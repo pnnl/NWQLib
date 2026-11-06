@@ -601,3 +601,25 @@ def test_native_jw_creation_phase_content():
 
     assert dict(_fermion_terms_to_pauli({((1, 1),): 1}, 2).to_list()) == {"XZ": 0.5, "YZ": -0.5j}
     assert dict(_fermion_terms_to_pauli({((1, 0),): 1}, 2).to_list()) == {"XZ": 0.5, "YZ": 0.5j}
+
+
+def test_generator_snapshot_refuses_bad_fields_and_copies_held_lists():
+    """A supplied generator is refused for a bad field and copied when it holds lists."""
+    from dataclasses import replace
+    from nwqlib.subroutines.fermionic_pool import _snapshot_generator
+
+    double = next(g for g in enumerate_spin_adapted_gsd_pool(3) if g.family == "double_singlet")
+    coefficient, operators = double.fermion_terms[0]
+    label, value = double.pauli_terms[0]
+    refused = {
+        "coefficients must be finite": dict(fermion_terms=((complex(np.inf, 0), operators),) + double.fermion_terms[1:]),
+        "in-register integer mode": dict(
+            fermion_terms=((coefficient, ((double.num_qubits, 1),) + operators[1:]),) + double.fermion_terms[1:]),
+        "qubit counts must agree": dict(pauli_terms=((label + "I", value),) + double.pauli_terms[1:]),
+    }
+    for message, fields in refused.items():
+        with pytest.raises((TypeError, ValueError), match=message):
+            _snapshot_generator(replace(double, **fields))
+    listed = replace(double, fermion_terms=list(double.fermion_terms), pauli_terms=list(double.pauli_terms))
+    copy = _snapshot_generator(listed)
+    assert copy == double and type(copy.fermion_terms) is tuple and type(copy.pauli_terms) is tuple

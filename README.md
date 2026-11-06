@@ -36,7 +36,7 @@ print(result.solution)
 ```
 
 ```text
-[ 0.96006038-1.54102084e-12j -0.00513885+3.61167323e-13j]
+[ 0.96006038-1.54057280e-12j -0.00513885+3.61491025e-13j]
 ```
 
 With its default settings, LCHS returns an approximation of the physical solution using nine qubits in total. [Install and first result](https://pnnl.github.io/NWQLib/quickstart/) compares it with an independent reference and shows how to change the approximation. Each method accepts its own input forms and conversions, which its algorithm guide describes.
@@ -103,7 +103,7 @@ If you use NWQLib in your work, please cite it through its Zenodo record, which 
   author  = {Zheng, Muqing and Liu, Chenxu and Song, Zhixin and Wu, Zeguan and Li, Xiangyu and Li, Mingze and Bauman, Nicholas P. and Stein, Samuel A. and M{\"u}lmenst{\"a}dt, Johannes and Chen, Yousu and Wiebe, Nathan and Li, Ang and Kowalski, Karol},
   title   = {NWQLib},
   year    = {2026},
-  version = {1.0.3.post2},
+  version = {1.0.4},
   doi     = {10.5281/zenodo.23074265},
   url     = {https://github.com/pnnl/NWQLib}
 }

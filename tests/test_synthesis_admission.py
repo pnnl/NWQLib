@@ -9,6 +9,7 @@ instructions that Qiskit emits for each gate kind are counted from the
 installed Qiskit, not read from the stored tables.
 """
 
+import re
 from functools import lru_cache
 
 import numpy as np
@@ -54,12 +55,6 @@ def _emitted(kind, controls):
     return len(_emitted_instructions(kind, controls))
 
 
-def _heavy(kind, controls):
-    """Emitted instructions that hold angles or are Python objects rather than parameterless standard gates."""
-    return sum(1 for item in _emitted_instructions(kind, controls)
-               if not item.is_standard_gate() or item.operation.params)
-
-
 def _controlled_census(num_qubits):
     """Gate bounds of one whole-matrix synthesis on m qubits, controls included.
 
@@ -80,20 +75,19 @@ def _controlled_synthesis_work(num_qubits):
 
 
 def _census_control(census, controls):
-    """(gates, instructions, heavy) of Qiskit's control of a circuit with gate census ``census`` and a global phase."""
+    """(gates, instructions) of Qiskit's control of a circuit with gate census ``census`` and a global phase."""
     return (sum(census.values()) + 1,
-            sum(count * _emitted(kind, controls) for kind, count in census.items()) + _emitted("phase", controls),
-            sum(count * _heavy(kind, controls) for kind, count in census.items()) + _heavy("phase", controls))
+            sum(count * _emitted(kind, controls) for kind, count in census.items()) + _emitted("phase", controls))
 
 
 def _gatewise_control(num_qubits, controls):
-    """(gates, instructions, heavy) of Qiskit's control of one synthesis, with its global phase."""
+    """(gates, instructions) of Qiskit's control of one synthesis, with its global phase."""
     return _census_control(_census(num_qubits), controls)
 
 
 def _gatewise_control_work(num_qubits, controls, occurrences=1, census=None):
     """Work of Qiskit's control of ``occurrences`` syntheses in one call, 2048 gates + 16 instructions."""
-    gates, instructions, _ = _census_control(_census(num_qubits) if census is None else census, controls)
+    gates, instructions = _census_control(_census(num_qubits) if census is None else census, controls)
     return occurrences * (2048 * gates + 16 * instructions)
 
 
@@ -120,69 +114,6 @@ def _counted_dense_controls(monkeypatch):
     return calls
 
 
-@lru_cache(maxsize=None)
-def _controlled_twice(kind):
-    """(gates, instructions) of controlling once more a gate of ``kind`` that Qiskit controlled once.
-
-    The gates are those that Qiskit unrolls from the once-controlled gate,
-    and the instructions those that the second control emits.
-    """
-    from qiskit.circuit._add_control import EFFICIENTLY_CONTROLLED_GATES, _unroll_gate
-
-    body = QuantumCircuit(2)
-    if kind == "u":
-        body.u(0.3, 0.7, 1.1, 0)
-    elif kind == "cx":
-        body.cx(0, 1)
-    elif kind == "ry":
-        body.ry(0.3, 0)
-    elif kind == "h":
-        body.h(0)
-    else:
-        body.global_phase = 0.4
-    gate = Gate("g", 2, [])
-    gate.definition = body
-    once = gate.control(1, annotated=False)
-    unrolled = _unroll_gate(once, EFFICIENTLY_CONTROLLED_GATES).definition
-    return sum(unrolled.count_ops().values()), len(once.control(1, annotated=False)._definition.data)
-
-
-def _twice_controlled_work(num_qubits):
-    """Work of the second one-control step over one synthesis that a first one-control step unrolled.
-
-    The law prices an RZ at the costliest rotation, which one control turns
-    into a CU, so the RZ entries use a controlled RY here. The global phase
-    and the two X gates around an open first control are one gate and one
-    instruction each.
-    """
-    census = _census(num_qubits)
-    pairs = {kind: _controlled_twice("ry" if kind == "rz" else kind) for kind in census}
-    gates = 3 + sum(census[kind] * pairs[kind][0] for kind in census)
-    instructions = 3 + sum(census[kind] * pairs[kind][1] for kind in census)
-    return 2048 * gates + 16 * instructions
-
-
-def test_twice_controlled_dense_counts_bound_the_second_control():
-    # A two-child QSP generator controls each dense child on its combine
-    # qubit, and the parity control of a pass then controls that output
-    # again. The second step unrolls the first one's gates and controls each
-    # of them, and the law bounds both counts for a Haar-random child.
-    from qiskit.circuit._add_control import EFFICIENTLY_CONTROLLED_GATES, _unroll_gate
-    from nwqlib.algorithms.lchs.compiled_selection import _twice_controlled_dense_counts
-    from nwqlib.subroutines._dense_synthesis import gatewise_control_size
-
-    for m in (2, 3):
-        child = QuantumCircuit(m)
-        child.append(UnitaryGate(random_unitary(1 << m, seed=44 + m).data), child.qubits)
-        child.global_phase = 0.2
-        once = controlled(child.to_gate(), 1, ctrl_state=0)
-        unrolled = sum(_unroll_gate(once, EFFICIENTLY_CONTROLLED_GATES).definition.count_ops().values())
-        twice = len(once.control(1, annotated=False)._definition.data)
-        gates, instructions, heavy = counts = _twice_controlled_dense_counts(m)
-        assert unrolled <= gates and twice <= instructions and heavy <= instructions
-        assert gatewise_control_size(*counts)[0] == _twice_controlled_work(m)
-
-
 def test_gatewise_control_tables_match_installed_qiskit():
     # Every entry of the stored tables, and the fixed counts beside them, is
     # recomputed with the installed Qiskit. A failure means that Qiskit
@@ -195,17 +126,6 @@ def test_gatewise_control_tables_match_installed_qiskit():
         assert _emitted("u", k) == CONTROLLED_U_INSTRUCTIONS[k - 1], k
         assert _emitted("rz", k) == CONTROLLED_RZ_INSTRUCTIONS[k - 1], k
         assert (_emitted("cx", k), _emitted("h", k), _emitted("phase", k)) == (1, 7, 1), k
-
-
-def test_gatewise_heavy_counts_match_installed_qiskit():
-    # The kept-byte law allows more memory for an emitted instruction that
-    # holds angles or is a Python object. Their count per gate kind is
-    # recomputed with the installed Qiskit for every control count.
-    from nwqlib.subroutines._dense_synthesis import _controlled_heavy_instructions
-
-    for k in range(1, 65):
-        for kind in ("u", "rz", "cx", "h", "phase"):
-            assert _controlled_heavy_instructions(kind, k) == _heavy(kind, k), (kind, k)
 
 
 def test_gatewise_control_law_bounds_the_built_control_step():
@@ -226,7 +146,7 @@ def test_gatewise_control_law_bounds_the_built_control_step():
     emitted = len(built._definition.data)
     expected = sum(count * _emitted(kind, controls) for kind, count in actual.items()) + 1
     assert emitted <= expected
-    gates, instructions, _ = counts = gatewise_control_counts(num_qubits, controls)
+    gates, instructions = counts = gatewise_control_counts(num_qubits, controls)
     assert counts == _gatewise_control(num_qubits, controls)
     assert emitted <= instructions and sum(actual.values()) < gates
 
@@ -252,18 +172,60 @@ def test_dense_control_counts_follow_every_occurrence():
         three, two = _gatewise_control(3, k), _gatewise_control(2, k)
         assert dense_control_counts(circuit.to_gate(), k) == tuple(3 * a + b for a, b in zip(three, two))
         assert dense_control_counts(circuit, k) == dense_control_counts(circuit.to_gate(), k)
-    assert dense_control_counts(first, 2) == (0, 0, 0)
+    assert dense_control_counts(first, 2) == (0, 0)
+
+
+def test_planning_census_skips_unbuilt_definitions_and_keeps_the_known_part(monkeypatch):
+    # Planning reads only built definitions, and a StatePreparation builds
+    # its definition only when asked. The planning walk skips each such
+    # gate, names the first one it meets and goes on, so the dense
+    # unitaries before and after it, also inside a nested built definition
+    # behind another unbuilt gate, give both populations of the same
+    # circuit without the skipped gates: each distinct matrix once and the
+    # three-qubit unitary at all three of its occurrences. No definition is
+    # built.
+    from qiskit.circuit.library import StatePreparation
+    from nwqlib.subroutines.qiskit_compat import dense_gatewise_charges, dense_unitary_census
+
+    defined = []
+    original = StatePreparation._define
+    monkeypatch.setattr(StatePreparation, "_define", lambda self: defined.append(self) or original(self))
+    first = UnitaryGate(random_unitary(8, seed=41).data)
+    second = UnitaryGate(random_unitary(4, seed=42).data)
+
+    def circuit(lazy):
+        inner = QuantumCircuit(3)
+        if lazy:
+            inner.append(StatePreparation([0.6, 0.8]), [0])
+        inner.append(first, [0, 1, 2])
+        inner.append(second, [0, 1])
+        outer = QuantumCircuit(3)
+        outer.append(first, [0, 1, 2])
+        if lazy:
+            outer.append(StatePreparation([0.6, 0.0, 0.0, 0.8]), [0, 1])
+        outer.append(first, [2, 1, 0])
+        outer.append(inner.to_gate(), [0, 1, 2])
+        return outer
+
+    lazy, known = circuit(True), circuit(False)
+    widths, occurrences, unbuilt = dense_unitary_census(lazy, built=True)
+    assert (widths, occurrences) == dense_unitary_census(known, built=True)[:2]
+    assert sorted(widths.values()) == [2, 3] and occurrences == {3: 3, 2: 1}
+    assert unbuilt.name == "state_preparation" and unbuilt.num_qubits == 2
+    for k in (1, 2):
+        assert dense_gatewise_charges(lazy, k, built=True)[:2] == dense_gatewise_charges(known, k)[:2]
+    assert defined == []
 
 
 def test_synthesis_cache_reuses_the_circuit_that_a_new_synthesis_makes(monkeypatch):
     # The cache keys a matrix by its content, so an equal matrix in a new
-    # gate object with another label is neither synthesized nor charged
-    # again. The transposed two-qubit matrix is new and is charged. The
+    # gate object with another label is not synthesized again. The
+    # transposed two-qubit matrix is new and is synthesized. The
     # synthesis is deterministic, so the reused circuit equals a new
     # synthesis of the matrix. Each gate receives its own copy.
     from nwqlib.subroutines._dense_synthesis import dense_unitary_circuit
     from nwqlib.subroutines.qiskit_compat import dense_matrix_key, exact_dense_unitaries
-    from test_dense_synthesis import _counted_syntheses, _dense_synthesis_work
+    from test_dense_synthesis import _counted_syntheses
 
     three, two = random_unitary(8, seed=48).data, random_unitary(4, seed=49).data
     first = QuantumCircuit(3)
@@ -272,19 +234,19 @@ def test_synthesis_cache_reuses_the_circuit_that_a_new_synthesis_makes(monkeypat
     second = QuantumCircuit(3)
     second.append(UnitaryGate(three.copy(), label="again"), [0, 1, 2])
     second.append(UnitaryGate(two.T.copy()), [1, 2])
-    cache, charges = {}, []
+    cache = {}
     calls = _counted_syntheses(monkeypatch)
-    exact_first = exact_dense_unitaries(first, charge=lambda work, operation: charges.append(work), cache=cache)
-    exact_second = exact_dense_unitaries(second, charge=lambda work, operation: charges.append(work), cache=cache)
+    exact_first = exact_dense_unitaries(first, cache=cache)
+    assert sorted(calls) == [2, 3]
+    exact_second = exact_dense_unitaries(second, cache=cache)
     assert sorted(calls) == [2, 2, 3]
-    assert charges == [_dense_synthesis_work(3) + _dense_synthesis_work(2), _dense_synthesis_work(2)]
     reused = exact_second.data[0].operation.definition
     assert reused == dense_unitary_circuit(three) == exact_first.data[0].operation.definition
     assert reused is not cache[dense_matrix_key(three)]
     reused.x(0)
     assert cache[dense_matrix_key(three)] == dense_unitary_circuit(three)
-    assert exact_dense_unitaries(second, charge=lambda work, operation: charges.append(work), cache=cache)
-    assert len(charges) == 2 and sorted(calls) == [2, 2, 3]
+    assert exact_dense_unitaries(second, cache=cache)
+    assert sorted(calls) == [2, 2, 3]
 
 
 def test_run_synthesizes_each_basis_unitary_once_and_again_after_reopening(tmp_path, monkeypatch):
@@ -292,13 +254,12 @@ def test_run_synthesizes_each_basis_unitary_once_and_again_after_reopening(tmp_p
     # experiments of this Plan hold the same three-qubit unitary, in gate
     # objects that each preparation lowers anew. The Run's synthesis cache
     # keys it by its matrix, so the second preparation reuses the circuit and
-    # reserves nothing. A reopened Run starts with an empty cache, so its
-    # first preparation synthesizes the unitary again against the same
-    # cumulative max_synthesis_work, which, set one unit below two
-    # syntheses, refuses it. The refused preparation stays charged but leaves its static
-    # item unprepared, so after the limit is raised the next call prepares it.
-    # A backend called directly with the Run, outside its preparations, is
-    # held to the same limit without reserving anything or using the cache.
+    # counts nothing. A reopened Run starts with an empty cache, so its first
+    # preparation synthesizes the unitary again and counts its work again.
+    # Each count is saved in the transaction that saves the preparation
+    # record, never in a commit of its own. A backend called directly with
+    # the Run, outside its preparations, neither counts its work nor uses the
+    # cache.
     import nwqlib
     from nwqlib import Expectation
     from nwqlib._prepared_execution import Run, _prepare_static_item
@@ -318,14 +279,23 @@ def test_run_synthesizes_each_basis_unitary_once_and_again_after_reopening(tmp_p
     problem = Expectation(state=state_input(state),
                           observable=ingest_pauli((("ZZZ", 1.0), ("XXX", 0.5), ("YYY", 0.25)), num_qubits=3))
     selected = nwqlib.plan(problem, method=ExpectationMethod(), shots=16, seed=7)
-    first, second, third = selected.experiments
+    first, second, third = selected._static_points()
     need = _dense_synthesis_work(3)
     calls = _counted_syntheses(monkeypatch)
+    saved, write = [], Run._write
+
+    def recorded_write(self, records, **kwargs):
+        work = sum(row.synthesis_work for kind, _, row in records if kind == "preparation")
+        if work:
+            saved.append((work, "prepared" in {kind for kind, _, _ in records}))
+        return write(self, records, **kwargs)
+
+    monkeypatch.setattr(Run, "_write", recorded_write)
     journal = tmp_path / "run"
-    limits = ExecutionLimits(max_data_bytes=10**7, max_synthesis_work=2 * need - 1)
+    limits = ExecutionLimits(max_data_bytes=10**7)
     with Run(selected, backend=configured(tmp_path), limits=limits, directory=journal) as run:
         handle = _prepare_static_item(selected, run, first)
-        assert calls == [3] and run.trace.synthesis_work_reserved == need
+        assert calls == [3] and run.trace.synthesis_work == need and saved == [(need, True)]
 
         def direct(unitary):
             circuit = QuantumCircuit(3)
@@ -334,33 +304,71 @@ def test_run_synthesizes_each_basis_unitary_once_and_again_after_reopening(tmp_p
             return run.backend.prepare(circuit, observation=handle.record.observation, runtime=handle.record.runtime,
                                        position=len(circuit.data), source_definitions=(), run=run, snapshot="direct")
 
-        # need - 1 units remain. A new two-qubit synthesis fits and is not
-        # cached. The three-qubit matrix that the first preparation cached is
-        # not read from the cache, so it needs a new synthesis and is refused
-        # before that starts.
+        # A new two-qubit synthesis is not cached. The three-qubit matrix that
+        # the first preparation cached is not read from the cache, so it is
+        # synthesized again. Neither is counted.
         direct(random_unitary(4, seed=51).data)
-        with pytest.raises(ValueError, match="rest of this Run's max_synthesis_work"):
-            direct(matrix)
-        assert calls == [3, 2] and len(run._state["synthesis_cache"]) == 1
+        direct(matrix)
+        assert calls == [3, 2, 3] and len(run._state["synthesis_cache"]) == 1
+        assert run.trace.synthesis_work == need
         # A later preparation still takes the matrix from the cache.
         _prepare_static_item(selected, run, second)
-        assert calls == [3, 2]
-        assert (run.trace.synthesis_work_reserved, run.trace.preparations) == (need, 2)
-    with load_run(journal, backend=configured(tmp_path)) as run:
-        with pytest.raises(ValueError, match="max_synthesis_work"):
-            _prepare_static_item(selected, run, third)
-        assert calls == [3, 2]
-        assert (run.trace.synthesis_work_reserved, run.trace.preparations) == (need, 3)
-        run.extend_limits(max_synthesis_work=2 * need)
-        prepared = _prepare_static_item(selected, run, third)
         assert calls == [3, 2, 3]
-        trace = run.trace
-        assert (trace.synthesis_work_reserved, trace.preparations) == (2 * need, 4)
-        assert trace.limit_amendments[0].synthesis_work == need
+        assert (run.trace.synthesis_work, run.trace.preparations) == (need, 2) and saved == [(need, True)]
     with load_run(journal, backend=configured(tmp_path)) as run:
-        assert (run.trace.synthesis_work_reserved, run.trace.preparations) == (2 * need, 4)
+        prepared = _prepare_static_item(selected, run, third)
+        assert calls == [3, 2, 3, 3]
+        assert (run.trace.synthesis_work, run.trace.preparations) == (2 * need, 3)
+        assert saved == [(need, True), (need, True)]
+    with load_run(journal, backend=configured(tmp_path)) as run:
+        assert (run.trace.synthesis_work, run.trace.preparations) == (2 * need, 3)
         assert _prepare_static_item(selected, run, third).record.content_id == prepared.record.content_id
-    assert calls == [3, 2, 3]
+    assert calls == [3, 2, 3, 3]
+
+
+def test_run_checks_its_syntheses_and_cache_against_the_physical_memory(monkeypatch):
+    # One three-qubit synthesis needs 320*64 + 65536 = 86,016 working and
+    # 352*64 + 16384 = 38,912 kept bytes. With 150,000 bytes of memory the
+    # first preparation's matrix fits, and the second matrix fits only after
+    # the cache of the first is emptied (124,928 + 38,912 > 150,000). The
+    # circuits are those of an unchecked synthesis. With 100,000 bytes the
+    # first matrix is refused before any synthesis starts.
+    import nwqlib
+    import nwqlib._limits as limits
+    from nwqlib import Expectation
+    from nwqlib._prepared_execution import Run
+    from nwqlib.algorithms.expectation import ExpectationMethod
+    from nwqlib.operators import ingest_pauli
+    from nwqlib.subroutines.qiskit_compat import exact_dense_unitaries
+    from test_dense_synthesis import _counted_syntheses, _dense_synthesis_work
+
+    def dense(seed):
+        circuit = QuantumCircuit(3)
+        circuit.append(UnitaryGate(random_unitary(8, seed=seed).data), [0, 1, 2])
+        return circuit
+
+    first, second = dense(61), dense(62)
+    expected = [exact_dense_unitaries(circuit).decompose() for circuit in (first, second)]
+    selected = nwqlib.plan(Expectation(state=[1., 0.], observable=ingest_pauli((("Z", 1.),), num_qubits=1)),
+                           method=ExpectationMethod(), seed=7)
+    calls = _counted_syntheses(monkeypatch)
+    with Run(selected) as run:
+        state = run._state
+        monkeypatch.setattr(limits, "physical_memory_bytes", lambda: 150_000)
+        built = []
+        for identity, circuit in (("first", first), ("second", second)):
+            state["synthesis_preparation"] = identity
+            built.append(run._exact_dense_unitaries(circuit).decompose())
+            assert len(state["synthesis_cache"]) == 1 and state["synthesis_cache_kept"] == 38_912
+        assert calls == [3, 3] and state["synthesis_pending"] == 2 * _dense_synthesis_work(3)
+        assert built == expected
+        monkeypatch.setattr(limits, "physical_memory_bytes", lambda: 100_000)
+        state.update(synthesis_cache={}, synthesis_cache_kept=0, synthesis_pending=0)
+        with pytest.raises(ValueError, match=r"exact synthesis of 1 dense unitaries on at most 3 qubits needs about "
+                                             r"124928 bytes, exceeding the physical memory \(100000 bytes\)"):
+            run._exact_dense_unitaries(first)
+        assert calls == [3, 3] and state["synthesis_pending"] == 0 and state["synthesis_cache"] == {}
+        state["synthesis_preparation"] = None
 
 
 def test_noisy_aer_lowering_takes_its_syntheses_from_the_run_cache(monkeypatch):
@@ -379,7 +387,6 @@ def test_noisy_aer_lowering_takes_its_syntheses_from_the_run_cache(monkeypatch):
     from nwqlib import Expectation
     from nwqlib.algorithms.expectation import ExpectationMethod
     from nwqlib.backends import AerBackend
-    from nwqlib.execution import ExecutionLimits
     from nwqlib.operators import ingest_pauli
     from nwqlib.problems.inputs import state_input
     from test_dense_synthesis import _counted_syntheses, _dense_synthesis_work
@@ -394,26 +401,24 @@ def test_noisy_aer_lowering_takes_its_syntheses_from_the_run_cache(monkeypatch):
     backend = AerBackend.from_noise_model(NoiseModel(basis_gates=["cx", "rz", "sx", "x"]))
     need = _dense_synthesis_work(3)
     calls = _counted_syntheses(monkeypatch)
-    prepared = nwqlib.prepare(chosen, backend=backend, limits=ExecutionLimits(max_synthesis_work=need))
+    prepared = nwqlib.prepare(chosen, backend=backend)
     run = prepared.run
     cached = [weakref.ref(circuit) for circuit in run._state["synthesis_cache"].values()]
     run.close()
     gc.collect()
-    assert calls == [3] and run.trace.synthesis_work_reserved == need
+    assert calls == [3] and run.trace.synthesis_work == need
     assert len(cached) == 1 and all(ref() is None for ref in cached)
 
 
-def test_run_admits_the_controlled_transform_of_a_supplied_basis_before_its_synthesis(monkeypatch):
+def test_run_records_the_controlled_transform_of_a_supplied_basis(monkeypatch):
     # An off-diagonal FixedGCIM pair controls each basis preparation through
     # a transformed block; the first setting, a diagonal pair, prepares its
     # basis state uncontrolled, so every setting is prepared here. Lowering
     # controls a supplied circuit once per Run, which synthesizes its
     # two-qubit unitary exactly and lets Qiskit control the synthesized
-    # gates. The Run charges both against max_synthesis_work before the
-    # synthesis starts, one unit below refuses and the laws admit.
+    # gates. The Run records the work of both by their laws.
     import nwqlib
     from nwqlib.algorithms.gcim import FixedGCIM
-    from nwqlib.execution import ExecutionLimits
     from nwqlib.problems.records import Eigenproblem
     from test_dense_synthesis import _counted_syntheses, _dense_synthesis_work
 
@@ -423,11 +428,8 @@ def test_run_admits_the_controlled_transform_of_a_supplied_basis_before_its_synt
                            method=FixedGCIM(basis=(basis, [1.0, 0.0, 0.0, 0.0])), execution="quantum", seed=7)
     need = _dense_synthesis_work(2) + _gatewise_control_work(2, 1)
     calls = _counted_syntheses(monkeypatch)
-    with pytest.raises(ValueError, match="max_synthesis_work"):
-        nwqlib.prepare(selected, limits=ExecutionLimits(max_synthesis_work=need - 1), settings="all")
-    assert calls == []
-    prepared = nwqlib.prepare(selected, limits=ExecutionLimits(max_synthesis_work=need), settings="all")
-    assert calls == [2] and prepared.run.trace.synthesis_work_reserved == need
+    prepared = nwqlib.prepare(selected, settings="all")
+    assert calls == [2] and prepared.run.trace.synthesis_work == need
     prepared.run.close()
 
 
@@ -532,3 +534,87 @@ def test_adapt_admits_the_controlled_synthesis_of_a_supplied_reference(monkeypat
     assert calls == []
     result.verify(checks=AdaptVerificationOptions(name="r", comparisons=("residual",)))
     assert calls == [2]
+
+
+def test_planning_leaves_the_controlled_synthesis_of_an_unbuilt_definition_unknown(monkeypatch):
+    # A StatePreparation builds its definition only when asked, and here that
+    # definition also holds a two-qubit dense unitary, which planning cannot
+    # see without building it. Planning builds no definition: a transformed
+    # block records its construction work as None with the reason, and QLS
+    # and ADAPT refuse an explicit max_work or max_products, which they could
+    # not check, and plan without one. The construction builds the
+    # definition and counts the syntheses of both dense unitaries before
+    # they start: a Run records the work of the controlled transform, and QLS
+    # and ADAPT check the controlled supplied circuit against max_bytes.
+    import nwqlib
+    from qiskit.circuit.library import StatePreparation
+    from nwqlib import LinearSystem, NormalizedExpectation
+    from nwqlib._prepared_execution import Run
+    from nwqlib.algorithms import PencilAcquisition
+    from nwqlib.algorithms.gcim import FixedGCIM
+    from nwqlib.algorithms.qls import QLS
+    from nwqlib.operators import ingest_pauli
+    from nwqlib.problems.inputs import state_input
+    from nwqlib.problems.records import Eigenproblem
+    from nwqlib.subroutines import _dense_synthesis
+    from test_adapt_primary import plan_for
+    from test_dense_synthesis import _dense_synthesis_work
+
+    defined, admitted = [], []
+    original_define, original_admit = StatePreparation._define, _dense_synthesis.admit_dense_syntheses
+    hidden = UnitaryGate(random_unitary(4, seed=51).data)
+
+    def define(self):
+        defined.append(self)
+        original_define(self)
+        self._definition.append(hidden, [0, 1])
+
+    def admit(qubit_counts, **kwargs):
+        admitted.append((kwargs["operation"], sorted(qubit_counts)))
+        return original_admit(qubit_counts, **kwargs)
+    monkeypatch.setattr(StatePreparation, "_define", define)
+    monkeypatch.setattr(_dense_synthesis, "admit_dense_syntheses", admit)
+
+    def supplied(seed):
+        circuit = QuantumCircuit(2)
+        circuit.append(UnitaryGate(random_unitary(4, seed=seed).data), [0, 1])
+        circuit.append(StatePreparation([0.6, 0.0, 0.0, 0.8]), [0, 1])
+        return circuit
+
+    reason = "controlled synthesis of supplied operation state_preparation (2 qubits): definition not built at planning"
+    selected = nwqlib.plan(Eigenproblem(A=np.diag([1.0, -1.0, 0.5, -0.5])),
+                           method=FixedGCIM(basis=(supplied(48), [1.0, 0.0, 0.0, 0.0])), execution="quantum", seed=7)
+    forward = [item for item in selected.construction.selections if item.signature.name.startswith("forward_")]
+    unknown = [item for item in forward if item.construction_work is None]
+    assert len(unknown) == 1 and reason in unknown[0].cost_context and not defined
+    need = 2 * _dense_synthesis_work(2) + _gatewise_control_work(2, 1, occurrences=2)
+    prepared = nwqlib.prepare(selected, settings="all")
+    assert prepared.run.trace.synthesis_work == need and defined
+    assert prepared.run.trace.construction_work_reserved is None
+    prepared.run.close()
+
+    def qls(**options):
+        problem = LinearSystem(A=np.diag([1.0, 0.8, 0.6, 0.5]) + 0.05, b=state_input(supplied(49)))
+        method = QLS(solver="shortcut_native_svp", encoded_solution_norm_estimate=1.5, epsilon_inv=0.5,
+                     block_encoding_implementation="dense_dilation", **options)
+        return nwqlib.plan(problem, method=method, output=NormalizedExpectation(observable=np.diag([1.0, -1.0, 0.5, 0.0])),
+                           seed=7)
+    defined.clear()
+    with pytest.raises(ValueError, match=re.escape(f"{reason}, so it cannot be counted against QLS.max_work={10**12}.")):
+        qls(max_work=10**12)
+    selected = qls()
+    assert not defined
+    admitted.clear()
+    nwqlib.solve(selected, progress=False)
+    assert ("QLS controlled supplied query synthesis", [2, 2]) in admitted and defined
+
+    options = dict(A=ingest_pauli((("ZI", 1.0), ("IZ", 0.5)), num_qubits=2), initial_state=supplied(50),
+                   pool_rows=((("YI", 1j),),), acquisition=PencilAcquisition(pair_preparation="controlled"))
+    defined.clear()
+    with pytest.raises(ValueError, match=re.escape(f"{reason}, so it cannot be counted against ADAPT.max_products={10**12}.")):
+        plan_for(max_products=10**12, **options)
+    selected = plan_for(**options)
+    assert not defined
+    admitted.clear()
+    Run(selected).wait(timeout=60, poll_interval=0)
+    assert admitted == [("ADAPT controlled reference synthesis", [2, 2])] and defined

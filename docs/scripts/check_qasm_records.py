@@ -48,7 +48,7 @@ def child(poison=False):
             __import__("qiskit")
         except ImportError:
             pass
-    from nwqlib.io import QasmWriteBudget, write_qasm3
+    from nwqlib.io import write_qasm3
     import nwqlib
     from nwqlib.algorithms.expectation import ExpectationMethod
     from nwqlib.operators import ingest_pauli
@@ -62,10 +62,8 @@ def child(poison=False):
         Expectation(state=[2.0, 2.0], observable=ingest_pauli((("I", 1.0), ("Z", 1.0)), num_qubits=1)),
         method=ExpectationMethod(), seed=7,
     )
-    budget = QasmWriteBudget(max_metadata_bytes=1000000, max_walk_steps=100000,
-                             max_qubits=1, max_clbits=0, max_bytes=1024, max_instructions=10, max_chunk_bytes=16)
     sink = BytesIO()
-    receipt = write_qasm3(plan.construction, sink, budget=budget)
+    receipt = write_qasm3(plan.construction, sink)
     assert receipt.expanded_operations == 1 and b"h a0;" in sink.getvalue()
     loaded = [name for name in sys.modules if forbidden(name)]
     if attempts or loaded:

@@ -15,7 +15,11 @@ concurrency:
 jobs:
   checks:
     name: Checks (${{ matrix.environment }})
-    runs-on: ubuntu-latest
+    # Qiskit 2.6.0, which the stable lock names, leaves too little static TLS for the libgomp of
+    # qiskit-aer on Ubuntu 26.04 (docs/dependency_issues.md). The jobs that install the lock stay
+    # on Ubuntu 24.04 until it moves to Qiskit 2.6.1 or later: this one, the notebooks job,
+    # mutation-probes.yml and nexus-qualification.yml.
+    runs-on: ${{ matrix.environment == 'stable' && 'ubuntu-24.04' || 'ubuntu-latest' }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -58,11 +62,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install --upgrade --upgrade-strategy eager --only-final=:all: -e ".[dev,aer,qasm,docs,notebook,chemistry,ibm,ionq,tensor]" pytest-cov "scikit_tt @ git+https://github.com/PGelss/scikit_tt.git"
-      # The Linux wheels of qiskit-aer 0.18.0 and pyscf bundle different builds of libgomp,
-      # and the build that a process loads second fails with "cannot allocate memory in
-      # static TLS block" (docs/dependency_issues.md), so the later steps preload the one of
-      # pyscf. Remove this step and its copies in the notebooks job and in
-      # mutation-probes.yml once both load in one process without it.
+      # The Linux wheels of qiskit-aer 0.18.0 and pyscf bundle different builds of libgomp. With
+      # Qiskit 2.6.0 the static TLS reserve holds one of them at most, and the build that a
+      # process loads second fails with "cannot allocate memory in static TLS block"
+      # (docs/dependency_issues.md), so the later steps preload the one of pyscf. Remove this
+      # step and its copies in the notebooks job and in mutation-probes.yml once both load in
+      # one process without it.
       - name: Preload the OpenMP library of pyscf
         run: |
           library=$(python -c 'from importlib.util import find_spec; from pathlib import Path; (path,) = Path(find_spec("pyscf").submodule_search_locations[0], "lib").glob("libgomp*.so*"); print(path)')
@@ -149,7 +154,8 @@ jobs:
 
   notebooks:
     name: Notebooks (stable)
-    runs-on: ubuntu-latest
+    # The notebooks load qiskit-aer with the Qiskit of the lock, see the checks job.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4

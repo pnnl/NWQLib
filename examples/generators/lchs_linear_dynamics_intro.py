@@ -3,13 +3,14 @@
 #
 # A dye pulse circulates in a closed channel, carried by the flow and spread by diffusion, and on 8 grid points its concentration solves the linear ODE $du/dt=-Au$. This notebook computes $u(T)$ with NWQLib's Linear Combination of Hamiltonian Simulation (LCHS) on a quantum circuit and checks it against `scipy.linalg.expm`.
 #
-# Install with `python -m pip install "nwqlib[aer,notebook,tensor]"` and add `scikit_tt`, which is not on PyPI, with `python -m pip install "scikit_tt @ git+https://github.com/PGelss/scikit_tt.git"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook,tensor]"` in a clone of the repository instead of the first command. The notebook simulates at most 12 qubits. Its result card reports the run time and the resources of the executed plan. The full notebook took 20.8 s in the recorded run with Python 3.12.14, Qiskit 2.6.0 and Aer 0.18.0 on macOS arm64.
+# Install with `python -m pip install "nwqlib[aer,notebook,tensor]"` and add `scikit_tt`, which is not on PyPI, with `python -m pip install "scikit_tt @ git+https://github.com/PGelss/scikit_tt.git"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook,tensor]"` in a clone of the repository instead of the first command. The notebook simulates at most 12 qubits. Its result card reports the run time and the resources of the executed plan. The full notebook took 31 s in the recorded run with Python 3.12.14, Qiskit 2.6.0 and Aer 0.18.0 on macOS arm64.
 #
 # > **How to read this notebook.** The next cells solve the channel and show the answer with its cost.
 # >
 # > - Sections 1 to 5: will it run, what it costs, how accurate, how large, what it assumes
 # > - Section 6: your own $A$, $u(0)$ and source $b$
 # > - Section 7 and Go deeper A to D: what NWQLib adds, the method in detail
+# > - Go deeper E: a norm estimated from random pairs of evolutions, for a decaying atom
 # > - Appendix A and B: the full resource estimate and a saved result
 
 # %%
@@ -153,22 +154,22 @@ show_card(result, reference, u0, predicted, seconds)
 #
 # - **Equation and sign.** NWQLib solves $du/dt=-Au+b$. For an equation written $du/dt=Mu+b$, pass `A = -M`.
 # - **Dissipation.** LCHS needs the Hermitian part $(A+A^\dagger)/2$ to be positive semidefinite. When it is not, NWQLib adds a multiple $sI$ of the identity that makes it so, and multiplies the answer by the growth factor $e^{sT}$.
-# - **Input.** A square NumPy array $A$, real or complex, an initial state and an optional constant source. When it runs as a circuit, LCHS also accepts a `PeriodicStencil`, a periodic finite-difference operator on $2^q$ grid points given by its mass, diffusion and potential coefficients. A time-dependent $A$ or $b$ is not implemented ([Supply inputs](../docs/inputs.md)).
+# - **Input.** A square NumPy array $A$, real or complex, an initial state and an optional constant source. When it runs as a circuit, LCHS also accepts forms of $A$ that are never expanded into a matrix: a Pauli sum, a periodic band operator, its Hermitian parts given separately, a block-encoding circuit you supply, and a `PeriodicStencil`, a periodic finite-difference operator on $2^q$ grid points given by its mass, diffusion and potential coefficients. Go deeper E uses a Pauli sum. A time-dependent $A$ or $b$ is not implemented ([Supply inputs](../docs/inputs.md)).
 # - **Size.** The circuit has $\lceil\log_2n\rceil$ system qubits for $n$ unknowns, plus an address register that indexes every evolution. `plan` reports the width before anything runs.
 # - **Output.** `result.solution` is the physical $u(T)$, available from exact readout, in which the simulator computes the amplitudes without shot sampling, subject to numerical rounding. Finite-shot runs return one requested quantity instead ([LCHS guide](../docs/algorithms/lchs.md)).
 #
-# Planning checks the work of each stage against a cap set on `LCHS`. Work is a nominal measure of classical computation that NWQLib derives from the problem sizes by formula ([work units](../docs/glossary.md#work-units)). Its units combine estimates of arithmetic and of circuit construction, and they are neither a uniform count of scalar operations nor a time. The composite Gauss quadrature of this channel first completes a scalar search for its number of panels and points per panel, then checks the work of that search and of building the chosen rule before it forms the node arrays. The cell sets the quadrature cap to 30,000 units, below what this channel needs. Planning refuses with a `ValueError` that names `max_quadrature_work` and the amount, and the second half of the cell plans again with that amount.
+# Planning checks the work of each stage against a cap set on `LCHS`. Work is a nominal measure of classical computation that NWQLib derives from the problem sizes by formula ([work units](../docs/glossary.md#work-units)). Its units combine estimates of arithmetic and of circuit construction, and they are neither a uniform count of scalar operations nor a time. The composite Gauss quadrature of this channel first completes a scalar search for its number of panels and points per panel, then checks the work of that search and of building the chosen rule before it forms the node arrays. The cell sets the quadrature cap to 10,000 units, below what this channel needs. Planning refuses with a `ValueError` that names `max_quadrature_work` and the amount, and the second half of the cell plans again with that amount.
 
 # %%
 started = perf_counter()
 try:
     plan(problem, method=LCHS(hamiltonian_evolution_backend="trotter", trotter_steps=TROTTER_STEPS,
-                              max_quadrature_work=30_000), seed=7)
+                              max_quadrature_work=10_000), seed=7)
 except ValueError as refusal:
     print(f"Refused after {(perf_counter() - started) * 1e3:.1f} ms, before any circuit existed:\n{refusal}")
 
 remedied = plan(problem, method=LCHS(hamiltonian_evolution_backend="trotter", trotter_steps=TROTTER_STEPS,
-                                     max_quadrature_work=30_467), seed=7)  # the remedy: the amount the refusal names
+                                     max_quadrature_work=11_513), seed=7)  # the remedy: the amount the refusal names
 show_table([
     ("Quadrature work cap", remedied.method.max_quadrature_work, "The amount the refusal named"),
     ("Nodes k_j", remedied.reconstruction.physical_branches, "The same quadrature as the card"),
@@ -183,7 +184,7 @@ show_table([
 #
 # **`estimate` predicts the quantum cost before the circuit exists, and the run records the classical cost.** Quantum cost means qubits, gates and shots, and classical cost means memory, work and time on this computer.
 #
-# `estimate` adds up a gate-count formula for each block of the construction that `plan` chose, without building a circuit. `prepare` builds the circuit without running it, and `inspect_resources` compiles a copy with Qiskit. The circuit has more operations than the 100,000 that `inspect_resources` reads by default, so the cell raises `max_operations`.
+# `estimate` adds up a gate-count formula for each block of the construction that `plan` chose, without building a circuit. `prepare` builds the circuit without running it, and `inspect_resources` compiles a copy with Qiskit.
 
 # %%
 from nwqlib import prepare
@@ -192,8 +193,7 @@ rec = selected.reconstruction
 prepared = prepare(selected, progress=False)
 with prepared.run:  # the prepared Run holds the circuit until the block ends
     compiled = prepared.inspect_resources(
-        transpile_options={"basis_gates": ["cx", "u"], "optimization_level": 1, "seed_transpiler": 7},
-        max_operations=200_000)
+        transpile_options={"basis_gates": ["cx", "u"], "optimization_level": 1, "seed_transpiler": 7})
 predicted_cx = quantity(predicted, "cx")
 show_table([
     ("Qubits", quantity(predicted, "logical_width", location="logical_device"), compiled["num_qubits"]),
@@ -240,6 +240,7 @@ relative_error = np.linalg.norm(u - reference) / np.linalg.norm(reference)
 quadrature_error = np.linalg.norm(np.asarray(exact_sum.solution) - reference) / np.linalg.norm(reference)
 _, facts = result.verify(checks=LCHSVerification(reference="expm", metric="relative_l2"))
 terms = {term.name: term.fact.fact for term in selected.error_model.terms}
+pruning = next(item.fact.value.value for item in selected.facts if item.fact.quantity == "trotter_pruning")
 roundoff, roundoff_reason = result.data.receipts[0].state_error()
 success = (np.linalg.norm(u) / (rec.coefficient_l1_norm * np.linalg.norm(u0))) ** 2
 show_table([
@@ -251,6 +252,7 @@ show_table([
     ("Kernel truncation error", terms["kernel_approximation"].value.value, "Upper bound from the Plan, absolute"),
     ("Quadrature error", terms["k_quadrature"].value.value, "Upper bound from the Plan, absolute"),
     ("Product-formula error", None, "Unavailable: " + terms["trotter_synthesis"].reason),
+    ("Part of it from Pauli terms removed at each node", pruning, "Upper bound from the Plan, absolute. It enters no total"),
     ("Roundoff of the simulated state", roundoff, "Upper bound" if roundoff is not None else "Unavailable: " + roundoff_reason),
     ("Total amount of dye Σu h", (h * u.sum().real, h * reference.sum()), "LCHS / reference. The exact ODE conserves it"),
     ("Success probability", success, "From α and the solution norm. On hardware it sets the repetitions"),
@@ -278,14 +280,13 @@ show_table([(count, quantity(estimate(run.plan, context=ResourceContext(basis="c
 # `solve(..., execution="classical")` with `hamiltonian_evolution_backend="dense_exact"` evaluates the finite sum classically, for systems too large to simulate. Its plan states the memory and work before anything runs. [Planning at scale](resource_estimation_at_scale.ipynb) plans circuits far beyond any simulator.
 
 # %%
-limits = trace.limits
+limits, width = trace.limits, len(rec.success_bits) + len(rec.system_bits)
 host_estimate = estimate(plan(problem, method=LCHS(hamiltonian_evolution_backend="dense_exact"),
                               execution="classical", seed=7))  # nothing runs yet
 show_table([
-    ("Qubits the local simulator accepts", limits.max_simulation_qubits,
-     f"Default. This channel uses {len(rec.success_bits) + len(rec.system_bits)}"),
-    ("Simulator memory cap", f"{limits.simulator_memory_mb:,} MiB", "Default simulator_memory_mb"),
-    ("SELECT construction work cap", selected.method.max_select_work, "Default max_select_work"),
+    ("Simulator memory cap", "Physical memory (default)" if limits.simulator_memory_mb is None else f"{limits.simulator_memory_mb:,} MiB",
+     f"Default simulator_memory_mb. The {width} qubits of this channel hold a {format_bytes(16 << width)} complex128 state"),
+    ("SELECT construction work cap", "No cap (default)" if selected.method.max_select_work is None else selected.method.max_select_work, "Default max_select_work"),
     ("Classical evaluation: memory of its arrays", format_bytes(quantity(host_estimate, "known_memory", location="host")),
      "Stated by plan before it runs"),
     ("Classical evaluation: work", quantity(host_estimate, "classical_work"),
@@ -303,7 +304,7 @@ show_table([
 #
 # - **Input.** `my_A` is a square NumPy array, real or complex, and `my_u0` and `my_b` vectors of the same length. The source is constant in time, and `source=None` removes it.
 # - **Source.** A source adds the integral $\int_0^Te^{-A(T-s)}b\,ds$, which LCHS evaluates at `duhamel_nodes` quadrature times. Each time takes one more copy of the nodes, so the address register grows with them.
-# - **Size limits.** The circuit must stay within the simulator's 20 qubits. With the default of 8 quadrature times this 2 × 2 system needs 13 qubits, and the cell's 4 times give 12.
+# - **Size limits.** The circuit must fit the local simulator's memory. With the default of 8 quadrature times this 2 × 2 system needs 13 qubits, and the cell's 4 times give 12.
 # - **Output.** `my_result.solution` is the physical $u(T)$ with its norm and phase, from exact readout by the simulator.
 
 # %%
@@ -337,6 +338,7 @@ print(f"relative error {np.linalg.norm(my_u - my_reference) / np.linalg.norm(my_
 # - **Planning beyond simulation.** `plan` and `estimate` work at sizes no simulator holds ([Planning at scale](resource_estimation_at_scale.ipynb)).
 # - **The formula behind every number.** Each predicted count comes from a gate-count formula per block ([Mathematics](../docs/mathematics.md)). Section 2 sets it beside the compiled circuit, and the resource notebook compares the formulas with compiled circuits at small sizes.
 # - **Arguments switch the kernel and the evaluation.** `LCHS(lchs_kernel=..., k_quadrature=...)` selects another published kernel with a quadrature it accepts (Go deeper C). `hamiltonian_evolution_backend="dense_exact"` with `execution="classical"` evaluates the same problem classically (Section 3).
+# - **A norm or an observable from random pairs of evolutions.** `observable_estimator="sampled_pairs"` estimates a scalar of $u(T)$ from circuits that each hold two evolutions instead of the whole sum, with a numerical covering radius at a stated confidence (Go deeper E).
 # - **Saved and reloaded.** A saved result reloads with its plan, and its numbers can be recomputed from it (Appendix B).
 #
 # [Why NWQLib](../docs/why_nwqlib.md) compares this workflow with other packages.
@@ -586,6 +588,71 @@ show_table(rows, headers=("Quadrature", "State preparation", "Relative error"))
 # The Gauss nodes are ordered by increasing $k$, but their spacings and quadrature weights are nonuniform, and the 270 coefficients are padded with zeros to 512 addresses. The coefficient state therefore differs in structure from that of a uniform grid, and the loader table shows that the MPS circuits approximate it less accurately.
 #
 # The loader table counts CX gates for the loaders alone, not for a complete LCHS circuit.
+#
+# ### E. A norm from random pairs of evolutions
+#
+# **Can a scalar of $u(T)$, such as its norm, be estimated without a circuit that holds the whole sum?** This section runs 500 one-shot circuits of two qubits on a one-qubit problem.
+#
+# A two-level atom is driven at Rabi frequency $\Omega$ and decays from its excited state $|1\rangle$ at rate $\Gamma$. Until it emits a photon, its unnormalized state obeys $du/dt=-Au$ with $A=\tfrac{\Gamma}{2}|1\rangle\langle1|+i\tfrac{\Omega}{2}X$, and $\lVert u(T)\rVert^2$ is the probability that no photon has been emitted by time $T$. The cell gives $A$ as a Pauli sum, so no matrix is formed.
+#
+# With an explicit evolution backend, `observable_estimator="sampled_pairs"` estimates `NormSquared`, `QuadraticForm` and `NormalizedExpectation` outputs from rows. Each row draws two terms of the LCHS sum, with probabilities proportional to their coefficient magnitudes, prepares both evolutions in one circuit with one extra qubit, and measures that qubit and the system. The mean of the signed scores over the rows estimates the physical quantity. The reported covering radius includes sampling error, product-formula bias and the kernel and quadrature contribution. Here each evolution is a product formula whose step count `"trotter_error_budgeted"` chooses so that its error bound fits 0.1 times `approximation_tolerance`. `shots` sets the number of rows, each measured once.
+
+# %%
+from nwqlib import Accuracy, NormSquared
+from nwqlib.operators import ingest_pauli
+
+RABI, DECAY, ATOM_TIME = 0.8, 0.4, 1.0  # drive and decay rates, per unit time, and the final time
+ROWS = 500                               # independent rows, each one random pair of evolutions measured once
+
+# A = (DECAY/2)|1><1| + i (RABI/2) X, written as Pauli terms: (DECAY/4)(I - Z) + i (RABI/2) X.
+atom_A = ingest_pauli([("I", DECAY / 4), ("Z", -DECAY / 4), ("X", 0.5j * RABI)], num_qubits=1)
+atom = LinearDynamics(A=atom_A, initial_state=[1, 0], time=ATOM_TIME)  # starts in the ground state |0>
+pairs = LCHS(observable_estimator="sampled_pairs", hamiltonian_evolution_backend="trotter_error_budgeted",
+             approximation_tolerance=0.05)
+
+started = perf_counter()
+atom_plan = plan(atom, method=pairs, output=NormSquared(), shots=ROWS, seed=7)  # draws the rows, runs nothing
+atom_result = solve(atom_plan, progress=False)
+atom_seconds = perf_counter() - started
+atom_estimate = atom_result.pair_estimate  # the raw estimate of ||u(T)||^2 and its covering radius
+
+dense_A = np.array([[0, 0.5j * RABI], [0.5j * RABI, DECAY / 2]])  # the same A as a matrix, for the reference only
+atom_exact = np.linalg.norm(expm(-ATOM_TIME * dense_A) @ [1, 0]) ** 2
+atom_cost = estimate(atom_plan, context=ResourceContext(basis="cx"))
+cx = atom_cost.quantity("cx")
+show_table([
+    ("No-photon probability ‖u(T)‖², estimate", atom_estimate.norm_squared, f"Mean over {ROWS} rows of one shot each"),
+    ("Covering radius", atom_estimate.radius_n,
+     f"Numerical bound for physical ‖u(T)‖² at confidence {1 - atom_estimate.failure_n:.0%}"),
+    ("Kernel and quadrature bounds", atom_plan.reconstruction.kernel_approximation_bound
+     + atom_plan.reconstruction.quadrature_bound, "Upper bound on ‖finite sum − u(T)‖ for this unit initial state"),
+    ("No-photon probability from scipy.linalg.expm", atom_exact, "Reference"),
+    ("|Estimate − reference|", abs(atom_estimate.norm_squared - atom_exact), "Measured against reference"),
+    ("Qubits", quantity(atom_cost, "logical_width", location="logical_device"), "Predicted by estimate"),
+    ("CX gates", cx.fact.value.numerator if cx.fact.availability == "concrete" else None,
+     f"Predicted by estimate, {cx.interpretation.replace('_', ' ')}, summed over the rows"),
+    ("Time on this computer", f"{atom_seconds:.1f} s", "Plan and solve"),
+], headers=("Decaying atom, sampled pairs", "Value", "Meaning"))
+
+# %% [markdown]
+# The covering radius targets the no-photon probability of the physical solution. It adds the product-formula bias and the kernel and quadrature contribution to Hoeffding's bound for the mean of the row scores. Only the sampling part decreases as one over the square root of the number of independent rows. Measuring each row more than once (`pair_repeats`) does not improve this bound. These are numerical evaluations of ideal-arithmetic bounds, with no complete enclosure of coefficient, angle or score arithmetic.
+#
+# An `accuracy` request constrains the sampling part of the radius instead of fixing the number of rows. It leaves the evolution and model bias contributions unchanged. The cell asks for a sampling radius of 0.02, plans the rows that this radius needs and counts their CX gates, without running them.
+
+# %%
+accurate_plan = plan(atom, method=pairs, output=NormSquared(), seed=7,
+                     accuracy=Accuracy(absolute_tolerance=0.02, component="sampling"))  # instead of ROWS
+accurate_cx = estimate(accurate_plan, context=ResourceContext(basis="cx")).quantity("cx")
+print(f"Rows for a sampling radius of 0.02: {accurate_plan.shots}")  # one shot per row
+print("CX gates summed over these rows:",
+      accurate_cx.fact.value.numerator if accurate_cx.fact.availability == "concrete" else accurate_cx.fact.availability)
+
+# %% [markdown]
+# `estimate` counts the gates of all rows without building a circuit. Running them takes one circuit per row, about 140 times as many as the 500-row run above. A Run on a backend that may charge, such as IBM, also needs `ExecutionLimits(max_total_circuits=...)` above its default of 512 circuits.
+#
+# With `hamiltonian_evolution_backend="qsp_block_encoding"`, each evolution is instead a quantum signal processing (QSP) polynomial of block encodings of $L$ and $H$, whose phases planning fits once for a finite set of evolution times (`pair_qsp_bank`). This route also evolves a periodic band operator and block-encoding circuits you supply. `pair_qsp_bank="stochastic"` keeps the low-order terms of each polynomial and draws one higher-order term separately for each evolution of a row, which can lower the average degree. A larger recovery factor $\zeta$ enlarges the range of the scores by $\zeta^2$ and the rows needed for a given sampling radius by $\zeta^4$, so a lower average degree does not by itself make a run cheaper.
+#
+# Replace `atom_A`, the initial state and `ATOM_TIME` to estimate your own norm. The product-formula route takes $A$ as a Pauli sum or as Pauli parts $L$ and $H$, and the [LCHS guide](../docs/algorithms/lchs.md#sampled-branch-pairs) lists the requirements of each route. [LCHS derivations](../docs/algorithms/lchs_derivations.md#sampled-branch-pairs) derives the scores, the radii and each bias bound.
 #
 # ## Appendix
 #

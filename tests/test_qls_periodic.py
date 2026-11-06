@@ -62,21 +62,19 @@ def injected_selection(monkeypatch):
         return InversePolynomial(
             coefficients=(0.0, 1.0, 0.0, -0.5),
             rescale=2.0,
-            candidate_degrees=(1, 3),
-            certificate=0.1,
-            certificate_grid_points=75,
-            certificate_basis="affine_chebyshev_residual_norming",
-            lsq_node_count=8,
+            ideal_degree=3,
+            minimax_error=0.1,
+            residual_check_value=0.1,
         )
 
     monkeypatch.setattr(owner, "select_polynomial", polynomial)
     monkeypatch.setattr(
         phases,
-        "solve_symmetric_qsp_phases",
+        "solve_wx_qsp_phases",
         lambda coefficients, **kw: SimpleNamespace(
             phases=(0.0,) * len(coefficients),
             residual_sup_bound=0.0,
-            evaluations=0,
+            evidence=SimpleNamespace(fft_lengths=(8,)),
         ),
     )
     return calls

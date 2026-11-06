@@ -9,9 +9,10 @@ from math import cos, pi, sin
 import numpy as np
 import pytest
 
-from nwqlib.algorithms.qpe import SPE
+from nwqlib import SpectralEstimation, solve
+from nwqlib.algorithms.qpe import RFE, SPE
 from nwqlib.algorithms.qpe import numerical
-from nwqlib.algorithms.qpe.records import public_estimate
+from nwqlib.algorithms.qpe.records import bounded_mean, public_estimate
 
 
 def ideal_overlap(power, *, phases, weights):
@@ -19,6 +20,38 @@ def ideal_overlap(power, *, phases, weights):
         weight * complex(cos(power * phase), sin(power * phase))
         for phase, weight in zip(phases, weights, strict=True)
     )
+
+
+def test_unitary_signal_drops_the_modulus_error_of_its_eigenvalues():
+    """z_p = sum_j w_j exp(i p theta_j) for lambda_j = (1 + eta_j) exp(i theta_j), and |z_p| <= 1 up to roundoff.
+
+    With eta = 1e-13 and p = 10**5 the power lambda**p has modulus 1 + 1e-8, far outside the 1e-12 window of
+    ``records.bounded_mean``. The window still refuses a value truly above one.
+    """
+    theta = .3
+    values = np.array([(1 + 1e-13) * complex(cos(theta), sin(theta))])
+    power = 10**5
+    signal = numerical.overlap(values, np.array([1.0]), power, None)
+    expected = complex(cos(power * float(np.angle(values[0]))), sin(power * float(np.angle(values[0]))))
+    assert abs(signal - expected) <= 4e-16
+    bounded_mean(signal.real)
+    assert numerical.overlap(values, np.array([1.0]), 0, None) == 1
+    with pytest.raises(ValueError, match="numerical endpoint window"):
+        bounded_mean(1 + 1e-9)
+
+
+def test_rfe_on_a_reflection_eigenstate_stays_inside_the_endpoint_window():
+    """U = 2|phi><phi| - I has eigenvalue +1 on phi, so every signal is one and RFE reports phase 0.
+
+    Whether the old power left the window depends on the rounding of the base, so seed 6 is a known natural
+    failure of that form here, not a portable one, and the assertion is the relation that holds after the repair.
+    """
+    rng = np.random.default_rng(6)
+    phi = rng.normal(size=8) + 1j * rng.normal(size=8)
+    phi /= np.linalg.norm(phi)
+    result = solve(SpectralEstimation(unitary=2 * np.outer(phi, phi.conj()) - np.eye(8), initial_state=phi),
+                   method=RFE(num_frequencies=2048, num_samples=97), execution="classical", seed=7)
+    assert min(result.phase, 1 - result.phase) <= 1 / 2048
 
 
 def test_qcels_nonzero_phase_and_symmetric_two_component_center():

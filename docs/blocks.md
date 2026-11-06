@@ -61,8 +61,7 @@ construction = SelectedConstruction(
 print(construction.encoding_semantics("encoding").alpha)  # 6.0
 saved = construction.model_dump_json()
 assert SelectedConstruction.model_validate_json(saved) == construction
-logical = lower_qiskit(construction, blocks=blocks, max_operations=1024,
-                       max_qubits=3, max_clbits=0)
+logical = lower_qiskit(construction, blocks=blocks)
 print(logical.circuit.num_qubits)  # 3
 ```
 
@@ -84,7 +83,7 @@ The port maps connect the PREP `system` port to the index wire and the SELECT po
 
 ## Bind your own constructor
 
-`SelectedBlock` holds a block's record and the code that builds its circuit, and it cannot be modified. A Method author uses `SelectedBlock.bind(record, payload=inputs, constructor=build)` to bind trusted code to the block's exact definition and its inputs. The constructor receives `(block, arguments, method_context)` and returns a circuit. Before calling it, `lower_qiskit` checks the block's content hash, the argument domains and the operation and width limits, and each expensive constructor applies its own numerical and synthesis limits. Adding a Method needs no shared registry of implementations. Serializing or revising the record changes no existing binding and does not make the record executable again.
+`SelectedBlock` holds a block's record and the code that builds its circuit, and it cannot be modified. A Method author uses `SelectedBlock.bind(record, payload=inputs, constructor=build)` to bind trusted code to the block's exact definition and its inputs, and can pass `native_bytes` and `definition_bytes`, rough estimates that the Run's [memory comparison](prepared_execution.md#memory-of-the-prepared-circuits) reads. The constructor receives `(block, arguments, method_context)` and returns a circuit. Before calling it, `lower_qiskit` checks the block's content hash, the argument domains and the memory of the circuit's instructions, and each expensive constructor applies its own numerical and synthesis limits. Adding a Method needs no shared registry of implementations. Serializing or revising the record changes no existing binding and does not make the record executable again.
 
 The constructor must implement its versioned definition, including its scientific dependencies and its work formula. The third argument, `method_context`, is a getter. `method_context(factory)` returns the Method's context and creates it with `factory()` on first use. Constructors must not keep the getter or the Run. Control and adjoint attach the exact in-memory base block through `transform_block`, so the base gate as built, with its full phase, is the one that is controlled or inverted. A block with a blocker, a requirement not yet resolved, may have no constructor, but it cannot run. `SelectedBlock.bind` imports no SDK and builds no circuit.
 
@@ -112,17 +111,9 @@ The exact gate list of a recipe, the CX slot bound, the construction size formul
 
 `lower_qiskit` builds the logical Qiskit circuit of a `SelectedConstruction`. It supports `Sequence`, `Repeat` with a concrete or bound count, coherent regions, `BlockCall` of a known block with valid concrete arguments, allocation and release, computational-basis measurement and reset. Whole registers appear in declaration order, the circuit keeps every declared register, and the returned `LogicalCircuit` gives both the quantum and the classical layout. `Program.select_experiment` selects one root `MeasurementBatch` setting and its bindings, and `lower_qiskit` builds that Program directly. Batches with several settings, nested batches, dynamic branches, classical stages, adaptive loops and reallocation are not supported here and raise an error.
 
-`lower_qiskit` checks its first four limits before it imports Qiskit or adds an instruction. A Run passes its own `ExecutionLimits` values in place of the defaults where the table says so.
+Before it builds a Qiskit register or adds an instruction, `lower_qiskit` counts the instructions the circuit will hold, one for each block call and one for each qubit of a measured or reset register, `Repeat` multiplicity included, and checks 256 bytes for each against `max_bytes`. Its default `None` is the physical memory of the computer, which a Run always uses. A direct state preparation is one instruction whose gates, about 1 KiB of memory per amplitude, are built when a backend first reads it, so a Run checks the direct preparations that a circuit calls against the physical memory before it prepares that circuit, and the gate checks its own circuit again when it is built ([engineering constants](ENGINEERING_CONSTANTS.md#selected-block-lowering-limits)).
 
-| Argument | Default | What it bounds |
-| --- | --- | --- |
-| `max_operations` | 100_000 | Visits to Program nodes during circuit building, with `Repeat` multiplicity included. Positive and inclusive |
-| `max_qubits` | 4096 | Total declared quantum width. Nonnegative |
-| `max_clbits` | 4096 | Total declared classical width. Nonnegative |
-| `max_direct_amplitudes` | 65_536 | Amplitude count of each reachable block that declares a direct state preparation. A Run passes `ExecutionLimits.max_direct_amplitudes` |
-| `max_synthesis_work` | 1_000_000_000 | Work of the exact syntheses, and of Qiskit's control of them, for the controlled transformed blocks. It is added up before each base is controlled. A Run counts this work against `ExecutionLimits.max_synthesis_work` instead ([limit checks of the exact synthesis](development/dense_synthesis.md#admission-of-the-exact-synthesis)) |
-
-Unused definitions and zero-count bodies are not built. Very large `Repeat` counts are checked arithmetically, without expanding the loop, while empty bodies still count node visits. Built block circuits are cached by the block's content hash and, for parameterized calls, by the arguments in formal-parameter order. Unparameterized forward and inverse uses share the built base circuit, and parameterized transforms need a supported compact constructor. `construction_work` reports the sum of the blocks' size formulas, which is neither a limit on total work nor a measurement. Each numerical or circuit constructor applies its own cost limits. `defined_selections` lists the block definitions used, and the Program keeps the arguments of each call. A coherent circuit is never split across jobs.
+Unused definitions and zero-count bodies are not built. Very large `Repeat` counts are checked arithmetically, without expanding the loop, while empty bodies still count node visits. Built block circuits are cached by the block's content hash and, for parameterized calls, by the arguments in formal-parameter order. Unparameterized forward and inverse uses share the built base circuit, and parameterized transforms need a supported compact constructor. `construction_work` reports the sum of the blocks' size formulas, which is neither a limit on total work nor a measurement. It is `None` when a block that the circuit reaches has unknown construction work, such as the controlled query of a supplied gate whose definition was not built when the Plan was made. Such a block is built, and the preparation records and the Run's trace keep its work as `None`. Each numerical or circuit constructor applies its own cost limits. `defined_selections` lists the block definitions used, and the Program keeps the arguments of each call. A coherent circuit is never split across jobs.
 
 The output is a logical Qiskit circuit that is not compiled, run or exported. QASM export is a separate step ([Export OpenQASM](qasm-streaming.md)).
 

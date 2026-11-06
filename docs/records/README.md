@@ -37,7 +37,7 @@ Nested record fields are frozen. Typed containers copy the collections that the 
 
 ### Content hash
 
-A record's content hash, `content_id`, is the SHA-256 digest of a compact, sorted-key UTF-8 JSON object that contains `nwqlib.record/1`, the fully qualified record type and the declared fields. Computed IDs are excluded from the digest input, and ordered collections keep their order. Constructors and mapping or JSON loads validate field data and normalize scalars. An existing instance of the exact declared type is reused, and its content hash is computed when requested. A content hash associates data with content. It does not authenticate a source or prove the content of external data. Unit compatibility compares symbol and dimension independently of revision ancestry.
+A record's content hash, `content_id`, is the SHA-256 digest of a compact, sorted-key UTF-8 JSON object that contains `nwqlib.record/2`, the fully qualified record type and the declared fields. A nested record enters that object as its fully qualified type and its content hash, and a `FrozenArray` as its dtype, shape and the SHA-256 digest of its elements, so a change anywhere inside a nested record or an array changes the hash. A Plan follows the same rule. Computed IDs are excluded from the digest input, and ordered collections keep their order. Constructors and mapping or JSON loads validate field data and normalize scalars. An existing instance of the exact declared type is reused, and its content hash is computed when requested. A content hash associates data with content. It does not authenticate a source or prove the content of external data. Unit compatibility compares symbol and dimension independently of revision ancestry.
 
 ### Exact scalar encodings
 

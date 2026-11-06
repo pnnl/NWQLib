@@ -4,7 +4,7 @@ The functions that accept operator and state inputs check concrete data before c
 
 ## Default and what it counts
 
-The default `max_bytes` is `10_000_000_000`. Each operation compares it with an upper bound on its peak live arrays, the bytes of the arrays alive at the same time at the peak of that operation. The bound is computed before allocation, from what the code knows at that point. Producing the metadata description of an input performs no numerical action. [Byte and work budgets](../CODE_TOUR.md#byte-and-work-budgets) explains why these budgets are checked before the work they bound.
+With the default `max_bytes=None`, the limit is the physical memory of the computer, read when the operation runs. Each operation compares the limit with an upper bound on its peak live arrays, the bytes of the arrays alive at the same time at the peak of that operation. The bound is computed before allocation, from what the code knows at that point. Producing the metadata description of an input performs no numerical action. [Byte and work budgets](../CODE_TOUR.md#byte-and-work-budgets) explains why these budgets are checked before the work they bound.
 
 ## What it does not count
 
@@ -15,7 +15,6 @@ These formulas keep the refusal before the work, but they do not measure SDK all
 ## Other limits
 
 - Methods and backends set their own limits for later construction and execution.
-- `prepare_qiskit(max_direct_amplitudes=65_536)` separately limits the direct synthesis of a vector's magnitudes and phases, whose arithmetic is O(q*2**q). It does not limit compact preparations or the dimensions of a symbolic input or Plan.
 - `matvec(max_products=...)`, `PauliTerms.group(max_comparisons=...)` and `expand(max_products=...)` limit work, as [Matrix-vector action](#matrix-vector-action), [Pauli grouping](#pauli-grouping) and [Sparse products](#sparse-products) describe.
 
 ## Peak live arrays by operation
@@ -28,24 +27,24 @@ These formulas keep the refusal before the work, but they do not measure SDK all
 | Product preparation input | Physical entries plus 32q direction bytes, with no 2**q vector |
 | Occupation input | q bytes plus two dimension integers |
 | Periodic stencil | `48 + ceil(bit_length(q)/8) + 2*ceil((q+1)/8)` bytes |
-| Pauli labels | `R*(q+4L+S)`, with `L=16*ceil(q/64)+16` and `S=6q+360` |
+| Pauli labels | `R*(q+4L+S)`, with `L=16*ceil(q/64)+16` and `S=3*max(2q+120,150)+112` |
 | Pauli masks | `R*(4L+S)` plus dimension metadata |
 | Qiskit `SparsePauliOp` | `R*(5L+S)` plus dimension metadata, because the converted masks and coefficients stay alive through the mask conversion |
 | Pauli label output | `M*(q+16)` returned data plus `t*(q+25)+q+4` bytes for a tile of `t<=min(M,1024)` rows |
 | Ordered Pauli product | `2*M*K*L+64*C*W+128*C`, with `W=ceil(q/64)` and blocks of `C=min(max(M,K),1024)` rows of the longer factor |
 | First-fit Pauli grouping | `M*L+64*t*W+64*t+32*W`, with `W=ceil(q/64)` and candidate tiles of `t<=min(M,1024)` terms |
-| Matrix-vector action | 33D bytes for dense/sparse, `49D+24M+16g+8+max(9M,96*min(D,1024))` for M stored Pauli terms, using the metadata bound `g=min(M,D)` on distinct single-word flip masks |
-| Supplied circuit snapshot | Stored arrays and scalars and circuit, gate and reference slots, with a shared payload copied once. The per-object allowances are in [engineering constants](../ENGINEERING_CONSTANTS.md#supplied-circuit-snapshot-allowances) |
+| Matrix-vector action | 33D bytes for dense/sparse, `49D+254M+1282+max(9M,96*min(D,1024))` for M stored Pauli terms, including the Python dict and lists that group the terms |
+| Supplied circuit snapshot | 256 bytes per instruction and qubit of each copied circuit and per annotation modifier, plus the parameter data of gates other than Qiskit's standard gates, with a shared payload copied once ([engineering constants](../ENGINEERING_CONSTANTS.md#supplied-circuit-snapshot-estimate)) |
 
-The Pauli rows also reserve `S` bytes per term for the content-hash JSON of the Plan records that will hold the term. `Record.content_id` holds two JSON copies beside the record's own data, and the records' own label and coefficient data take at most one more copy. The widest per-term JSON is `J=2q+120` bytes, which holds the Pauli term record of an Expectation Plan with a 24-character binary64 repr, the label and coefficient again in its readout spec and 4 bytes of list brackets, so `S=3J=6q+360`. [Engineering constants](../ENGINEERING_CONSTANTS.md#record-identity-json) gives the measured Plans and the Methods that count their own records.
+The Pauli rows also reserve `S` bytes per term for the content-hash JSON of the Plan records that will hold the term. `Record.content_id` holds two JSON copies beside the record's own data, and the records' own label and coefficient data take at most one more copy. Each record's content hash is computed on its own, so one JSON copy holds a term in its widest single layout. That is `J=max(2q+120,150)` bytes, 150 for a per-term record, which enters its parent as a 145-character reference, with a separator and 4 bytes of list brackets, and `2q+120` for the label and coefficient written inline, as in an Expectation readout spec. Each per-term record also keeps its computed content hash, 112 bytes on CPython 3.12, as long as the Plan, so `S=3J+112`, which is 562 for q up to 15. [Engineering constants](../ENGINEERING_CONSTANTS.md#record-identity-json) gives the measured Plans and the Methods that count their own records.
 
 ## Matrix-vector action
 
-`matvec(max_products=1_000_000_000)` limits the scalar products that the representation needs: D² for dense, nnz+D for sparse, and `(M+g)+3M+D(M+g+1)+D+M*D` for M stored Pauli terms with the metadata bound `g=min(M,D)` on distinct single-word flip masks. The Pauli allowance includes preprocessing, grouped action and a possible ordered retry after overflow. Factorized action sums the counts of the chosen factors before reading the vector. A method that repeats an action must also account for its whole number of iterations or queries before the overall computation. A per-action limit does not claim that any number of repeated actions is cheap.
+`matvec(max_products=...)` limits the scalar products that the representation needs, and the default `None` sets no limit. The counts are D² for dense, nnz+D for sparse, and `(M+g)+3M+D(M+g+1)+D+M*D` for M stored Pauli terms with the metadata bound `g=min(M,D)` on distinct single-word flip masks. The Pauli allowance includes preprocessing, grouped action and a possible ordered retry after overflow. Factorized action sums the counts of the chosen factors before reading the vector. A method that repeats an action must also account for its whole number of iterations or queries before the overall computation. A per-action limit does not claim that any number of repeated actions is cheap.
 
 ## Pauli grouping
 
-`PauliTerms.group(max_comparisons=1_000_000)` counts each candidate tile against the remaining comparison budget before testing it. The worst case is M(M-1)/2 comparisons, but it is not reserved in advance. Each comparison visits the masks' word width. Grouping returns the original term indices and the number of comparisons made, without building a dense graph. Neither grouping strategy claims optimality. These local controls are never silently increased after a refusal, and they do not limit symbolic resource estimates.
+`PauliTerms.group(max_comparisons=...)`, with no limit by default, counts each candidate tile of at most 1024 comparisons against the remaining comparison budget before testing it. The worst case is M(M-1)/2 comparisons, but it is not reserved in advance. Each comparison visits the masks' word width. Grouping returns the original term indices and the number of comparisons made, without building a dense graph. Neither grouping strategy claims optimality. These local controls are never silently increased after a refusal, and they do not limit symbolic resource estimates.
 
 ## Fermion input
 
@@ -65,7 +64,7 @@ Structural refinement streams exact `Fraction` arithmetic over binary64 input. E
 
 ## Dense matrices that are later synthesized
 
-A dense matrix accepted here can later be synthesized into gates, which costs of order M³ work for an M-square unitary, far more than accepting the matrix. That synthesis has its own formula, `_dense_synthesis.dense_synthesis_size`, or `controlled_synthesis_size` for a directly controlled unitary. Qiskit's control of the synthesized gates has its own formula, `gatewise_control_size`. A Method that controls a unitary built from such a matrix, or a supplied circuit that holds one, counts the synthesis and Qiskit's control of it against its own work and byte limits at planning, and a subroutine builder does so before its construction. A backend that compiles an uncontrolled one to a gate basis, and circuit building inside a Run that controls a transformed block, set aside the work from the Run's `max_synthesis_work`, a total over all its preparations, before the first synthesis. The backend synthesizes each distinct matrix once per Run object. `lower_qiskit` called outside a Run checks its own `max_synthesis_work` ([Exact dense synthesis](../development/dense_synthesis.md#admission-of-the-exact-synthesis)).
+A dense matrix accepted here can later be synthesized into gates, which costs of order M³ work for an M-square unitary, far more than accepting the matrix. That synthesis has its own formula, `_dense_synthesis.dense_synthesis_size`, or `controlled_synthesis_size` for a directly controlled unitary. Qiskit's control of the synthesized gates has its own formula, `gatewise_control_size`. A Method that controls a unitary built from such a matrix, or a supplied circuit that holds one, counts the synthesis and Qiskit's control of it against its own work and byte limits at planning, and a subroutine builder does so before its construction. A backend that compiles an uncontrolled one to a gate basis, and circuit building inside a Run that controls a transformed block, check its memory against the physical memory before it starts and count its work in the Run's `synthesis_work`, a total over its saved preparations. The backend synthesizes each distinct matrix once per Run object ([Exact dense synthesis](../development/dense_synthesis.md#admission-of-the-exact-synthesis)).
 
 ## Stored input arrays
 

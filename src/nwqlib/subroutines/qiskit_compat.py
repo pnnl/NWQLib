@@ -26,6 +26,8 @@ from typing import Any
 from qiskit.circuit import ControlledGate, Gate, Instruction, QuantumCircuit
 from qiskit.circuit.library import UCGate, UnitaryGate
 
+from nwqlib._limits import ResourceLimitError
+
 
 def controlled(gate: Any, num_ctrl_qubits: int, *, ctrl_state: int | str | None = None,
                route: str = "gatewise") -> Any:
@@ -218,38 +220,39 @@ def _controlled_whole_matrix(gate: Any, num_ctrl_qubits: int, ctrl_state: int | 
 
 
 def dense_control_charges(operation: Any, num_controls: int, route: str) -> tuple[tuple[int, ...], tuple[int, ...],
-                                                                                  tuple[int, int, int]]:
+                                                                                  tuple[int, int]]:
     """Return the syntheses that :func:`controlled` makes when it adds ``num_controls`` controls to ``operation`` on ``route``.
 
     The result is ``(widths, controlled_widths, counts)``. ``widths`` are the
     qubit counts of the syntheses of the gate-wise route
     (:func:`dense_synthesis_widths`), ``controlled_widths`` those, controls
     included, of the controlled matrices of the whole-matrix route, and
-    ``counts`` the ``(gates, instructions, heavy)`` of Qiskit's control of
+    ``counts`` the ``(gates, instructions)`` of Qiskit's control of
     the synthesized gates (:func:`dense_control_counts`), zero when no gate
     is controlled that way. ``_dense_synthesis.admit_dense_syntheses`` takes
     the three. Reading a definition can make Qiskit build it.
     """
     if isinstance(operation, UnitaryGate):
-        return (), (operation.num_qubits + num_controls,), (0, 0, 0)
+        return (), (operation.num_qubits + num_controls,), (0, 0)
     if route != "gatewise":
         from nwqlib.subroutines._dense_synthesis import select_dense_control_route
 
         if select_dense_control_route(route, num_controls) == "whole_matrix":
             if _dense_matrix(operation) is not None:
-                return (), (operation.num_qubits + num_controls,), (0, 0, 0)
+                return (), (operation.num_qubits + num_controls,), (0, 0)
             definition = _whole_matrix_definition(operation)
             if definition is not None:
-                widths, controlled_widths, totals = [], [], [0, 0, 0]
+                widths, controlled_widths, totals = [], [], [0, 0]
                 for item in definition.data:
                     if _dense_matrix(item.operation) is not None:
                         controlled_widths.append(item.operation.num_qubits + num_controls)
                         continue
-                    widths += dense_synthesis_widths(item.operation)
-                    totals = [total + count for total, count in
-                              zip(totals, dense_control_counts(item.operation, num_controls), strict=True)]
+                    item_widths, counts, _ = dense_gatewise_charges(item.operation, num_controls)
+                    widths += item_widths
+                    totals = [total + count for total, count in zip(totals, counts, strict=True)]
                 return tuple(widths), tuple(controlled_widths), tuple(totals)
-    return dense_synthesis_widths(operation), (), dense_control_counts(operation, num_controls)
+    widths, counts, _ = dense_gatewise_charges(operation, num_controls)
+    return widths, (), counts
 
 
 def _controlled_unitary(gate: UnitaryGate, num_ctrl_qubits: int, ctrl_state: int | str | None) -> ControlledGate:
@@ -271,8 +274,7 @@ def _controlled_unitary(gate: UnitaryGate, num_ctrl_qubits: int, ctrl_state: int
     return result
 
 
-def exact_dense_unitaries(circuit: Any, *, charge: Any = None,
-                          cache: dict[Any, QuantumCircuit] | None = None) -> Any:
+def exact_dense_unitaries(circuit: Any, *, cache: dict[Any, QuantumCircuit] | None = None) -> Any:
     """Return ``circuit`` with every dense ``UnitaryGate``, at any depth, synthesized exactly.
 
     Aer applies a ``UnitaryGate`` as its matrix, but a backend that compiles
@@ -283,36 +285,23 @@ def exact_dense_unitaries(circuit: Any, *, charge: Any = None,
     function before they compile, and so does Aer compilation when a noise
     model's gate basis omits the unitary instruction. The circuit comes back
     unchanged when it contains no ``UnitaryGate`` on two or more qubits.
-    Control-flow blocks and annotated operations are not rewritten.
-
-    The work of the syntheses that this call would make,
-    ``_dense_synthesis.dense_synthesis_size`` of each width that
-    :func:`dense_synthesis_widths` lists, is known before any of them
-    starts. With ``charge`` set, ``charge(work, operation)`` is called with a
-    positive sum and a description of the syntheses, and may raise.
+    Control-flow blocks and annotated operations are not rewritten. The
+    syntheses this call makes are those of :func:`dense_synthesis_widths`,
+    or with ``cache`` the matrices of ``dense_unitary_census(circuit,
+    cached=True)`` that the cache lacks, so a caller can size them with
+    ``_dense_synthesis.dense_synthesis_size`` before calling.
 
     ``cache`` maps the content of a dense matrix (:func:`dense_matrix_key`)
-    to its synthesized circuit. A matrix found there is not synthesized or
-    counted again, and each gate receives a copy of the stored circuit, so
-    a caller that edits a definition leaves the cache unchanged. The call
-    counts and synthesizes once each distinct matrix that the cache lacks,
-    and stores its circuit. ``dense_unitary_circuit`` is deterministic, so
-    a stored circuit equals a new synthesis of the same matrix. The
-    backends reach this function through ``Run._exact_dense_unitaries``,
-    which passes its ``_charge_synthesis`` and, during a preparation of the
-    Run, the Run's synthesis cache.
+    to its synthesized circuit. A matrix found there is not synthesized
+    again, and each gate receives a copy of the stored circuit, so a caller
+    that edits a definition leaves the cache unchanged. The call
+    synthesizes once each distinct matrix that the cache lacks, and stores
+    its circuit. ``dense_unitary_circuit`` is deterministic, so a stored
+    circuit equals a new synthesis of the same matrix. The backends reach
+    this function through ``Run._exact_dense_unitaries``, which checks the
+    memory of the syntheses, passes the Run's synthesis cache during a
+    preparation of the Run and counts their work.
     """
-    if charge is not None:
-        from nwqlib.subroutines._dense_synthesis import dense_synthesis_size
-
-        widths = (dense_synthesis_widths(circuit) if cache is None
-                  else tuple(width for key, width in _dense_unitary_widths(circuit, cached=True).items()
-                             if key not in cache))
-        work = sum(dense_synthesis_size(width)[0] for width in widths)
-        operation = (f"exact synthesis of {len(widths)} dense unitaries on at most "
-                     f"{max(widths, default=0)} qubits")
-        if charge is not None and work:
-            charge(work, operation)
     rewritten = _rewrite_circuit(circuit, {}, cache)
     return circuit if rewritten is None else rewritten
 
@@ -345,84 +334,70 @@ def dense_synthesis_widths(operation: Any) -> tuple[int, ...]:
     return tuple(_dense_unitary_widths(operation, cached=False).values())
 
 
-def _dense_unitary_widths(operation: Any, *, cached: bool) -> dict[Any, int]:
-    """Map the key of each distinct dense unitary in ``operation`` to its qubit count.
+def dense_unitary_census(operation: Any, *, cached: bool = False,
+                         built: bool = False) -> tuple[dict[Any, int], dict[int, int], Any]:
+    """Return the two populations of dense unitaries in ``operation`` from one walk.
 
-    Without ``cached`` a unitary is keyed by its matrix bytes and label, as
-    one rewrite keys it. With ``cached`` it is keyed by
-    :func:`dense_matrix_key`, as a synthesis cache keys it.
-    """
-    widths: dict[Any, int] = {}
-    visited: set[int] = set()
-    held: list[Any] = []
+    The result is ``(widths, occurrences, unbuilt)``. ``widths`` maps the key
+    of each distinct dense ``UnitaryGate`` on two or more qubits to its qubit
+    count, the population that the exact rewrite synthesizes once each
+    (:func:`dense_synthesis_widths`). ``occurrences`` counts those gates by
+    width with their multiplicity through nested definitions, the population
+    whose synthesized gates Qiskit's control unrolls once for every place
+    where they occur (:func:`dense_control_counts`). The two differ whenever a
+    matrix occurs more than once, so they are kept apart. Without ``cached``
+    a unitary is keyed by its matrix bytes and label, as one rewrite keys it,
+    and with ``cached`` by :func:`dense_matrix_key`, as a synthesis cache
+    keys it. Each gate object is keyed once. Standard gates, one-qubit
+    unitaries and control-flow blocks count nothing.
 
-    def visit(item: Any) -> None:
-        if isinstance(item, UnitaryGate):
-            if item.num_qubits >= 2:
-                matrix = item.to_matrix()
-                key = dense_matrix_key(matrix) if cached else ("dense_unitary", matrix.tobytes(), item.label)
-                widths.setdefault(key, item.num_qubits)
-            return
-        if getattr(item, "_standard_gate", None) is not None or id(item) in visited:
-            return
-        # Holding each visited object keeps its id from being reused during the walk.
-        visited.add(id(item))
-        held.append(item)
-        definition = getattr(item, "definition", None)
-        if definition is not None:
-            walk(definition)
-
-    def walk(circuit: Any) -> None:
-        for instruction in circuit.data:
-            if not (instruction.is_standard_gate() or instruction.is_control_flow()):
-                visit(instruction.operation)
-
-    if isinstance(operation, QuantumCircuit):
-        walk(operation)
-    else:
-        visit(operation)
-    return widths
-
-
-def dense_control_counts(operation: Any, num_controls: int) -> tuple[int, int, int]:
-    """Return (gates, instructions, heavy) of Qiskit's control of the exact syntheses in ``operation``.
-
-    ``operation`` is a gate that :func:`controlled` receives with
-    ``num_controls`` controls, or a circuit that becomes one. Qiskit unrolls
-    the definition of the gate to its basis and controls each gate
-    (``qiskit/circuit/_add_control.py``), so a dense ``UnitaryGate`` on two
-    or more qubits is unrolled, after its exact synthesis, once for every
-    place where it occurs. The walk therefore counts occurrences with their
-    multiplicity through nested definitions, where
-    :func:`dense_synthesis_widths` counts each distinct synthesis once, and
-    each occurrence adds the triple of
-    ``_dense_synthesis.gatewise_control_counts`` for its width. The other
-    gates of the definition are controlled too and lie outside this count,
-    and so does a gate that an earlier control already unrolled. A ``UnitaryGate`` that :func:`controlled` receives directly
-    goes through ``_dense_synthesis.controlled_unitary_circuit`` and counts
-    nothing here. Reading a definition can make Qiskit build it.
+    Reading ``definition`` can make Qiskit build it. With ``built`` the walk
+    reads only definitions that are already built (``_definition``), as
+    circuit intake does (``blocks._qiskit_intake``), so planning builds
+    nothing. An operation whose class builds its definition lazily
+    (overrides ``_define``) and has not built it, or that is not an
+    ``Instruction`` but has a definition, is skipped, and the walk goes on
+    with the rest. ``unbuilt`` is the first such operation, and the two
+    populations then hold the known part: the dense unitaries outside the
+    skipped definitions, which the construction synthesizes and controls as
+    well. Otherwise ``unbuilt`` is None.
     """
     from collections import Counter
 
-    from nwqlib.subroutines._dense_synthesis import gatewise_control_counts
-
-    if isinstance(operation, UnitaryGate):
-        return 0, 0, 0
+    widths: dict[Any, int] = {}
     memo: dict[int, Counter] = {}
+    unbuilt: list[Any] = []
+    # Holding each visited object keeps its id from being reused during the walk.
     held: list[Any] = []
 
+    def definition(item: Any) -> Any:
+        if not built:
+            return getattr(item, "definition", None)
+        if isinstance(item, Instruction):
+            if item._definition is None and type(item)._define is not Instruction._define:
+                unbuilt.append(item)
+            return item._definition
+        if getattr(type(item), "definition", None) is not None:
+            unbuilt.append(item)
+        return None
+
     def occurrences(item: Any) -> Counter:
-        if isinstance(item, UnitaryGate):
-            return Counter({item.num_qubits: 1}) if item.num_qubits >= 2 else Counter()
-        if getattr(item, "_standard_gate", None) is not None:
-            return Counter()
         key = id(item)
-        if key not in memo:
-            # Holding each visited object keeps its id from being reused during the walk.
-            held.append(item)
+        if key in memo:
+            return memo[key]
+        held.append(item)
+        if isinstance(item, UnitaryGate):
             memo[key] = Counter()
-            definition = getattr(item, "definition", None)
-            memo[key] = Counter() if definition is None else walk(definition)
+            if item.num_qubits >= 2:
+                matrix = item.to_matrix()
+                widths.setdefault(dense_matrix_key(matrix) if cached else
+                                  ("dense_unitary", matrix.tobytes(), item.label), item.num_qubits)
+                memo[key] = Counter({item.num_qubits: 1})
+            return memo[key]
+        memo[key] = Counter()
+        if getattr(item, "_standard_gate", None) is None:
+            inner = definition(item)
+            memo[key] = Counter() if inner is None else walk(inner)
         return memo[key]
 
     def walk(circuit: Any) -> Counter:
@@ -432,12 +407,83 @@ def dense_control_counts(operation: Any, num_controls: int) -> tuple[int, int, i
                 total += occurrences(instruction.operation)
         return total
 
-    widths = walk(operation) if isinstance(operation, QuantumCircuit) else occurrences(operation)
-    totals = [0, 0, 0]
-    for width, count in widths.items():
+    total = walk(operation) if isinstance(operation, QuantumCircuit) else occurrences(operation)
+    return widths, dict(total), unbuilt[0] if unbuilt else None
+
+
+def _dense_unitary_widths(operation: Any, *, cached: bool) -> dict[Any, int]:
+    """Map the key of each distinct dense unitary in ``operation`` to its qubit count (:func:`dense_unitary_census`)."""
+    return dense_unitary_census(operation, cached=cached)[0]
+
+
+def dense_gatewise_charges(operation: Any, num_controls: int, *,
+                           built: bool = False) -> tuple[tuple[int, ...], tuple[int, int], Any]:
+    """Return ``(widths, counts, unbuilt)`` of the gate-wise control of ``operation`` with ``num_controls`` controls, from one walk.
+
+    ``widths`` are those of :func:`dense_synthesis_widths` and ``counts``
+    the pair of :func:`dense_control_counts`, the two populations of
+    :func:`dense_unitary_census`, which also defines ``built`` and
+    ``unbuilt``. ``_dense_synthesis.admit_dense_syntheses`` takes
+    ``widths`` and ``counts``.
+    """
+    widths, occurrences, unbuilt = dense_unitary_census(operation, built=built)
+    counts = (0, 0) if isinstance(operation, UnitaryGate) else gatewise_control_totals(occurrences, num_controls)
+    return tuple(widths.values()), counts, unbuilt
+
+
+def unbuilt_definition(operation: Any) -> str:
+    """Describe ``operation``, the ``unbuilt`` of :func:`dense_unitary_census`, in the reason that a planning count is unknown."""
+    return f"supplied operation {operation.name} ({operation.num_qubits} qubits): definition not built at planning"
+
+
+def refuse_unbuilt_limit(operation: Any, limit: str) -> None:
+    """Refuse the explicit work ``limit``, written as ``Method.field=value``, that the controlled synthesis of ``operation`` leaves uncounted at planning.
+
+    ``operation`` is the ``unbuilt`` of :func:`dense_unitary_census`. Planning
+    cannot count its synthesis without building its definition, so the
+    requested limit cannot be checked, and the Plan is refused before any
+    later work.
+    """
+    raise ResourceLimitError(f"controlled synthesis of {unbuilt_definition(operation)}, so it cannot be counted against "
+                             f"{limit}. Expand the supplied circuit before it is ingested, for example with decompose(), so "
+                             "that its definitions are built, or set that limit to None")
+
+
+def gatewise_control_totals(occurrences: dict[int, int], num_controls: int) -> tuple[int, int]:
+    """Return (gates, instructions) of Qiskit's control of the synthesized dense unitaries counted in ``occurrences``.
+
+    Each occurrence of a width adds the pair of
+    ``_dense_synthesis.gatewise_control_counts`` for that width.
+    """
+    from nwqlib.subroutines._dense_synthesis import gatewise_control_counts
+
+    totals = [0, 0]
+    for width, count in occurrences.items():
         for index, value in enumerate(gatewise_control_counts(width, num_controls)):
             totals[index] += count * value
     return tuple(totals)
+
+
+def dense_control_counts(operation: Any, num_controls: int) -> tuple[int, int]:
+    """Return (gates, instructions) of Qiskit's control of the exact syntheses in ``operation``.
+
+    ``operation`` is a gate that :func:`controlled` receives with
+    ``num_controls`` controls, or a circuit that becomes one. Qiskit unrolls
+    the definition of the gate to its basis and controls each gate
+    (``qiskit/circuit/_add_control.py``), so a dense ``UnitaryGate`` on two
+    or more qubits is unrolled, after its exact synthesis, once for every
+    place where it occurs. The count therefore uses the occurrences of
+    :func:`dense_unitary_census`, where :func:`dense_synthesis_widths`
+    counts each distinct synthesis once (:func:`gatewise_control_totals`).
+    The other gates of the definition are controlled too and lie outside
+    this count, and so does a gate that an earlier control already
+    unrolled. A ``UnitaryGate`` that :func:`controlled` receives directly
+    goes through ``_dense_synthesis.controlled_unitary_circuit`` and counts
+    nothing here. Reading a definition can make Qiskit build it.
+    """
+    return dense_gatewise_charges(operation, num_controls)[1]
+
+
 
 
 def _exact_dense_definitions(operation: Any, visited: dict[Any, tuple[Any, Any]],
@@ -569,7 +615,9 @@ def inverse_realized_gate(gate: Gate, *, native_ucg: bool = True) -> Gate:
     negated. Open controlled gates use the closed definition and restore
     the control state once. Reversing a controlled definition avoids
     Qiskit's ``base_gate.inverse().control(...)`` resynthesis. A gate with
-    no definition falls back to its own inverse.
+    no definition falls back to its own inverse. Shared operations are
+    inverted once per invocation and effective ``native_ucg`` mode. The
+    cache holds the original operations until the traversal finishes.
 
     Args:
         gate: Gate whose table or built definition is adjointed.
@@ -578,8 +626,21 @@ def inverse_realized_gate(gate: Gate, *, native_ucg: bool = True) -> Gate:
             False when the caller knows the result will be controlled or
             decomposed. This option does not inspect a backend target.
     """
-    if isinstance(gate, ControlledGate):
-        native_ucg = False
+    memo = {}
+
+    def inverse(operation, *, native_ucg):
+        if isinstance(operation, ControlledGate):
+            native_ucg = False
+        key = (id(operation), native_ucg)
+        if key not in memo:
+            memo[key] = (operation, _construct_inverse(operation, native_ucg=native_ucg, invert=inverse))
+        return memo[key][1]
+
+    return inverse(gate, native_ucg=native_ucg)
+
+
+def _construct_inverse(gate, *, native_ucg, invert):
+    """Build one gate's adjoint, using ``invert`` to reuse adjoints of shared children."""
     if isinstance(gate, UnitaryGate):
         # The admitted matrix adjoint needs no repeated unitarity checks or synthesis.
         return UnitaryGate(gate.to_matrix().conj().T, check_input=False, label=gate.label)
@@ -611,12 +672,12 @@ def inverse_realized_gate(gate: Gate, *, native_ucg: bool = True) -> Gate:
     inverse_definition.global_phase = -definition.global_phase
     for instruction in reversed(definition.data):
         inverse_definition.append(
-            inverse_realized_gate(instruction.operation, native_ucg=native_ucg),
+            invert(instruction.operation, native_ucg=native_ucg),
             instruction.qubits,
             instruction.clbits,
         )
     if isinstance(gate, ControlledGate):
-        base_inverse = inverse_realized_gate(gate.base_gate, native_ucg=False)
+        base_inverse = invert(gate.base_gate, native_ucg=False)
         # A generic inverse must not reuse a native name interpreted by the transpiler.
         return ControlledGate(
             f"{closed_gate.name}_dg", gate.num_qubits, base_inverse.params,

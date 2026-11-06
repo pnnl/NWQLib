@@ -33,8 +33,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Mapping
 
 import numpy as np
-from nwqlib._limits import DEFAULT_MAX_BYTES
-from nwqlib._validation import integer
+from nwqlib._limits import ResourceLimitError, exceeds, optional_limit
 from nwqlib.operators.access import _check_bytes
 from qiskit import QuantumCircuit, QuantumRegister
 from qiskit.circuit.library import UnitaryGate
@@ -51,10 +50,6 @@ from nwqlib.subroutines.lcu.data import _lcu_prep_stage_requirements, lcu_coeffi
 
 
 LCUPreparationBackend = Literal["direct", "mps_circuit"]
-# Local intake and construction size ceiling of ``_admit_lcu``, adjustable
-# per call. Its law and rationale are registered in
-# docs/ENGINEERING_CONSTANTS.md.
-DEFAULT_MAX_LCU_WORK = 1_000_000_000
 
 
 def _admit_lcu(data, *, max_bytes, max_work, dense=False):
@@ -97,8 +92,8 @@ def _admit_lcu(data, *, max_bytes, max_work, dense=False):
     size = prep_bytes + (64*n*d*d + working_bytes + synthesized*kept_bytes if dense else 0)
     work = prep_work + (n*d**3 + synthesized*branch_work if dense else 0)
     _check_bytes(size, max_bytes, "LCU selected arrays")
-    if work > integer(max_work, "max_work", 1):
-        raise ValueError("LCU selected work exceeds max_work")
+    if exceeds(work, optional_limit(max_work, "max_work")):
+        raise ResourceLimitError(f"LCU selected work exceeds max_work: it needs {work} work units, max_work={max_work}")
 
 
 def _as_unitary_array(unitary: Any, *, dimension: int) -> np.ndarray:
@@ -243,8 +238,8 @@ def prepare_lcu_gate_data(
     *,
     system_dimension: int,
     coefficient_atol: float = 0.0,
-    max_bytes: int = DEFAULT_MAX_BYTES,
-    max_work: int = DEFAULT_MAX_LCU_WORK,
+    max_bytes: int | None = None,
+    max_work: int | None = None,
 ) -> LCUData:
     """Check LCU coefficients and compute the PREP data for a SELECT built from your own gates.
 
@@ -262,9 +257,9 @@ def prepare_lcu_gate_data(
             branch gates act on, a power of two.
         coefficient_atol (float): Default `0.0`. Threshold on the total
             coefficient 1-norm, as for `prepare_lcu_data`.
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+        max_bytes (int | None): Default `None`, the physical memory.
             Limit on the coefficient and PREP arrays.
-        max_work (int): Default `1_000_000_000`. Limit on the PREP work.
+        max_work (int | None): Default `None`, no limit. Limit on the PREP work.
 
     Returns:
         data (LCUData): Coefficients, PREP amplitudes and register sizes,
@@ -306,8 +301,8 @@ def prepare_lcu_data(
     unitaries: Any,
     *,
     coefficient_atol: float = 0.0,
-    max_bytes: int = DEFAULT_MAX_BYTES,
-    max_work: int = DEFAULT_MAX_LCU_WORK,
+    max_bytes: int | None = None,
+    max_work: int | None = None,
 ) -> LCUData:
     """Check LCU coefficients and unitaries, and move each coefficient's phase into its unitary.
 
@@ -329,11 +324,11 @@ def prepare_lcu_data(
             representable global rescaling is still accepted. This
             threshold does not prune individual terms. Every nonzero
             coefficient contributes its phase.
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+        max_bytes (int | None): Default `None`, the physical memory.
             Byte limit for the coefficient and PREP arrays, the supplied
             matrices and the later dense SELECT, including the synthesized
             branch circuits it keeps.
-        max_work (int): Default `1_000_000_000`. Work limit for these
+        max_work (int | None): Default `None`, no limit. Work limit for these
             checks and the later dense SELECT, including the synthesis of
             each controlled branch.
 
@@ -409,8 +404,8 @@ def _build_lcu_preparation_artifact(
     mps_max_bond_dim: int | None = None,
     mps_threshold: float = 1.0e-14,
     mps_num_layers: int = 2,
-    max_bytes: int = DEFAULT_MAX_BYTES,
-    max_work: int = DEFAULT_MAX_LCU_WORK,
+    max_bytes: int | None = None,
+    max_work: int | None = None,
 ) -> _LCUPreparationArtifact:
     """Build one LCU PREP circuit together with its matching metadata.
 
@@ -421,12 +416,10 @@ def _build_lcu_preparation_artifact(
 
     The direct path uses the same magnitude and phase tree as
     ``prepare_qiskit`` but is not a separate state-preparation block of a
-    Program, so the execution limit ``ExecutionLimits.max_direct_amplitudes``
-    does not apply. ``_admit_lcu``
-    checks it instead, counting ``16 P (a + 1)`` work against ``max_work``
+    Program, so the Run's check of direct preparations does not count it.
+    ``_admit_lcu`` checks it instead, counting ``16 P (a + 1)`` work against ``max_work``
     and 128 bytes per address for P = 2**a addresses. A ``max_work`` of
-    10**8 allows up to 2**18 addresses, and the default of 10**9, which QLS
-    shares, up to 2**21.
+    10**8 allows up to 2**18 addresses.
     """
 
     _admit_lcu(data, max_bytes=max_bytes, max_work=max_work)
@@ -502,8 +495,8 @@ def build_lcu_prepare(
     mps_max_bond_dim: int | None = None,
     mps_threshold: float = 1.0e-14,
     mps_num_layers: int = 2,
-    max_bytes: int = DEFAULT_MAX_BYTES,
-    max_work: int = DEFAULT_MAX_LCU_WORK,
+    max_bytes: int | None = None,
+    max_work: int | None = None,
 ) -> QuantumCircuit:
     """Build the PREP circuit that loads the LCU coefficient state on the control register.
 
@@ -524,10 +517,10 @@ def build_lcu_prepare(
             gives its reason.
         mps_num_layers (int): Default `2`. Number of MPS disentangling
             layers.
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+        max_bytes (int | None): Default `None`, the physical memory.
             Limit on the known coefficient and PREP arrays. It does not
             bound memory used inside external libraries.
-        max_work (int): Default `1_000_000_000`. Limit on the PREP work and
+        max_work (int | None): Default `None`, no limit. Limit on the PREP work and
             the TT-SVD of MPS PREP.
 
     Returns:
@@ -548,8 +541,8 @@ def build_lcu_prepare(
     ).circuit
 
 
-def build_lcu_select(data: LCUData, *, max_bytes: int = DEFAULT_MAX_BYTES,
-                     max_work: int = DEFAULT_MAX_LCU_WORK) -> QuantumCircuit:
+def build_lcu_select(data: LCUData, *, max_bytes: int | None = None,
+                     max_work: int | None = None) -> QuantumCircuit:
     """Build SELECT, which applies the dense unitary of branch `j` when the control register holds `j`.
 
     This function serves small dense validation tables of unrelated
@@ -574,11 +567,11 @@ def build_lcu_select(data: LCUData, *, max_bytes: int = DEFAULT_MAX_BYTES,
     Args:
         data (LCUData): Output of `prepare_lcu_data`, which holds the dense
             unitaries.
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+        max_bytes (int | None): Default `None`, the physical memory.
             Byte limit for the supplied matrices, the arrays of one branch
             synthesis and the synthesized circuits the branches keep,
             checked before the first synthesis.
-        max_work (int): Default `1_000_000_000`. Work limit for the
+        max_work (int | None): Default `None`, no limit. Work limit for the
             unitarity checks and the synthesis of each branch, checked
             before the first synthesis.
 
@@ -690,8 +683,8 @@ def build_lcu_circuit(
     mps_max_bond_dim: int | None = None,
     mps_threshold: float = 1.0e-14,
     mps_num_layers: int = 2,
-    max_bytes: int = DEFAULT_MAX_BYTES,
-    max_work: int = DEFAULT_MAX_LCU_WORK,
+    max_bytes: int | None = None,
+    max_work: int | None = None,
 ) -> LCUCircuit:
     """Build the PREP-SELECT-PREP^dagger circuit whose all-zero control block is `sum_j c_j U_j / alpha`.
 
@@ -714,10 +707,10 @@ def build_lcu_circuit(
             per bond.
         mps_num_layers (int): Default `2`. Number of MPS disentangling
             layers.
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+        max_bytes (int | None): Default `None`, the physical memory.
             Byte limit for the supplied matrices, PREP and the dense SELECT
             with its kept synthesized branch circuits.
-        max_work (int): Default `1_000_000_000`. Work limit for the input
+        max_work (int | None): Default `None`, no limit. Work limit for the input
             checks, the SELECT synthesis and the TT-SVD of MPS PREP.
 
     Returns:

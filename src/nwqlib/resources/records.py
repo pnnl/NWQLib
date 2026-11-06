@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import StrictBool, model_validator
 
-from nwqlib.core.records import ContentID, Float64, Limit, Rational, Record, Source, Text
+from nwqlib.core.records import ContentID, Float64, Limit, Rational, Record, Source, Text, storable_integer
 from nwqlib.evidence import Evidence, Fact
 from nwqlib.ir.expressions import (
     AdmissionLimits,
@@ -74,15 +74,11 @@ GATES = ("operations", "single_qubit", "two_qubit", "controlled", "global_phases
 COUNTS = GATES + ("calls", "measurements", "resets", "settings", "shots", "exact_evaluations", "adaptive_rounds",
                   "classical_work", "preparation_components")
 DEPTHS = frozenset(("logical_depth", "t_depth", "non_clifford_depth"))
-# The fold repeats the admitted Program traversal and carries one cost per count
-# metric, so its work limit is one traversal unit plus one unit per metric for
-# each unit of Program admission work. A fold that exceeds it has grown faster
-# than the Program and is rejected.
-FOLD_WORK_PER_ADMISSION_STEP = 1 + len(COUNTS)
 # exact: an exact count, and upper_bound: a ceiling, each only as strong as the
 # evidence kind recorded with it (an asserted exact law stays an assertion).
 # estimate: derived from observed, empirically predicted or numerically
-# estimated evidence. conditional: holds only under a stated premise, such as
+# estimated evidence, or from a declared size (Workspace), which no allocation
+# has confirmed. conditional: holds only under a stated premise, such as
 # a serial schedule. unavailable: no applicable law, which is never read as zero.
 Interpretation = Literal["exact", "upper_bound", "estimate", "conditional", "unavailable"]
 # Alternative cost questions about one construction. Quantities in different
@@ -104,6 +100,18 @@ MetricBasis = Literal["selected_logical", "cx", "clifford_t", "toffoli"]
 CLIFFORD_ANGLES = frozenset((0.0, math.pi / 2, -math.pi / 2, math.pi, -math.pi,
                              3 * math.pi / 2, -3 * math.pi / 2, 2 * math.pi, -2 * math.pi))
 T_ANGLES = frozenset((math.pi / 4, -math.pi / 4))
+# The synthesis that ResourceContext.synthesis selects for the resource fold's
+# T estimate of an arbitrary single-qubit phase in the clifford_t basis
+# (fold._Fold.primitive). Ross and Selinger, arXiv:1403.2975v3, give the
+# typical T count of an ancilla-free single-qubit Z rotation to operator error
+# eps as 3 log2(1/eps) + O(log log(1/eps)). The fold counts the leading term,
+# rounded up, so the count is an estimate and not an upper bound.
+TYPICAL_ROTATION_SYNTHESIS = Source(
+    name="ross_selinger.typical_leading_term", version="1",
+    domain="ancilla-free single-qubit Z rotation to operator error eps (ResourceContext.precision)",
+    reference="Ross and Selinger arXiv:1403.2975v3: typical T count 3 log2(1/eps) + O(log log(1/eps)), "
+              "counted as ceil(3 log2(1/eps)) per rotation, an estimate, not an upper bound",
+)
 
 
 class ResourceContext(Record):
@@ -122,13 +130,21 @@ class ResourceContext(Record):
             `"toffoli"`. Counts in different bases answer different
             questions and are never converted into or added to each other.
         precision: Default `None`. Positive rotation synthesis precision, in
-            the sense that `synthesis` defines. An arbitrary rotation gets a T
-            count only when the precision and the synthesis are known, and a
-            block's `ResourceLaw` applies only when its `precision` equals
-            this value.
+            the sense that `synthesis` defines, as a `Float64`. An arbitrary
+            rotation gets a T count only when the precision and the synthesis
+            are known, and a block's `ResourceLaw` applies only when its
+            `precision` equals this value.
         synthesis: Default `None`. Source naming the synthesis method. A
             block's [`ResourceLaw`][nwqlib.resources.records.ResourceLaw]
-            applies only under the same choice.
+            applies only under the same choice. With `basis="clifford_t"`,
+            `TYPICAL_ROTATION_SYNTHESIS` gives each arbitrary single-qubit
+            phase of a block's gate list, such as the global phase of a
+            controlled block, `ceil(3*log2(1/precision))` T gates, the leading
+            term of the typical Ross and Selinger count for an ancilla-free Z
+            rotation to operator error `precision` (arXiv:1403.2975v3). That T
+            count is an `estimate`, not an upper bound, and the block's other
+            gate counts are unavailable ([Estimate fault-tolerant
+            resources](../fault-tolerant-resources.md#project-a-resource-estimate-without-compiling)).
         resident: Default `()`. [`Workspace`][nwqlib.resources.records.Workspace]
             entries that stay in memory for the whole workload and are added
             to every memory peak.
@@ -280,8 +296,10 @@ class ResourceQuantity(Record):
             scope, conditions (`fact.assumptions`) and the weakest evidence
             kind among the sources that determined it.
         population: What is counted, for example `"dynamic workload"` for a
-            total over the whole run or `"simultaneous live footprint"` for a
-            peak.
+            total over the circuits and stages the Program declares or
+            `"simultaneous live footprint"` for a peak. `adaptive_rounds` and
+            `classical_work` name the declared Program nodes they count. A
+            Method's controller and analysis outside the Program are not counted.
         lifecycle: Workflow stage of the quantity: `"planned"`,
             `"prepared"`, `"submitted"` or `"observed"`. A planning estimate
             gives only `"planned"`.
@@ -419,12 +437,12 @@ class WorkloadEstimate(Record):
             arithmetic of the estimate does not make them verified.
         defined_selections: Content hashes of the circuit blocks and classical
             routines the run may reach, not a record of built circuits.
-        work_units: Bookkeeping work of the estimate, not run time, at most
-            `24 * limits.max_steps`.
-        evaluated_contexts: Distinct node and call contexts evaluated.
-        limits: The size limits of the planned circuit description.
+        work_units: Bookkeeping work of the estimate, not run time.
+        evaluated_contexts: Distinct node and call contexts evaluated, at
+            most `work_units`, since each costs at least one work unit.
+        limits: The AdmissionLimits of the planned circuit description.
         assumptions: Conditions of the whole estimate, such as
-            `"logical dependency schedule; no physical QEC/routing/factory projection"`.
+            `"serial schedule of the Program order; no physical QEC/routing/factory projection"`.
         schema_version: Format version of the record, 2.
 
     Examples:
@@ -469,26 +487,21 @@ class WorkloadEstimate(Record):
     def _references(self):
         """Check a loaded estimate's bookkeeping and that every reference resolves inside it.
 
-        work_units may not exceed ``FOLD_WORK_PER_ADMISSION_STEP * max_steps``,
-        the largest work of the resource total that an accepted Program can
-        reach, and evaluated_contexts may not exceed work_units. The
-        expression table must be an acyclic graph within the Program's size
-        limits (``AdmissionLimits``), with declared parameters and integer
-        constants within ``max_integer_bits``. Each (metric, location) pair
+        evaluated_contexts may not exceed work_units. The expression table
+        must be an acyclic graph within the Program's depth limit
+        (``AdmissionLimits.max_depth``), with declared parameters and integer
+        constants that a saved record can hold. Each (metric, location) pair
         appears once, every source content hash names an Evidence record in
         ``sources`` and every symbolic value names an expression in
         ``expressions``.
         """
-        if (self.work_units > FOLD_WORK_PER_ADMISSION_STEP * self.limits.max_steps
-                or self.evaluated_contexts > self.work_units):
-            raise ValueError("resource work/context count exceeds its admission envelope")
+        if self.evaluated_contexts > self.work_units:
+            raise ValueError("evaluated_contexts exceeds work_units, but each evaluated context costs at least one work unit")
         table = {item.id: item.value for item in self.expressions}
         params = {item.name for item in self.parameters}
         sources = {item.content_id for item in self.sources}
         if len(table) != len(self.expressions) or len(params) != len(self.parameters):
             raise ValueError("duplicate resource expression/parameter")
-        if len(table) + len(params) > self.limits.max_definitions:
-            raise ValueError("resource definitions exceed admission limit")
         topological(
             table,
             lambda node: (node.left, node.right) if isinstance(node, Binary) else (),
@@ -499,8 +512,9 @@ class WorkloadEstimate(Record):
                 raise ValueError("undeclared resource parameter")
             if isinstance(node, Constant):
                 value = number(node.value)
-                if type(value) is int and value.bit_length() > self.limits.max_integer_bits:
-                    raise ValueError("resource constant exceeds integer limit")
+                if type(value) is int and not storable_integer(value):
+                    raise ValueError("resource constant exceeds the integers a saved record can hold, "
+                                     "above -10**4299 and below 10**4300")
         identities = set()
         for quantity in self.quantities:
             key = (quantity.metric, quantity.location)

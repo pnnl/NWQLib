@@ -3,6 +3,8 @@
 All native selectors here use at most eight total qubits.
 """
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import scipy.linalg
@@ -10,8 +12,8 @@ import sympy as sp
 from qiskit import QuantumCircuit, transpile
 from qiskit.quantum_info import Operator
 from nwqlib.algorithms.qhd.grid import OneHotGrid
-from nwqlib.algorithms.qhd.kinetic import KineticCompiler
-from nwqlib.algorithms.qhd.potential import PotentialCompiler
+from nwqlib.algorithms.qhd.onehot_schedule import OneHotSchedule, hopping_layers
+from nwqlib.subroutines.hamiltonian_evolution.pauli_ir import PauliEvolutionBlock, PauliEvolutionTerm
 from nwqlib.subroutines.hamiltonian_evolution.pauli_evolution import (
     append_number_projector_phase,
     append_pauli_evolution_block,
@@ -21,16 +23,19 @@ from nwqlib.subroutines.hamiltonian_evolution.pauli_evolution import (
 
 def test_paired_hopping_matches_independent_dense_reference_with_two_cx() -> None:
     grid = OneHotGrid(variables=("x",), bounds=((-1.0, 1.0),), num_grid_points=2)
-    block = KineticCompiler().compile(grid, dt=0.37, kinetic_weight=0.6)[0]
+    (layer,) = hopping_layers(grid, dt=0.37, kinetic_weight=0.6, trotter_order=1, threshold=0.0)
+    block = PauliEvolutionBlock(
+        kind="kinetic", time_step=layer.duration, support=(0, 1), angle=layer.angle,
+        terms=tuple(PauliEvolutionTerm(pauli=f"{axis}0{axis}1", coefficient=layer.coefficient) for axis in "xy"))
     circuit = QuantumCircuit(2)
     append_pauli_evolution_block(circuit, block)
 
     x_matrix = np.array([[0, 1], [1, 0]], dtype=complex)
     y_matrix = np.array([[0, -1j], [1j, 0]], dtype=complex)
-    coefficient = complex(block.terms[0].coefficient).real
+    coefficient = layer.coefficient
     reference = scipy.linalg.expm(
         -1j
-        * block.time_step
+        * layer.duration
         * coefficient
         * (np.kron(x_matrix, x_matrix) + np.kron(y_matrix, y_matrix))
     )
@@ -69,33 +74,23 @@ def test_projector_routing_prices_the_realized_provider(angle) -> None:
             bounds=((-1.0, 1.0),) * support_size,
             num_grid_points=2,
         )
-        compiler = PotentialCompiler(rotation_threshold=0.0)
         # The table entry at grid indices (0, ..., 0) is the angle; the other entries are zero.
         table = np.zeros(2**support_size)
         table[0] = angle
-        blocks = compiler.compile_selected(
-            compiler.select_occurrences(
-                {support: table},
-                num_grid_points=grid.num_grid_points,
-                dt=1.0,
-                potential_weight=1.0,
-            ),
-            grid,
-            dt=1.0,
-        )
+        schedule = OneHotSchedule(
+            grid, tables=(SimpleNamespace(support=support, values=SimpleNamespace(array=table)),),
+            providers={support_size: (provider["provider"], provider["cx"])}, step_weights=((0.5, 1.0, 1.0),),
+            constant=0.0, total_time=1.0, num_steps=1, trotter_order=1, rotation_threshold=0.0)
+        blocks = [block for block in schedule.blocks(0) if block.kind == "number_projector"]
         # A zero projector is the identity: no emitted block may reserve CX work,
         # even when the user disables pruning. Nonzero blocks keep the routing.
         assert len(blocks) == int(angle != 0.0)
-        assert compiler._dropped_nonzero_contribution_count == 0
+        summary = schedule.summary()
+        assert summary.dropped_count == 0
+        assert summary.projector_blocks == ((support_size, int(angle != 0.0)),)
         if angle == 0.0:
-            assert (
-                sum(
-                    block.metadata["projector_provider"]["cx"] for block in blocks
-                )
-                == 0
-            )
             continue
-        assert blocks[0].metadata["projector_provider"] == provider
+        assert (blocks[0].provider, blocks[0].cx) == (provider["provider"], provider["cx"])
         circuit = QuantumCircuit(support_size)
         append_number_projector_phase(circuit, range(support_size), angle)
         realized = transpile(

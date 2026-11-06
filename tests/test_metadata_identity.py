@@ -1,11 +1,10 @@
-"""Plan resolution memory over long point sequences and the per-Method admission ceiling."""
+"""Plan resolution memory over long point sequences."""
 
 import pytest
 
 import nwqlib
 from nwqlib.algorithms.expectation import ExpectationMethod
 from nwqlib.core.planning import Plan
-from nwqlib.core import Record
 from nwqlib.operators import ingest_pauli
 from nwqlib.problems import Expectation
 
@@ -92,41 +91,3 @@ def test_plan_memo_keeps_one_resolution_and_one_construction_over_a_point_sequen
     assert kept() is None
     plan.resolve(name, bindings=bindings(0))
     assert misses[0] == 3006 and misses[1] is plan
-
-
-def _admission_plan(max_admission_steps):
-    """Plan one small sampled expectation whose Method field sets its Programs' admission ceiling."""
-    return nwqlib.plan(Expectation(state=[1, 1], observable=[[1, .2], [.2, -1]]),
-                       method=ExpectationMethod(max_admission_steps=max_admission_steps), shots=100, seed=7)
-
-
-def test_max_admission_steps_reaches_each_program_and_the_plan_identity(tmp_path):
-    # The field sets AdmissionLimits.max_steps of every Program the Method
-    # builds (ir.validation.admitted_program). A tiny ceiling is refused at
-    # planning as a ValueError naming the field and the complete stored field
-    # inventory, which an independent count of the selected Program's record
-    # fields and tuple items reproduces. That value passes the inventory, so a
-    # retry at it can only be refused by a later stage. The explicit 1_000_000
-    # setting admits, and the field enters the saved Plan's identity.
-    import re
-    from nwqlib._choice_archive import ArchiveFiles, load_plan, save_plan
-
-    def kept(value):
-        if isinstance(value, Record):
-            names = type(value).model_fields
-            return len(names) + sum(kept(getattr(value, name)) for name in names)
-        return len(value) + sum(map(kept, value)) if isinstance(value, tuple) else 0
-
-    with pytest.raises(ValueError, match=r"\.max_admission_steps=1: its stored field inventory counts \d+ kept "
-                                         r"field slots, the complete inventory") as caught:
-        _admission_plan(1)
-    named = int(re.search(r"inventory counts (\d+)", str(caught.value)).group(1))
-    selected = _admission_plan(1_000_000)
-    assert named == 1 + kept(selected.construction.program)
-    try:
-        _admission_plan(named)
-    except ValueError as error:
-        assert "stored field inventory" not in str(error)
-    assert selected.construction.program.limits.max_steps == selected.method.max_admission_steps
-    saved = save_plan(selected, ArchiveFiles(tmp_path, 4_000_000))
-    assert load_plan(saved, ArchiveFiles(tmp_path, 4_000_000)).content_id == selected.content_id

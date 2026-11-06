@@ -359,16 +359,18 @@ def test_decoded_invalid_mass_is_summed_directly(bits):
     (dict(num_grid_points=16, encoding="binary", boundary="periodic"), "quantum"),
     (dict(num_grid_points=8), "quantum"),
 ])
-def test_a_refused_readout_grid_is_streamed_with_the_same_probabilities(monkeypatch, fields, execution):
-    """A kept state whose dense grid the level's limits refuse is streamed in admitted chunks, never formed as a grid.
+def test_a_streamed_readout_grid_has_the_same_probabilities(monkeypatch, fields, execution):
+    """A kept state on a grid above the dense threshold is streamed with the dense grid's probabilities, never formed as a grid.
 
-    The dense route is kept whenever its complete byte law fits, 48D + 24K + 65536 bytes for native amplitudes
-    and 32D + 24K + 65536 for classical ones. Otherwise the stream reserves 65536 + 1024d + (16d + 128)c bytes
-    for the largest admitted chunk c, and a limit below both refuses before any grid or chunk exists
-    (``refinement._kept_readout_choice``). Each streamed chunk squares the moduli of the amplitudes gathered at
-    the one-hot or binary register indices of its grid points, entry by entry as the dense grid does, so the box
-    masses, a correctly rounded ``fsum`` of the same terms, and the side modes equal the kept grid's. A joint
-    request reads the kept state once and both sides of a split share two passes.
+    The route depends only on the grid D (``refinement._kept_readout_choice``): the dense grid, 48D + 24K + 65536
+    bytes for native amplitudes and 32D + 24K + 65536 for classical ones, for at most
+    ``refinement.DENSE_READOUT_POINTS`` points, and otherwise a stream of c = min(D, 4096) points that reserves
+    65536 + 1024d + (16d + 128)c bytes. A limit one byte below the chosen route refuses before any grid or chunk
+    exists, instead of switching routes. The test lowers the threshold below this grid to stream it. Each
+    streamed chunk squares the moduli of the amplitudes gathered at the one-hot or binary register indices of its
+    grid points, entry by entry as the dense grid does, so the box masses, a correctly rounded ``fsum`` of the
+    same terms, and the side modes equal the kept grid's. A joint request reads the kept state once and both
+    sides of a split share two passes.
     """
     from types import SimpleNamespace
 
@@ -385,11 +387,14 @@ def test_a_refused_readout_grid_is_streamed_with_the_same_probabilities(monkeypa
     kept = refinement._LevelReadout(result, SimpleNamespace(max_bytes=dense, max_work=10**12), 0)
     assert kept.grid is not None
     with pytest.raises(ValueError, match="max_bytes"):
-        refinement._LevelReadout(result, SimpleNamespace(max_bytes=min(dense, fixed + rate) - 1, max_work=10**12), 0)
+        refinement._LevelReadout(result, SimpleNamespace(max_bytes=dense - 1, max_work=10**12), 0)
+    monkeypatch.setattr(refinement, "DENSE_READOUT_POINTS", k**2 - 1)
     monkeypatch.setattr(refinement._LevelReadout, "_population", Mock(side_effect=AssertionError("formed")))
-    streamed = refinement._LevelReadout(result, SimpleNamespace(max_bytes=dense - 1, max_work=10**12), 0)
-    assert streamed.grid is None
-    assert streamed._chunk_size == min(k**2, 4096, (dense - 1 - fixed) // rate) < k**2
+    chunk = min(k**2, 4096)
+    with pytest.raises(ValueError, match="max_bytes"):
+        refinement._LevelReadout(result, SimpleNamespace(max_bytes=fixed + rate * chunk - 1, max_work=10**12), 0)
+    streamed = refinement._LevelReadout(result, SimpleNamespace(max_bytes=fixed + rate * chunk, max_work=10**12), 0)
+    assert streamed.grid is None and streamed._chunk_size == chunk
     for intervals in (((0, k - 1), (0, k - 1)), ((1, k - 2), (0, k // 2)), ((k - 1, k - 1), (2, 2))):
         assert streamed.joint(intervals) == kept.joint(intervals)
     window = result.most_probable_tie_window or 0.0
@@ -402,7 +407,7 @@ def test_a_refused_readout_grid_is_streamed_with_the_same_probabilities(monkeypa
 
 
 @pytest.mark.parametrize("window", [None, 0.0, 0.02, 1.0])
-def test_the_array_summary_matches_a_scalar_reference_with_ties_and_a_leading_zero_cell(monkeypatch, window):
+def test_the_array_summary_matches_a_scalar_reference_with_ties_and_a_leading_zero_cell(window):
     """``method._summarize`` on a d = 2, K = 8 probability grid equals a scalar reference written here.
 
     The reference walks the positive points in lexicographic order: the candidate is the first point of least
@@ -421,7 +426,15 @@ def test_the_array_summary_matches_a_scalar_reference_with_ties_and_a_leading_ze
     def objective(reconstruction, indices, k):
         return float((indices[0] - 3) ** 2 % 5 + (indices[1] % 2))
 
-    monkeypatch.setattr(owner, "objective_at", objective)
+    # The summary reads the objective from the reconstruction's tables, so the
+    # Plan's tables on x and y carry the two separable parts of these values.
+    from nwqlib.algorithms.qhd.records import SupportValues
+    parts = (np.array([float((i - 3) ** 2 % 5) for i in range(8)]), np.array([float(j % 2) for j in range(8)]))
+    assert [table.support for table in selected.reconstruction.support_values] == [(0,), (1,)]
+    tables = tuple(SupportValues(support=(axis,), values=part, minimum=part.min(), maximum=part.max(),
+                                 magnitude=np.abs(part).max()) for axis, part in enumerate(parts))
+    selected = selected.model_copy(update={"reconstruction": selected.reconstruction.model_copy(
+        update={"constant": 0.0, "support_values": tables})})
     w = np.full((8, 8), 0.01)
     w[0, 0] = 0.0
     w[2, 5] = w[4, 1] = w[6, 6] = 0.05

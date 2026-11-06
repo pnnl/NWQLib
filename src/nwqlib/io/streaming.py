@@ -1,4 +1,4 @@
-"""OpenQASM 3.0 text written from exact primitive gate recipes, within limits and without a quantum SDK."""
+"""OpenQASM 3.0 text written from exact primitive gate recipes, without a quantum SDK."""
 
 from dataclasses import dataclass
 import os
@@ -6,47 +6,13 @@ from pathlib import Path
 import tempfile
 from typing import Literal
 
-from nwqlib.core.records import PositiveInt, Record
+from nwqlib.core.records import STORABLE_INTEGER_BOUND, Record, storable_integer
 from nwqlib.ir import Allocate, BlockCall, CoherentRegion, Measure, MeasurementBatch, Release, Repeat, Reset, Sequence
-from nwqlib.ir.expressions import walk_kept
 from nwqlib.ir.validation import _Admission
 from nwqlib.operators.access import Count
 
-
-class QasmWriteBudget(Record):
-    """Limits for writing a Plan's circuit (`plan.construction`) as OpenQASM 3 text with `write_qasm3` or `write_qasm3_file`.
-
-    Build it with keyword arguments, for example
-    `QasmWriteBudget(max_metadata_bytes=1_000_000, max_walk_steps=100_000, max_qubits=1, max_clbits=0, max_bytes=4096, max_instructions=100, max_chunk_bytes=256)`,
-    and pass it as `budget=`. Every field is required. The graph and metadata
-    checks run before any text is written. The limits do not grow with the count
-    of a `Repeat`, which the text writes as one loop.
-
-    Attributes:
-        max_metadata_bytes: Required. Limit in bytes on a conservative JSON size
-            of the [Program](../glossary.md#program) graph and of the final
-            `QasmWriteReceipt`, each checked before it is used.
-        max_walk_steps: Required. Limit on the steps of each walk over the graph
-            and of the counting and writing passes. A `Repeat` count is not
-            multiplied in.
-        max_qubits: Required. Limit on the total declared qubits.
-        max_clbits: Required. Limit on the total declared classical bits.
-        max_bytes: Required. Limit on the bytes of text written. It is checked
-            while the text is written, so exceeding it raises `QasmWriteError`
-            after part of the text has been delivered.
-        max_instructions: Required. Limit on the gate, measurement and reset
-            statements in the text, gate definitions included.
-        max_chunk_bytes: Required. Positive. Limit in bytes on each buffer offered
-            to the sink. It does not bound how long a blocking sink takes.
-    """
-
-    max_metadata_bytes: Count
-    max_walk_steps: Count
-    max_qubits: Count
-    max_clbits: Count
-    max_bytes: Count
-    max_instructions: Count
-    max_chunk_bytes: PositiveInt
+# Bytes offered to the sink in one write call.
+_CHUNK_BYTES = 65536
 
 
 class QasmWriteReceipt(Record):
@@ -83,8 +49,10 @@ class QasmWriteReceipt(Record):
             counting a definition body once for each time it appears in the text.
         expanded_operations: Primitive gates plus one per measured or reset bit,
             after expanding loops and calls.
-        dynamic_visits: Visits to [Program](../glossary.md#program) nodes,
-            empty calls and loop bodies included.
+        unrolled_instructions: Top-level instructions after the loops are
+            unrolled: one per call of a gate on qubits, one per primitive of a
+            call on no qubits and one per measured or reset bit. The imported
+            circuit's `output_nodes` is at most this count.
         completion: `"stream"` from `write_qasm3` or `"file"` from
             `write_qasm3_file`.
     """
@@ -101,7 +69,7 @@ class QasmWriteReceipt(Record):
     bytes_written: Count
     emitted_instructions: Count
     expanded_operations: Count
-    dynamic_visits: Count
+    unrolled_instructions: Count
     completion: Literal["stream", "file"]
 
 
@@ -121,7 +89,7 @@ class QasmPrefix:
 
 
 class QasmWriteError(RuntimeError):
-    """Raised when writing OpenQASM 3 text fails after the limit checks passed.
+    """Raised when writing OpenQASM 3 text fails after the construction was checked.
 
     `prefix` is the [`QasmPrefix`][nwqlib.io.streaming.QasmPrefix] of the text
     already delivered, and `__cause__` is the original failure. `secondary`
@@ -137,37 +105,24 @@ class QasmWriteError(RuntimeError):
         self.temporary = temporary
 
 
-def _metadata(value, budget):
-    """Bound a conservative JSON size of ``value`` before any text is produced.
+def _count_sum(*values):
+    """Return the sum of nonnegative counts when a saved write record can hold it."""
+    total = sum(values)
+    if not storable_integer(total):
+        raise ValueError("QASM expansion count exceeds the integers a saved write record can hold")
+    return total
 
-    Each value that ``walk_kept`` visits costs one walk step and 8 bytes of
-    punctuation. Strings cost
-    six bytes per character (worst-case JSON escaping), integers their bit length
-    plus one (a decimal digit count never exceeds the bit length) and floats 32
-    bytes. Both limits are checked during the walk, so an oversized graph stops
-    early.
+
+def _count_product(a, b):
+    """Return ``a * b`` for nonnegative counts when a saved write record can hold it.
+
+    For positive a and b the product has at least
+    ``bit_length(a) + bit_length(b) - 1`` bits, so a product that fails this
+    test is refused before it is formed.
     """
-    slots = payload = 0
-
-    def reserve(amount):
-        """Count ``amount`` values, one walk step and 8 bytes each, before walk_kept visits them."""
-        nonlocal slots, payload
-        slots += amount
-        payload += 8 * amount  # punctuation and scalar overhead, no RSS claim
-        if slots > budget.max_walk_steps or payload > budget.max_metadata_bytes:
-            raise ValueError("QASM metadata traversal exceeds max_walk_steps or max_metadata_bytes")
-
-    for item in walk_kept(value, reserve):
-        if isinstance(item, str):
-            payload += 6 * len(item)  # worst-case JSON character escaping
-        elif type(item) is int:
-            payload += item.bit_length() + 1  # conservative decimal envelope
-        elif type(item) is float:
-            payload += 32
-        elif isinstance(item, Record):
-            payload += sum(6 * len(field) for field in type(item).model_fields)
-        if slots > budget.max_walk_steps or payload > budget.max_metadata_bytes:
-            raise ValueError("QASM metadata traversal exceeds max_walk_steps or max_metadata_bytes")
+    if a and b and a.bit_length() + b.bit_length() - 1 > STORABLE_INTEGER_BOUND.bit_length():
+        raise ValueError("QASM expansion count exceeds the integers a saved write record can hold")
+    return _count_sum(a * b)
 
 
 class _Prepared:
@@ -178,24 +133,19 @@ class _Prepared:
     Repeat, CoherentRegion, Sequence, computational Measure and Reset,
     Allocate/Release without reallocation, and the five registered primitive
     recipes without parameters, ``preparation.native``, ``preparation.hzh``,
-    ``reflection.positive_zero``, ``pauli.parity`` and ``pauli.group_basis``),
-    multiplies dynamic work by the Repeat counts without
-    expanding them, and counts the written statements with each shared definition once.
-    It also bounds the size of the final receipt. The writing pass (``fragments``) then
-    streams text whose instruction and walk counts are already known to fit. The
-    byte limit is enforced while streaming, so exceeding it raises ``QasmWriteError``
-    with the accepted prefix. A rejection by these checks leaves no output, and
-    ``materialize_qasm3_file`` can rebuild the same counts from the construction alone.
+    ``reflection.positive_zero``, ``pauli.parity`` and ``pauli.group_basis``)
+    on the Program's recorded admission, and multiplies the expanded counts by
+    the Repeat counts without expanding them. The writing pass
+    (``fragments``) then streams the text. A rejection by these checks leaves
+    no output.
     """
 
-    def __init__(self, construction, budget):
-        """Check the supported QASM subset and count its statements before any byte is written."""
-        _metadata(construction, budget)
+    def __init__(self, construction):
+        """Check the supported QASM subset and count the expanded work before any byte is written."""
         self.construction = construction
-        self.budget = budget
         program = construction.program
         admission = _Admission(program)
-        admission.check().require_ready()
+        admission.admitted().require_ready()
         binding = admission.binding_map(program.bindings)
         root = admission.nodes[program.root]
         self.batch = root if isinstance(root, MeasurementBatch) else None
@@ -210,8 +160,6 @@ class _Prepared:
         if any(value.dtype != "bits" for value in program.classical):
             raise ValueError("QASM writer supports only classical bits")
         self.cwidths = {reg.name: admission.integer(reg.width, context, "bit width") for reg in program.classical}
-        if sum(self.widths.values()) > budget.max_qubits or sum(self.cwidths.values()) > budget.max_clbits:
-            raise ValueError("QASM width exceeds budget")
         self.qnames = {name: f"q{i}" for i, name in enumerate(self.widths)}
         self.cnames = {name: f"c{i}" for i, name in enumerate(self.cwidths)}
         records = {item.signature.name: item for item in construction.selections}
@@ -219,27 +167,13 @@ class _Prepared:
         self.counts = {}
         self.nodes = admission.nodes
         memo = {}
-        work = 0
-
-        def multiply(a, b):
-            """Return ``a * b`` for nonnegative counts, rejecting growth past the Program's integer limit.
-
-            For positive a and b the product has at least
-            ``bit_length(a) + bit_length(b) - 1`` bits, so a product that fails
-            this test is too large before it is formed. ``admission.bounded``
-            then checks the actual product.
-            """
-            if a and b and a.bit_length() + b.bit_length() - 1 > program.limits.max_integer_bits:
-                raise ValueError("QASM expansion exceeds integer growth envelope")
-            return admission.bounded(a * b)
 
         def count(name):
-            """Count the dynamic work and the written statements of node ``name`` without expanding a repeated body."""
-            nonlocal work
+            """Count the expanded operations and unrolled instructions of node ``name`` without expanding a repeated body."""
             if name in memo:
                 return memo[name]
             node = self.nodes[name]
-            visits, operations, statements, static_visits = 1, 0, 0, 1
+            operations = unrolled = 0
             allocations = {}
             children = ()
             factor = 1
@@ -268,49 +202,31 @@ class _Prepared:
                 self.selected[node.signature] = record
                 operations = len(record.decomposition)
                 width = sum(admission.integer(port.width, context, "port width") for port in record.signature.quantum)
-                statements = 1 if width else operations
-                static_visits += width
-            elif isinstance(node, Measure):
-                operations = statements = self.widths[node.wire]
-            elif isinstance(node, Reset):
-                operations = statements = self.widths[node.wire]
+                unrolled = 1 if width else operations
+            elif isinstance(node, (Measure, Reset)):
+                operations = unrolled = self.widths[node.wire]
             elif isinstance(node, Allocate):
                 allocations[node.wire] = 1
             elif not isinstance(node, Release):
                 raise ValueError(f"unsupported QASM node: {node.kind}")
             for child in children:
-                v, o, s, t, allocated = count(child)
-                visits = admission.bounded(visits + multiply(factor, v))
-                operations = admission.bounded(operations + multiply(factor, o))
-                statements += s
-                static_visits += t
-                work += len(allocated) + 1
-                if work > budget.max_walk_steps:
-                    raise ValueError("QASM accounting exceeds max_walk_steps")
+                child_operations, child_unrolled, allocated = count(child)
+                operations = _count_sum(operations, _count_product(factor, child_operations))
+                unrolled = _count_sum(unrolled, _count_product(factor, child_unrolled))
                 # Allocation counts saturate at 2. Only "more than one" matters
                 # (a reallocation, rejected below), so a large Repeat factor
                 # never has to be multiplied out.
                 for wire, number in allocated.items():
                     allocations[wire] = min(2, allocations.get(wire, 0) + min(2, factor) * number)
-            if statements > budget.max_instructions or static_visits > budget.max_walk_steps:
-                raise ValueError("QASM static emission exceeds max_walk_steps or max_instructions")
-            memo[name] = visits, operations, statements, static_visits, allocations
+            memo[name] = operations, unrolled, allocations
             return memo[name]
 
-        # Count a shared definition once for emission while preserving its dynamic
-        # repetition cost. Reallocation is rejected before streaming starts.
-        self.visits, self.operations, statements, static_visits, allocations = count(program.root)
+        operations, unrolled, allocations = count(program.root)
         if any(value > 1 for value in allocations.values()):
             raise ValueError("QASM reallocation is unsupported")
         self.gnames = {name: f"g{i}" for i, name in enumerate(self.selected)}
         self.gwidths = {name: sum(admission.integer(port.width, context, "port width") for port in rec.signature.quantum)
                         for name, rec in self.selected.items()}
-        statements += sum(len(rec.decomposition) for name, rec in self.selected.items() if self.gwidths[name])
-        definition_work = sum(self.gwidths[name] + len(rec.decomposition) for name, rec in self.selected.items())
-        if static_visits + definition_work > budget.max_walk_steps:
-            raise ValueError("QASM definition/emission traversal exceeds max_walk_steps")
-        if statements > budget.max_instructions:
-            raise ValueError("QASM emitted instructions exceed budget")
         self.receipt_fields = dict(
             construction_id=construction.content_id,
             selected_definitions=tuple(rec.content_id for rec in self.selected.values()),
@@ -319,10 +235,8 @@ class _Prepared:
             batch_repetitions=self.repetitions,
             observation_kind=self.batch.observation_kind if self.batch else None,
             setting_label=self.batch.settings[0].label if self.batch else None,
-            expanded_operations=self.operations, dynamic_visits=self.visits,
+            expanded_operations=operations, unrolled_instructions=unrolled,
         )
-        # Validate/bound even the final receipt before exposing artifact bytes.
-        _metadata(self.receipt(budget.max_bytes, budget.max_instructions, "stream"), budget)
 
     def receipt(self, size, instructions, completion):
         """The receipt for ``size`` accepted bytes and ``instructions`` statements."""
@@ -430,15 +344,15 @@ class _Prepared:
         yield from emit(self.construction.program.root)
 
 
+
 def _write(prepared, sink, cancel, completion):
-    """Stream the checked text in pieces of bounded size to a blocking binary sink.
+    """Stream the checked text in pieces of at most ``_CHUNK_BYTES`` to a blocking binary sink.
 
     A sink may accept fewer bytes than offered. The remainder is offered again
     until the chunk is complete. Cancellation is checked before each fragment and each retry. Any error
     becomes ``QasmWriteError`` carrying the accepted prefix, so a caller can tell
     how much of the file exists without a completed receipt.
     """
-    budget = prepared.budget
     size = instructions = 0
     try:
         fragments = iter(prepared.fragments())
@@ -450,16 +364,13 @@ def _write(prepared, sink, cancel, completion):
             except StopIteration:
                 break
             # Fragments are ASCII. No full artifact or unrolled body is kept.
-            for start in range(0, len(fragment), budget.max_chunk_bytes):
-                chunk = fragment[start:start + budget.max_chunk_bytes].encode("ascii")
+            for start in range(0, len(fragment), _CHUNK_BYTES):
+                chunk = fragment[start:start + _CHUNK_BYTES].encode("ascii")
                 offset = 0
                 while offset < len(chunk):
                     if cancel is not None and cancel():
                         raise InterruptedError("QASM write cancelled")
-                    remaining = budget.max_bytes - size
-                    if remaining <= 0:
-                        raise ValueError("QASM byte cap exceeded")
-                    offered = memoryview(chunk)[offset:offset + remaining]
+                    offered = memoryview(chunk)[offset:]
                     accepted = sink.write(offered)
                     if type(accepted) is not int or not 0 < accepted <= len(offered):
                         raise ValueError("binary sink must return a positive accepted-byte count")
@@ -471,7 +382,7 @@ def _write(prepared, sink, cancel, completion):
         raise QasmWriteError(str(exc), QasmPrefix(size, instructions)) from exc
 
 
-def write_qasm3(construction, sink, *, budget: QasmWriteBudget, cancel=None) -> QasmWriteReceipt:
+def write_qasm3(construction, sink, *, cancel=None) -> QasmWriteReceipt:
     """Write a Plan's circuit (`plan.construction`) as OpenQASM 3 text to a binary stream, without any quantum SDK.
 
     The construction must use the writer subset of the
@@ -479,17 +390,17 @@ def write_qasm3(construction, sink, *, budget: QasmWriteBudget, cancel=None) -> 
     sequences, bound repeats written as loops, allocation, computational
     measurement and reset, and at most one batch setting. Other constructions,
     such as generic state preparation or Pauli SELECT blocks, are rejected before
-    any text is written. The sink's `write` must return a positive integer no
-    larger than the buffer offered, and a partial write is completed before more
-    text is produced. Cancellation is checked between writes, so a blocking write
-    cannot be interrupted.
+    any text is written. The text grows with the construction, not with the
+    count of a `Repeat`, which it writes as one loop. The sink's `write` must
+    return a positive integer no larger than the buffer offered, and a partial
+    write is completed before more text is produced. Cancellation is checked
+    between writes, so a blocking write cannot be interrupted.
 
     Args:
         construction (SelectedConstruction): The
             [Program](../glossary.md#program) and its selected definitions,
             such as `plan.construction`.
         sink (BinaryIO): Binary stream with a `write` method.
-        budget (QasmWriteBudget): The limits.
         cancel (Callable[[], bool] | None): Called between writes. A true
             result stops the write and raises `QasmWriteError`.
 
@@ -498,18 +409,18 @@ def write_qasm3(construction, sink, *, budget: QasmWriteBudget, cancel=None) -> 
             `completion="stream"`.
 
     Raises:
-        ValueError: If the construction is outside the writer subset or
-            exceeds a limit of `budget` other than `max_bytes`, before any
-            text is written.
-        QasmWriteError: If writing fails after it started, including when the
-            text exceeds `budget.max_bytes` or `cancel` returns true. After a
-            cancellation its `__cause__` is an `InterruptedError`. Its
-            `prefix` describes the text already delivered.
+        ValueError: If the construction is outside the writer subset, or an
+            expanded count exceeds the integers a saved write record can
+            hold, before any text is written.
+        QasmWriteError: If writing fails after it started, including when
+            `cancel` returns true. After a cancellation its `__cause__` is an
+            `InterruptedError`. Its `prefix` describes the text already
+            delivered.
     """
-    return _write(_Prepared(construction, budget), sink, cancel, "stream")
+    return _write(_Prepared(construction), sink, cancel, "stream")
 
 
-def write_qasm3_file(construction, path, *, budget: QasmWriteBudget, cancel=None) -> QasmWriteReceipt:
+def write_qasm3_file(construction, path, *, cancel=None) -> QasmWriteReceipt:
     """Write a Plan's circuit (`plan.construction`) as an OpenQASM 3 file, replacing the destination only when the write is complete.
 
     It writes the text as [`write_qasm3`][nwqlib.io.streaming.write_qasm3] does,
@@ -523,7 +434,6 @@ def write_qasm3_file(construction, path, *, budget: QasmWriteBudget, cancel=None
             [Program](../glossary.md#program) and its selected definitions,
             such as `plan.construction`.
         path (str | Path): Destination file. Its directory must exist.
-        budget (QasmWriteBudget): The limits.
         cancel (Callable[[], bool] | None): Called between writes. A true
             result stops the write and raises `QasmWriteError`.
 
@@ -532,19 +442,18 @@ def write_qasm3_file(construction, path, *, budget: QasmWriteBudget, cancel=None
             `completion="file"`.
 
     Raises:
-        ValueError: If the construction is outside the writer subset or
-            exceeds a limit of `budget` other than `max_bytes`, before any
-            file is created.
-        QasmWriteError: If writing fails after it started, including when the
-            text exceeds `budget.max_bytes` or `cancel` returns true. The
-            destination is left unchanged. Its `prefix` describes the text
-            already delivered, its `temporary` names the temporary file if it
-            could not be removed, and `secondary` holds later cleanup
-            failures. An exception that is not an `Exception`, such as
-            `KeyboardInterrupt`, keeps its type, with cleanup failures in its
-            notes.
+        ValueError: If the construction is outside the writer subset, or an
+            expanded count exceeds the integers a saved write record can
+            hold, before any file is created.
+        QasmWriteError: If writing fails after it started, including when
+            `cancel` returns true. The destination is left unchanged. Its
+            `prefix` describes the text already delivered, its `temporary`
+            names the temporary file if it could not be removed, and
+            `secondary` holds later cleanup failures. An exception that is not
+            an `Exception`, such as `KeyboardInterrupt`, keeps its type, with
+            cleanup failures in its notes.
     """
-    prepared = _Prepared(construction, budget)
+    prepared = _Prepared(construction)
     path = Path(path)
     temporary = None
     receipt = None

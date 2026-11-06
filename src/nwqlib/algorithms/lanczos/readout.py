@@ -300,37 +300,44 @@ def readout_values(readout, kind, width, histogram):
 def reduce_moments(values, weights, *, counts):
     """Reduce signed values and their weights to the first two moments.
 
-    With counts, the weights are nonnegative integer frequencies, the mean is
-    sum(w*x)/sum(w) and the shot count is the exact integer total of the
-    counts. Without counts, the weights are exact probabilities used as
-    returned, with denominator 1, so missing probability, negative roundoff
-    and padding leakage stay in the moments. x*x is one on used select rows
-    and zero on padding, and one everywhere for reflection. The products are
-    formed elementwise and exactly, and fsum reduces them in array order.
+    With counts, the weights are nonnegative integer frequencies, the shot
+    count is the exact integer total of the counts, and the sums of w*x and
+    w*x*x are exact integers, so the mean sum(w*x)/sum(w) and the second
+    moment are the correctly rounded quotients of exact integers. Without
+    counts, the weights are exact probabilities used as returned, with
+    denominator 1, so missing probability, negative roundoff and padding
+    leakage stay in the moments. x*x is one on used select rows and zero on
+    padding, and one everywhere for reflection. The products are formed
+    elementwise and exactly, and NumPy sums them in an order that the bound
+    below does not assume.
 
-    Decode `m_hat=fsum(s_j*p_hat_j)` with exact signs `s_j` in `{-1,0,1}`,
-    zero signs on unused SELECT addresses, and denominator one. Let
-    `psi_tilde` be the computed state entering probability formation,
-    `R2=||psi_tilde||_2**2`, `w` its full native width, `N=2**w`,
-    `u=2**-53`, and `eta=2**-1074`. For binary64 component-square/add
-    probabilities with round-to-nearest, gradual underflow, no overflow,
-    truncation or renormalization, and `2*N*u<=1/2`, use
+    Decode `m_hat=sum_j s_j*p_hat_j` over the M returned entries, with exact
+    signs `s_j` in `{-1,0,1}`, zero signs on unused SELECT addresses, and
+    denominator one. Let `psi_tilde` be the computed state entering
+    probability formation, `R2=||psi_tilde||_2**2`, `w` its full native
+    width, `N=2**w`, `M <= N`, `u=2**-53`, `eta=2**-1074` and
+    `gamma_k=k*u/(1-k*u)`. For binary64 component-square/add probabilities
+    with round-to-nearest, gradual underflow, no overflow, truncation or
+    renormalization, and `2*N*u<=1/2`, use
     `e_prob=max(exact_readout_roundoff(w)*u, (2*N*u)/(1-2*N*u))` and
     `U_prob=4*N*eta`. The latter bounds absolute probability-evaluation
     underflow and may be zero under an established normal-range or
-    exact-underflow assumption. With correctly rounded `fsum`, the absolute
-    arithmetic error relative to `sum_j s_j*p_j`, where `p_j` is the exact
-    bin probability of `psi_tilde`, satisfies
-    `a_moment <= e_prob*R2 + u*sum_j abs(p_hat_j) + U_prob + eta
-    <= [e_prob+u*(1+e_prob)]*R2 + (1+u)*U_prob + eta`. If the preparation
-    record (receipt) supplies a state-distance allowance `delta` from a unit
-    target, `R2 <= (1+delta)**2`. Otherwise that substitution is
-    unavailable. Evaluate bound expressions outward when reporting them as
-    numerical upper bounds.
+    exact-underflow assumption. A floating-point sum of M terms in any
+    order differs from the exact sum by at most `gamma_(M-1)` times the sum
+    of their magnitudes (Higham, Eq. (4.4)), also with gradual underflow,
+    under which a sum is exact when it underflows. The absolute arithmetic
+    error relative to `sum_j s_j*p_j`, where `p_j` is the exact bin
+    probability of `psi_tilde`, therefore satisfies
+    `a_moment <= e_prob*R2 + gamma_(M-1)*sum_j abs(p_hat_j) + U_prob
+    <= [e_prob+gamma_(M-1)*(1+e_prob)]*R2 + (1+gamma_(M-1))*U_prob`. If
+    the preparation record (receipt) supplies a state-distance allowance
+    `delta` from a unit target, `R2 <= (1+delta)**2`. Otherwise that
+    substitution is unavailable. Evaluate bound expressions outward when
+    reporting them as numerical upper bounds.
 
-    The first inequality uses `|s_j|<=1` and a single rounded signed sum.
-    The second uses `sum|p_hat_j| <= (1+e_prob)R2+U_prob`. The final `eta`
-    covers the sum's rounding separately. Algebraically supplied moments
+    The first inequality uses `|s_j|<=1`, so each exact product has
+    magnitude at most `p_hat_j`. The second uses
+    `sum|p_hat_j| <= (1+e_prob)R2+U_prob`. Algebraically supplied moments
     bypass this readout and have no `a_moment` term.
 
     Comparison of an exact trajectory moment with a separately prepared one:
@@ -387,14 +394,10 @@ def reduce_moments(values, weights, *, counts):
 
     Sources: Aer 0.18.0, `QubitVector::probability` and `probabilities`
     (https://github.com/Qiskit/qiskit-aer/blob/0.18.0/src/simulators/statevector/qubitvector.hpp#L2089-L2143),
-    CPython 3.12.14, `math.fsum`
-    (https://github.com/python/cpython/blob/v3.12.14/Modules/mathmodule.c#L1249-L1465),
     and the gamma propagation model in Higham, *Accuracy and Stability of
-    Numerical Algorithms*, 2nd ed., DOI 10.1137/1.9780898718027. The `fsum`
-    statement keeps the qualification against excess precision and unsafe
-    reassociation: platforms subject to the documented excess-precision
-    exception need an additional correctly-rounded-sum allowance or a proved
-    conservative summation routine.
+    Numerical Algorithms*, 2nd ed., DOI 10.1137/1.9780898718027. The sum
+    bound assumes binary64 additions rounded to nearest, without excess
+    precision.
 
     Args:
         values: int8 signed values.
@@ -407,19 +410,16 @@ def reduce_moments(values, weights, *, counts):
     first = values * weights
     second = (values * values) * weights
     if not counts:
-        population = 1
-    elif weights.size and int(weights.max()) * weights.size > np.iinfo(np.int64).max:
+        return MomentStatistics(mean=float(np.sum(first)), second_moment=float(np.sum(second)), shots=None)
+    if weights.size and int(weights.max()) * weights.size > np.iinfo(np.int64).max:
         # Each count fits int64, but their sum may not: add Python integers.
-        population = sum(weights.tolist())
+        population, total, squares = sum(weights.tolist()), sum(first.tolist()), sum(second.tolist())
     else:
-        population = int(weights.sum())
+        # Every partial sum is at most the population in magnitude, so the int64 sums are exact.
+        population, total, squares = int(weights.sum()), int(first.sum()), int(second.sum())
     if population <= 0:
         raise ValueError("empty returned count population")
-    return MomentStatistics(
-        mean=fsum(first.tolist()) / population,
-        second_moment=fsum(second.tolist()) / population,
-        shots=population if counts else None,
-    )
+    return MomentStatistics(mean=total / population, second_moment=squares / population, shots=population)
 
 
 def decode_histogram(readout, setting, histogram, *, counts):

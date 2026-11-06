@@ -40,6 +40,7 @@ import shutil
 
 import sympy as sp
 
+from nwqlib._limits import exceeds
 from nwqlib.problems.records import Optimization
 from ._outer import (
     USED_COUNTS,
@@ -77,6 +78,12 @@ from .refinement_records import (
 # changes with the fields of the record (docs/FRAMEWORK.md, "API stability").
 ARCHIVE_FORMAT = "qhd.refinement/4"
 ARCHIVE_RECORD = "refinement.json"
+
+# Largest valid grid, in points, whose kept-state readout forms the dense
+# probability grid. A larger grid is streamed. The route depends only on the
+# grid, so the reads that a level records do not depend on max_bytes.
+# Registered in docs/ENGINEERING_CONSTANTS.md.
+DENSE_READOUT_POINTS = 2**20
 
 
 def _level_grid(problem, box, qhd, search):
@@ -640,6 +647,8 @@ def _support_tables(qhd, problem, show=None):
 
         values = evaluate_support(evaluator, centered_axes, chunks[support], expression=expression,
                                   support=tuple(support), locate=locate)
+        # Changing -0.0 to +0.0 in this private table keeps FrozenArray to one copy, as in planning.
+        values += 0.0
         tables.append(SupportValues.tabulate(tuple(support), FrozenArray(values)))
     return tuple(tables), decomposer, evaluations
 
@@ -782,11 +791,20 @@ def _level_problem(problem, box, qhd, scaling, gain, stored=None):
     factor f, so delta is about ``4 u_fp kappa`` times ``table_magnitude/E``
     (``RefinementLevel.conditioning``). This estimate illustrates the scale
     for simple expressions. It does not bound the evaluation error of an
-    arbitrary expression, whose e_S and e'_S can be much larger. The
-    resolution stop does not bound the conditioning either.
-    ``exp(2**-51 x)`` on the grid ``{0, 1}`` passes it with conditioning
-    about ``2.25e15``, where ``4 u_fp`` times the conditioning is about one.
-    Each level reports its conditioning. A strict enclosure would need
+    arbitrary expression, whose e_S and e'_S can be much larger. The stored
+    T_S are themselves rounded values of the recorded objective, so relative
+    to that objective both T_S and T'_S carry rounding of about ``u_fp
+    kappa`` times the conditioning, and the solved potential about ``4 u_fp
+    kappa`` times it. A fresh planning of the recorded level objective
+    reproduces T'_S exactly, which shows reproducibility, not fidelity, and
+    rounding of this size can create or remove ties. The resolution stop
+    does not bound the conditioning. ``exp(2**-51 x)`` on four unit grid
+    points passes it with conditioning about ``2.25e15``, where ``4 u_fp``
+    times the conditioning is just above one, and its solved potential
+    differs from the recorded objective by a quarter of kappa, with a tie
+    the objective does not have. Such a level reports
+    ``RefinementLevel.numerically_unresolved``, a diagnostic that changes
+    neither the stop nor the selection. A strict enclosure would need
     outward rounding of every table evaluation.
 
     Kappa acts after E is formed. Multiplying F by kappa before forming E
@@ -950,36 +968,33 @@ def _state_probabilities(state):
 def _kept_readout_choice(d, k, entries, native, held, max_bytes, max_work):
     """Return ``(chunk, workspace, work)`` for a kept-state readout.
 
-    ``chunk == 0`` selects the dense ``(K,)*d`` grid, and a positive
-    ``chunk`` the streamed pass of that many points. ``workspace`` is the
-    byte allowance of the chosen route, and ``work`` the work of one dense
-    readout or of one streamed pass. The byte and work formulas are those
-    that ``_LevelReadout`` states.
+    ``chunk == 0`` selects the dense ``(K,)*d`` grid, for a valid grid of at
+    most ``DENSE_READOUT_POINTS`` points, and a positive ``chunk``
+    the streamed pass of ``min(D, 4096)`` points for a larger grid. The route
+    depends only on the grid, so the reads that a level records are the same
+    on every computer, and ``max_bytes`` and ``max_work`` only accept or
+    refuse it. ``workspace`` is the byte allowance of the route, and ``work``
+    the work of one dense readout or of one streamed pass. The byte and work
+    formulas are those that ``_LevelReadout`` states.
     """
     from .decoding import QHD_DECODING_PROBABILITY_CHUNK_SIZE
 
     dimension = k**d
-    # The one-hot index builder allows 24*K bytes for three K-entry int64
-    # vectors: local indices, their register offsets and the resulting bit masks.
-    # This scratch allowance is also included for binary and classical readout.
-    dense_bytes = (48 if native else 32) * dimension + 24 * k + 65536
-    fixed = 65536 + 1024 * d
-    # The 16*d bytes per streamed point allow two coordinate blocks to coexist
-    # while the consumer advances the generator, each with d eight-byte indices.
-    rate = 16 * d + 128
-    dense_work = (d + 4) * dimension + (4 * d + 8) * entries
-    if held + dense_bytes <= max_bytes and dense_work <= max_work:
-        chunk, workspace = 0, dense_bytes
-        work = dense_work
+    if dimension <= DENSE_READOUT_POINTS:
+        # The one-hot index builder allows 24*K bytes for three K-entry int64
+        # vectors: local indices, their register offsets and the resulting bit masks.
+        # This scratch allowance is also included for binary and classical readout.
+        chunk, workspace = 0, (48 if native else 32) * dimension + 24 * k + 65536
+        work = (d + 4) * dimension + (4 * d + 8) * entries
     else:
+        chunk = min(dimension, QHD_DECODING_PROBABILITY_CHUNK_SIZE)
+        # The 16*d bytes per streamed point allow two coordinate blocks to coexist
+        # while the consumer advances the generator, each with d eight-byte indices.
+        workspace = 65536 + 1024 * d + (16 * d + 128) * chunk
         work = (8 * d + 32) * dimension
-        minimum = min(dense_bytes, fixed + rate) if dense_work <= max_work else fixed + rate
-        _require_bytes(max_bytes, held=held, local=minimum,
-                       stage='refinement readout (dense or one-point stream)')
-        chunk = min(dimension, QHD_DECODING_PROBABILITY_CHUNK_SIZE,
-                    (max_bytes - held - fixed) // rate)
-        workspace = fixed + rate * chunk
-    if work > max_work:
+    _require_bytes(max_bytes, held=held, local=workspace,
+                   stage='refinement readout (' + ('dense grid)' if chunk == 0 else 'streamed points)'))
+    if exceeds(work, max_work):
         raise ValueError(f'QHD refinement readout requires {work} work units, '
                          f'with QHD(max_work={max_work}). Use QHD(max_work>={work})')
     return chunk, workspace, work
@@ -1010,16 +1025,18 @@ class _LevelReadout:
     integers until a probability is formed (int64 sums only while the
     returned shots fit ``MAX_COUNT``, Python integers otherwise).
 
-    A kept-state readout first checks the bytes of its dense probability
-    grid and later mode workspace, 48D+24K+65536 bytes for circuit amplitudes
-    and 32D+24K+65536 bytes for classical amplitudes, beyond the caller's live
-    buffers. D is the valid grid size and the caller includes every live
-    kept state. If that route does not fit, streaming sets aside
-    65536+1024d+(16d+128)c bytes and chooses the largest c no greater than
-    D or 4096 that fits the remainder. If no point fits, the readout refuses
-    with QHD.max_bytes before constructing a grid or a block of points. The
-    stream allows the coordinates of the old and the new block to coexist
-    and forms the same vectorized probabilities as the dense route. Each
+    A kept-state readout on a valid grid of D points, at most 2**20
+    (``DENSE_READOUT_POINTS``), forms the dense probability grid
+    and later mode workspace, 48D+24K+65536 bytes for circuit amplitudes and
+    32D+24K+65536 bytes for classical amplitudes, beyond the caller's live
+    buffers, which include every live kept state. A larger grid is streamed
+    in blocks of c = min(D, 4096) points, which set aside
+    65536+1024d+(16d+128)c bytes. The route depends only on D, so the read
+    counts of a level do not depend on the limits, and QHD.max_bytes and
+    max_work only accept or refuse it before a grid or a block of points
+    exists. The stream allows the coordinates of the old and the new block
+    to coexist and forms the same vectorized probabilities as the dense
+    route. Each
     joint request uses one streamed pass. Both sides of a split share two
     passes, first their maxima and then their first qualifying points in C
     order. The read counter counts one full kept-state length per started
@@ -1190,7 +1207,7 @@ class _LevelReadout:
     def _admit_passes(self, count):
         """Check the work of the next complete streamed operation before its first pass."""
         required = self._readout_work + count * self._pass_work
-        if required > self._max_work:
+        if exceeds(required, self._max_work):
             raise ValueError(
                 f"QHD refinement streamed readout requires {required} work units "
                 f"({self._readout_work} used + {count * self._pass_work} requested), "
@@ -1786,7 +1803,9 @@ def refine_box(
             compares.
         limits (ExecutionLimits | None): Cumulative limits of the whole refinement. Each
             level Run receives what the earlier levels left. None uses the
-            ExecutionLimits defaults.
+            ExecutionLimits defaults. On a backend that may charge, unset
+            circuit and shot budgets become 512 and 1,000,000 for the whole
+            refinement.
         progress (object | None): Progress callback of every level Run, as for
             `nwqlib.solve`.
         directory (str | Path | None): A new directory for a saved refinement that
@@ -1899,7 +1918,7 @@ def refine_box(
 
     if not isinstance(problem, Optimization):
         raise TypeError("refine_box requires an Optimization; box refinement has no constraint handling")
-    execution, limits = check_arguments(qhd, execution, shots, seed, limits)
+    execution, limits = check_arguments(qhd, execution, shots, seed, limits, backend=backend)
     check_refinement_options(options, qhd, execution)
     root = np.random.SeedSequence(seed)
     if directory is None:
@@ -1937,9 +1956,13 @@ def resume_box_refinement(directory, *, backend, progress=None, end_at_unfinisha
     constant C comes from the first level's saved data when it is rational. A level
     whose Run exists continues that Run with `load_run(...).wait()`, and no level gets a
     second Run. When that Run cannot finish without new work, because the interruption
-    stopped a local preparation, measurement or classical evolution whose outcome
+    stopped a local measurement or classical evolution whose outcome
     nothing can retrieve, its error propagates with a note, and the outer record keeps
-    its saved levels unchanged. With `end_at_unfinishable=True` the refinement
+    its saved levels unchanged. An interrupted local preparation stops resume in the same
+    way, because resume makes no new preparation. To prepare it again, open the Run of
+    that level under the directory with `load_run`, call
+    `run.resume(rebuild_preparations=True)` and resume again. With
+    `end_at_unfinishable=True` the refinement
     instead ends there with `inner_failed`, keeps its completed levels and records the
     Run's error as the failure. This option handles an unfinishable continuation after a
     Run has reopened. A Run folder whose run-log header was never written fails during
@@ -1954,7 +1977,9 @@ def resume_box_refinement(directory, *, backend, progress=None, end_at_unfinisha
 
     Resuming gives the records of an uninterrupted saved refinement with the same root
     entropy, apart from the fields that differ between any two saved executions, which
-    `resume_augmented_lagrangian` lists with their reasons.
+    `resume_augmented_lagrangian` lists with their reasons. A preparation rebuilt through
+    `load_run` stays counted, so on a quantum run `circuit_preparations` of that level and
+    of the total is one higher than in an uninterrupted run.
 
     Args:
         directory (str | Path): The directory of `refine_box(..., directory=...)`.
@@ -2079,7 +2104,6 @@ def save_archive(result, path):
     continues.
     """
     from nwqlib._choice_archive import ArchiveFiles
-    from nwqlib._limits import DEFAULT_MAX_BYTES
 
     problem = result.problem
     if problem is None:
@@ -2088,7 +2112,7 @@ def save_archive(result, path):
                          "has none, and neither has a refinement nested in an augmented-Lagrangian record, which "
                          "ConstrainedQHDResult.save stores with its run")
     _check_attachments(result, problem, result.results)
-    files = ArchiveFiles(Path(path), DEFAULT_MAX_BYTES)
+    files = ArchiveFiles(Path(path), None)
     files.path.mkdir()
     try:
         with files.writer("problem.pickle") as stream:
@@ -2269,7 +2293,9 @@ def _level_table_phase_bytes(d, specs, json_bytes):
     is bounded with a 192-byte wrapper allowance, ``J_id,i = J_file,i + 192``
     and ``I_max = max_i [2q_i + 3J_id,i + 512]`` (the entirely ASCII
     content-hash text, the encoder formula ``3wJ`` with w = 1, other scalar
-    tokens within 512 bytes). Then
+    tokens within 512 bytes). The content hash names each array by its
+    digest (``core.records.FrozenArray``), so its payload is shorter than
+    ``J_id,i`` and ``I_max`` is an upper allowance for it. Then
 
     ``W_save = max(Q + q_max + 12J, Q + I_max) + R_scalar(S)``,
     ``W_load = max(4J, Q + max(q_max, 9 n_max)) + R_scalar(S)``,
@@ -2279,15 +2305,15 @@ def _level_table_phase_bytes(d, specs, json_bytes):
     all Q base64 characters. Serializing the current array overlaps raw
     and base64 bytes, or encoded bytes and the ASCII string, within
     ``Q + q_max``. The default dump's computed ``content_id`` forms a
-    separate content-hash serialization, ``I_max`` beyond Q. The streamed
+    separate content-hash serialization, within ``I_max`` beyond Q. The streamed
     ``json.dump`` pieces, escaped current token and UTF-8 writing fit 12J.
     On load, ``read_text`` and parsing overlap input bytes/text and the parsed
     strings within 4J, and the complete input text is released when
     ``json.loads(path.read_text(...))`` returns. Each array is decoded one
-    at a time (ASCII encoding and base64 decoding overlap ``q_i + p_i``, the
-    byte copy is released before ``FrozenArray`` makes its owning array, and
-    making it read-only overlaps the decoded raw ``8n_i``, the final array
-    and the ``n_i`` finite mask), so with all final ``P_data`` set aside first the extra is
+    at a time (ASCII encoding and base64 decoding overlap ``q_i + p_i``, and
+    ``FrozenArray`` keeps the decoded raw ``8n_i`` bytes, which this writer
+    stores without negative zero, as its storage after a scan with a Boolean
+    tile of at most ``n_i`` bytes, within the conservative ``9n_i``), so with all final ``P_data`` set aside first the extra is
     ``max(q_i, 9n_i)``. These are qualified engineering
     bounds for 64-bit CPython 3.12.14, NumPy 2.5.2, SymPy 1.14.0 and
     Pydantic 2.13.5, for files produced by this writer with the existing

@@ -7,20 +7,21 @@ Plan.
 """
 
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from math import prod
 from types import MappingProxyType
-import hashlib
 import json
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, NamedTuple
 
-from pydantic import (Field, InstanceOf, PrivateAttr, SerializeAsAny, StrictInt, computed_field, field_serializer,
+from pydantic import (Field, InstanceOf, PrivateAttr, SerializeAsAny, field_serializer,
                       field_validator, model_validator)
 
-from nwqlib._validation import MAX_COUNT
+from nwqlib._validation import MAX_COUNT, integer
 from nwqlib.amplitudes import AmplitudeReadout
 from nwqlib.blocks.records import SelectedConstruction, SelectedKernel
-from nwqlib.core.records import ContentID, Real, Record, Text
+from nwqlib.core.records import StrictInteger, ContentID, Real, Record, Text
 from nwqlib.evidence.error_model import ErrorModel, FramedFact
 from nwqlib.ir import Binding, MeasurementBatch
 from nwqlib.ir.expressions import number
@@ -93,8 +94,8 @@ class Reducer:
 
     An `ObservationPoint` of kind `"reduction"` names it by `reducer`, and
     ``registered_reducer(name)`` returns this entry. The registry supplies
-    the validated output shapes and dtypes, the work of one reduction and
-    its execution. A reducer name without a registered shape fails when
+    the validated output shapes and dtypes and the execution, and
+    optionally the work and workspace of one reduction. A reducer name without a registered shape fails when
     the point's output shape is resolved, before any backend work. A built-in reducer registers itself in ``READOUT_REDUCERS`` when
     its module is imported, and that module is listed in
     ``BUILTIN_REDUCER_MODULES`` so that ``registered_reducer`` resolves its
@@ -107,12 +108,19 @@ class Reducer:
     - ``shape(parameters)``: the output components, each with its dtype and
       shape. Before data collection, the Run sets aside an upper bound on the
       JSON bytes needed to store each component.
-    - ``work(parameters, width)``: the classical work of one reduction of a
-      saved state of ``width`` qubits, as a nonnegative integer in the unit
-      that the calling Method's work allowance counts. ``admit_reductions``
-      requires the calling Method's remaining work allowance and rejects a
-      schedule whose summed registered work exceeds it, before the circuits
-      run. The allowance is specific to the calling Method.
+    - ``work(parameters, width)``, optional: the classical work of one
+      reduction of a saved state of ``width`` qubits, as a nonnegative
+      integer in the unit that the calling Method's work allowance counts.
+      ``admit_reductions`` calls it only when the calling Method gives a
+      finite work allowance, and then rejects a schedule whose summed
+      registered work exceeds it, before the circuits run, or a reducer
+      that registers no work. The allowance is specific to the calling
+      Method.
+    - ``workspace(parameters, width)``, optional: the bytes of the main
+      arrays that one reduction of a saved state of ``width`` qubits
+      allocates besides that state. The shared trajectory check counts the
+      largest of them with the saves the simulator keeps against the Run's
+      ``simulator_memory_mb`` before native preparation.
     - ``execute(state, parameters, bindings)``: the reduction itself. It
       receives the read-only complex128 simulator state saved at its point
       (qubit zero least significant), the validated read-only parameter
@@ -133,11 +141,15 @@ class Reducer:
     Attributes:
         shape: Function of the validated parameter mapping that returns the
             output components as a nonempty tuple of ``ReducerOutput``. It
-            describes the saved output only. The memory of the reduction's
-            own state or workspace is checked by the code that allocates it.
-        work: Registered work function, or None when no execution is registered.
+            describes the saved output only. The reduction's workspace is
+            registered by ``workspace``.
+        work: Registered work function, or None when the reducer registers
+            no work.
+        workspace: Registered workspace function, or None when the reducer
+            registers no workspace.
         execute: Registered execution function, or None when no execution is
-            registered. A reducer is executable when both are registered.
+            registered. A reducer is executable when its execution function
+            is registered.
         phase_invariant: True when the reducer's outputs are unchanged when
             the saved state is multiplied by one common global phase, and
             False otherwise, the default. It is set at registration and read
@@ -159,6 +171,7 @@ class Reducer:
 
     shape: Callable[[Mapping[str, Any]], tuple[ReducerOutput, ...]]
     work: Callable[[Mapping[str, Any], int], int] | None = None
+    workspace: Callable[[Mapping[str, Any], int], int] | None = None
     execute: Callable[..., tuple] | None = None
     phase_invariant: bool = False
     receives_context: bool = False
@@ -171,13 +184,13 @@ class Reducer:
                 or any(type(label) is not str or not label
                        for label in self.state_error_resolutions)):
             raise ValueError("state-error resolutions must be a tuple of nonempty labels")
-        if (self.work is None) != (self.execute is None) or any(
-                function is not None and not callable(function) for function in (self.work, self.execute)):
-            raise ValueError("an executable reducer registers both its work and its execution function")
+        if any(function is not None and not callable(function)
+               for function in (self.work, self.workspace, self.execute)):
+            raise ValueError("a reducer registers callable work, workspace and execution functions or None")
 
     @property
     def executable(self):
-        """Whether both the work and the execution function are registered."""
+        """Whether the execution function is registered."""
         return self.execute is not None
 
 
@@ -345,12 +358,14 @@ def reducer_outputs(name, parameters):
 def admit_reductions(observation, *, width, allowance):
     """Check a trajectory's reductions before the circuits run and return their registered classical work.
 
-    Each reduction point needs a reducer registered with its execution and
-    work functions. The work of the schedule is the sum of ``work(parameters,
-    width)`` over its reduction points, checked against ``allowance`` point
-    by point. ``allowance`` is the calling Method's remaining work allowance,
-    taken from the Method's own work record. A schedule with reductions and no
-    allowance is rejected. Nothing here runs a reduction.
+    Each reduction point needs a registered reducer whose output shape
+    resolves for its parameters and that has an execution function.
+    ``allowance`` is the calling Method's remaining work allowance, taken
+    from the Method's own work record, or None for no limit. With a finite
+    allowance, the work of the schedule is the sum of ``work(parameters,
+    width)`` over its reduction points, checked against it point by point,
+    and a reducer that registers no work is rejected. With None no work is
+    computed and 0 is returned. Nothing here runs a reduction.
     """
     total = 0
     for point in observation.positions:
@@ -363,8 +378,10 @@ def admit_reductions(observation, *, width, allowance):
         if not reducer.executable:
             raise ValueError(f"reduction {point.reducer!r} has no registered execution")
         if allowance is None:
-            raise ValueError(f"reduction {point.reducer!r} at point {point.id!r} needs the calling Method's "
-                             "remaining work allowance")
+            continue
+        if reducer.work is None:
+            raise ValueError(f"reduction {point.reducer!r} at point {point.id!r} registers no work, so the calling "
+                             f"Method's work allowance {allowance} cannot be checked. Refused before acquisition")
         work = reducer.work(MappingProxyType(json.loads(point.parameters)), width)
         if type(work) is not int or work < 0:
             raise ValueError(f"reduction {point.reducer!r} must register a nonnegative integer work")
@@ -1154,6 +1171,69 @@ class Experiment(Record):
             kind=kind, shots=count if kind == "counts" else 0, **details)
 
 
+class StaticPoint(NamedTuple):
+    """One point of a static Plan: an experiment, with one value of each range axis of its batch when it has axes.
+
+    A static Run prepares and submits each point once, the experiments in
+    Plan order and the points of an experiment's range axes in increasing
+    axis order with the last axis fastest. `Method.row_templates` receives
+    the points it groups.
+
+    Attributes:
+        key: The point's name in the Run (`point_key`): the experiment name,
+            followed for an experiment with range axes by its axis values, as
+            in ``"pairs[row=3]"``. A backslash or ``[`` in the experiment name
+            is preceded by a backslash, so no two points of a Plan share a key.
+        experiment: The Plan's `Experiment`.
+        bindings: One `Binding` per range axis, in axis order, or () for an
+            experiment without axes. `Plan.resolve` adds the Plan's and the
+            setting's bindings.
+    """
+
+    key: str
+    experiment: Experiment
+    bindings: tuple
+
+
+def point_key(name, pairs):
+    """Return the `StaticPoint.key` of experiment ``name`` at the axis values ``pairs``, ``(parameter, value)`` in axis order.
+
+    The name's backslashes and opening brackets are escaped with a backslash,
+    so the first unescaped ``[`` starts the axis values. Distinct experiment
+    names then give distinct prefixes, and an experiment's axes fix the
+    parameters that follow, so distinct points of a Plan have distinct keys.
+    """
+    name = name.replace("\\", "\\\\").replace("[", "\\[")
+    return f"{name}[{','.join(f'{parameter}={value}' for parameter, value in pairs)}]" if pairs else name
+
+
+def _grid(grids):
+    """Yield one value of each grid per tuple, the last grid fastest, reading each grid only as far as the tuples need.
+
+    An odometer over one iterator per grid, without recursion, so the
+    number of grids is not limited by the interpreter's recursion depth. A
+    grid that runs out restarts from its first value and advances the grid
+    before it.
+    """
+    end = object()
+    iterators = [iter(grid) for grid in grids]
+    values = [next(iterator, end) for iterator in iterators]
+    if any(value is end for value in values):
+        return
+    yield tuple(values)
+    index = len(grids) - 1
+    while index >= 0:
+        value = next(iterators[index], end)
+        if value is end:
+            iterators[index] = iter(grids[index])
+            values[index] = next(iterators[index])
+            index -= 1
+        else:
+            values[index] = value
+            yield tuple(values)
+            index = len(grids) - 1
+
+
 class RandomState(Record):
     """The root entropy and the exact PCG64 states of the random streams, as text, without a NumPy generator.
 
@@ -1179,6 +1259,39 @@ class RandomState(Record):
             if value.get("bit_generator") != "PCG64":
                 raise ValueError("random streams require PCG64 states")
         return self
+
+
+_PLANNING_MEMO = ContextVar("nwqlib_planning_memo", default=None)
+
+
+@contextmanager
+def planning_call():
+    """Open the memo of `planning_memo` for one planning call, `scientist._plan_with_streams`."""
+    token = _PLANNING_MEMO.set({})
+    try:
+        yield
+    finally:
+        _PLANNING_MEMO.reset(token)
+
+
+def planning_memo(name, objects, compute):
+    """Return ``compute()``, computed once for ``name`` and ``objects`` within one planning call.
+
+    For an accuracy request, a Method's ``sampling_shots`` and ``plan``
+    make the same deterministic choice from the same objects, and the
+    framework calls both inside one `planning_call`, so the second reads
+    the first's result. The memo keys ``objects`` by identity and holds them
+    with the result, and it ends with the call, so no result passes between
+    Plans. Outside a planning call, ``compute()`` runs every time. A failed
+    ``compute()`` stores nothing.
+    """
+    memo = _PLANNING_MEMO.get()
+    if memo is None:
+        return compute()
+    key = (name, *map(id, objects))
+    if key not in memo:
+        memo[key] = objects, compute()
+    return memo[key][1]
 
 
 class RandomStreams:
@@ -1207,8 +1320,8 @@ class RandomStreams:
     """
 
     def __init__(self, seed=None):
-        if seed is not None and (type(seed) is not int or seed < 0):
-            raise ValueError("seed must be a nonnegative integer or None")
+        if seed is not None:
+            seed = integer(seed, "seed", 0)
         import numpy as np
         self._initialize(np.random.SeedSequence(seed))
 
@@ -1259,7 +1372,9 @@ class Plan(Record):
     [`prepare`][nwqlib.scientist.prepare] to run it, or to
     [`estimate`][nwqlib.scientist.estimate] to count its resources.
     `print(plan)` shows its Method, Problem, output, execution mode, shots
-    and number of experiments.
+    and number of experiments, followed by any line that the Method's
+    `reconstruction` record adds, such as what the LCHS route chosen under
+    fixed shots gives up in precision.
 
     A Plan is the choice a Method made once for one Problem, output,
     execution mode, shot request and seed. Preparation, execution,
@@ -1361,9 +1476,11 @@ class Plan(Record):
         return self
 
     @field_serializer("problem", "method", "output")
-    def _describe(self, value):
-        return dict(type=f"{type(value).__module__}.{type(value).__qualname__}",
-                    fields=value.model_dump(mode="json", exclude_computed_fields=True))
+    def _describe(self, value, info):
+        # Inside the Plan's content hash computation, the record's reference.
+        return value._identity_reference(info) or dict(
+            type=f"{type(value).__module__}.{type(value).__qualname__}",
+            fields=value.model_dump(mode="json", exclude_computed_fields=True))
 
     def to_record(self):
         """Return the JSON form of the Plan's fields.
@@ -1374,25 +1491,10 @@ class Plan(Record):
         return self.model_dump(mode="json", exclude_computed_fields=True)
 
     def __str__(self):
-        return (f"Plan(method={type(self.method).__name__}, problem={type(self.problem).__name__}, "
+        head = (f"Plan(method={type(self.method).__name__}, problem={type(self.problem).__name__}, "
                 f"output={type(self.output).__name__}, execution={self.execution}, "
                 f"shots={self.shots}, experiments={len(self.experiments)})")
-
-    @computed_field
-    @property
-    def content_id(self) -> str:
-        # The identity covers the portable fields only. Problem, Method and
-        # output enter with their concrete type names, so equal fields of
-        # different classes stay distinct. Bound native blocks and caches are
-        # private and excluded, which lets an archive restore the same
-        # bindings under the same identity. Cached because the Plan is frozen.
-        if "identity" not in self._cache:
-            data = dict(format="nwqlib.plan/7",
-                        type=f"{type(self).__module__}.{type(self).__qualname__}", fields=self.to_record())
-            encoded = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-                                 allow_nan=False).encode("utf-8")
-            self._cache["identity"] = "sha256:" + hashlib.sha256(encoded).hexdigest()
-        return self._cache["identity"]
+        return "\n".join((head, *getattr(self.reconstruction, "_plan_summary_lines", tuple)()))
 
     @property
     def blocks(self):
@@ -1438,6 +1540,82 @@ class Plan(Record):
         if "experiments" not in self._cache:
             self._cache["experiments"] = MappingProxyType({item.name: item for item in self.experiments})
         return self._cache["experiments"]
+
+    def _axes(self, experiment):
+        """Return the range axes of the experiment's batch, in axis order, or () for an experiment without axes.
+
+        The Program's check refuses a binding of an axis parameter, so every
+        value of each axis grid is a point.
+        """
+        node = None if experiment.batch is None else self._program_nodes.get(experiment.batch)
+        return getattr(node, "axes", ())
+
+    def _point_count(self, experiments=None):
+        """Return the number of points (`_static_points`) of the Plan's experiments, or of ``experiments``, from the axis bounds alone."""
+        return sum(prod((axis.stop - axis.start - 1) // axis.step + 1 for axis in self._axes(experiment))
+                   for experiment in (self.experiments if experiments is None else experiments))
+
+    def _point_shots(self, experiment):
+        """Return the shots that each point of a batch experiment requests when the Program fixes them for every point, or None.
+
+        A batch experiment takes its kind and repetitions from the batch
+        (`Experiment._resolved_observation`), so a counts batch whose
+        repetitions are an integer, or an expression that the Program's and
+        the setting's bindings already decide, requests that many shots at
+        every point, and any other kind requests none. Repetitions that
+        depend on an axis value, or that the Program leaves open, give None,
+        and so does a direct experiment, whose readout the Method can still
+        specialize for its bindings (`Method.specialize_experiment`). Their
+        shots are known only once the point is resolved.
+        """
+        if experiment.batch is None:
+            return None
+        batch = self._program_nodes[experiment.batch]
+        if batch.observation_kind is None or batch.repetitions is None:
+            return None
+        if batch.observation_kind != "counts":
+            return 0
+        if isinstance(batch.repetitions, int):
+            return batch.repetitions
+        admission = self._program_admission
+        context = admission.binding_map(admission.p.bindings)
+        context.update(admission.binding_map(batch.settings[experiment.setting_index].bindings))
+        return admission.expressions(context)[batch.repetitions.expression]
+
+    def _static_points(self, experiments=None):
+        """Yield each point of the Plan's experiments, or of ``experiments`` of the Plan, as a `StaticPoint`, in order.
+
+        An experiment without range axes is one point, named by the
+        experiment. The points of a batch experiment with range axes follow
+        the Cartesian product of its axis grids, each in increasing order and
+        the last axis fastest. Only the yielded point is built, and each axis
+        is read only as far as the yielded points need, so the first point of
+        an axis of 10**12 values reads one value of it.
+        """
+        for experiment in self.experiments if experiments is None else experiments:
+            axes = self._axes(experiment)
+            for values in _grid(tuple(range(axis.start, axis.stop, axis.step) for axis in axes)):
+                pairs = tuple(zip((axis.parameter for axis in axes), values))
+                yield StaticPoint(point_key(experiment.name, pairs), experiment,
+                                  tuple(Binding(parameter=name, value=value) for name, value in pairs))
+
+    def _static_point(self, name, values):
+        """Return the `StaticPoint` of experiment ``name`` at the axis values in the mapping ``values``, or None if the Plan has no such point.
+
+        ``values`` may hold other parameters too, such as the bindings of a
+        data collection. None is returned for an unknown experiment and for
+        an axis value that is missing or off its grid.
+        """
+        experiment = self._experiment_map.get(name)
+        if experiment is None:
+            return None
+        axes = self._axes(experiment)
+        pairs = tuple((axis.parameter, values.get(axis.parameter)) for axis in axes)
+        if any(type(value) is not int or not axis.start <= value < axis.stop or (value - axis.start) % axis.step
+               for axis, (_, value) in zip(axes, pairs)):
+            return None
+        return StaticPoint(point_key(name, pairs), experiment,
+                           tuple(Binding(parameter=parameter, value=value) for parameter, value in pairs))
 
     @property
     def _parameter_map(self):
@@ -1495,6 +1673,20 @@ class Plan(Record):
         # The immutable Plan and the effective bindings determine the result.
         _, program = self._resolve_selection(experiment, bindings)
         return Realization(plan_id=self.content_id, experiment=experiment, bindings=program.bindings)
+
+    def _point_realization(self, experiment, bindings):
+        """Return the Realization that `resolve` gives one point, from its checked values only.
+
+        The values pass the same domain, conflict, axis and `validate_point`
+        checks (`_effective_point`), and the point's Program, which `resolve`
+        builds and checks, carries exactly these merged bindings in name
+        order. The Program is not built, so an analysis that matches many
+        points' data to the Plan pays for each point's values, not for its
+        Program.
+        """
+        _, values = self._effective_point(experiment, tuple(bindings))
+        return Realization(plan_id=self.content_id, experiment=experiment,
+                           bindings=tuple(Binding(parameter=key, value=values[key]) for key in sorted(values)))
 
     def _effective_point(self, experiment, bindings):
         """Return the experiment and the merged parameter values of one point.
@@ -1746,4 +1938,4 @@ MAX_RUNTIME_SEED = 2**32 - 1
 class RuntimeOptions(Record):
     """The uint32 backend seed that one preparation used, saved with it."""
 
-    seed: Annotated[StrictInt, Field(ge=0, le=MAX_RUNTIME_SEED)]
+    seed: Annotated[StrictInteger, Field(ge=0, le=MAX_RUNTIME_SEED)]

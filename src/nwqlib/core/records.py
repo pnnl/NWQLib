@@ -8,15 +8,18 @@ from __future__ import annotations
 
 import base64
 import binascii
+import functools
 import hashlib
 import json
 import math
+import operator
+import sys
 from collections.abc import Mapping
 from typing import Annotated, Literal, Self
 
 from pydantic import (
-    AfterValidator, BaseModel, ConfigDict, Field, StrictFloat, StrictInt,
-    StringConstraints, computed_field, model_validator,
+    AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, StrictFloat, StrictInt,
+    StringConstraints, computed_field, model_serializer, model_validator,
 )
 from pydantic_core import core_schema
 
@@ -58,36 +61,151 @@ values give one content hash.
 """
 Nonnegative = Annotated[Real, Field(ge=0)]
 """A finite real number at least 0, accepted as for [`Real`][nwqlib.core.records.Real]."""
-PositiveInt = Annotated[StrictInt, Field(gt=0)]
-"""A positive Python `int`.
 
-A `float`, a `bool` or a NumPy integer is rejected. Convert it with `int(...)`.
+
+def _exact_integer(value):
+    """Return a NumPy or other exact integer scalar as the Python `int` of the same value.
+
+    Python numbers, strings and bytes are returned unchanged, so StrictInt
+    still rejects a `bool`, a `float` and a string. NumPy booleans have no
+    `__index__` and stay rejected too.
+    """
+    if isinstance(value, (bool, int, float, complex, str, bytes)) or not hasattr(type(value), "__index__"):
+        return value
+    return operator.index(value)
+
+
+StrictInteger = Annotated[StrictInt, BeforeValidator(_exact_integer)]
+"""An exact integer: a Python `int` or a NumPy integer, stored as `int`. A `float` or a `bool` is rejected."""
+PositiveInt = Annotated[StrictInteger, Field(gt=0)]
+"""A positive exact integer.
+
+A `float` or a `bool` is rejected. A NumPy integer such as `np.int64(1000)` is
+accepted and stored as a Python `int`.
 """
+
+
+def _bytes_backed(array):
+    """Whether the memory of ``array`` belongs to an immutable ``bytes`` object."""
+    import numpy as np
+
+    base = array
+    while isinstance(base, np.ndarray):
+        base = base.base
+    return type(base) is bytes
+
+
+# Elements read per tile by _scan_float64, with one Boolean buffer of this length.
+_SCAN_TILE = 1 << 16
+
+
+def _scan_float64(array):
+    """Return whether C-order float64 ``array`` holds negative zero, raising if an element is not finite.
+
+    Negative zero is the one float64 whose bits read as the int64 ``-2**63``.
+    The scan reads tiles of ``_SCAN_TILE`` elements and reuses one Boolean
+    buffer of at most that length, with no full-size temporary.
+    """
+    import numpy as np
+
+    flat = array.reshape(-1)
+    bits = flat.view(np.int64)
+    mask = np.empty(min(flat.size, _SCAN_TILE), dtype=bool)
+    negative_zero = False
+    for start in range(0, flat.size, _SCAN_TILE):
+        stop = min(start + _SCAN_TILE, flat.size)
+        out = mask[:stop - start]
+        if not np.isfinite(flat[start:stop], out=out).all():
+            raise ValueError("FrozenArray float64 elements must be finite")
+        negative_zero = negative_zero or bool(np.equal(bits[start:stop], -(1 << 63), out=out).any())
+    return negative_zero
+
+
+def _immutable_elements(values, dtype):
+    """Return a read-only C-order array of ``values`` in ``dtype`` whose memory is an immutable ``bytes`` object.
+
+    Canonical input, already in ``dtype`` and without float64 negative zero,
+    takes one copy, the ``tobytes`` snapshot, which the scan then reads, so a
+    concurrent change to the input cannot reach the stored elements. A
+    C-order view of a ``bytes`` object in that form is shared with no copy,
+    and its own shape and offset are kept. Negative zero or a byte swap
+    needs one writable canonical intermediate, made after the snapshot is
+    released, and its snapshot, so the input plus two copies at most.
+    """
+    import numpy as np
+
+    def stored_array(data, shape):
+        # A private header above the frombuffer root. NumPy gives every later view that root as its
+        # base, so a change to the root's dtype or shape cannot reinterpret the stored array.
+        array = np.frombuffer(data, dtype=dtype)
+        return array.view() if len(shape) == 1 else array.reshape(shape)
+
+    float64 = dtype.str == "<f8"
+    if values.dtype.str == dtype.str:
+        if values.flags.c_contiguous and _bytes_backed(values):
+            stored = values.view()
+        else:
+            stored = stored_array(values.tobytes(order="C"), values.shape)
+        if not (float64 and _scan_float64(stored)):
+            return stored
+        # Adding +0.0 maps -0.0 to +0.0 and leaves every other finite value unchanged.
+        canonical = stored + 0.0
+        del stored
+    else:
+        canonical = np.array(values, dtype=dtype, order="C", copy=True)
+        if float64:
+            _scan_float64(canonical)
+            canonical += 0.0
+    return stored_array(canonical.tobytes(), canonical.shape)
+
+
+class _Identity:
+    """The serialization context of one ``Record.content_id`` computation.
+
+    Under it a record other than ``root`` serializes as its reference
+    ``{type, content_id}`` and a FrozenArray in its digest form.
+    """
+
+    __slots__ = ("root",)
+
+    def __init__(self, root):
+        self.root = root
 
 
 class FrozenArray:
     """A read-only float64 or int64 array as a Record field value.
 
-    Public construction from a NumPy array copies it once, in C order and
-    little-endian byte order. Construction from a FrozenArray shares its
-    read-only storage. Library code can hand over a private canonical
-    buffer through ``_from_owned_canonical_array``, under that method's
-    conditions on ownership and validation. Float64 elements must be finite
-    and negative zero is canonicalized to positive zero, so equal values
-    have equal bytes and one content hash. Equality and hashing compare
-    dtype, shape and elements.
+    Public construction from a NumPy array stores the elements, in C order
+    and little-endian byte order, in an immutable ``bytes`` object, so no
+    NumPy or NWQLib API can make them writable, ``setflags`` included.
+    Canonical input, little-endian and without float64 negative zero, takes
+    the input plus one copy, and canonical input that is already a C-order
+    view of a ``bytes`` object, such as decoded JSON data, takes no copy.
+    A float64 input that holds negative zero, or an input in big-endian byte
+    order, holds the input plus two copies at the same time while it is
+    converted. Construction from a FrozenArray shares its storage, and
+    unpickling goes through public construction. The one exception is
+    storage handed over by library code through
+    ``_from_owned_canonical_array``, which that method's docstring
+    describes. Float64 elements must be finite and negative zero is
+    canonicalized to positive zero, so equal values have equal bytes and
+    one content hash. Equality and hashing compare dtype, shape and
+    elements.
 
-    The JSON form, which the content hash of a Record covers, is an
-    object with three keys: ``dtype`` (``"<f8"`` or ``"<i8"``), ``shape`` (a
-    list of nonnegative integers) and ``data`` (standard base64 of the
-    little-endian C-order element bytes). Validation accepts that object, a
-    FrozenArray or a NumPy array of one of the two dtypes. Other dtypes are
-    rejected, not cast. The JSON text grows with the array, so a record
-    that holds a problem-sized array names the size check that bounds it,
-    as other records whose JSON grows with the problem do.
+    The JSON form is an object with three keys: ``dtype`` (``"<f8"`` or
+    ``"<i8"``), ``shape`` (a list of nonnegative integers) and ``data``
+    (standard base64 of the little-endian C-order element bytes).
+    Validation accepts that object, a FrozenArray or a NumPy array of one
+    of the two dtypes. Other dtypes are rejected, not cast. The JSON text
+    grows with the array, so a record that holds a problem-sized array
+    names the size check that bounds it, as other records whose JSON grows
+    with the problem do. The content hash of a Record covers the array by
+    its digest form, the keys ``dtype`` and ``shape`` with ``sha256``, the
+    hexadecimal SHA-256 digest of the same element bytes, read in place
+    without encoding or copying them.
 
     Attributes:
-        array: The read-only NumPy array.
+        array: A new read-only view of the stored elements at each access.
         shape: The shape of ``array``.
 
     Indexing gives what NumPy indexing of ``array`` gives. Basic indexing
@@ -114,19 +232,11 @@ class FrozenArray:
         dtype = values.dtype.newbyteorder("<")
         if dtype.str not in self._DTYPES:
             raise ValueError(f"FrozenArray supports float64 and int64 arrays, not {values.dtype}")
-        array = np.array(values, dtype=dtype, order="C", copy=True)
-        if dtype.str == "<f8":
-            if not np.isfinite(array).all():
-                raise ValueError("FrozenArray float64 elements must be finite")
-            # Adding +0.0 maps -0.0 to +0.0 and leaves every other finite value unchanged.
-            array += 0.0
-        # A view of a read-only array cannot be made writeable again.
-        array.flags.writeable = False
-        self._array = array.view()
+        self._array = _immutable_elements(values, dtype)
 
     @classmethod
     def _from_owned_canonical_array(cls, values):
-        """Take over a private array whose creator has validated its values.
+        """Take over a private array whose creator has validated its values, without copying it.
 
         The creator must hold the only writable reference, have filled every
         element, checked float64 finiteness, and changed negative zero to
@@ -134,6 +244,19 @@ class FrozenArray:
         discard its array reference and must not have handed out any
         writable view. This path allocates no element buffer or full-array
         mask.
+
+        The elements stay in that NumPy array, which owns its memory, not in
+        a ``bytes`` object. It is the ``.base`` of every view of the result,
+        ``setflags(write=True)`` on it succeeds, and a later write changes
+        the elements while a ``hash()`` or ``content_id`` computed earlier
+        stays. Use this route only where the copy into a ``bytes`` object
+        would raise the admitted peak of its stage, and never for Result
+        data. Its one caller is the angle table of an
+        ``LCHSProductFormulaSelectPlan`` built in-process
+        (``lchs.time_independent_terms``), whose admission holds 8 bytes
+        per angle where protected storage would hold 16 at the handoff. A
+        FrozenArray built from that table shares the same storage, and a
+        Plan loaded from JSON stores its table through public construction.
         """
         import numpy as np
 
@@ -156,7 +279,9 @@ class FrozenArray:
 
     @property
     def array(self):
-        return self._array
+        # A new view each time, so a change to its shape or dtype cannot
+        # reinterpret the stored elements.
+        return self._array.view()
 
     @property
     def shape(self):
@@ -186,10 +311,23 @@ class FrozenArray:
             raise ValueError("FrozenArray data length differs from its shape")
         return cls(np.frombuffer(raw, dtype=np.dtype(dtype)).reshape(tuple(shape)))
 
+    def _element_bytes(self):
+        """Return the stored C-order element bytes as a read-only buffer, without copying them."""
+        # A memoryview cast refuses a shape with a zero, so an empty array gives b"".
+        return memoryview(self._array).cast("B") if self._array.size else b""
+
     def to_json(self):
         """Return the JSON form described in the class docstring."""
         return {"dtype": self._array.dtype.str, "shape": list(self._array.shape),
-                "data": base64.b64encode(self._array.tobytes()).decode("ascii")}
+                "data": base64.b64encode(self._element_bytes()).decode("ascii")}
+
+    def _digest(self):
+        """Return the digest form that a content hash covers, described in the class docstring."""
+        return {"dtype": self._array.dtype.str, "shape": list(self._array.shape),
+                "sha256": hashlib.sha256(self._element_bytes()).hexdigest()}
+
+    def _serialize(self, info):
+        return self._digest() if type(info.context) is _Identity else self.to_json()
 
     @classmethod
     def _validate(cls, value):
@@ -200,7 +338,7 @@ class FrozenArray:
         return core_schema.no_info_plain_validator_function(
             cls._validate,
             serialization=core_schema.plain_serializer_function_ser_schema(
-                lambda value: value.to_json(), when_used="json"),
+                cls._serialize, info_arg=True, when_used="json"),
         )
 
     @classmethod
@@ -215,7 +353,8 @@ class FrozenArray:
             if copy is False:
                 raise ValueError("FrozenArray cannot change dtype without a copy")
             return self._array.astype(dtype)
-        return self._array.copy() if copy else self._array
+        # Without a copy, a new view, as for `array`, so its dtype or shape can change without the stored one.
+        return self._array.copy() if copy else self._array.view()
 
     def __len__(self):
         return len(self._array)
@@ -237,12 +376,15 @@ class FrozenArray:
 
     def __hash__(self):
         if self._hash is None:
-            self._hash = hash((self._array.dtype.str, self._array.shape, self._array.tobytes()))
+            # A digest of the element buffer, which equal arrays share, read without a bytes copy.
+            digest = hashlib.blake2b(self._element_bytes()).digest()
+            self._hash = hash((self._array.dtype.str, self._array.shape, digest))
         return self._hash
 
     def __reduce__(self):
-        # Unpickling goes through __init__, so the restored array is read-only again.
-        return FrozenArray, (self._array,)
+        # A new view, so the returned array's header is not the stored one. Unpickling goes through
+        # __init__, so the restored elements are stored in a bytes object again.
+        return FrozenArray, (self._array.view(),)
 
     def __copy__(self):
         return self
@@ -283,10 +425,14 @@ class Record(BaseModel):
         content_id: The record's content hash, read-only: `"sha256:"`
             followed by the hexadecimal SHA-256 digest of compact, sorted-key
             UTF-8 JSON of an object with the keys `"identity_encoding"`
-            (`"nwqlib.record/1"`), `"type"` (the record's fully qualified
+            (`"nwqlib.record/2"`), `"type"` (the record's fully qualified
             type) and `"fields"` (all its declared fields in
-            `model_dump(mode="json")` form). Tuples keep their order, and
-            numbers use Python's round-trip binary64 JSON form.
+            `model_dump(mode="json")` form, with two substitutions). A
+            nested record enters as its reference, an object with its fully
+            qualified `"type"` and its `"content_id"`, and a `FrozenArray`
+            enters with the SHA-256 digest of its elements in place of
+            their base64 text. Tuples keep their order, and numbers use
+            Python's round-trip binary64 JSON form.
     """
 
     # Reuse of admitted records. When a field, ``model_validate`` or a revision
@@ -313,11 +459,23 @@ class Record(BaseModel):
     #
     # Identity JSON memory. Computing ``content_id`` holds the JSON text of the
     # identity encoding and its UTF-8 bytes beside the record's own data, since
-    # ``model_dump`` shares the scalar objects. A record does not know its
-    # caller's byte limit, so no check applies here. For each record whose JSON
-    # grows with the problem size, ENGINEERING_CONSTANTS.md, "Record identity
-    # JSON", names the admission that bounds its data and whether that bound
-    # also covers these two JSON copies.
+    # ``model_dump`` shares the scalar objects. Nested records enter by
+    # reference, each computing and storing its own identity first, and arrays
+    # by a digest of their element buffer, so this JSON grows with the
+    # record's own non-array fields only. A record does not know its caller's
+    # byte limit, so no check applies here. For each record whose JSON grows
+    # with the problem size, ENGINEERING_CONSTANTS.md, "Record identity JSON",
+    # names the admission that bounds its data and whether that bound also
+    # covers these two JSON copies.
+    #
+    # Ordinary JSON dumps. ``_serialize_record`` wraps every record's
+    # serialization, so Pydantic infers the type of its result once more and
+    # copies the containers of each nested record once. For a q = 6 Pauli
+    # Expectation Plan this raised the peak per term from 200 to 854 bytes in
+    # ``to_record`` and from 654 to 1,684 bytes in ``Result.save``. The copy is
+    # transient, and saving counts written file bytes, not Python objects.
+    # Revisit when a workflow's save becomes memory bound, or when Pydantic
+    # can choose a serializer per call without inferring the result again.
 
     model_config = ConfigDict(
         frozen=True, extra="forbid", validate_default=True, revalidate_instances="never",
@@ -371,6 +529,23 @@ class Record(BaseModel):
             object.__setattr__(record, "_identity_cache", None)
         return record
 
+    def _reference(self):
+        """Return ``{type, content_id}``, the form in which another record's content hash covers this record."""
+        return {"type": _type_name(type(self)), "content_id": self.content_id}
+
+    def _identity_reference(self, info):
+        """Return the reference while ``info`` serializes another record's content hash, else None.
+
+        Field serializers that write a nested record themselves call it too.
+        """
+        context = info.context
+        return self._reference() if type(context) is _Identity and context.root is not self else None
+
+    @model_serializer(mode="wrap")
+    def _serialize_record(self, handler, info):
+        reference = self._identity_reference(info)
+        return handler(self) if reference is None else reference
+
     @computed_field
     @property
     def content_id(self) -> str:
@@ -383,9 +558,10 @@ class Record(BaseModel):
             identity = None
         if identity is None:
             payload = {
-                "identity_encoding": "nwqlib.record/1",
-                "type": f"{type(self).__module__}.{type(self).__qualname__}",
-                "fields": self.model_dump(mode="json", exclude_computed_fields=True),
+                "identity_encoding": "nwqlib.record/2",
+                "type": _type_name(type(self)),
+                "fields": self.model_dump(mode="json", exclude_computed_fields=True, context=_Identity(self),
+                                          fallback=_identity_fallback),
             }
             encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"),
                                  ensure_ascii=False, allow_nan=False).encode("utf-8")
@@ -428,6 +604,19 @@ class Record(BaseModel):
         if update:
             return self.revise(**update)
         return type(self).model_validate({name: getattr(self, name) for name in type(self).model_fields})
+
+
+@functools.cache
+def _type_name(cls):
+    # One string per record type, shared by all references to its records.
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _identity_fallback(value):
+    # An array inside an Any value, which type inference does not serialize, by its digest.
+    if isinstance(value, FrozenArray):
+        return value._digest()
+    raise TypeError(f"a content hash cannot encode a value of type {type(value).__name__}")
 
 
 def _declared_fields_equal(record, other):
@@ -558,12 +747,15 @@ class Rational(Record):
             reduction.
 
     Raises:
-        ValueError: If `denominator` is zero.
+        ValueError: If `denominator` is zero, or if a saved record cannot
+            hold the reduced numerator or denominator: the numerator must lie
+            above -10**4299 and below 10**4300, and the positive denominator
+            below 10**4300.
     """
 
     kind: Literal["rational"] = "rational"
-    numerator: StrictInt
-    denominator: StrictInt
+    numerator: StrictInteger
+    denominator: StrictInteger
 
     @model_validator(mode="after")
     def _reduce(self):
@@ -575,7 +767,37 @@ class Rational(Record):
         sign = -1 if self.denominator < 0 else 1
         object.__setattr__(self, "numerator", sign * self.numerator // divisor)
         object.__setattr__(self, "denominator", sign * self.denominator // divisor)
+        if not (storable_integer(self.numerator) and storable_integer(self.denominator)):
+            raise ValueError("a saved record holds rational numerators above -10**4299 and below 10**4300, "
+                             "and denominators below 10**4300")
         return self
+
+
+# A record writes an integer as a decimal JSON number. CPython's int() reads at
+# most sys.int_info.default_max_str_digits (4300) digits, sign excluded, and the
+# pydantic-core reader behind model_validate_json reads a number of at most 4300
+# characters, sign included. A record stores the integers that both read: at
+# most 4300 characters in decimal, -10**4299 < value < 10**4300. The default
+# rather than this process's setting keeps every record readable in a process
+# with default settings. The positive bound has 14285 bits.
+STORABLE_INTEGER_BOUND = 10 ** sys.int_info.default_max_str_digits
+_NEGATIVE_STORABLE_BOUND = STORABLE_INTEGER_BOUND // 10
+
+
+def storable_integer(value):
+    """Return whether a record can store the integer ``value``, ``-10**4299 < value < 10**4300``."""
+    return -_NEGATIVE_STORABLE_BOUND < value < STORABLE_INTEGER_BOUND
+
+
+def storable_power(coefficient, exponent):
+    """Return ``coefficient * 2**exponent`` when a record can store it, else None.
+
+    A value with more bits than ``STORABLE_INTEGER_BOUND`` is never formed.
+    """
+    if coefficient.bit_length() + exponent > STORABLE_INTEGER_BOUND.bit_length():
+        return None
+    value = coefficient << exponent
+    return value if storable_integer(value) else None
 
 
 Scalar = Annotated[Float64 | Complex128 | Rational, Field(discriminator="kind")]
@@ -683,7 +905,7 @@ class Limit(Record):
     metric: Literal["cpu_time", "wall_time", "memory", "materialization", "stored", "transfer", "evaluations", "shots", "jobs", "currency", "host_invocations", "host_work"]
     unit: Unit
     kind: Literal["consumption", "capacity_stock", "deadline"]
-    value: Annotated[StrictInt, Field(ge=0)] | Nonnegative
+    value: Annotated[StrictInteger, Field(ge=0)] | Nonnegative
     scope: Text
 
     @model_validator(mode="after")

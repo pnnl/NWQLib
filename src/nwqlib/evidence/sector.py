@@ -6,7 +6,7 @@ from pydantic import model_validator
 
 from nwqlib.core.records import Nonnegative, Record, Source, Text, Unit
 from nwqlib.operators.access import Count
-from ._work import DEFAULT_MAX_INTEGER_BITS, ExactArithmetic
+from ._work import exact
 from .error_model import CheckDomain, CheckSpec, ErrorFrame
 from .verification import _publish
 
@@ -101,7 +101,7 @@ def _exact_count_sum(counts):
     return (high << 32) + low
 
 
-def verify_number_sector(result, *, options: NumberSectorOptions, max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
+def verify_number_sector(result, *, options: NumberSectorOptions):
     """Run the number-sector check on a Result's saved counts, running no analysis or circuit again.
 
     `result.verify(checks=options)` calls this for QHD. The particle number
@@ -114,8 +114,6 @@ def verify_number_sector(result, *, options: NumberSectorOptions, max_integer_bi
         result (Result): A Result that holds complete computational-register
             counts, with its Plan.
         options (NumberSectorOptions): The sector and tolerance.
-        max_integer_bits (int): Bit limit of the exact arithmetic. Default
-            4096.
 
     Returns:
         verification (tuple): `(receipt, facts)`: the `VerificationReceipt`
@@ -128,8 +126,7 @@ def verify_number_sector(result, *, options: NumberSectorOptions, max_integer_bi
         ValueError: If the Result supplies no complete-register counts,
             `particles` exceeds the register width, the saved counts are
             not unconditional counts of the whole register that sum to the
-            returned shots, or an exact intermediate value needs more than
-            `max_integer_bits` bits.
+            returned shots.
     """
     import numpy as np
 
@@ -137,7 +134,6 @@ def verify_number_sector(result, *, options: NumberSectorOptions, max_integer_bi
         raise TypeError("number-sector verification requires concrete selected options")
     checks = options.verification_checks(result)
     chunks = result.number_sector_observations()
-    arithmetic = ExactArithmetic(max_integer_bits=max_integer_bits)
     total = outside = 0
     width = result.number_sector_width()
     for chunk in chunks:
@@ -155,5 +151,5 @@ def verify_number_sector(result, *, options: NumberSectorOptions, max_integer_bi
             raise ValueError("number-sector total differs from the actual returned shots")
         outside += _exact_count_sum(histogram.weights[particles != options.particles])
         total += chunk_total
-    value = None if total == 0 else arithmetic.divide(arithmetic.fraction(outside), arithmetic.fraction(total))
-    return _publish(result, options, checks, (value,), max_integer_bits=max_integer_bits)
+    value = None if total == 0 else exact(outside) / exact(total)
+    return _publish(result, options, checks, (value,))

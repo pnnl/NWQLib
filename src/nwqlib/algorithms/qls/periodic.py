@@ -54,7 +54,7 @@ def select_periodic_encoding(operator, method):
             "compact QLS supports the Hermitian positive periodic family with zero potential"
         )
     if m == 0:
-        raise ValueError("periodic QLS requires a positive original mass and encoded gap")
+        raise ApplicabilityError("periodic QLS requires a positive original mass and encoded gap")
     if method.block_encoding_implementation not in ("auto", "banded"):
         raise ApplicabilityError("compact periodic QLS requires its banded encoding")
     # This function holds at most three bands and a few Fractions of binary64
@@ -76,7 +76,7 @@ def select_periodic_encoding(operator, method):
     )
     alpha = finite_real(selected.alpha, "periodic normalization")
     if method.alpha != "auto" and method.alpha != alpha:
-        raise ValueError("periodic encoding differs from requested alpha")
+        raise ApplicabilityError("periodic encoding differs from requested alpha")
     # Use exact rational values of the stored floats to account for diagonal
     # and normalization rounding before claiming a positive encoded gap.
     mass, diffusion, diagonal, normalization = (
@@ -88,7 +88,7 @@ def select_periodic_encoding(operator, method):
     error = abs(delta) + normalization_error
     gap = diagonal - twice - normalization_error
     if gap <= 0:
-        raise ValueError("selected periodic encoding has no representable positive gap")
+        raise ApplicabilityError("selected periodic encoding has no representable positive gap")
     required = normalization / min(mass, gap)
     actual = alpha / m
     if method.kappa == "auto":
@@ -99,7 +99,7 @@ def select_periodic_encoding(operator, method):
         )
     else:
         if Fraction.from_float(float(method.kappa)) < required:
-            raise ValueError(
+            raise ApplicabilityError(
                 "supplied kappa does not cover the original spectrum and actual encoded gap"
             )
         kappa, polynomial, kappa_source = (

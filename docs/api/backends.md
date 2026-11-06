@@ -263,7 +263,7 @@ A Run carries a forecast when `prepare` receives a `ComparisonRow` whose estimat
 
 ## Export OpenQASM
 
-`export_qasm` converts any Qiskit circuit to OpenQASM 3 or 2. `write_qasm3_file` and `write_qasm3` write a Plan's circuit (`plan.construction`) as OpenQASM 3 without a quantum SDK, for the constructions listed in [Export OpenQASM](../qasm-streaming.md#writer-subset), and `materialize_qasm3_file` imports such a file back into Qiskit after checking its bytes.
+`export_qasm` converts any Qiskit circuit to OpenQASM 3 or 2. `write_qasm3_file` and `write_qasm3` write a Plan's circuit (`plan.construction`) as OpenQASM 3 without a quantum SDK, for the constructions listed in [Export OpenQASM](../qasm-streaming.md#writer-subset), and `materialize_qasm3_file` imports such a file back into Qiskit after checking it against its write record.
 
 ::: nwqlib.io.qasm.export_qasm
     options:
@@ -276,11 +276,6 @@ A Run carries a forecast when `prepare` receives a `ComparisonRow` whose estimat
 ::: nwqlib.io.streaming.write_qasm3
     options:
       heading_level: 3
-
-::: nwqlib.io.streaming.QasmWriteBudget
-    options:
-      heading_level: 3
-      members: false
 
 ::: nwqlib.io.streaming.QasmWriteReceipt
     options:
@@ -300,11 +295,6 @@ A Run carries a forecast when `prepare` receives a `ComparisonRow` whose estimat
 ::: nwqlib.io.materialization.materialize_qasm3_file
     options:
       heading_level: 3
-
-::: nwqlib.io.materialization.QasmMaterializationBudget
-    options:
-      heading_level: 3
-      members: false
 
 ::: nwqlib.io.materialization.QasmMaterialization
     options:

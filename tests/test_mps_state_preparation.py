@@ -225,6 +225,26 @@ def test_existing_mps_analysis_metrics_reuse_order_and_before_svd_cost(monkeypat
         decompose_state_to_mps(np.ones(8), max_svd_work=1)
     with pytest.raises(ValueError, match="max_bytes"):
         truncated.to_statevector(max_bytes=1)
+    # One contraction step of 2*2 output entries times the contracted rank 1.
+    np.testing.assert_allclose(truncated.to_statevector(), [np.sqrt(3)/2, 0, 0, 0], rtol=0, atol=1e-15)
+    with pytest.raises(ValueError, match="needs 4 scalar products, exceeding max_products=3"):
+        truncated.to_statevector(max_products=3)
+
+
+def test_selected_mps_reuses_the_hash_of_immutable_storage(monkeypatch):
+    # The TT-SVD hashes the bytes-backed target it compresses, and builds from
+    # those cores and the same array reuse that hash.
+    from nwqlib.operators.inputs import _freeze_array
+
+    hashed = []
+    original = mps_module._digest
+    monkeypatch.setattr(mps_module, "_digest", lambda *args: hashed.append(args[1]) or original(*args))
+    target = _freeze_array(np.kron(np.array([.6, .8]), np.full(4, .5)).astype(complex))
+    decomposition = mps_module._decompose_normalized_state(target, max_bond_dim=None, threshold=1e-14)
+    for _ in range(2):
+        circuit = build_mps_circuit_state_preparation(target, _selected_decomposition=decomposition).circuit
+        np.testing.assert_allclose(Statevector(circuit).data, target, rtol=0, atol=EXACT_PREPARATION_ATOL)
+    assert hashed == [(8,)]
 
 
 def test_fidelity_kernel_accepts_extreme_but_finite_entry_magnitudes():
@@ -262,14 +282,15 @@ def test_mps_two_qubit_gates_are_exact_near_a_product_state(distance) -> None:
     np.testing.assert_allclose(prepared, state, atol=EXACT_PREPARATION_ATOL, rtol=0)
 
 
-def test_mps_builder_admits_its_syntheses_and_layered_construction_first(monkeypatch) -> None:
-    # Each layer synthesizes at most n - 1 two-qubit unitaries exactly. The
-    # builder charges layers * (n - 1) syntheses against max_svd_work before
-    # the first one, apart from its TT-SVD, whose work for 16 amplitudes is
-    # far smaller. One unit below the law refuses before any synthesis, and
-    # the law admits.
+def test_mps_builder_admits_its_whole_construction_before_the_first_svd(monkeypatch) -> None:
+    # The builder compares once, before the first SVD, the TT-SVD sweep, the
+    # at most layers * (n - 1) exact two-qubit syntheses and the layered
+    # construction at the largest bonds the sweep can keep, (1, 2, 4, 2, 1)
+    # for 16 amplitudes. One unit below their sum refuses before any SVD or
+    # synthesis, and the sum admits.
     pytest.importorskip("scikit_tt")
     from test_dense_synthesis import _dense_synthesis_work
+    from nwqlib.subroutines.state_preparation.mps import layered_construction_size
 
     rng = np.random.default_rng(9)
     state = rng.normal(size=16) + 1j * rng.normal(size=16)
@@ -278,18 +299,22 @@ def test_mps_builder_admits_its_syntheses_and_layered_construction_first(monkeyp
     original = mps_circuit_module.dense_unitary_circuit
     monkeypatch.setattr(mps_circuit_module, "dense_unitary_circuit",
                         lambda matrix: calls.append(np.shape(matrix)) or original(matrix))
-    need = 2 * 3 * _dense_synthesis_work(2)
-    with pytest.raises(ValueError, match="max_svd_work"):
+    svds = []
+    original_svd = np.linalg.svd
+    monkeypatch.setattr(np.linalg, "svd", lambda matrix, *a, **k: svds.append(matrix.shape) or original_svd(matrix, *a, **k))
+    sweep = 2*8*2 + 4*4*4 + 8*2*2
+    need = sweep + 2*3*_dense_synthesis_work(2) + layered_construction_size((1, 2, 4, 2, 1), 2)[0]
+    with pytest.raises(ValueError, match="MPS circuit needs .* max_svd_work"):
         build_mps_circuit_state_preparation(state, num_layers=2, max_svd_work=need - 1)
-    assert calls == []
+    assert calls == [] and svds == []
     build_mps_circuit_state_preparation(state, num_layers=2, max_svd_work=need)
     assert calls and set(calls) == {(4, 4)} and len(calls) <= 6
 
     # After the TT-SVD, which runs NumPy's SVD, scikit_tt orthonormalizes the
     # MPS again after every extracted gate with SciPy's SVD. For ten random
-    # qubits those SVDs alone, m*c*min(m, c) each, exceed the syntheses and
-    # the TT-SVD, so a limit one below their traced total must refuse the
-    # construction before scikit_tt starts. The default limit builds it.
+    # qubits a limit one below the traced total of those SVDs alone,
+    # m*c*min(m, c) each, must refuse the construction before scikit_tt
+    # starts. The default, no limit, builds it.
     import scipy.linalg
 
     state = rng.normal(size=1024) + 1j * rng.normal(size=1024)
@@ -304,6 +329,48 @@ def test_mps_builder_admits_its_syntheses_and_layered_construction_first(monkeyp
     build_mps_circuit_state_preparation(state, num_layers=2)
     started = Mock(wraps=mps_circuit_module._scikit_tt_mps_from_cores)
     monkeypatch.setattr(mps_circuit_module, "_scikit_tt_mps_from_cores", started)
-    with pytest.raises(ValueError, match="layered MPS construction needs .* max_svd_work"):
+    with pytest.raises(ValueError, match="MPS circuit needs .* max_svd_work"):
         build_mps_circuit_state_preparation(state, num_layers=2, max_svd_work=sum(traced) - 1)
     assert started.call_count == 0
+
+
+def test_mps_admission_prices_the_scalar_and_product_routes_they_take(monkeypatch) -> None:
+    # A scalar is prepared by a global phase and cores whose bonds are all
+    # one by one gate per qubit, so an explicit limit counts no two-qubit
+    # synthesis for either. With bond cap one, four qubits need the sweep
+    # 2*8*2 + 2*4*2 + 2*2*2 = 56 and 64 per qubit for the product gates, 312
+    # in all, and one unit less refuses before any SVD.
+    scalar = build_mps_circuit_state_preparation(np.array([1j]), max_bond_dim=1, max_svd_work=1)
+    assert scalar.circuit.num_qubits == 0 and scalar.circuit.size() == 0
+    svds = []
+    original_svd = np.linalg.svd
+    monkeypatch.setattr(np.linalg, "svd", lambda matrix, *a, **k: svds.append(matrix.shape) or original_svd(matrix, *a, **k))
+    state = np.full(16, .25)
+    with pytest.raises(ValueError, match="needs 312 work"):
+        build_mps_circuit_state_preparation(state, max_bond_dim=1, max_svd_work=311)
+    assert svds == []
+    product = build_mps_circuit_state_preparation(state, max_bond_dim=1, max_svd_work=312)
+    assert product.decomposition.bond_dimensions == (1,) * 5
+    assert {item.operation.num_qubits for item in product.circuit.data} == {1}
+
+
+def test_reused_cores_compare_their_construction_with_max_svd_work_before_building():
+    """Cores supplied with the target, as a reopened LCHS Plan supplies them, are compared with max_svd_work.
+
+    The 3-qubit GHZ cores have bonds (1, 2, 2, 1), so the default two layers
+    need 4 two-qubit syntheses and the layered construction at those bonds.
+    """
+    from nwqlib.operators.inputs import _freeze_array
+    from nwqlib.subroutines._dense_synthesis import dense_synthesis_size
+
+    ghz = np.zeros(8, dtype=complex)
+    ghz[[0, 7]] = np.sqrt(.5)
+    target = _freeze_array(ghz)
+    decomposition = mps_module._decompose_normalized_state(target, max_bond_dim=None, threshold=1e-14)
+    assert decomposition.bond_dimensions == (1, 2, 2, 1)
+    work = 4 * dense_synthesis_size(2)[0] + mps_module.layered_construction_size((1, 2, 2, 1), 2)[0]
+    with pytest.raises(ValueError, match=f"needs {work} work .* exceeding max_svd_work={work - 1}"):
+        build_mps_circuit_state_preparation(target, _selected_decomposition=decomposition, max_svd_work=work - 1)
+    circuit = build_mps_circuit_state_preparation(target, _selected_decomposition=decomposition,
+                                                  max_svd_work=work).circuit
+    np.testing.assert_allclose(Statevector(circuit).data, target, rtol=0, atol=EXACT_PREPARATION_ATOL)

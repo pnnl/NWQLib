@@ -16,7 +16,7 @@ import numpy as np
 from qiskit import QuantumCircuit, QuantumRegister
 from qiskit.circuit.library import QFTGate, UnitaryGate
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from nwqlib._limits import exceeds, optional_limit
 from nwqlib._validation import integer
 from nwqlib.operators.access import _check_bytes
 from nwqlib.subroutines._dense_synthesis import controlled_synthesis_size
@@ -71,8 +71,8 @@ def build_coherent_qpe_circuit(
     *,
     num_phase_qubits: int,
     name: str = "coherent_qpe",
-    max_work: int = 1_000_000_000,
-    max_bytes: int = DEFAULT_MAX_BYTES,
+    max_work: int | None = None,
+    max_bytes: int | None = None,
 ) -> CoherentQPECircuit:
     """Build the coherent phase-estimation circuit of a dense unitary, without measurement.
 
@@ -132,7 +132,6 @@ def build_coherent_qpe_circuit(
     dense powers of the QPE Methods, plus the working bytes of one
     synthesis and the circuit definitions kept from all m controlled power
     syntheses are compared with `max_bytes`.
-    The default work limit is the QPE Methods' `max_work`.
 
     Args:
         unitary (array_like): Dense unitary matrix of power-of-two
@@ -140,10 +139,11 @@ def build_coherent_qpe_circuit(
         num_phase_qubits (int): Number m of qubits used for phase
             estimation.
         name (str): Default `"coherent_qpe"`. Circuit name.
-        max_work (int): Default `1_000_000_000`. Limit on the work of the
+        max_work (int | None): Default `None`, no limit, as for the QPE
+            Methods' `max_work`. Optional limit on the work of the
             unitarity check, the powers and their exact controlled
             synthesis.
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+        max_bytes (int | None): Default `None`, the physical memory of this computer.
             Limit on the bytes of the power arrays and of the syntheses.
 
     Returns:
@@ -184,8 +184,10 @@ def build_coherent_qpe_circuit(
     synthesis_work, working_bytes, kept_bytes = controlled_synthesis_size(dimension.bit_length())
     _check_bytes(96 * dimension**2 + working_bytes + num_phase_qubits * kept_bytes, max_bytes,
                  "coherent QPE powers and their controlled synthesis")
-    if num_phase_qubits * (dimension**3 + synthesis_work) > integer(max_work, "max_work", 1):
-        raise ValueError("coherent QPE powers and their controlled synthesis exceed max_work")
+    required = num_phase_qubits * (dimension**3 + synthesis_work)
+    if exceeds(required, optional_limit(max_work, "max_work")):
+        raise ValueError(f"coherent QPE powers and their controlled synthesis need {required} work units, above "
+                         f"max_work={max_work}. Raise max_work to at least {required} or set it to None.")
     # Entrywise absolute window on U^dagger U - I, equal to the is_unitary
     # default registered in docs/ENGINEERING_CONSTANTS.md.
     if not is_unitary(matrix, atol=1.0e-8):

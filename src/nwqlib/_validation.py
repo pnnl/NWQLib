@@ -215,6 +215,47 @@ def native_state_error(operations: int, per_operation: float) -> float:
     return (per_operation * operations / 2 + GLOBAL_PHASE_STATE_ROUNDOFF) * UNIT_ROUNDOFF
 
 
+def initial_state_defect(state) -> float:
+    """Upper bound on ``| ||v||_2**2 - 1 |`` for a state vector v that a simulator sets directly as its initial state.
+
+    The simulator copies v without arithmetic, so the circuit starts from v
+    instead of the unit state ``psi = v/||v||_2`` that a direct preparation
+    circuit of unitary gates would reach. With ``S = ||v||_2**2``,
+    ``||v - psi||_2 = |S - 1|/(||v||_2 + 1) <= |S - 1|``, and the total
+    probability of v differs from one by ``|S - 1|``. The other operations
+    are unitary and carry this distance unchanged, so it adds to their
+    first-order budget. ``S_hat``, the binary64 sum of the squares of the
+    ``m = 2*len(v)`` real components (``_square_sum``), satisfies
+    ``|S_hat - S| <= gamma_m*S + m*eta`` with ``eta = 2**-1074``, which gives
+    ``|S - 1| <= (|S_hat - 1| + gamma_m*S_hat + m*eta)/(1 - gamma_m)``. The
+    bound is evaluated in exact rational arithmetic and rounded upward. It is
+    a bound for the actual vector, not a first-order estimate. One pass over
+    v, no temporary array.
+    """
+    from nwqlib._quantum_readout import ETA, Q, _square_sum, gamma
+
+    vector = np.asarray(state, dtype=np.complex128)
+    m = 2 * len(vector)
+    total, rounding = Q(_square_sum(vector)), gamma(m)
+    return round_up((abs(total - 1) + rounding * total + m * ETA) / (1 - rounding))
+
+
+def round_up(value) -> float:
+    """The least binary64 number not below the exact rational or float ``value``."""
+    from fractions import Fraction
+
+    exact = Fraction(value)
+    result = float(exact)
+    return result if Fraction(result) >= exact else math.nextafter(result, math.inf)
+
+
+def add_up(bound: float, extra: float | None) -> float:
+    """``bound + extra`` rounded upward, or ``bound`` when ``extra`` is None, so a sum of bounds is not understated."""
+    from fractions import Fraction
+
+    return bound if extra is None else round_up(Fraction(bound) + Fraction(extra))
+
+
 def probability_difference_window(delta: float, evaluation: float) -> float:
     """Bound ``2*delta + delta**2 + evaluation*(1 + delta)**2`` on a computed probability difference.
 

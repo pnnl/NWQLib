@@ -5,7 +5,7 @@ from math import exp, sqrt
 import pytest
 import sympy as sp
 
-from nwqlib.algorithms.qhd import QHD, QuadraticSchedule
+from nwqlib.algorithms.qhd import QHD, QuadraticSchedule, step_blocks
 from nwqlib.problems import Optimization
 from test_qhd_workflow import make_plan
 
@@ -33,7 +33,7 @@ def test_actual_second_order_taylor_and_forward_falsifier():
     def coefficients(order):
         plan = make_plan(binding, options.revise(trotter_order=order))
         first, second = sp.zeros(3), sp.zeros(3)
-        for block in plan.reconstruction.steps[0]:
+        for block in step_blocks(plan, 0):
             assert block.kind == "kinetic"
             a, b = block.support
             term = sp.zeros(3)

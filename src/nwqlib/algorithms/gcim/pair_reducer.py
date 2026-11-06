@@ -133,27 +133,35 @@ def pair_work(parameters, width=None):
 def pair_bytes(parameters):
     """Return the private reduction workspace ``B_pair`` beyond the saved state, checked before the computation.
 
-    With ``N = 2**parameters["qubits"]``, ``L = parameters["terms"]``,
-    ``F = parameters["flips"]`` the flip-group bound, and
-    ``t = min(N, TILE)``, where ``TILE = 1024``, the logical group metadata is
-    ``B_groups = 24L + 16F + 8``. For L > 0 the numerical reducer byte formula is
-    ``B_pair = 17N + max(9L, 96t) + B_groups + H0``.
-    The 17N covers one action output and a finite mask. The 9L peak of group
-    construction and the 96t tile scratch enter as one maximum.
-    The strided branches are views, and ``np.vdot`` reduces them without a
-    contiguous copy. The saved input is counted by the trajectory memory
-    check, and the operator table is resident in the Plan, so neither is
-    counted again here. ``H0 = 65536`` is the fixed heap allowance.
+    With ``N = 2**parameters["qubits"]``, ``L = parameters["terms"]`` and
+    ``t = min(N, TILE)``, where ``TILE = 1024``, the numerical reducer byte
+    formula for L > 0 is ``B_pair = 17N + max(9L, 96t) + 254L + H0``.
+    The 17N covers one action output and a finite mask. The 9L Y-count
+    arrays of group construction and the 96t tile scratch enter as one
+    maximum. ``apply_terms`` groups the rows in Python containers, a dict
+    from each flip key to a list of member indices and a list of rotated
+    complex coefficients, which stay live through the tiles. On CPython
+    3.12 with 64-bit flip keys and one group per row, tracemalloc measured
+    their peak at most 254 bytes per row from 6 to 300,000 rows and at most
+    1,282 bytes in all for 1 to 5 rows (``_projected_workspace`` in
+    ``nwqlib._quantum_readout``), so H0 covers the small-row excess.
+    Merging rows into fewer groups removes lists and dict entries and adds
+    only list slots, so one group per row is the largest case and the flip
+    bound does not enter. The strided branches are views, and ``np.vdot``
+    reduces them without a contiguous copy. The saved input is counted by
+    the trajectory memory check, and ``apply_terms`` reads the Plan's
+    resident operator table in place, so neither is counted again here.
+    ``H0 = 65536`` is the fixed heap allowance.
     For L = 0 the action and Hamiltonian contraction are skipped, and
     ``B_pair = H0``.
     """
     n = 1 << parameters["qubits"]
-    terms, flips = parameters["terms"], parameters["flips"]
+    terms = parameters["terms"]
     t = min(n, TILE)
     if not terms:
         action = 0
     else:
-        action = 17 * n + max(9 * terms, 96 * t) + 24 * terms + 16 * flips + 8
+        action = 17 * n + max(9 * terms, 96 * t) + 254 * terms
     return action + 65536
 
 

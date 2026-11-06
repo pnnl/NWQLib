@@ -28,6 +28,16 @@ from nwqlib.execution import CountsSampling, JobLocator, RegisterMap
 from nwqlib.operators.access import Count
 
 
+def _download_bytes(shots, bits):
+    """Untuned allowance for one downloaded result: len(bits) + 8 bytes per requested shot (docs/ENGINEERING_CONSTANTS.md)."""
+    return shots * (len(bits) + 8)
+
+
+def _decode_bytes(shots, width):
+    """Untuned allowance, per requested shot, of 4 bytes per bit plus 8 for the outcome tuples and count labels of `_decode`."""
+    return shots * (4 * width + 8)
+
+
 class NexusPreparationData(BaseModel):
     """Local data of one prepared circuit before any Nexus upload.
 
@@ -213,7 +223,8 @@ class NexusBackend(Record):
     def _encode(self, value, run, *, input_payload=False):
         """Encode JSON under the Run's data cap, and also under ``max_input_bytes`` for circuit input."""
         from nwqlib._run_journal import encode
-        limit = min(self.max_input_bytes, run.limits.max_data_bytes) if input_payload else run.limits.max_data_bytes
+        from nwqlib._limits import least
+        limit = least(self.max_input_bytes, run.limits.max_data_bytes) if input_payload else run.limits.max_data_bytes
         return encode(value, limit)
 
     def _program(self, text, run):
@@ -252,10 +263,9 @@ class NexusBackend(Record):
                 raise ValueError("Nexus requires each classical bit in exactly one named register")
             register, index = registers[0]
             bits.append((register.name, index))
-
         # Qiskit would lower a dense UnitaryGate with its inexact synthesis.
         # The Run makes the exact synthesis of each distinct matrix once per Run
-        # object and reserves each new one against its max_synthesis_work first.
+        # object and records the work of each new one first.
         lowered = transpile(run._exact_dense_unitaries(circuit),
                             basis_gates=["u", "cx"], optimization_level=0, seed_transpiler=runtime.seed)
         native = qiskit_to_tk(lowered)
@@ -452,6 +462,22 @@ class NexusBackend(Record):
         return _PreparedNexus(program_json, options["compiled_program"]["id"], record.snapshot, record.observation.shots, bits,
                              record.classical_layout, dict(readout_population=record.population))
 
+    def admit_preparation(self, observation, *, classical_widths, run):
+        """Check the download and decode allowances of a result, before the preparation is charged.
+
+        They follow from the requested shots, which a result never exceeds
+        (_decode), so refresh's checks cannot refuse.
+        """
+        bits = sum(classical_widths)
+        run.check_data(_download_bytes(observation.shots, range(bits)))
+        run.check_data(_decode_bytes(observation.shots, bits))
+
+    def admit_submission(self, natives, *, run):
+        """Check the saved program references and the job description against the Run's data limit, before its submission is saved."""
+        for native in natives:
+            run.check_data(4 * len(native.program_json))
+        self._association([native.program_id for native in natives], [native.shots for native in natives], run)
+
     def admit_batch(self, natives):
         """Accept at most 300 distinct Nexus items with 1 to 10,000 shots each.
 
@@ -541,9 +567,7 @@ class NexusBackend(Record):
             raise ValueError("Nexus result inventory differs from submitted program inventory")
         by_program = {native.program_id: (str(index), native)
                       for index, native in enumerate(natives)}
-        # Untuned allowance for one downloaded result: len(bits) + 8 bytes per
-        # requested shot of the largest item (docs/ENGINEERING_CONSTANTS.md).
-        download_bytes = max(n.shots*(len(n.bits)+8) for n in natives)
+        download_bytes = max(_download_bytes(n.shots, n.bits) for n in natives)
         # launch names the job nwqlib:execute:<submission_id>, so the submission
         # is found by its id. The locator comparison rejects a foreign name.
         prefix = self._name("execute", "")
@@ -596,7 +620,6 @@ class NexusBackend(Record):
                 if item is not None:
                     if item.provider_result_id is not None and item.provider_result_id != result_id:
                         raise ValueError("Nexus result identity changed for an original acquisition")
-                    run.check_data(len(result_id))
                     assigned.append(item.revise(provider_result_id=result_id))
                     if item.attempt in run._state["by_attempt"]:
                         continue
@@ -628,10 +651,7 @@ class NexusBackend(Record):
         if set(result.get_bitlist()) != set(bits):
             raise ValueError("Nexus result classical registers differ from original named bits")
         width = len(bits)
-        # Untuned allowance, per requested shot, of 4 bytes per bit plus 8 for
-        # the outcome tuples and count labels built below
-        # (docs/ENGINEERING_CONSTANTS.md).
-        run.check_data(native.shots * (4 * width + 8))
+        run.check_data(_decode_bytes(native.shots, width))
         counts = result.get_counts(cbits=bits)
         ordered, total = {}, 0
         for outcome, count in counts.items():

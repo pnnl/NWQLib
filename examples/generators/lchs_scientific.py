@@ -174,7 +174,7 @@ def show_card(result, coordinates, initial, v_penalty, u_dirichlet, predicted, s
         f"Computed the complex kernel weights on {nodes} k nodes and combined them with the initial state and "
         f"{len(rec.source_nodes)} Gauss source-time nodes into {rec.physical_branches} weighted branches "
         f"e<sup>−i(kL+H)t</sup>, addressed by {len(rec.success_bits)} qubits, with normalization "
-        f"α = {rec.coefficient_l1_norm:.3g}.",
+        f"α = {rec.recovery.as_float():.3g}.",
         f"Exponentiated the {rec.dimension} × {rec.dimension} Hamiltonian of each branch, built the circuit that "
         f"prepares the weights, applies the branches and reverses the preparation, and simulated it on the Aer "
         f"statevector simulator.",
@@ -239,7 +239,6 @@ compile_started = perf_counter()
 prepared = prepare(selected, progress=False)
 with prepared.run:  # the prepared Run holds the circuit until the block ends
     compiled = prepared.inspect_resources(
-        max_operations=10_000_000,  # the circuit has more operations than the default cap of 100,000
         transpile_options={"basis_gates": ["cx", "u"], "optimization_level": 1, "seed_transpiler": 7})
 compile_seconds = perf_counter() - compile_started
 compiled_cx = compiled["operations"].get("cx", 0)
@@ -351,8 +350,8 @@ show_table([
 # %%
 limits = trace.limits
 show_table([
-    ("Qubits the local simulator accepts", limits.max_simulation_qubits, f"Default. This rod uses {total_qubits}"),
-    ("Simulator memory cap", f"{limits.simulator_memory_mb:,} MiB", "Default simulator_memory_mb"),
+    ("Simulator memory cap", "Physical memory (default)" if limits.simulator_memory_mb is None else f"{limits.simulator_memory_mb:,} MiB",
+     f"Default simulator_memory_mb. The {total_qubits} qubits of this rod hold a {format_bytes(16 << total_qubits)} complex128 state"),
     ("Address qubits", len(rec.success_bits), f"{rec.physical_branches} weighted branches in {rec.padded_branches} address slots"),
 ], headers=("Limit or use", "Value", "Meaning"))
 
@@ -536,7 +535,7 @@ show_table([
 #
 # $$\alpha_{\rm source}=\alpha_k\left(\|v(0)\|_2+\|f\|_2\sum_\ell w_\ell\right).$$
 #
-# The Gauss weights sum to $T$, and each source branch evolves for $T-s_\ell$. The cell compares this normalization with the Plan's and shows the PSD support, any shift and the two component bounds, where `unavailable` means the construction has none.
+# The Gauss weights sum to $T$, and each source branch evolves for $T-s_\ell$. The cell compares this normalization with the Plan's physical recovery scale, shows the coefficient one-norm before its binary scale is restored, and gives the PSD support, any shift and the two component bounds, where `unavailable` means the construction has none.
 
 # %%
 from nwqlib.algorithms.lchs import resolve_lchs_coefficient_plan
@@ -564,7 +563,8 @@ show_table([
      f"{len(k_nodes)} nodes, spacing {format_value(grid_spacing, 6)}, from {format_value(ordered_nodes[0], 6)} to {format_value(ordered_nodes[-1], 6)}"),
     ("Base coefficient one-norm", base_coefficients.coefficient_l1_norm, "Sum of coefficient magnitudes, dimensionless"),
     ("Source-weighted normalization", alpha_from_source_weights, "From the initial norm and source-time weights, in temperature units"),
-    ("Selected normalization", rec.coefficient_l1_norm, "Normalization used by this source Plan, in temperature units"),
+    ("Stored coefficient one-norm", rec.coefficient_l1_norm,
+     f"Multiply by the binary scale {rec.recovery.as_float() / rec.coefficient_l1_norm:g} for the physical normalization"),
     ("Initial-vector norm", rec.initial_scale.as_float(), "L2 norm in temperature units"),
     ("Source-vector norm", rec.source_scale.as_float(), "L2 norm in temperature per unit time"),
     ("Physical recovery scale", rec.recovery.as_float(), "Converts the success amplitudes to the physical vector"),

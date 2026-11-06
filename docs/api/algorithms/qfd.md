@@ -22,7 +22,8 @@ Every object on this page imports from `nwqlib.algorithms.qfd`, and `QFD` and `Q
 ::: nwqlib.algorithms.qfd.records.QFDResult
     options:
       heading_level: 3
-      members: false
+      members:
+        - overlap_noise
 
 ::: nwqlib.algorithms.qfd.records.QFDReconstruction
     options:

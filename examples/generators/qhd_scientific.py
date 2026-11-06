@@ -154,7 +154,8 @@ def show_ackley_card(result, control, lbfgsb, targets, seconds):
         f"workspace {max(run.plan.reconstruction.workspace_bytes for run in result.results):,} bytes per solve, "
         f"stated by the plan before it runs, evolution work {result.resources.evolution_work:,} units over the "
         f"{len(result.levels)} solves (a planning quantity, not seconds), each solve within max_work = "
-        f"{result.qhd.max_work:,}, {seconds:.1f} s on this computer.</p>"))
+        f"{'no limit' if result.qhd.max_work is None else format(result.qhd.max_work, ',')}, "
+        f"{seconds:.1f} s on this computer.</p>"))
 
     fig, axes = plt.subplots(1, 2, figsize=(11, 3.9), layout="constrained")
     for run, label, color, marker in ((control, "Gain 1", GRAY, "s"), (result, "Gain 8", BLUE, "o")):
@@ -632,9 +633,9 @@ display(HTML(f"<p><strong>{escape(lead)}</strong></p><ul>"
 # - **Input.** A real SymPy objective, its variables and one finite interval per variable. Constraints are written as `g <= 0` (Section 10).
 # - **Output.** A point in the original coordinates and its objective, read from probabilities computed without shot sampling here.
 # - **Size.** $d$ variables with $K$ grid points each use $d\log_2K$ qubits. The classical evolution stores $K^d$ amplitudes, and its counted work grows about as the number of steps times $K^d\log_2K$.
-# - **Limit.** `QHD(max_work=...)` limits the work of each planned stage of a solve. Work is a nominal measure of classical computation that NWQLib derives from the problem sizes by formula ([work units](../docs/glossary.md#work-units)). It combines estimates such as one unit for each node of the symbolic expression evaluated at each table entry and a nominal cost for each Fourier transform of the split-step evolution, and it is neither a uniform count of scalar operations nor a time. The default, 1,000,000,000, covers the 32 × 32 levels of Section 2.
+# - **Limit.** `QHD(max_work=...)` limits the work of each planned stage of a solve. Work is a nominal measure of classical computation that NWQLib derives from the problem sizes by formula ([work units](../docs/glossary.md#work-units)). It combines estimates such as one unit for each node of the symbolic expression evaluated at each table entry and a nominal cost for each Fourier transform of the split-step evolution, and it is neither a uniform count of scalar operations nor a time. The default sets no limit.
 #
-# The cell repeats the first Rastrigin call with `max_work` set to 100,000,000 for this demonstration (the default is 1,000,000,000). Planning refuses it before any evolution, and the message names the amount. The remedy is the default `max_work`, which the runs of Section 2 use.
+# The cell repeats the first Rastrigin call with `max_work` set to 100,000,000 for this demonstration (the default sets no limit). Planning refuses it before any evolution, and the message names the amount. The remedy is the default `max_work`, which the runs of Section 2 use.
 
 # %%
 DEMONSTRATION_MAX_WORK = 100_000_000  # below what one 32 × 32 level needs, to show the refusal
@@ -647,7 +648,9 @@ try:
 except ValueError as refusal:
     print(f"Refused after {perf_counter() - started:.2f} s, before any evolution:\n{refusal}\n")
 first_rastrigin_level = rastrigin_runs[min(LEVELS_PER_ROUND)].iterations[0].refinement.levels[0]
-print(f"Remedy, the default of Section 2: max_work = {rastrigin_qhd.max_work:,}. Evolution work counted for one "
+print(f"Remedy, the default of Section 2: max_work = "
+      f"{'no limit' if rastrigin_qhd.max_work is None else format(rastrigin_qhd.max_work, ',')}. "
+      f"Evolution work counted for one "
       f"32 × 32 level: {first_rastrigin_level.resources.evolution_work:,} units")
 
 # %% [markdown]

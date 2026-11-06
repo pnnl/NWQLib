@@ -1,24 +1,30 @@
 """QLS normalization, spectral-assumption and verification constants."""
 
-# Rescale margin over the rigorous Chebyshev norming bound. The phase solver
-# demands max|target| <= 1, and dividing a selected polynomial by its norming
-# bound times 1 + 1e-3 leaves the phase target with norming bound
-# 1/(1 + 1e-3). Every sampled QLS phase target at this margin converges,
-# but not always from the L-BFGS start. With the default epsilon_inv = 0.01,
-# the sampled targets on which L-BFGS missed the tolerance were all inverse
-# targets with polynomial_kappa between 5.01 and 5.72 (degrees 29 to 33),
-# and the Newton start of subroutines/qsp/phases.py solved each of them.
-# The margin costs 0.1% of success amplitude. Registered in
-# docs/ENGINEERING_CONSTANTS.md with the sampled targets. Revisit if a fit
-# change makes a QLS phase solve fail at this margin.
+# Rescale margin over the Chebyshev norming bound. Canonical Wx synthesis
+# (subroutines/qsp/phases.py) needs a target whose norming bound is strictly
+# below 1, and dividing the selected polynomial by its norming bound times
+# 1 + 1e-3 gives the phase target the norming bound 1/(1 + 1e-3). At this
+# margin every QLS target sampled at epsilon_inv = 0.01 (400 inverse values
+# of polynomial_kappa from 1.01 to 50, 300 kernel-reflection values from 1.01
+# to 80) synthesizes within the 1e-12 residual tolerance. The margin costs
+# 0.1% of success amplitude. Registered in docs/ENGINEERING_CONSTANTS.md with
+# the sampled targets. Revisit if the norming evaluation or the synthesis cap
+# changes.
 QLS_TARGET_MARGIN = 1.0e-3
+# Engineering ratio c of the default phase target of "qsvt_inverse",
+# delta = max(1e-12, c * epsilon_inv / (polynomial_kappa * rescale))
+# (quantum._phase_tolerance). When the second argument decides and the actual
+# residual meets it, the phase term k*s*delta/||y|| of the relative inverse
+# error is at most c*epsilon_inv, because ||y|| >= 1. It is not taken from
+# epsilon_inv, which stays the polynomial's own target, so the degree does not
+# change. It is neither an optimal constant nor a guarantee on the total error.
+# Revisit if a public workload shows a material accuracy or cost change.
+QLS_PHASE_RELATIVE_TARGET_SHARE = 0.1
 # Polynomial-domain floor, separate from actual alpha/sigma_min. A perfectly
 # conditioned input has actual condition 1, while the polynomial constructions
-# need a domain parameter strictly above 1. The 1.01 floor also avoids the
-# kernel-reflection (KR) coefficient formula's cancellation near 1. This does
-# not alter the reported original spectrum, actual alpha or condition
-# estimate. Revisit if the domain requirement of either polynomial
-# construction or the kernel-reflection coefficient fit changes.
+# need a domain parameter strictly above 1. This does not alter the reported
+# original spectrum, actual alpha or condition estimate. Revisit if the domain
+# requirement of either polynomial construction changes.
 QLS_POLYNOMIAL_KAPPA_FLOOR = 1.01
 
 # Relative admission window for already computed singular endpoints, matching

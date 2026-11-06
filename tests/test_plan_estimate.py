@@ -44,21 +44,6 @@ def test_public_estimate_preserves_hand_forecast_without_native_work(monkeypatch
         loaded.validate_plan(plan.revise(assumptions=plan.assumptions + ("different selection",)))
 
 
-def test_whole_expansion_rejects_before_model_work(monkeypatch):
-    plan, _, profile, allocation, _, _, at = stored_inputs()
-    import nwqlib.backends.assessment as owner
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("oversized forecast must reject before folding or model work")
-
-    monkeypatch.setattr(owner, "estimate", forbidden)
-    monkeypatch.setattr(owner, "_predict_time", forbidden)
-    with pytest.raises(ValueError, match="requires 2.*max_assessments=1"):
-        estimate_plan(
-            plan, profile=profile, allocation=allocation, assessed_at=at, max_assessments=1
-        )
-
-
 def test_selected_sampling_criterion_is_preserved_without_claiming_total_accuracy():
     from nwqlib import Accuracy, plan as select_plan
     from nwqlib.backends import assess

@@ -2,13 +2,86 @@
 
 from __future__ import annotations
 
-from math import expm1, frexp, fsum, isfinite, ldexp, log1p
+from fractions import Fraction
+from math import expm1, frexp, fsum, inf, isfinite, ldexp, log1p, nextafter, sqrt
 from numbers import Real
 from typing import Any, Iterable
 
 import numpy as np
 from nwqlib._validation import finite_real
 from scipy.linalg.blas import dnrm2, dznrm2
+
+
+def complex_magnitude_upper(value: complex) -> Fraction:
+    """Return an exact rational at least ``|value|`` for a complex number with finite parts.
+
+    With ``s = max(|Re c|, |Im c|)`` and ``l = min(|Re c|, |Im c|)``,
+    ``|c| = s sqrt(1 + (l/s)**2)``, exactly zero for s = 0. The ratio, its
+    square and the sum are each rounded to nearest and stepped one binary64
+    number up, and the square root, which IEEE 754 rounds correctly, is
+    stepped up as well, so each factor bounds its exact value from above,
+    subnormal intermediates included. The ratio lies in [0, 1] and the root's
+    argument near [1, 2], so no step leaves the binary64 range, and the
+    product with s is formed exactly, so the magnitude need not be a binary64
+    number. Ordinary ``abs(c)`` has no such upward-rounding guarantee. The
+    periodic LCHS Strang bound and the periodic-band operator facts of
+    ``operators.cartesian`` use it.
+    """
+    real, imag = abs(value.real), abs(value.imag)
+    if not (isfinite(real) and isfinite(imag)):
+        raise ValueError(f"coefficient {value!r} is not finite")
+    large, small = max(real, imag), min(real, imag)
+    if large == 0:
+        return Fraction(0)
+    ratio = nextafter(small / large, inf) if small else 0.0
+    square = nextafter(ratio * ratio, inf) if ratio else 0.0
+    root = nextafter(sqrt(nextafter(1.0 + square, inf) if square else 1.0), inf)
+    return Fraction(large) * Fraction(root)
+
+
+def complex_magnitudes_upper(values) -> np.ndarray:
+    """Return binary64 upper bounds of ``|c|`` for an array of complex numbers with finite parts.
+
+    The array form of ``complex_magnitude_upper``: the ratio, its square, the
+    sum and the square root are stepped one binary64 number up as there, and
+    the product with s, rounded to nearest, is stepped up once more. A
+    number with a zero real or imaginary part gets its exact magnitude. A
+    bound beyond the binary64 range is infinite.
+    """
+    values = np.asarray(values, dtype=np.complex128)
+    real, imag = np.abs(values.real), np.abs(values.imag)
+    large, small = np.maximum(real, imag), np.minimum(real, imag)
+    mixed = small > 0
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        ratio = np.nextafter(small / large, inf)
+        square = np.nextafter(ratio * ratio, inf)
+        root = np.nextafter(np.sqrt(np.nextafter(1.0 + square, inf)), inf)
+        product = np.nextafter(large * root, inf)
+    return np.where(mixed, product, large)
+
+
+def outward_sum(values, *, upward: bool) -> float:
+    """Return the binary64 number next to the exact sum of binary64 values in the requested direction.
+
+    ``math.fsum`` rounds the exact sum S to the nearest binary64 number s.
+    The residual S - s is a multiple of 2**-1074, so its correctly rounded
+    value, a second ``fsum``, is zero only when s is exact and otherwise has
+    its sign. One step from s in the requested direction then bounds S and
+    equals the outward rounding of S. A sum beyond the binary64 range raises.
+    """
+    values = np.asarray(values, dtype=float)
+    try:
+        total = fsum(values)
+        residual = fsum(np.append(values, -total)) if isfinite(total) else 0.0
+    except OverflowError:
+        total, residual = inf, 0.0
+    if upward and residual > 0:
+        total = nextafter(total, inf)
+    elif not upward and residual < 0:
+        total = nextafter(total, -inf)
+    if not isfinite(total):
+        raise ValueError("operator bound exceeds the binary64 range")
+    return total
 
 
 def normalized_matrix(matrix, alpha):

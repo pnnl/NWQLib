@@ -49,10 +49,11 @@ from fractions import Fraction
 from typing import Annotated, Literal, NamedTuple
 
 import numpy as np
-from pydantic import Field, StrictInt
+from pydantic import Field
 
+from nwqlib._limits import ResourceLimitError, memory_limit
 from nwqlib._validation import UNIT_ROUNDOFF
-from nwqlib.core.records import Record
+from nwqlib.core.records import StrictInteger, Record
 from nwqlib.algorithms.qhd.validation import (
     _admitted_products,
     _kinetic_range_error,
@@ -116,7 +117,7 @@ class BinarySynthesis(Record):
     potential: SynthesisChoice = "min_cx"
     kinetic_phase: SynthesisChoice = "min_cx"
     qft_bit_reversal: Literal["relabel", "swap"] = "relabel"
-    aqft_cutoff: Annotated[StrictInt, Field(ge=0)] | None = None
+    aqft_cutoff: Annotated[StrictInteger, Field(ge=0)] | None = None
 
 
 def register_bits(num_grid_points):
@@ -971,22 +972,28 @@ def _integer_storage(bits):
 def _require_bytes(limit, *, held, local, stage, later=False):
     """Return ``held + local`` bytes after checking them against ``limit``, a QHD ``max_bytes``.
 
-    ``held`` counts the bytes of the data that stay in memory through the
-    phase and ``local`` the phase's own workspace. The error names the phase
-    and the smallest ``max_bytes`` that accepts it. With ``later`` it says
-    that the phases checked after this one need more, so that value is a
-    lower bound.
+    ``limit=None`` means the physical memory of this computer, and no check
+    is made where the platform does not report it. ``held`` counts the bytes
+    of the data that stay in memory through the phase and ``local`` the
+    phase's own workspace. The error names the phase and the smallest
+    ``max_bytes`` that accepts it, or for the physical memory the bytes a
+    computer needs. With ``later`` it says that the phases checked after this
+    one need more, so that value is a lower bound.
 
     Raises:
         ValueError: ``held + local`` exceeds ``limit``.
     """
     required = int(held) + int(local)
-    if required > int(limit):
-        raise ValueError(
-            f"QHD {stage} requires {required} bytes "
-            f"({held} held + {local} phase), with QHD(max_bytes={limit}); "
-            + (f"QHD(max_bytes>={required}) admits this phase only; the phases admitted after it need more" if later
-               else f"use QHD(max_bytes>={required})"))
+    resolved = memory_limit(limit)
+    if resolved is not None and required > resolved:
+        source = (f"QHD(max_bytes={limit})" if limit is not None
+                  else f"the physical memory of this computer ({resolved} bytes)")
+        remedy = (f"QHD(max_bytes>={required})" if limit is not None
+                  else f"a computer with at least {required} bytes of physical memory")
+        raise ResourceLimitError(
+            f"QHD {stage} requires {required} bytes ({held} held + {local} phase), with {source}; "
+            + (f"{remedy} admits this phase only; the phases admitted after it need more" if later
+               else f"use {remedy}"))
     return required
 
 
@@ -1024,19 +1031,27 @@ def _construction_entry_cap(entries, support_size):
     return 16 * entries + metadata, metadata
 
 
+# Largest byte total of the optional whole-model cache of one BinaryModel.
+# The cache saves repeated synthesis only, so a limit that leaves more room
+# does not grow it. Registered in docs/ENGINEERING_CONSTANTS.md.
+CONSTRUCTION_CACHE_BYTES = 2**30
+
+
 def _construction_cache_capacity(max_bytes, *, held_bytes, model_bytes, latest_bytes, build_bytes, use_bytes):
-    """Check a ``BinaryModel``'s baseline ``B_base`` against ``max_bytes`` and return the capacity left for optional cache entries.
+    """Check a ``BinaryModel``'s baseline ``B_base`` against ``max_bytes`` and return the capacity of its optional cache.
 
     ``B_base = held + model + latest + max(build, use)`` covers the caller's
     data held in memory, the model, one latest construction per table and
     the largest construction or use workspace, and is checked against
-    ``max_bytes`` before any model or build allocation. Only the remaining
-    capacity ``cache_capacity = max_bytes - B_base`` is available for
-    optional whole-model caching, ``cache_bytes + new_entry_bytes <=
-    cache_capacity``. Because the baseline already covers a cache miss and
-    its latest result per table, the caching decision may use the payload
-    measured after synthesis. A negative residual rejects the baseline and
-    is never clamped to zero.
+    ``max_bytes`` before any model or build allocation. The optional
+    whole-model cache then holds at most
+    ``cache_capacity = min(CONSTRUCTION_CACHE_BYTES, max_bytes - B_base)``,
+    ``cache_bytes + new_entry_bytes <= cache_capacity``. Because the
+    baseline already covers a cache miss and its latest result per table,
+    the caching decision may use the payload measured after synthesis. A hit
+    returns the same construction that a miss would build, so the capacity
+    changes the repeated synthesis work, not the gates or angles. A negative
+    residual rejects the baseline and is never clamped to zero.
 
     Raises:
         ValueError: ``B_base`` exceeds ``max_bytes``.
@@ -1045,7 +1060,8 @@ def _construction_cache_capacity(max_bytes, *, held_bytes, model_bytes, latest_b
                 + max(int(build_bytes), int(use_bytes)))
     _require_bytes(max_bytes, held=held_bytes,
                    local=baseline - int(held_bytes), stage="binary construction and use")
-    return int(max_bytes) - baseline
+    limit = memory_limit(max_bytes)
+    return CONSTRUCTION_CACHE_BYTES if limit is None else min(CONSTRUCTION_CACHE_BYTES, limit - baseline)
 
 
 def _construction_entry_bytes(built, *, entries, support_size):
@@ -1266,18 +1282,22 @@ class BinaryModel:
     def __init__(self, grid, method, support_values, *, held_bytes=0):
         self.bits = register_bits(grid.num_grid_points)
         # The caller's residents, the model, one current construction per table and the largest
-        # synthesis or use workspace are admitted before any array is built. The rest funds the
-        # optional whole-model cache (_construction_cache_capacity).
-        self._cache_capacity = _construction_cache_capacity(
-            method.max_bytes, held_bytes=held_bytes, **dict(zip(
-                ("model_bytes", "latest_bytes", "build_bytes", "use_bytes"),
-                _model_reservation(
-                    grid.num_variables, self.bits,
-                    [(t.values.array.size, len(t.support)) for t in support_values],
-                    cutoff=method.binary_synthesis.aqft_cutoff,
-                    swaps=method.binary_synthesis.qft_bit_reversal == "swap",
-                    potential_walsh=method.binary_synthesis.potential != "dense_diagonal"),
-                strict=True)))
+        # synthesis or use workspace are admitted before any array is built. Up to
+        # CONSTRUCTION_CACHE_BYTES of the rest funds the optional whole-model cache
+        # (_construction_cache_capacity).
+        parts = dict(zip(
+            ("model_bytes", "latest_bytes", "build_bytes", "use_bytes"),
+            _model_reservation(
+                grid.num_variables, self.bits,
+                [(t.values.array.size, len(t.support)) for t in support_values],
+                cutoff=method.binary_synthesis.aqft_cutoff,
+                swaps=method.binary_synthesis.qft_bit_reversal == "swap",
+                potential_walsh=method.binary_synthesis.potential != "dense_diagonal"),
+            strict=True))
+        # B_base - held_bytes, the bytes this model admits beside its caller's data.
+        self._local_bytes = (parts["model_bytes"] + parts["latest_bytes"]
+                             + max(parts["build_bytes"], parts["use_bytes"]))
+        self._cache_capacity = _construction_cache_capacity(method.max_bytes, held_bytes=held_bytes, **parts)
         synthesis = method.binary_synthesis
         relabel = synthesis.qft_bit_reversal == "relabel"
         self.kinetic = tuple(
@@ -1331,11 +1351,12 @@ class BinaryModel:
         construction per table, and the largest synthesis or use workspace
         against QHD.max_bytes. For classical evolution the allowance includes
         the state buffers and the complex phase tables that stay in memory.
-        For inspection it includes the rotation count. The remaining bytes are
-        available for optional whole-model cache entries. A miss is built
-        within the bytes already counted for the current construction and
-        kept in the whole-model cache only when its phase or mask/angle
-        payload and key/scalar metadata fit that remainder. A fallback still
+        For inspection it includes the rotation count. Up to
+        ``CONSTRUCTION_CACHE_BYTES`` of the remaining bytes are available for
+        optional whole-model cache entries. A miss is built within the bytes
+        already counted for the current construction and kept in the
+        whole-model cache only when its phase or mask/angle payload and
+        key/scalar metadata fit that capacity. A fallback still
         stays within the counted bytes and repeats synthesis work, which
         construction_counts records. Every block occurrence keeps its
         original multiplicity in the gate counts and error contributions.
@@ -1468,13 +1489,13 @@ def compile_binary_steps(model, method, step_weights, constant):
     (first order, ``U_K(alpha) exp(-i B V)``), or the potential blocks for
     dt/2, the kinetic blocks for dt and the potential blocks for dt/2 again
     (second order, ``exp(-i B/2 V) U_K(alpha) exp(-i B/2 V)``), the ordering
-    of the one-hot compiler (``compiler.QHDCompiler.build_step_pauli_ir``).
+    of the one-hot compiler (``onehot_schedule`` module docstring).
     Under the ``"integrated"`` coefficient rule the weights are the step
     averages, so both potential halves apply ``B_k/2``, the convention every
     route uses. Equal halves make the step the symmetric split of the first
     Magnus exponent, which keeps its time-ordering and product-formula errors
     separate, as ``method._error_model`` declares them, while unequal halves
-    would mix the two (``compiler.QHDCompiler.build_step_pauli_ir`` derives
+    would mix the two (the ``onehot_schedule`` module docstring derives
     this). The support tables are diagonal and commute, so their order
     within a potential factor adds no error. ``U_K(alpha)`` is the product of
     the per-variable conjugations ``F^dagger exp(-i alpha diag(E_j)) F``,
@@ -1569,7 +1590,8 @@ def compile_binary_steps(model, method, step_weights, constant):
         constant's N contributions (``method._phase_contributions`` counts
         them), ``phase_sources``, ``walsh_phase`` (``WalshPhaseTerms``),
         ``dropped_count``, ``dropped_angle_sum`` (the dropped absolute ``Rz``
-        angles summed exactly and rounded to nearest), ``pruning_error_bound``
+        angles summed exactly and rounded to nearest, None beyond the
+        binary64 range), ``pruning_error_bound``
         and ``aqft_error_bound``, and ``range_omissions``, the lower-range
         omissions of this compilation with their exact contributions, the Walsh
         normalization omissions of a table counted only when a selected
@@ -1578,13 +1600,14 @@ def compile_binary_steps(model, method, step_weights, constant):
         bound is half the exact sum of the absolute angles that the
         threshold dropped, which each block records as an integer count of
         ``2**-1074``, plus the exact range contributions of the omitted rotations
-        and dense entries. The sum is exact and converted to binary64 once
+        and dense entries, capped at 2 because both products are unitary.
+        The sum is exact and converted to binary64 once
         upward (``evolution_bounds._upward``), so the recorded bound is never
         below the exact value and is 0.0 exactly when nothing is omitted.
     """
     from math import fsum
 
-    from .evolution_bounds import _upward
+    from .evolution_bounds import _nearest, _upward
     from .method import _add_up, _gamma_up, _mul_up, _sum_up
     from .records import QHDBinaryBlock
 
@@ -1718,11 +1741,12 @@ def compile_binary_steps(model, method, step_weights, constant):
         walsh_phase=WalshPhaseTerms(count=walsh_count, identity_sum=_sum_up(identity_phases),
                                     formation=_sum_up(formations), reconstruction=_sum_up(reconstructions)),
         dropped_count=dropped_count,
-        # The exact sum of the dropped absolute angles, rounded to nearest.
-        dropped_angle_sum=float(Fraction(dropped_units, 1 << 1074)),
+        # The exact sum of the dropped absolute angles, rounded to nearest, or None beyond the binary64 range.
+        dropped_angle_sum=_nearest(Fraction(dropped_units, 1 << 1074)),
         # ||Rz(theta) - I|| <= |theta|/2 per dropped rotation, halved exactly, plus the exact range charges,
-        # rounded up once.
-        pruning_error_bound=_upward(Fraction(dropped_units, 1 << 1075) + charges["rotation"] + charges["dense"]),
+        # capped at 2, the largest distance between two unitaries, and rounded up once.
+        pruning_error_bound=_upward(min(Fraction(2), Fraction(dropped_units, 1 << 1075) + charges["rotation"]
+                                        + charges["dense"])),
         aqft_error_bound=aqft,
         # A table's normalization omissions count only where a selected Walsh block uses its coefficients.
         range_omissions=dict(

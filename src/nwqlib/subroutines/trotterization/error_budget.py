@@ -32,9 +32,14 @@ The commutator sums used outside dense validation take Pauli commutation
 relations and coefficient magnitudes. Norm subadditivity plus
 ``||[P, Q]|| = 2`` and ``||[P, [Q, R]]|| = 4`` for nonzero Pauli
 commutators makes these triangle expansions certified upper bounds on the
-tail-sum spectral norms in Props. 9-10. At order 2 a caller can choose the
-full triangle expression or its degree-capped suffix relaxation, which
-needs pair tests only (``_pauli_bound_coefficient_from_terms``).
+tail-sum spectral norms in Props. 9-10. At order 2 the full triangle
+expression ("exact_census") or its degree-capped suffix relaxation
+("relaxed_prefix"), which needs pair tests only, can be requested, and
+"auto" takes the full expression when its selection count N(A) max(w, K)
+is at most EXACT_CENSUS_WORD_TESTS (``choose_variant``). N(A) is the
+number of nested tests, w the mask words per test and K the number of
+weightings contracted with the same masks, so the count is the larger of
+the w N(A) nested word tests and the K N(A) weight products.
 
 Outward evaluation. The Pauli-triangle coefficient is evaluated with scaled
 binary64 upper products and sums, followed by rational rescaling. Its value
@@ -52,18 +57,19 @@ norms from dense ``2**n`` by ``2**n`` matrices, for small-instance
 validation only.
 
 Commutation census. The census, called the Pauli commutation table in the
-user documentation, of an ordered Pauli term list is its table of
-anticommuting pairs and, for the full second-order expression, its table
-of triples with a nonzero nested commutator. ``census_work`` and
-``census_bytes``, with ``choose_census_block``, give the work and bytes of
-one shared census before it is built. A caller can then choose the full or
-relaxed expression, or refuse, before building it. The bytes include the
-packed masks, the pair and triple tables held together, the overhead of the
-partial index arrays, the row tests and the bounded coefficient-reduction
-workspace. ``choose_census_block`` picks the block size from the remaining
-byte allowance, including the partial sums kept between blocks. The public
-functions check their census in two stages against ``max_work`` and
-``max_bytes`` (``_bound_coefficient_evaluation``).
+user documentation, of an ordered Pauli term list is its rows of
+anticommuting pairs (``pair_rows``). The full second-order expression
+forms, for each pair, the mask of the later terms that anticommute with
+the pair product and contracts it with the magnitudes, a tile of
+_PAIR_TILE pairs at a time, so only one tile of masks is held
+(``coefficient_up``). The same masks serve every weighting of one label
+table, such as the LCHS quadrature nodes. The expression is chosen from
+counts alone (``census_structure``), so memory never changes the
+expression or the arithmetic grouping. ``census_work`` counts the work for
+an explicit work limit, and ``census_bytes`` gives a coarse estimate of the
+dominant arrays, which are checked against the memory limit before the
+contraction. Its nested-mask term charges the largest tile that the pair
+rows can form, zero when no pair anticommutes.
 
 Common steps. ``common_steps`` chooses an ideal rational step whose
 integer repetitions reach the target times ``p*val(tau)`` for nonnegative
@@ -71,10 +77,11 @@ integer powers ``p``, where ``val(tau)`` is the exact value of the stored
 binary64 time unit. The emitted step, angles and phases are the binary64
 values that the circuit uses. ``select_common_step`` accepts the
 corresponding shared ordered second-order step only after the subtotal
-defined by ``emitted_subtotal`` fits every requested prefix's allowance.
+B_p defined by ``_emitted_parts`` fits every requested prefix's allowance.
 This subtotal includes product-formula, pruning, time-displacement,
 identity-phase and rotation-angle bounds evaluated with the emitted
-binary64 step, angles and phases.
+binary64 step, angles and phases. A first count that misses it by rounding
+gets a bounded correction on the same grid (``_common_envelope_count``).
 
 Circuit construction delegates to the ``hamiltonian_evolution`` helpers,
 ``build_sparse_pauli_product_circuit`` over ``build_pauli_evolution_circuit``,
@@ -87,7 +94,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from fractions import Fraction
 from functools import reduce
-from math import ceil, frexp, gcd, inf, isfinite, isqrt, nextafter
+from math import ceil, frexp, fsum, gcd, inf, isfinite, isqrt, nextafter
 from sys import float_info
 from typing import TYPE_CHECKING, Any
 
@@ -97,7 +104,7 @@ if TYPE_CHECKING:
 
 import numpy as np
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from nwqlib._limits import ResourceLimitError, check_memory, exceeds
 
 
 # These strings leave the module in TrotterStepSelection.to_dict output and in
@@ -112,10 +119,24 @@ TROTTER_BOUND_REFERENCE = (
 """Citation text of the Trotter error bounds, Childs et al., Phys. Rev. X 11, 011020 (2021), doi:10.1103/PhysRevX.11.011020, with the note that cited proposition, equation and section numbers follow that journal version."""
 
 BOUND_VARIANTS = ("exact_census", "relaxed_prefix")
-# Default census work allowance of the public helpers, matching the QPE
-# planning-work default. An engineering default, not a mathematical ceiling
-# (docs/ENGINEERING_CONSTANTS.md).
-DEFAULT_CENSUS_MAX_WORK = 1_000_000_000
+# "auto" chooses the exact second-order census when N(A)*max(w, K) is at
+# most this count, and the relaxed one above it. With one weighting (K = 1)
+# the count is the w*N(A) logical nested word tests. K weightings contracted
+# with the same masks also make K*N(A) weight products, and the count keeps
+# the nested work w*N(A) + K*N(A) within twice this value, the work that one
+# weighting at w = 1 is allowed. The weight products are counted like word
+# tests by choice, without a measured cost ratio. The threshold sits
+# just above the 1,280,549,200 word tests of a 2500-term table, which an
+# earlier triple-table implementation took 7.5 s to count (0.41 s and 1.56 s
+# for 80,918,050 and 270,132,409 tests at 1000 and 1500 terms) on 20-qubit
+# 2-4-local Pauli sums. A choice of expression, not a limit: both variants
+# plan when their arrays fit memory.
+# Registered in docs/ENGINEERING_CONSTANTS.md. Revisit when the exact
+# contraction or its measured cost changes.
+EXACT_CENSUS_WORD_TESTS = 1_300_000_000
+# Pairs of one row whose nested masks are formed together. Fixed, so that
+# memory never changes the arithmetic grouping.
+_PAIR_TILE = 32
 
 _PROP9 = "[CSTWZ doi:10.1103/PhysRevX.11.011020 Prop. 9, Eq. (120), Phys. Rev. X numbering]"
 _PROP10 = "[CSTWZ doi:10.1103/PhysRevX.11.011020 Prop. 10, Eq. (121), Phys. Rev. X numbering]"
@@ -208,11 +229,11 @@ class TrotterStepSelection:
     selection for one evolution time. The maximum target time
     ``p_max*val(common_tau)``, where ``p_max`` is the largest requested
     power, and each represented prefix time ``r(p)*val(common_step_time)``
-    are computed from the fields and not recorded. On construction, the
-    record computes ``g = common_g`` as the greatest common divisor of the
-    positive powers, requires every power to be divisible by it and checks
-    ``r(p) = (p/g)*m`` with ``m = common_m``, the positive subdivision count.
-    The all-zero schedule has no g, m or step and no common selection.
+    are computed from the fields and not recorded. ``select_common_step``
+    sets ``common_g`` to the greatest common divisor g of the positive
+    powers and ``common_m`` to the positive subdivision count m, so that
+    ``r(p) = (p/g)*m``. The all-zero schedule has no g, m or step and no
+    common selection.
 
     Attributes:
         formula_order: Lie-Trotter order 1 or symmetric Suzuki order 2.
@@ -251,15 +272,13 @@ class TrotterStepSelection:
             node.
         pair_commutation_checks: Number of new pair commutation tests that
             this selection performed, zero when the coefficient or the Pauli
-            commutation table (anticommuting pairs and, for the full
-            second-order expression, triples with a nonzero nested
-            commutator) was reused.
+            commutation table (its anticommuting pairs) was reused.
         nested_commutation_checks: Number of new nested commutation tests
             that this selection performed, zero for relaxed_prefix or a
             reused Pauli commutation table.
         bound_variant: Pauli-triangle expression used, "exact_census" for
-            the Pauli commutation table of anticommuting pairs and, at second
-            order, triples with a nonzero nested commutator, or
+            the full expression over the anticommuting pairs and, at second
+            order, every later term anticommuting with each pair product, or
             "relaxed_prefix" for the second-order degree-capped suffix
             relaxation. Order 1 uses "exact_census".
         common_tau: Finite positive binary64 time unit. The exact target
@@ -312,45 +331,6 @@ class TrotterStepSelection:
             raise ValueError(f"unknown Pauli-triangle bound variant {self.bound_variant!r}")
         if self.formula_order == 1 and self.bound_variant == "relaxed_prefix":
             raise ValueError("order 1 records the exact_census expression")
-        common = (
-            self.common_tau, self.common_g, self.common_m, self.common_step_time,
-            self.common_prefix_steps, self.common_power_allowances,
-            self.common_recheck_outcome, self.common_prefix_bounds,
-        )
-        if all(value is None for value in common):
-            return
-        if self.formula_order != 2:
-            raise ValueError("a common selection uses the second-order step")
-        if (self.common_tau is None or self.common_prefix_steps is None
-                or self.common_power_allowances is None or self.common_prefix_bounds is None
-                or self.common_recheck_outcome != "accepted"):
-            raise ValueError("a common selection records tau, prefix counts, allowances, "
-                             "bounds and an accepted recheck together")
-        if not (isfinite(self.common_tau) and self.common_tau > 0):
-            raise ValueError("common_tau must be finite and positive")
-        steps = dict(self.common_prefix_steps)
-        if (len(steps) != len(self.common_prefix_steps)
-                or len(self.common_power_allowances) != len(steps)
-                or len(self.common_prefix_bounds) != len(steps)
-                or any(type(p) is not int or p < 0 for p in steps)
-                or {p for p, _ in self.common_power_allowances} != set(steps)
-                or {p for p, _ in self.common_prefix_bounds} != set(steps)):
-            raise ValueError("common prefix counts, allowances and bounds need the same "
-                             "distinct nonnegative integer powers")
-        positive = [p for p in steps if p]
-        if not positive:
-            raise ValueError("the all-zero schedule has no common selection")
-        g = reduce(gcd, positive)
-        m = self.common_m
-        if self.common_g != g or type(m) is not int or m < 1:
-            raise ValueError("common_g must be the gcd of the positive powers and common_m positive")
-        if any(steps[p] != p // g * m for p in steps):
-            raise ValueError("common prefix counts must be r(p) = (p/g)*m with r(0) = 0")
-        if self.step_count != steps[max(positive)]:
-            raise ValueError("step_count must be the common count at the largest power")
-        h = self.common_step_time
-        if h is None or not isfinite(h) or h <= 0:
-            raise ValueError("common_step_time must be a finite positive binary64 step")
 
     @property
     def bound_formula(self) -> str:
@@ -472,58 +452,57 @@ def _finite_upper(value, name):
     return result
 
 
-def _add_nonnegative_up(a, b):
-    """Return a binary64 upper bound on a + b for finite nonnegative binary64 a and b.
-
-    If either operand is zero the exact sum is the other one. Otherwise the
-    exact sum lies no higher than the next binary64 number above the
-    round-to-nearest sum r, so nextafter(r, inf) bounds it, also for
-    subnormal results. A nonfinite result raises.
-    """
-    if a == 0.0:
-        return b
-    if b == 0.0:
-        return a
-    result = nextafter(a + b, inf)
-    if not isfinite(result):
-        raise ValueError("dropped coefficient mass enclosure exceeds binary64 range")
-    return result
-
-
 def upper_dropped_mass(dropped_coefficients):
     """Return mass_up >= sum_D |c_j| over the dropped stored complex coefficients c_j.
 
     D is exactly the set selected by the caller's cutoff test. For
     c = x + iy with binary64 components, |c| = sqrt(x**2 + y**2) <= |x| + |y|,
-    and each |x|, |y| is exact. The accumulator starts at zero and adds every
-    real and imaginary absolute component upward (``_add_nonnegative_up``),
-    so by induction it bounds the exact component sum S >= d = sum_D |c_j|.
-    S = d for real coefficients and can exceed d by at most a factor sqrt(2)
-    for complex residues before accumulation rounding. All-zero input stays
-    exactly zero, and exact cancellation contributes zero. The result can
-    exceed the least binary64 upper bound of S after repeated upward
-    additions. This is a deliberate trade of accuracy for a constant amount
-    of work per coefficient in a streamed upper bound. It may increase the
-    chosen step count or exhaust an allowance. A nearest-rounded fsum of
-    moduli is not an upper bound, since for 2**-41 and 2**-100 it returns
-    2**-41. The final budget composition rounds the exact rational value
-    upward once (``upper_pruning_error``, ``upper_combined_error``).
+    and each |x|, |y| is exact, so the exact component sum S bounds
+    d = sum_D |c_j|. S = d for real coefficients and can exceed d by at most
+    a factor sqrt(2) for complex residues. The coefficients are read once,
+    as a stream, and their nonzero absolute components go to math.fsum.
+    With round-to-nearest, which Python does not change, fsum returns S
+    rounded to nearest, so one step up with nextafter bounds S. Python
+    documents that on some builds whose C library adds in extended precision
+    the result can be off by one unit in the last place, so two steps up
+    bound S on every build, at most about 2.5 units in the last place above
+    it. A sum of no or one nonzero component is exact and is returned
+    unchanged, +0.0 for no component. The final budget composition rounds
+    the exact rational value upward once (``upper_pruning_error``,
+    ``upper_combined_error``).
 
-    Work, in scalar visits: at most 16 per dropped coefficient (one complex
+    Work, in scalar visits: at most 10 per dropped coefficient (one complex
     conversion, two finiteness checks and their combination, two absolute
-    values and two upward additions of five visits each) and four per call,
-    so 16*d + 4 for d dropped coefficients. Workspace is 128 logical bytes,
-    counted once. These units are proxies used to check work limits, not
-    timings or equal-cost CPU operations. Source: NWQLib's derivation for this module (Python's
-    math.nextafter directed step), not a paper theorem.
+    values, two zero tests and two fsum inputs, one visit each) and five per
+    call (the fsum result, the count test, two steps up and their finiteness
+    check), so 10*d + 5 for d dropped coefficients. Workspace is the list of
+    nonoverlapping partials that fsum keeps. Its length depends on the
+    spread of the binary64 exponents, not on d, and it is counted once as
+    512 logical bytes. These units are proxies used to check work limits, not
+    timings or equal-cost CPU operations. Source: NWQLib's derivation for
+    this module (Python's math.fsum and math.nextafter), not a paper theorem.
     """
-    mass = 0.0
-    for coefficient in dropped_coefficients:
-        c = complex(coefficient)
-        if not (isfinite(c.real) and isfinite(c.imag)):
-            raise ValueError("dropped coefficients must be finite")
-        mass = _add_nonnegative_up(mass, abs(c.real))
-        mass = _add_nonnegative_up(mass, abs(c.imag))
+    nonzero = 0
+
+    def components():
+        nonlocal nonzero
+        for coefficient in dropped_coefficients:
+            c = complex(coefficient)
+            if not (isfinite(c.real) and isfinite(c.imag)):
+                raise ValueError("dropped coefficients must be finite")
+            for part in (abs(c.real), abs(c.imag)):
+                if part:
+                    nonzero += 1
+                    yield part
+
+    try:
+        mass = fsum(components())
+    except OverflowError as error:
+        raise ValueError("dropped coefficient mass enclosure exceeds binary64 range") from error
+    if nonzero > 1:
+        mass = nextafter(nextafter(mass, inf), inf)
+        if not isfinite(mass):
+            raise ValueError("dropped coefficient mass enclosure exceeds binary64 range")
     return mass
 
 
@@ -629,17 +608,6 @@ def _validate_order(order: int) -> int:
     return int(order)
 
 
-def _validate_variant(variant: str, order: int) -> str:
-    """Return the recorded variant: ``variant`` at order 2, "exact_census" at order 1.
-
-    At order 1 both variants are the same pair-only expression W_1, which
-    the record names "exact_census".
-    """
-    if variant not in BOUND_VARIANTS:
-        raise ValueError(f"bound_variant must be one of {BOUND_VARIANTS}; got {variant!r}")
-    return "exact_census" if order == 1 else variant
-
-
 def _validate_time(time: float) -> float:
     """Return ``time`` as a positive finite float. Props. 9-10 are stated for t >= 0."""
     value = float(time)
@@ -651,61 +619,44 @@ def _validate_time(time: float) -> float:
     return value
 
 
-def _term_matrices(terms: list[tuple[str, float]]) -> list[np.ndarray]:
-    """Dense validation-scale matrices ``c_gamma * P_gamma`` (cost ``4**n``)."""
-    from qiskit.quantum_info import SparsePauliOp
-
-    return [
-        np.asarray(SparsePauliOp.from_list([(label, coefficient)]).to_matrix())
-        for label, coefficient in terms
-    ]
-
-
-def _suffix_pairs(matrices: list[np.ndarray]) -> list[tuple[np.ndarray, np.ndarray]]:
-    """Pair each summand with its later-term sum, preserving summand order."""
-
-    tail = np.zeros_like(matrices[0])
-    pairs: list[tuple[np.ndarray, np.ndarray]] = []
-    for head in reversed(matrices):
-        pairs.append((head, tail.copy()))
-        tail = tail + head
-    pairs.reverse()
-    return pairs
-
-
 def _spectral_norm(matrix: np.ndarray) -> float:
     return float(np.linalg.norm(matrix, 2))
 
 
-def _first_order_commutator_sum(matrices: list[np.ndarray]) -> float:
-    """``C1 = sum_gamma1 ||[T_gamma1, H_gamma1]||`` with the Eq. (120) tail sum.
+def _tail_commutator_norms(terms, order: int) -> list[tuple[float, ...]]:
+    """Return, in term order, the spectral norms that Eqs. (120)-(121) sum over the terms H_gamma1 = c P.
 
-    Bilinearity gives ``sum_{gamma2 > gamma1} [H_gamma2, H_gamma1] =
-    [T_gamma1, H_gamma1]`` for the suffix sum ``T_gamma1``, maintained in
-    reverse so the pass costs two matrix products per summand.
+    With the suffix sum ``T_gamma1 = sum_{gamma2 > gamma1} H_gamma2``,
+    bilinearity gives ``sum_{gamma2 > gamma1} [H_gamma2, H_gamma1] =
+    [T_gamma1, H_gamma1]``. Order 1 returns ``||[T_gamma1, H_gamma1]||`` of
+    C1, and order 2 the pair ``||[T_gamma1, [T_gamma1, H_gamma1]]||`` of C12
+    and ``||[H_gamma1, [H_gamma1, T_gamma1]]||`` of C24. The terms are
+    visited last to first and each dense matrix (``4**n`` entries) is
+    formed only when visited, so the term matrix, T and the commutator
+    products of one term are live at a time, not every term matrix and
+    every suffix sum. T starts at zero and adds each visited term, the same
+    additions in the same order as a forward pairing of precomputed
+    suffix sums, so the norms are bit for bit those of that pairing, and
+    the callers sum them first to last.
     """
+    from qiskit.quantum_info import SparsePauliOp
 
-    total = 0.0
-    for head, tail_sum in _suffix_pairs(matrices):
-        total += _spectral_norm(tail_sum @ head - head @ tail_sum)
-    return total
-
-
-def _second_order_commutator_sums(matrices: list[np.ndarray]) -> tuple[float, float]:
-    """``(C12, C24)`` of Eq. (121), with ``T_gamma1 = sum_{gamma2 > gamma1} H_gamma2``.
-
-    ``C12 = sum_gamma1 ||[T_gamma1, [T_gamma1, H_gamma1]]||`` and
-    ``C24 = sum_gamma1 ||[H_gamma1, [H_gamma1, T_gamma1]]||``.
-    """
-
-    c12 = 0.0
-    c24 = 0.0
-    for head, tail_sum in _suffix_pairs(matrices):
-        inner_t = tail_sum @ head - head @ tail_sum  # [T_gamma1, H_gamma1]
-        c12 += _spectral_norm(tail_sum @ inner_t - inner_t @ tail_sum)
-        inner_h = -inner_t  # [H_gamma1, T_gamma1] is the exact negation
-        c24 += _spectral_norm(head @ inner_h - inner_h @ head)
-    return c12, c24
+    norms = []
+    tail = None
+    for label, coefficient in reversed(terms):
+        head = np.asarray(SparsePauliOp.from_list([(label, coefficient)]).to_matrix())
+        if tail is None:
+            tail = np.zeros_like(head)
+        inner_t = tail @ head - head @ tail  # [T_gamma1, H_gamma1]
+        if order == 1:
+            norms.append((_spectral_norm(inner_t),))
+        else:
+            inner_h = -inner_t  # [H_gamma1, T_gamma1] is the exact negation
+            norms.append((_spectral_norm(tail @ inner_t - inner_t @ tail),
+                          _spectral_norm(head @ inner_h - inner_h @ head)))
+        tail += head
+    norms.reverse()
+    return norms
 
 
 @dataclass(frozen=True)
@@ -721,9 +672,13 @@ class _BoundCoefficientEvaluation:
             Pauli-triangle expression (``coefficient_up``).
         pauli_term_count: Number of Pauli terms in the census.
         pair_commutation_checks: Logical pair tests performed, P = p(p-1)/2.
-        nested_commutation_checks: Logical nested tests performed, N for
-            the exact order-2 structure and zero otherwise.
+        nested_commutation_checks: Logical nested tests performed, N(A) for
+            the exact order-2 census and zero otherwise.
         bound_variant: "exact_census" or "relaxed_prefix".
+        nested_word_tests: w*N(A), the logical nested word tests of the
+            full expression, whether or not the tests were made. For one
+            weighting it is the count that chose the expression at order 2
+            (``choose_variant``).
     """
 
     coefficient: Fraction
@@ -731,6 +686,7 @@ class _BoundCoefficientEvaluation:
     pair_commutation_checks: int
     nested_commutation_checks: int
     bound_variant: str
+    nested_word_tests: int = 0
 
 
 def _upward_float(value):
@@ -830,18 +786,22 @@ def pack_labels(labels, q):
     Inputs are validated, equally wide, ordered canonical Pauli labels.
     This convention reverses the physical-bit order of PauliTerms, where
     physical qubit zero, the rightmost character, is bit zero. Never mix
-    tables from the two conventions.
+    tables from the two conventions. Besides the tables, the ASCII codes of
+    the labels, one difference array and one Boolean mask, 3*len(labels)*q
+    bytes, are held at once.
     """
-    x = np.zeros((len(labels), (q + 63) // 64), dtype=np.uint64)
-    z = np.zeros_like(x)
-    for i, label in enumerate(labels):
-        for b, symbol in enumerate(label):
-            bit = np.uint64(1) << np.uint64(b % 64)
-            if symbol in "XY":
-                x[i, b // 64] |= bit
-            if symbol in "YZ":
-                z[i, b // 64] |= bit
-    return x, z
+    p, words = len(labels), (q + 63) // 64
+    # Row i holds the ASCII codes of label i, column b its character b.
+    chars = np.frombuffer("".join(labels).encode("ascii"), dtype=np.uint8).reshape(p, q)
+    tables = []
+    # X, Y and Z have consecutive codes, so an unsigned difference of at most
+    # one from X marks X or Y, and from Y marks Y or Z.
+    for first in ("X", "Y"):
+        packed = np.zeros((p, 8 * words), dtype=np.uint8)
+        # Little-endian bit order within bytes and words puts character b at bit b % 64 of word b // 64.
+        packed[:, :(q + 7) // 8] = np.packbits(chars - np.uint8(ord(first)) <= 1, axis=1, bitorder="little")
+        tables.append(packed.view("<u8").astype(np.uint64, copy=False))
+    return tables[0], tables[1]
 
 
 def anti(x1, z1, x2, z2):
@@ -855,38 +815,49 @@ def anti(x1, z1, x2, z2):
     return (np.bitwise_count(bits).sum(axis=-1, dtype=np.uint64) & 1) != 0
 
 
-def pair_structure(x, z):
-    """Return anticommuting i<j pairs and the p*(p-1)//2 logical tests.
+def pair_rows(x, z, *, max_bytes=None):
+    """Return ``(rows, P)``: rows[i] holds the j > i whose Pauli anticommutes with P_i, ascending.
 
-    Work is O(p^2*w), stored output O(|A|), workspace O(p*w).
+    P = p(p-1)/2 logical pair tests are made. Work is O(p^2 w), and the
+    rows hold O(E) indices without a concatenated copy (16pw bytes of masks
+    and about 8E + 128p bytes of rows, checked against ``max_bytes``, None
+    for the physical memory, as they grow).
     """
-    chunks = []
-    p = len(x)
-    for i in range(p - 1):
+    p, w = x.shape if x.ndim == 2 else (len(x), 0)
+    rows, pairs = [], 0
+    for i in range(p):
         js = np.flatnonzero(anti(x[i], z[i], x[i + 1:], z[i + 1:])) + i + 1
-        if js.size:
-            chunks.append(np.column_stack((np.full(js.size, i, dtype=np.intp), js)))
-    pairs = np.concatenate(chunks) if chunks else np.empty((0, 2), dtype=np.intp)
-    return pairs, p * (p - 1) // 2
+        rows.append(js.astype(np.intp, copy=False))
+        pairs += len(js)
+        check_memory(16 * p * w + 8 * pairs + 128 * (i + 1), max_bytes, "Pauli census pair rows")
+    return rows, p * (p - 1) // 2
 
 
-def triple_structure(x, z, pairs):
-    """Return (i,j,k) with (i,j) in A, k>i, and P_k anticommuting with P_i P_j.
+def nested_test_count(rows):
+    """Return N(A) = sum_i e_i (p-i-1), the nested tests of the exact census, from the row sizes e_i.
 
-    The range includes k=j. Work is O(w*sum_A(p-i-1)), storage O(|T|).
-    Concatenating the partial index arrays can temporarily double the
-    stored index bytes.
+    For every anticommuting pair (i, j) the exact census tests every k > i,
+    including k = j. With w = ceil(q/64), it makes w*N(A) logical nested
+    word tests, and K weightings make K*N(A) weight products
+    (``choose_variant``).
     """
-    chunks = []
-    checks = 0
-    for i, j in pairs:
-        ks = np.flatnonzero(anti(x[i] ^ x[j], z[i] ^ z[j], x[i + 1:], z[i + 1:])) + i + 1
-        checks += len(x) - int(i) - 1
-        if ks.size:
-            chunks.append(np.column_stack((np.full(ks.size, i, dtype=np.intp),
-                                           np.full(ks.size, j, dtype=np.intp), ks)))
-    triples = np.concatenate(chunks) if chunks else np.empty((0, 3), dtype=np.intp)
-    return triples, checks
+    p = len(rows)
+    return sum(len(row) * (p - 1 - i) for i, row in enumerate(rows))
+
+
+def choose_variant(order, requested, selection_count):
+    """Return the census expression: order 1 has one, an explicit request is kept, and "auto" compares N(A)*max(w, K) with EXACT_CENSUS_WORD_TESTS.
+
+    ``selection_count`` is N(A)*max(w, K) (``census_structure``). A count
+    equal to the threshold chooses the full expression.
+    """
+    if requested not in (*BOUND_VARIANTS, "auto"):
+        raise ValueError(f"bound_variant must be 'auto' or one of {BOUND_VARIANTS}; got {requested!r}")
+    if order == 1:
+        return "exact_census"
+    if requested == "auto":
+        return "exact_census" if selection_count <= EXACT_CENSUS_WORD_TESTS else "relaxed_prefix"
+    return requested
 
 
 def _sum_factor(n):
@@ -908,11 +879,14 @@ def mul_up(a, b):
 
     Finite nonnegative inputs and no overflow are required. Zero factors
     give exact zero. Positive underflow gives the smallest subnormal.
+    A product of two positive factors is at least +0, and binary64 values
+    from +0 upward are ordered like their bit patterns, so adding one to
+    the bit pattern is exactly nextafter(c, inf).
     """
     a, b = np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64)
     with np.errstate(under="ignore", over="raise", invalid="raise"):
         c = a * b
-    return np.where((a > 0) & (b > 0), np.nextafter(c, np.inf), 0.0)
+    return np.where(np.minimum(a, b) > 0, (c.view(np.int64) + 1).view(np.float64), 0.0)
 
 
 def sum_up(values):
@@ -949,285 +923,276 @@ def scaled_magnitudes(magnitudes):
     return np.where(m > 0, np.nextafter(a, np.inf), 0.0), e
 
 
-def coefficient_up(magnitudes, pairs, *, order, variant, triples=None, block=65536):
-    """Return a rational upper bound on the chosen Pauli-triangle W.
+def _row_sums(values):
+    """Outward sum of each row of nonnegative ``values`` (``sum_up`` along the last axis)."""
+    if values.shape[-1] == 1:
+        return values[..., 0].copy()
+    return mul_up(values.sum(axis=-1, dtype=np.float64), _sum_factor(values.shape[-1]))
 
-    variant is exact_census or relaxed_prefix. At order 1 both use A only.
-    At order 2 exact_census uses T, and relaxed_prefix uses
-    U_ij = min(S_i, D_i+D_j-a_i), with S_i = sum_{k>i} a_k and
-    D_v = sum_{k: P_v P_k = -P_k P_v} a_k. Symplectic bilinearity gives
+
+def coefficient_up(magnitudes, rows, *, order, variant, x=None, z=None):
+    """Return a rational upper bound on the chosen Pauli-triangle W, or one bound per row of ``magnitudes``.
+
+    ``magnitudes`` holds |c_i| in the census order, one row per weighting of
+    the same labels, such as LCHS nodes. A zero entry removes a label exactly.
+    ``rows`` comes from ``pair_rows``. variant is exact_census or
+    relaxed_prefix. At order 1 both use the pairs A only. At order 2
+    exact_census sums a_i a_j n_ij over A, with the nested mass
+    n_ij = sum_{k>i} a_k [P_k anticommutes with P_i P_j], k = j included,
+    formed from the masks ``x``, ``z`` one tile of pairs at a time.
+    relaxed_prefix uses U_ij = min(S_i, D_i+D_j-a_i), with S_i = sum_{k>i} a_k
+    and D_v = sum_{k: P_v P_k = -P_k P_v} a_k. Symplectic bilinearity gives
     s_{k,ij} = s_ki XOR s_kj <= s_ki+s_kj. Thus the exact nested mass over
     k>i is at most S_i and D_i+D_j-a_i, since (i,j) anticommutes and the
     range excludes i but includes j. The chosen coefficient is
-    sum_A a_i*a_j*U_ij/3 + sum_A a_i**2*a_j/6, between the full triangle
-    coefficient and its pure suffix relaxation (CSTWZ
-    doi:10.1103/PhysRevX.11.011020, Prop. 10, Eq. (121)).
-    Weights and reductions are outward. The power-of-two scale and the
-    divisors 3 and 6 are combined as Fractions once after each reduction.
-    This certifies W, without claiming exact evaluation of that W.
+    sum_A a_i*a_j*n_ij/3 + sum_A a_i**2*a_j/6 (CSTWZ
+    doi:10.1103/PhysRevX.11.011020, Prop. 10, Eq. (121)), with U_ij in place
+    of n_ij for the relaxation.
 
-    Assumptions: binary64 round-to-nearest, finite nonnegative inputs and
-    the stated reduction tree (``mul_up``, ``sum_up``). The result W_up is a
-    rational upper bound, not the exact rational Pauli-triangle
-    coefficient, so step selection uses the rational W_up*t**(o+1).
+    A mask of zeros and ones selects nonnegative magnitudes exactly, and a
+    binary64 sum of s values is enclosed by the sequential gamma factor of
+    ``_sum_factor`` for every addition tree. Products and the per-row and
+    final reductions are rounded outward (``mul_up``, ``sum_up``). The
+    grouping is fixed: one reduction per row of A, then one over the rows,
+    and nested masks are formed _PAIR_TILE pairs at a time. The power-of-two
+    scale and the divisors 3 and 6 are combined as Fractions once. This
+    bounds W from above, without claiming exact evaluation of that W.
+
+    Assumptions: binary64 round-to-nearest and finite nonnegative inputs.
     Underflow-aware outward rounding preserves validity over the finite
     input range but has no useful uniform relative-error guarantee when
-    monomials underflow after normalization. ``block`` is a workspace-size
-    choice (``choose_census_block``), not a tolerance. The bound holds for
-    every positive block size, and no p*p*p array is allocated.
-
-    Degree rows sum at most p-1 enclosed weights. _sum_factor encloses
-    each row's addition tree before the row is used. For a pair, the
-    enclosed D_j includes a_i, so upward D_j-a_i encloses a nonnegative
-    remainder. The subtraction, union sum and minimum remain outward and
-    monotone in the enclosed weights. A negative remainder violates the
-    assumption that (i, j) anticommutes. Degree weights are rebuilt for
-    this term table, including the own magnitudes of a restricted LCHS
-    quadrature node, and only pair blocks are gathered.
+    monomials underflow after normalization. For relaxed_prefix a negative
+    D_j - a_i remainder violates the assumption that (i, j) anticommutes.
     """
-    a, e = scaled_magnitudes(magnitudes)
-    if order not in (1, 2) or variant not in ("exact_census", "relaxed_prefix"):
+    m = np.asarray(magnitudes, dtype=np.float64)
+    single = m.ndim == 1
+    m = m.reshape(1, -1) if single else m
+    if order not in (1, 2) or variant not in BOUND_VARIANTS:
         raise ValueError("invalid formula or bound variant")
-    if order == 2 and variant == "exact_census" and triples is None:
-        raise ValueError("exact census requires its triple structure")
-    suffix = np.zeros(len(a), dtype=np.float64)
-    if order == 2 and variant == "relaxed_prefix" and len(a) > 1:
-        raw = np.cumsum(a[:0:-1], dtype=np.float64)[::-1]
-        suffix[:-1] = mul_up(raw, _sum_factor(len(a) - 1))
-        del raw
+    exact2 = order == 2 and variant == "exact_census"
+    if exact2 and x is None:
+        raise ValueError("the exact census requires the Pauli masks")
+    scaled = [scaled_magnitudes(row) for row in m]
+    a = np.array([row for row, _ in scaled]).reshape(m.shape)
+    nodes, p = a.shape
     if order == 2 and variant == "relaxed_prefix":
-        degree = np.zeros(len(a), dtype=np.float64)
-        for start in range(0, len(pairs), block):
-            i, j = pairs[start:start + block].T
-            np.add.at(degree, i, a[j])
-            np.add.at(degree, j, a[i])
-        degree = mul_up(degree, _sum_factor(max(1, len(a) - 1)))
-    part1, part24, part12 = [], [], []
-    for start in range(0, len(pairs), block):
-        i, j = pairs[start:start + block].T
-        ij = mul_up(a[i], a[j])
+        suffix = np.zeros_like(a)
+        if p > 1:
+            raw = np.cumsum(a[:, :0:-1], axis=1, dtype=np.float64)[:, ::-1]
+            suffix[:, :-1] = mul_up(raw, _sum_factor(p - 1))
+            del raw
+        degree = np.zeros_like(a)
+        for i, js in enumerate(rows):
+            if len(js):
+                degree[:, i] += a[:, js].sum(axis=1)
+                degree[:, js] += a[:, i:i + 1]
+        degree = mul_up(degree, _sum_factor(max(1, p - 1)))
+    # Per-row partial sums, zero for a row without pairs.
+    part12, part24 = np.zeros_like(a), np.zeros_like(a) if order == 2 else None
+    for i, js in enumerate(rows):
+        if not len(js):
+            continue
+        ai = a[:, i:i + 1]
+        ij = mul_up(ai, a[:, js])
         if order == 1:
-            part1.append(sum_up(ij))
+            part12[:, i] = _row_sums(ij)
+            continue
+        part24[:, i] = _row_sums(mul_up(ij, ai))
+        if variant == "relaxed_prefix":
+            remainder = np.nextafter(degree[:, js] - ai, np.inf)
+            union = np.nextafter(degree[:, i:i + 1] + remainder, np.inf)
+            nested = np.minimum(suffix[:, i:i + 1], union)
+            del remainder, union
         else:
-            part24.append(sum_up(mul_up(ij, a[i])))
-            if variant == "relaxed_prefix":
-                remainder = np.nextafter(degree[j] - a[i], np.inf)
-                union = np.nextafter(degree[i] + remainder, np.inf)
-                cap = np.minimum(suffix[i], union)
-                part12.append(sum_up(mul_up(ij, cap)))
-                del remainder, union, cap
-    if order == 1:
-        return Fraction(sum_up(part1)) * Fraction(2) ** (2 * e)
-    if variant == "exact_census":
-        for start in range(0, len(triples), block):
-            i, j, k = triples[start:start + block].T
-            part12.append(sum_up(mul_up(mul_up(a[i], a[j]), a[k])))
-    w = Fraction(sum_up(part12)) / 3 + Fraction(sum_up(part24)) / 6
-    return w * Fraction(2) ** (3 * e)
+            tail = a[:, i + 1:]
+            nested = np.empty((nodes, len(js)))
+            for start in range(0, len(js), _PAIR_TILE):
+                tile = js[start:start + _PAIR_TILE]
+                mask = anti((x[i] ^ x[tile])[:, None, :], (z[i] ^ z[tile])[:, None, :],
+                            x[None, i + 1:], z[None, i + 1:])
+                nested[:, start:start + len(tile)] = np.einsum(
+                    "ts,ks->kt", mask.astype(np.float64), tail, optimize=False)
+                del mask
+            nested = mul_up(nested, _sum_factor(p - i - 1))
+        part12[:, i] = _row_sums(mul_up(ij, nested))
+        del ij, nested
+    bounds = []
+    for k, (_, e) in enumerate(scaled):
+        if order == 1:
+            bounds.append(Fraction(sum_up(part12[k])) * Fraction(2) ** (2 * e))
+            continue
+        w = Fraction(sum_up(part12[k])) / 3 + Fraction(sum_up(part24[k])) / 6
+        bounds.append(w * Fraction(2) ** (3 * e))
+    return bounds[0] if single else bounds
 
 
-def census_sizes(p):
-    """Return ``(P, J) = (p(p-1)/2, p(p-1)(2p-1)/6)`` for p kept terms.
-
-    P is the exact number of pair tests of the triangular scan, and J bounds
-    the number of nested tests N(A) = sum_((i,j) in A)(p-i-1) <= J.
-    """
-    return p * (p - 1) // 2, p * (p - 1) * (2 * p - 1) // 6
-
-
-def nested_test_count(pairs, p):
-    """Return N(A) = sum_((i,j) in A)(p-i-1), the nested tests of the exact structure.
-
-    Once A has passed the limit check and been built, N is an O(E) count
-    obtained without further tests.
-    """
-    return int(np.sum(p - 1 - np.asarray(pairs)[:, 0], dtype=np.int64)) if len(pairs) else 0
-
-
-def census_work(p, q, *, order, variant, pairs, nested=0, triples=0):
-    """Return G + V, the work counted for one shared census.
+def census_work(p, q, *, order, variant, pairs, nested=0, nodes=1):
+    """Return G + K*V, the work counted for one census structure and K node contractions.
 
     A packed symplectic test costs w = ceil(q/64) constant-size word visits,
     and one logical magnitude-contribution visit is counted for each term
     evaluated, with linear passes counted separately:
 
-        G_1 = wP,  G_C = wP,  G_D = w(P+N);
-        V_1 = E,   V_C = 2p+4E, V_D = E+F.
+        G_1 = G_C = wP,  G_D = w(P+N);
+        V_1 = E,   V_C = 2p+4E,   V_D = E+N.
 
-    Here C is relaxed_prefix and D exact_census at order 2, E = ``pairs``,
-    N = ``nested`` and F = ``triples``. Before any structure exists use E = P
-    and N = F = J (``census_sizes``). Before T exists use V_D <= E+N, that
-    is F = N. The fixed number of float products, outward operations and
-    additions per contribution is bundled in a visit. By this engineering
-    convention, the suffix pass and the outward rounding of the degrees
-    cost 2p visits, endpoint-weight additions 2E, and the two contribution
-    reductions 2E. Neighbor subtraction, union and min are bundled into
-    each contribution visit. The count is a proxy for the work limit, not
-    a runtime measurement. A caller adds its own linear passes, for QPE
-    ``2*p*q``.
+    Here C is relaxed_prefix and D exact_census at order 2, P = p(p-1)/2,
+    E = ``pairs`` and N = ``nested``, the nested tests of the exact census.
+    The count is a proxy for an explicit work limit, not a runtime
+    measurement. A caller adds its own linear passes, for QPE ``2*p*q``.
     """
-    if min(p, q, pairs, nested, triples) < 0:
+    if min(p, q, pairs, nested) < 0 or nodes < 1:
         raise ValueError("invalid census sizes")
     if order not in (1, 2) or variant not in BOUND_VARIANTS:
         raise ValueError("invalid census kind")
     w = (q + 63) // 64
     total_pairs = p * (p - 1) // 2
     if order == 1:
-        return w * total_pairs + pairs
+        return w * total_pairs + nodes * pairs
     if variant == "relaxed_prefix":
-        return w * total_pairs + 2 * p + 4 * pairs
-    return w * (total_pairs + nested) + pairs + triples
+        return w * total_pairs + nodes * (2 * p + 4 * pairs)
+    return w * (total_pairs + nested) + nodes * (pairs + nested)
 
 
-def census_bytes(p, q, pairs, triples, block, *, order, variant, held=0):
-    """Return the byte upper bound of one census, including B_held (``held``).
+def census_bytes(p, q, pairs, *, order, variant, nodes=1, tile=None):
+    """Return a coarse estimate of the dominant arrays of one census and its K node contractions.
 
-    With w = ceil(q/64), E = ``pairs``, F = ``triples``, b = ``block`` and
-    H0 = 65536 bytes of scalar bookkeeping, ndarray headers, iterators and
-    fixed sort stacks on the qualified 64-bit CPython/NumPy stack:
-
-        B = B_held + 80p + 16pw + 32E + 48F + H_chunks
-            + max(R(p,w)+H0, C(p,E,F,b)),
-        R(p,w) = 32pw+64p+32w,
-        H_chunks = 384[p+1 + I_D(E+1)],
-        C_1,D(p,E,F,b) = 56p+64b+48H(b)+H0,
-        C_C(p,E,b) = 72p+96b+48H(b)+H0,
-
-    C is relaxed_prefix and D exact_census at order two, with
-    H(b) = ceil(E/b) at order 1, 2 ceil(E/b) for relaxed_prefix and
-    ceil(E/b)+ceil(F/b) for exact_census at order 2, and I_D = 1 only for
-    the order-2 exact_census builder. F = 0 for order one or relaxed_prefix.
-    80p counts the census inputs formed from the caller's labels and
-    coefficients, 16pw the masks, 32E and 48F pair and triple storage during
-    concatenation, R one row test (never a p^3 broadcast cube), 384 bytes
-    the overhead of one partial index array, 56p the order-one/full linear
-    contraction
-    workspace, 64b their block gathers and products, and 48 bytes each
-    partial sum kept between blocks. Relaxed order two adds 16p for the
-    degree vector and its simultaneous outward rounding, and 32b for
-    bounded endpoint gathers, remainder, union and minimum while pair
-    products remain in memory. The raw degree vector is released once it is
-    rounded, and no E-sized degree gather is made. H0 follows the qualified
-    CPython 3.12.14 / NumPy 2.5.2 convention. Before any structure work use
-    E = P and, for D, F = J. After the pairs exist, F = N counts the triple
-    scan in advance. H0 is an engineering allowance, not a universal
-    interpreter or process-RSS theorem.
+    With w = ceil(q/64) and E = ``pairs``: 80p for the census inputs, 16pw
+    for the masks, 3pq for the label codes and the two temporaries that
+    ``pack_labels`` holds while it forms them, 8E + 128p for the pair rows
+    and their array headers, 64Kp for the scaled magnitudes, partial sums
+    and per-row products of K weightings, 16Kp more for the suffix and degree vectors of
+    relaxed_prefix, and 40Tw for the largest tile of nested masks of
+    exact_census, a tile of T mask entries. ``tile`` is T from the pair rows
+    (``_CensusStructure.nested_tile``), and without it the upper bound
+    T = min(_PAIR_TILE, E)(p - 1). T is zero when no pair anticommutes. The
+    estimate is meant to be within about a factor of two of the arrays held
+    at once, not the process memory.
     """
-    if min(p, q, pairs, triples, held) < 0 or block < 1:
+    if min(p, q, pairs) < 0 or nodes < 1:
         raise ValueError("invalid census sizes")
-    if order not in (1, 2) or variant not in ("exact_census", "relaxed_prefix"):
-        raise ValueError("invalid census kind")
-    exact2 = order == 2 and variant == "exact_census"
-    F = triples if exact2 else 0
-    w = (q+63)//64
-    pair_blocks = (pairs+block-1)//block
-    if order == 1:
-        partials = pair_blocks
-    elif exact2:
-        partials = pair_blocks+(F+block-1)//block
-    else:
-        partials = 2*pair_blocks
-    objects = 384*(p+1+(pairs+1 if exact2 else 0))
-    row = 32*p*w+64*p+32*w+65536
-    contraction = ((72*p+96*block) if order == 2 and not exact2 else (56*p+64*block))
-    contraction += 48*partials+65536
-    return (held+80*p+16*p*w+32*pairs+48*F+objects
-            +max(row, contraction))
+    w = (q + 63) // 64
+    size = 80 * p + 16 * p * w + 3 * p * q + 8 * pairs + 128 * p + 64 * nodes * p
+    if order == 2 and variant == "relaxed_prefix":
+        size += 16 * nodes * p
+    if order == 2 and variant == "exact_census":
+        size += 40 * w * (min(_PAIR_TILE, pairs) * max(p - 1, 0) if tile is None else tile)
+    return size
 
 
-def choose_census_block(p, q, E, F, max_bytes, *, order, variant, held=0):
-    """Return ``(block, bytes)`` for the largest fitting candidate block, or None.
+def _check_census_memory(p, q, pairs, *, order, variant, max_bytes, nodes=1, held=0, tile=None,
+                         operation="Pauli census"):
+    """Refuse a census whose dominant arrays exceed the memory limit, naming the relaxed alternative for the exact one."""
+    need = held + census_bytes(p, q, pairs, order=order, variant=variant, nodes=nodes, tile=tile)
+    try:
+        check_memory(need, max_bytes, f"{operation} ({variant})")
+    except ResourceLimitError as error:
+        if order == 2 and variant == "exact_census":
+            relaxed = held + census_bytes(p, q, pairs, order=2, variant="relaxed_prefix", nodes=nodes)
+            raise ResourceLimitError(f"{error}. bound_variant='relaxed_prefix' needs about {relaxed} bytes") from None
+        raise
 
-    The candidates are max(1, E, F) and the powers of two below it, at most
-    64 evaluations of the integer byte formula for counts that fit in intp.
-    None says that none of the checked block sizes fits, not that every
-    integer block is impossible.
+
+@dataclass(frozen=True)
+class _CensusStructure:
+    """The ordered pair rows of one Pauli label table and the census expression chosen for it.
+
+    ``word_tests`` is the w*N(A) logical nested word tests and
+    ``selection_count`` the N(A)*max(w, K) that chose ``variant``. They are
+    equal for one weighting. ``nested_tile`` is the largest nested tile in
+    mask entries, the maximum of min(_PAIR_TILE, e_i)(p - i - 1) over the
+    pair rows, zero without pairs (``census_bytes``). The evaluation records
+    ``nested_tests`` only when it performs them.
     """
-    # Largest fitting member of a finite geometric candidate set.
-    top = max(1, E, F if order == 2 and variant == "exact_census" else 0)
-    choices = {top}
-    choices.update(1 << k for k in range(top.bit_length()))
-    for block in sorted(choices, reverse=True):
-        size = census_bytes(p, q, E, F, block, order=order,
-                            variant=variant, held=held)
-        if size <= max_bytes:
-            return block, size
-    return None
+    x: Any
+    z: Any
+    rows: list
+    pair_tests: int
+    pairs: int
+    nested_tests: int
+    word_tests: int
+    selection_count: int
+    nested_tile: int
+    variant: str
+
+
+def census_structure(labels, q, order, bound_variant="auto", *, weightings=1, max_bytes=None):
+    """Pack ``labels``, scan their anticommuting pairs and choose the census expression.
+
+    The pair scan makes p(p-1)/2 tests and stores the rows (``pair_rows``).
+    Before any nested test, the expression is "exact_census" at order 1, the
+    requested one, or for "auto" the one that ``choose_variant`` gives from
+    N(A)*max(w, K), with K = ``weightings`` the number of magnitude rows
+    that the contraction will process. Memory never selects the expression.
+    """
+    if type(weightings) is not int or weightings < 1:
+        raise ValueError("weightings must be a positive integer")
+    x, z = pack_labels(labels, q)
+    rows, pair_tests = pair_rows(x, z, max_bytes=max_bytes)
+    nested = nested_test_count(rows) if order == 2 else 0
+    w = (q + 63) // 64
+    selection = nested * max(w, weightings)
+    p = len(rows)
+    tile = max((min(_PAIR_TILE, len(row)) * (p - 1 - i) for i, row in enumerate(rows)), default=0)
+    return _CensusStructure(x=x, z=z, rows=rows, pair_tests=pair_tests, pairs=sum(len(row) for row in rows),
+                            nested_tests=nested, word_tests=w * nested, selection_count=selection,
+                            nested_tile=tile, variant=choose_variant(order, bound_variant, selection))
 
 
 def _pauli_bound_coefficient_from_terms(
     terms: tuple[tuple[str, float], ...],
     order: int,
     *,
-    choose,
+    bound_variant="auto",
+    max_bytes=None,
+    admit=None,
 ) -> _BoundCoefficientEvaluation:
     """Bound the ordered Pauli-triangle coefficient W from validated terms.
 
     For order 1, W=sum_A |c_i*c_j|, where A contains anticommuting i<j.
     For order 2, the exact_census variant returns an outward bound on
-    sum_T |c_i*c_j*c_k|/3 + sum_A |c_i|**2*|c_j|/6. Here T contains
-    (i,j,k) with (i,j) in A, k>i, and P_k anticommuting with P_i*P_j.
-    The range includes k=j. The relaxed_prefix variant replaces the
-    inner sum over such k by U_ij = min(S_i, D_i+D_j-|c_i|), with S_i the
-    full suffix mass and D_v the mass of all anticommuting neighbors of v.
-    Symplectic XOR is at most the sum of endpoint parities, so the nested
-    mass is at most D_i+D_j-|c_i| as well as S_i. This gives an upper bound
-    using pair structure alone, rebuilding degrees from each term table.
+    sum_A |c_i*c_j| n_ij/3 + sum_A |c_i|**2*|c_j|/6, with n_ij the mass of
+    the k > i, k = j included, whose P_k anticommutes with P_i*P_j. The
+    relaxed_prefix variant replaces n_ij by U_ij = min(S_i, D_i+D_j-|c_i|),
+    with S_i the full suffix mass and D_v the mass of all anticommuting
+    neighbors of v (``coefficient_up``).
 
     These are triangle expansions of Childs et al.,
     doi:10.1103/PhysRevX.11.011020, Eqs. (120)-(121). The chosen
     formula obeys ||S_o(t/r)**r-exp(-i*t*H)|| <= W*abs(t)**(o+1)/r**o.
     The ordered labels determine the shared structure, and the supplied
     real coefficients determine its weights. Identity phases and pruning
-    are accounted for by the caller.
-
-    Scaled binary64 products and sums are rounded outward. W is returned
-    as a rational upper coefficient so its exponent can be combined with
-    time without intermediate binary64 overflow or loss to zero. Step
-    minimality is relative to that coefficient. A full indicator census
+    are accounted for by the caller. W is returned as a rational upper
+    coefficient so its exponent can be combined with time without
+    intermediate binary64 overflow or loss to zero. A full indicator census
     does not imply exact arithmetic or the exact simulation error.
 
-    A caller that chooses the variant automatically may use exact_census
-    when it fits, or relaxed_prefix when that expression fits. The public
-    functions in this module keep an explicitly requested variant and
-    raise when its limit check fails.
-    The full structure takes O(w*p**3) worst-case word work, and the
-    relaxed structure takes O(w*p**2), with w=ceil(q/64). A reused structure
-    still requires the magnitude contractions of each LCHS quadrature node.
-    The result records its bound variant and the checks newly performed.
-
-    ``choose(E, N)`` is called after the pair structure is
-    built and before any triple test, with the counted number of pairs E
-    and of nested tests N (``nested_test_count``). It returns the
-    ``(variant, block)`` to use, after checking that stage against the
-    limits, or raises to refuse it. The public functions of this module
-    check it through ``_bound_coefficient_evaluation``. At order 1 the
-    variant is "exact_census".
-
-    Storage: the masks take 16pw bytes and the pair and triple index
-    tables 16E and 24F bytes with 64-bit indices. Concatenation can
-    temporarily double each table's index bytes. For order-2 exact_census,
-    F <= N <= J = p(p-1)(2p-1)/6. The pair table determines N before
-    ``choose`` is called. Order 1 and relaxed_prefix build no triple table.
+    ``bound_variant`` is "auto" or an explicit expression
+    (``census_structure``). ``admit(census)``, when given, receives the
+    ``_CensusStructure``, checks the caller's explicit limits after the pair
+    scan and before any nested test, and raises to refuse. The dominant arrays are checked against
+    ``max_bytes`` (None: the physical memory) before the contraction. The
+    exact census takes O(w*(p**2 + N)) word work and O(p*w + E) storage, the
+    relaxed one O(w*p**2) and the same storage, with w=ceil(q/64).
     """
     labels = [label for label, _ in terms]
     magnitudes = np.array([abs(float(coefficient)) for _, coefficient in terms], dtype=np.float64)
-    x, z = pack_labels(labels, len(labels[0]) if labels else 0)
-    pairs, pair_checks = pair_structure(x, z)
-    variant, block = choose(len(pairs), nested_test_count(pairs, len(labels)))
-    variant = _validate_variant(variant, order)
-    triples, nested_checks = None, 0
-    if order == 2 and variant == "exact_census":
-        triples, nested_checks = triple_structure(x, z, pairs)
-    coefficient = coefficient_up(
-        magnitudes, pairs, order=order, variant=variant, triples=triples, block=block
-    )
+    q = len(labels[0]) if labels else 0
+    census = census_structure(labels, q, order, bound_variant, max_bytes=max_bytes)
+    if admit is not None:
+        admit(census)
+    _check_census_memory(len(labels), q, census.pairs, order=order, variant=census.variant, max_bytes=max_bytes,
+                         tile=census.nested_tile)
+    exact2 = order == 2 and census.variant == "exact_census"
+    coefficient = coefficient_up(magnitudes, census.rows, order=order, variant=census.variant,
+                                 x=census.x, z=census.z)
     return _BoundCoefficientEvaluation(
         coefficient=coefficient,
         pauli_term_count=len(terms),
-        pair_commutation_checks=pair_checks,
-        nested_commutation_checks=nested_checks,
-        bound_variant=variant,
+        pair_commutation_checks=census.pair_tests,
+        nested_commutation_checks=census.nested_tests if exact2 else 0,
+        bound_variant=census.variant,
+        nested_word_tests=census.word_tests,
     )
 
 
@@ -1239,11 +1204,19 @@ def _dense_bound_coefficient_from_terms(
 
     Validation only. Each dense matrix has 4**n entries for n qubits, and
     each commutator product and spectral norm costs O(8**n) operations.
+    The arrays of one term are live at a time (``_tail_commutator_norms``).
     """
-    matrices = _term_matrices(list(terms))
+    norms = _tail_commutator_norms(terms, order)
     if order == 1:
-        return _first_order_commutator_sum(matrices) / 2.0
-    c12, c24 = _second_order_commutator_sums(matrices)
+        c1 = 0.0
+        for (value,) in norms:
+            c1 += value
+        return c1 / 2.0
+    c12 = 0.0
+    c24 = 0.0
+    for value_12, value_24 in norms:
+        c12 += value_12
+        c24 += value_24
     return c12 / 12.0 + c24 / 24.0
 
 
@@ -1259,122 +1232,55 @@ def _bound_coefficient_evaluation(
     hamiltonian: SparsePauliOp,
     *,
     order: int,
-    bound_variant: str = "exact_census",
-    max_work: int = DEFAULT_CENSUS_MAX_WORK,
-    max_bytes: int = DEFAULT_MAX_BYTES,
-    held: int = 0,
+    bound_variant: str = "auto",
+    max_work: int | None = None,
+    max_bytes: int | None = None,
 ) -> _BoundCoefficientEvaluation:
-    """Check the limits, validate the terms and evaluate the operator's Pauli-triangle W_up.
+    """Validate the terms, choose the census expression and evaluate the operator's Pauli-triangle W_up.
 
-    The work and bytes of the sparse Pauli census are checked against their
-    limits before labels are converted or index tables are built. The full
-    second-order expression stores three intp indices per triple with a
-    nonzero nested commutator and can require cubic storage in the number
-    of terms. The contraction block limits the coefficient-reduction
-    workspace and does not limit the number of stored indices. If the
-    requested expression does not fit, the function raises before the stage
-    that fails the check. At order two, the degree-capped suffix
-    relaxation, when requested explicitly, uses the pair structure and a
-    potentially larger error coefficient.
-
-    The limits are checked in stages. With p terms on q qubits, the operator
-    supplies p and q before ``hamiltonian.to_list()``. The byte bound
-    ``128*p*(q+1)+65536`` of the label and term conversion stays in use
-    while the census reads the validated labels, and ``16*p*(q+1)``
-    logical preparation work plus ``p*q`` label visits for packing are added
-    to ``census_work``. The pair stage is checked first with
-    ``E = P = p*(p-1)//2`` and no triples. After the pair scan gives the
-    counted E and N, the requested variant is checked before any triple
-    test. The full second-order expression counts F = N in advance. Order
-    one and relaxed_prefix count no nested tests or triples. Each complete
-    census_work expression includes the pair work already spent once. A
-    requested bound_variant is kept. held is the number of bytes the caller
-    already uses outside the census and its label conversion.
-
-    A refusal identifies the failed stage, its work and the applicable
-    limits. A byte-fit failure occurs when no block size tried fits the
-    current byte allowance. No triple table or coefficient is created on
-    refusal.
-
-    The block search first takes the largest fitting candidate from
-    choose_census_block. If that block exceeds 65536 and the byte bound
-    at 65536 also fits, this function uses 65536. Otherwise it uses the
-    block found. The byte check includes the partial sums for the block
-    used. Changing the block can change the outward coefficient through the
-    grouping of reductions, while preserving its upper-bound property. A
-    relative rounding window must use that block.
+    The label conversion, ``128*p*(q+1)`` bytes for p terms on q qubits,
+    is checked against ``max_bytes`` (None: the physical memory) before
+    ``hamiltonian.to_list()``. ``bound_variant`` is "auto" or an explicit
+    expression (``census_structure``). With an explicit ``max_work``, the
+    work ``16*p*(q+1) + p*q`` of label preparation and packing plus the
+    ``w*p(p-1)/2`` pair tests is checked before the labels are converted,
+    and that work plus ``census_work`` of the chosen expression after the
+    pair scan and before any nested test. A refusal states the requirement
+    and, for the exact census, the work of the relaxed one.
     """
     order = _validate_order(order)
-    variant = _validate_variant(bound_variant, order)
-    max_work = _validate_limit(max_work, "max_work", minimum=1)
-    max_bytes = _validate_limit(max_bytes, "max_bytes", minimum=1)
-    held = _validate_limit(held, "held", minimum=0)
+    if max_work is not None:
+        max_work = _validate_limit(max_work, "max_work", minimum=1)
     p, q = int(hamiltonian.size), int(hamiltonian.num_qubits)
-    P, _ = census_sizes(p)
-    label_bytes = 128*p*(q+1) + 65536
-    linear = 16*p*(q+1) + p*q
-    census_held = held + label_bytes
-    capacity = np.iinfo(np.intp).max
-
-    def admit(E, N, chosen_order, chosen_variant, stage):
-        exact2 = chosen_order == 2 and chosen_variant == "exact_census"
-        F = N if exact2 else 0
-        if max(p*((q+63)//64), 2*E, 3*F) > capacity:
-            raise ValueError(
-                f"Pauli census {chosen_variant} with p={p}, q={q}, E={E}, F={F} "
-                "exceeds the intp array shape capacity"
-            )
-        work = linear + census_work(
-            p, q, order=chosen_order, variant=chosen_variant,
-            pairs=E, nested=N if exact2 else 0, triples=F,
-        )
-        fit = choose_census_block(
-            p, q, E, F, max_bytes, order=chosen_order,
-            variant=chosen_variant, held=census_held,
-        )
-        if work > max_work or fit is None:
-            message = (
-                f"Pauli census {stage} stage needs work={work}, "
-                f"max_work={max_work}, max_bytes={max_bytes}. "
-                "Increase the binding limit or reduce the Pauli term population."
-            )
-            if fit is None:
-                message += (
-                    " No checked block fits the current byte allowance."
-                )
-            if order == 2 and variant == "exact_census":
-                message += ' bound_variant="relaxed_prefix" selects the pair-only order-two bound.'
-            raise ValueError(message)
-        # A chosen block above the kernel default 65536 is replaced by 65536
-        # when its envelope fits. An admitted call then returns the W_up of
-        # the unadmitted kernel call, as it also does when max(1, E, F) <=
-        # 65536 and one chunk covers every pair and triple.
-        block = fit[0]
-        if block > 65536 and census_bytes(
-            p, q, E, F, 65536, order=chosen_order,
-            variant=chosen_variant, held=census_held,
-        ) <= max_bytes:
-            block = 65536
-        return work, block
-
-    # The order-one envelope bounds masks/pairs before the callback.
-    # It also reserves a contraction that has not yet run, conservatively.
-    admit(P, 0, 1, "exact_census", "pair")
+    check_memory(128 * p * (q + 1), max_bytes, "Pauli label conversion of the census")
+    linear = 16 * p * (q + 1) + p * q
+    pair_scan = linear + (q + 63) // 64 * (p * (p - 1) // 2)
+    if exceeds(pair_scan, max_work):
+        raise ResourceLimitError(f"Pauli census pair scan needs work={pair_scan}, above max_work={max_work}")
     terms = tuple(_validated_terms(hamiltonian))
 
-    def choose(E, N):
-        return variant, admit(E, N, order, variant, "requested expression")[1]
+    def admit(census):
+        variant = census.variant
+        need = linear + census_work(p, q, order=order, variant=variant, pairs=census.pairs,
+                                    nested=census.nested_tests if variant == "exact_census" else 0)
+        if exceeds(need, max_work):
+            message = f"Pauli census ({variant}) needs work={need}, above max_work={max_work}"
+            if order == 2 and variant == "exact_census":
+                relaxed = linear + census_work(p, q, order=2, variant="relaxed_prefix", pairs=census.pairs)
+                message += f". bound_variant='relaxed_prefix' needs work={relaxed}"
+            raise ResourceLimitError(message)
 
-    return _pauli_bound_coefficient_from_terms(terms, order, choose=choose)
+    return _pauli_bound_coefficient_from_terms(terms, order, bound_variant=bound_variant, max_bytes=max_bytes,
+                                               admit=admit)
 
 
 def trotter_bound_coefficient(
     hamiltonian: SparsePauliOp,
     *,
     order: int = 1,
-    bound_variant: str = "exact_census",
-    max_work: int = DEFAULT_CENSUS_MAX_WORK,
-    max_bytes: int = DEFAULT_MAX_BYTES,
+    bound_variant: str = "auto",
+    max_work: int | None = None,
+    max_bytes: int | None = None,
 ) -> float:
     """Return the time-independent prefactor `W_up` of the Trotter error bound `W_up * t**(order + 1)`.
 
@@ -1386,12 +1292,11 @@ def trotter_bound_coefficient(
     ``r``-step total is ``W_up * t**(order + 1) / r**order``. The function
     evaluates the coefficient without dense matrices. W_up can exceed the
     exact triangle coefficient, and it is returned rounded upward to
-    binary64. Before converting labels or building its index tables, the
-    function checks the work and bytes of counting anticommuting Pauli
-    pairs and triples with a nonzero nested commutator against `max_work`
-    and `max_bytes`, and a requested
-    expression that does not fit raises before the stage that would exceed
-    them.
+    binary64.
+    The census of anticommuting Pauli pairs, and at order 2 of the later
+    terms anticommuting with each pair product, is checked against
+    `max_bytes` before its arrays are formed and, when set, against
+    `max_work` before any nested test.
 
     Args:
         hamiltonian (SparsePauliOp): `H = sum_j c_j P_j` in the term order of
@@ -1401,23 +1306,25 @@ def trotter_bound_coefficient(
             global phase `exp(-i t c)` yourself.
         order (int): Default `1`. Product-formula order, 1 (Lie-Trotter) or
             2 (second-order Suzuki).
-        bound_variant (str): Default `"exact_census"`, the full
-            Pauli-triangle expression. At order 2, `"relaxed_prefix"` selects
+        bound_variant (str): Default `"auto"`. At order 2, `"exact_census"`
+            selects the full Pauli-triangle expression and `"relaxed_prefix"`
             the degree-capped suffix relaxation, which needs pair tests only
-            and can give a larger bound.
-        max_work (int): Default `1_000_000_000`. Work limit of label
-            preparation, pair/triple tests and coefficient contraction.
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
-            Byte limit of label conversion, index tables and bounded
-            coefficient-reduction workspace.
+            and can give a larger bound. `"auto"` uses the full expression
+            when it needs at most 1,300,000,000 nested word tests (one per
+            64 qubits of each test). Order 1 has one expression.
+        max_work (int | None): Default `None`, no limit. Optional work limit
+            of label preparation, pair and nested tests and coefficient
+            contraction.
+        max_bytes (int | None): Default `None`, the physical memory. Limit
+            on the label conversion and the dominant census arrays.
 
     Returns:
         coefficient (float): `W_up`, rounded upward to binary64.
 
     Raises:
         ValueError: W_up exceeds the largest binary64 number, a limit is not
-            a positive integer, or the requested pair and triple tests do not
-            fit ``max_work`` and ``max_bytes``.
+            a positive integer, or the census does not fit ``max_work`` or
+            ``max_bytes``.
     """
 
     coefficient = _upward_float(
@@ -1472,9 +1379,9 @@ def evaluate_trotter_bound(
     time: float,
     steps: int,
     order: int = 1,
-    bound_variant: str = "exact_census",
-    max_work: int = DEFAULT_CENSUS_MAX_WORK,
-    max_bytes: int = DEFAULT_MAX_BYTES,
+    bound_variant: str = "auto",
+    max_work: int | None = None,
+    max_bytes: int | None = None,
 ) -> float:
     """Return the error bound `W_up * time**(order + 1) / steps**order` of a product formula with a given step count.
 
@@ -1484,11 +1391,10 @@ def evaluate_trotter_bound(
     outward coefficient W_up of the ``bound_variant`` expression. With the
     step count fixed, the relaxed expression changes only the certified
     bound, which can be larger.
-    Before converting labels or building its index tables, the function
-    checks the work and bytes of counting anticommuting Pauli pairs and
-    triples with a nonzero nested commutator against `max_work` and
-    `max_bytes`, and a requested expression that does not fit raises before
-    the stage that would exceed them.
+    The census of anticommuting Pauli pairs, and at order 2 of the later
+    terms anticommuting with each pair product, is checked against
+    `max_bytes` before its arrays are formed and, when set, against
+    `max_work` before any nested test.
 
     Args:
         hamiltonian (SparsePauliOp): `H = sum_j c_j P_j` with finite real
@@ -1498,13 +1404,17 @@ def evaluate_trotter_bound(
         steps (int): Positive number of product-formula steps.
         order (int): Default `1`. Product-formula order, 1 (Lie-Trotter) or
             2 (second-order Suzuki).
-        bound_variant (str): Default `"exact_census"`, or `"relaxed_prefix"`
-            for the second-order degree-capped suffix relaxation.
-        max_work (int): Default `1_000_000_000`. Work limit of label
-            preparation, pair/triple tests and coefficient contraction.
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
-            Byte limit of label conversion, index tables and bounded
-            coefficient-reduction workspace.
+        bound_variant (str): Default `"auto"`. At order 2, `"exact_census"`
+            selects the full Pauli-triangle expression and `"relaxed_prefix"`
+            the degree-capped suffix relaxation, which needs pair tests only
+            and can give a larger bound. `"auto"` uses the full expression
+            when it needs at most 1,300,000,000 nested word tests (one per
+            64 qubits of each test). Order 1 has one expression.
+        max_work (int | None): Default `None`, no limit. Optional work limit
+            of label preparation, pair and nested tests and coefficient
+            contraction.
+        max_bytes (int | None): Default `None`, the physical memory. Limit
+            on the label conversion and the dominant census arrays.
 
     Returns:
         bound (float): The total bound, rounded upward to binary64.
@@ -1533,9 +1443,9 @@ def select_trotter_step_count(
     time: float,
     error_budget: float,
     order: int = 1,
-    bound_variant: str = "exact_census",
-    max_work: int = DEFAULT_CENSUS_MAX_WORK,
-    max_bytes: int = DEFAULT_MAX_BYTES,
+    bound_variant: str = "auto",
+    max_work: int | None = None,
+    max_bytes: int | None = None,
 ) -> TrotterStepSelection:
     """Return the smallest Trotter step count whose error bound meets an error budget.
 
@@ -1559,11 +1469,10 @@ def select_trotter_step_count(
     for the same time and positive error allowance. If ``W_2 > 0``, then
     ``r_exact <= r_rel <= ceil(alpha * r_exact)`` for
     ``alpha = sqrt(W_2,rel / W_2)`` in exact arithmetic.
-    Before converting labels or building its index tables, the function
-    checks the work and bytes of counting anticommuting Pauli pairs and
-    triples with a nonzero nested commutator against `max_work` and
-    `max_bytes`, and a requested expression that does not fit raises before
-    the stage that would exceed them.
+    The census of anticommuting Pauli pairs, and at order 2 of the later
+    terms anticommuting with each pair product, is checked against
+    `max_bytes` before its arrays are formed and, when set, against
+    `max_work` before any nested test.
 
     Args:
         hamiltonian (SparsePauliOp): `H = sum_j c_j P_j` in the term order of
@@ -1576,15 +1485,17 @@ def select_trotter_step_count(
             `epsilon` of the whole evolution.
         order (int): Default `1`. Product-formula order, 1 (Lie-Trotter) or
             2 (second-order Suzuki).
-        bound_variant (str): Default `"exact_census"`, the full
-            Pauli-triangle expression. At order 2, `"relaxed_prefix"` selects
+        bound_variant (str): Default `"auto"`. At order 2, `"exact_census"`
+            selects the full Pauli-triangle expression and `"relaxed_prefix"`
             the degree-capped suffix relaxation, which needs pair tests only
-            and can give a larger bound.
-        max_work (int): Default `1_000_000_000`. Work limit of label
-            preparation, pair/triple tests and coefficient contraction.
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
-            Byte limit of label conversion, index tables and bounded
-            coefficient-reduction workspace.
+            and can give a larger bound. `"auto"` uses the full expression
+            when it needs at most 1,300,000,000 nested word tests (one per
+            64 qubits of each test). Order 1 has one expression.
+        max_work (int | None): Default `None`, no limit. Optional work limit
+            of label preparation, pair and nested tests and coefficient
+            contraction.
+        max_bytes (int | None): Default `None`, the physical memory. Limit
+            on the label conversion and the dominant census arrays.
 
     Returns:
         selection (TrotterStepSelection): `selection.step_count` is the
@@ -1626,20 +1537,21 @@ def select_trotter_step_count(
     )
 
 
-def _smallest_step_count(one_step_bound: Fraction, budget: float, order: int) -> int:
+def _smallest_step_count(one_step_bound: Fraction, budget: float | Fraction, order: int) -> int:
     """Return the smallest r >= 1 with ``one_step_bound / r**order <= budget``.
 
     ``one_step_bound`` is an exact nonnegative rational (the bound of one
     application over the whole time, formed exactly from the supplied
     coefficient) and ``budget`` a
-    positive binary64 value. Let n = ceil(one_step_bound / budget). Order 1 needs r >= n, so
+    positive binary64 value or exact rational. Let n = ceil(one_step_bound / budget). Order 1 needs r >= n, so
     r = max(1, n). Order 2 needs r**2 >= one_step_bound / budget, and since
     r**2 is an integer this is r**2 >= n, so r = ceil(sqrt(n)) =
     1 + isqrt(n - 1) for n >= 1, and r = 1 for n = 0. The ratio is exact, so
     rounded division or sqrt cannot move r across an integer boundary, and
     incrementing a huge integer needs no float comparison. Minimality refers
     to the supplied bound, not to the product-formula error itself. Used by
-    ``_selection_from_evaluation`` and by the periodic LCHS Strang selection
+    ``_selection_from_evaluation``, ``algorithms/qpe/powers._corrected_steps``
+    and the periodic LCHS Strang selection
     (``algorithms/lchs/periodic.select_periodic_parameters``).
     """
     required_power = ceil(one_step_bound / Fraction(budget))
@@ -1757,30 +1669,24 @@ def _common_reductions(coefficients, h, half_angles):
 
 
 def _emitted_parts(W, loss, mass, angle_per_step, phase, t, h, identity, steps):
-    """Compose the five exact nonnegative parts for one emitted prefix."""
-    parts = dict(trotter=W*steps*abs(h)**3, pruning=loss*abs(t),
-                 time=mass*abs(steps*h-t), identity=abs(phase+t*identity),
-                 angles=steps*angle_per_step)
-    if any(value < 0 for value in parts.values()):
-        raise ValueError("error contributions must be nonnegative")
-    return sum(parts.values(), Fraction(0)), parts
-
-
-def emitted_subtotal(W, dropped_mass, coefficients, identity, tau, power, steps,
-                     step_time, half_angles, identity_phase_increments):
-    """Return the exact structural subtotal B_p of one emitted prefix and its parts.
+    """Return the exact structural subtotal B_p of one emitted prefix and its five parts.
 
     All times and coefficients denote exact values of their stored binary64
-    numbers. For a nonnegative power p, t_p = p*val(tau), r = ``steps``,
-    h = val(h_hat), kept generator A = sum_j c_j P_j (the nonidentity terms
-    kept after pruning, with their coefficients) and exact identity
-    coefficient c_I:
+    numbers. For a nonnegative power p, t_p = ``t`` = p*val(tau),
+    r = ``steps``, h = ``h`` = val(h_hat), kept generator A = sum_j c_j P_j
+    (the nonidentity terms kept after pruning, with their coefficients),
+    exact identity coefficient c_I = ``identity`` and dropped mass
+    d_drop = ``loss``:
 
         B_p = W r abs(h)^3 + d_drop abs(t_p) + C_kept abs(r h - t_p)
               + B_identity,p + B_angles,p,
         C_kept = sum_j abs(c_j),
         B_identity,p = abs(Phi_p + t_p*c_I),
         B_angles,p = 2r sum_j abs(val(a_hat_j) - h*c_j/2).
+
+    ``_common_reductions`` forms C_kept (``mass``) and the one-step leaf
+    discrepancy 2 sum_j abs(val(a_hat_j) - h*c_j/2) (``angle_per_step``)
+    once per checked count, and ``phase`` is Phi_p.
 
     The product-formula term is Childs et al., arXiv:1912.08854v3,
     Proposition 16, Eq. (152), DOI 10.1103/PhysRevX.11.011020. Each
@@ -1812,29 +1718,133 @@ def emitted_subtotal(W, dropped_mass, coefficients, identity, tau, power, steps,
     occurrences.
 
     This is for the common nonnegative-power convention, order two and a
-    shared half-step schedule that is actually repeated. The caller
-    validates those construction invariants, and rounds B_p upward only
-    after composing it (``_upward_float``).
+    shared half-step schedule that is actually repeated.
+    ``_select_common_step`` validates those construction invariants and
+    rounds B_p upward only after composing it (``_upward_float``).
     """
-    if (type(power) is not int or power < 0 or type(steps) is not int
-            or steps < 0 or len(coefficients) != len(half_angles)):
-        raise ValueError("invalid emitted prefix")
-    vals = [tau, step_time, identity, *coefficients, *half_angles]
-    if not all(isfinite(float(v)) for v in vals) or tau <= 0:
-        raise ValueError("parameters must be finite and tau positive")
-    t = power * Fraction(float(tau))
-    h = Fraction(float(step_time))
-    mass, angle_per_step = _common_reductions(coefficients, h, half_angles)
-    phase = Fraction(0)
-    for value in identity_phase_increments:
-        if not isfinite(float(value)):
-            raise ValueError("phase parameters must be finite")
-        phase += Fraction(float(value))
-    return _emitted_parts(
-        Fraction(W), Fraction(dropped_mass), mass, angle_per_step, phase,
-        t, h, Fraction(float(identity)), steps,
-    )
+    parts = dict(trotter=W*steps*abs(h)**3, pruning=loss*abs(t),
+                 time=mass*abs(steps*h-t), identity=abs(phase+t*identity),
+                 angles=steps*angle_per_step)
+    if any(value < 0 for value in parts.values()):
+        raise ValueError("error contributions must be nonnegative")
+    return sum(parts.values(), Fraction(0)), parts
 
+
+def _is_normal(value):
+    """Return whether the binary64 ``value`` has a finite magnitude in the normal range."""
+    return float_info.min <= abs(value) <= float_info.max
+
+
+def _common_envelope_count(W, coefficients, dt, identity, dropped_mass, g, allowances, phases):
+    """Return ``(m_lo, None)``, the count that a rounding envelope proposes for a common grid, or ``(None, why)``.
+
+    The exact subtotal B_p(m) of ``_emitted_parts`` stays the only acceptance
+    criterion. This rule is a sufficient envelope that proposes one count for
+    it, not another comparator, and that count need not be the smallest emitted
+    count that fits. The single-step bound ``||S_2(h)-exp(-i h H_0)|| <= W
+    abs(h)**3`` for Hermitian summands and nonnegative time comes from Childs et
+    al., arXiv:1912.08854v3, Proposition 16, Eq. (152), whose two classes of
+    nested commutator norms have coefficients 1/12 and 1/24. W, the upper bound
+    from the current Pauli commutator count, is a premise here. That paper does
+    not treat binary64 parameter formation. The grid, the roundoff envelope and
+    this rule are this library's own derivation for its emitted schedule.
+
+    Let tau > 0 denote its exact represented value, g the gcd of the positive
+    integer powers, n_p = p/g and T_0 = g val(tau). The factors of repeated
+    steps are unitary, so telescoping gives r W abs(h)**3 on the grid
+
+        h_* = T_0/m,  r_p = n_p m,  t_p = n_p T_0,  integer m >= 1.                   (T1)
+
+    Every binary64 value denotes its exact rational, and only the composed
+    total is rounded outward for reporting. With h_hat = RN(h_*), a_j =
+    RN((h_hat/2) c_j), M = sum_j abs(c_j), d_drop the bound on the dropped
+    coefficient mass and Phi_p the exact sum of the emitted identity phase
+    increments,
+
+        B_p(m) = W r_p abs(h_hat)**3 + d_drop t_p + M abs(r_p h_hat - t_p)
+                 + abs(Phi_p + t_p c_I) + 2 r_p sum_j abs(val(a_j) - h_hat c_j/2).    (T2)
+
+    (T2) bounds these structural contributions of the ordered half-step leaves
+    and the sorted-prefix identity increments. It does not bound later gate
+    synthesis, simulation roundoff or hardware noise.
+
+    The envelope assumes binary64 round-to-nearest with gradual underflow,
+    h_hat and h_hat/2 normal, exact halving, finite products and the same
+    parameter schedule as (T2) (``_select_common_step`` checks the proposed
+    count before using it). Then, with unit roundoff u = 2**-53, smallest
+    subnormal eta = 2**-1074 and J kept terms, ``abs(h_hat - h_*) <= u h_*`` and
+    ``2 sum_j abs(a_j - h_hat c_j/2) <= u abs(h_hat) M + J eta``. The second
+    relation uses relative roundoff for a normal product and an absolute half
+    ULP for a subnormal one, and the sum of the two is their common conservative
+    envelope. The eta term includes products that round to zero, and it does not
+    cover an inexact half step. Therefore
+
+        B_p(m) <= C_p/m**2 + D_p + F_p m,                                             (T3)
+        C_p = W n_p (1+u)**3 T_0**3,
+        D_p = d_drop t_p + abs(Phi_p + t_p c_I) + u (2+u) M t_p,
+        F_p = n_p J eta.                                                              (T4)
+
+    C_p, D_p and F_p are exact rationals here, since unchecked rounded-down
+    binary64 arithmetic could lose the bound. Phi_p does not depend on m, since
+    the adjacent-power identity schedule is reused unchanged. Applying the
+    independent-power correction of ``algorithms/qpe/powers._corrected_steps``
+    to each power would break (T1). Only positive powers enter the interval,
+    because power 0 has zero count and zero subtotal and its allowance may be
+    zero. If Q_p = epsilon_p - D_p > 0 at every positive power, let
+
+        m_lo = max(1, max_(p>0) ceil(sqrt(2 C_p/Q_p))),
+        m_hi = min_(p>0: F_p>0) floor(Q_p/(2 F_p)),                                   (T5)
+
+    with an unbounded m_hi when no F_p is positive. C_p = 0 asks nothing of
+    m_lo and F_p = 0 asks nothing of m_hi. For a rational R = N/D >= 0, the
+    exact ceiling of sqrt(R) is k = isqrt(N//D), incremented when k*k*D < N,
+    including R = 0 and exact squares. A rounded float square root could decide
+    the boundary wrongly. Every m with m_lo <= m <= m_hi gives C_p/m**2 <= Q_p/2
+    and F_p m <= Q_p/2, so (T3) stays within the allowance at every prefix, and
+    this rule chooses m_lo.
+
+    ``Q_p <= 0``, an empty interval or a failed normal or finite premise means
+    only that this conservative rule confirmed no count, not that the target
+    error is unattainable. A ``Q_p <= 0`` refusal reports the largest D_p among
+    the powers with no room, since every one of them must have room before the
+    rule proposes a count. The rule repairs the failures caused by the small
+    margin of the first ideal count and need not find a count on arbitrary
+    input. It does not make success monotone in the allowance, because the first
+    exact check can pass where this more conservative envelope has no evidence.
+    The first count and m+1 need only (T2), so a subnormal case that passes its
+    exact check is still accepted and the envelope adds no refusal.
+
+    The work is one pass of O(J+K) scalar reductions over J terms and K powers,
+    with no commutator count and no circuit. It counts reductions, not the bit
+    cost of the exact rational arithmetic.
+    """
+    u, eta = Fraction(1, 2**53), Fraction(1, 2**1074)
+    magnitudes = [abs(Fraction(value)) for value in coefficients]
+    M, J = sum(magnitudes, Fraction(0)), len(magnitudes)
+    grown_cube = (1 + u)**3 * (g * dt)**3
+    m_lo, m_hi, no_room = 1, None, None
+    for p in filter(None, allowances):
+        n, t = p // g, p * dt
+        D = dropped_mass * t + abs(phases[p] + t * identity) + u * (2 + u) * M * t
+        Q = Fraction(allowances[p]) - D
+        if Q <= 0:
+            no_room = (D, p) if no_room is None or D > no_room[0] else no_room
+            continue
+        ratio = 2 * W * n * grown_cube / Q
+        k = isqrt(ratio.numerator // ratio.denominator)
+        m_lo = max(m_lo, k + 1 if k * k * ratio.denominator < ratio.numerator else k)
+        if J:
+            top = Q // (2 * n * J * eta)
+            m_hi = top if m_hi is None else min(m_hi, top)
+    if no_room is not None:
+        D, p = no_room
+        return None, (f"The part of the conservative rounding bound that does not depend on the step count leaves no "
+                      f"room below an allowance, and its largest such value is {_upward_float(D)!r} at power {p}, "
+                      f"where the allowance is {allowances[p]!r}, so the rule proposes no further count.")
+    if m_hi is not None and m_lo > m_hi:
+        return None, (f"The conservative rounding bound needs m at least {m_lo} and at most {m_hi}, which no count "
+                      "satisfies, so the rule proposes no further count.")
+    return m_lo, None
 
 
 def select_common_step(
@@ -1845,7 +1855,7 @@ def select_common_step(
     tau: float,
     allowances,
     dropped_mass: float,
-    max_steps: int,
+    max_steps: int | None,
 ) -> TrotterStepSelection | None:
     """Select one ordered second-order step for the nonnegative integer power positions.
 
@@ -1864,21 +1874,35 @@ def select_common_step(
     whose exact represented values the recheck uses, and a value that
     would round on conversion is refused. Run the ideal
     rational common-grid selector ``common_steps`` once and check its
-    largest count against ``max_steps``. Form the binary64 step
+    largest count against ``max_steps``, where None sets no limit. Form the binary64 step
     ``h_hat = float(h)``, the half-step leaf times ``0.5 * h_hat * c_j``
     (the formation of ``algorithms/qpe/powers.rotation_schedule``) and one
     identity phase increment ``-(p - p_prev) * tau * identity`` per point in
     increasing power order. Compute the exact kept mass and one-step leaf
-    discrepancy once, and accumulate the exact phase prefix once per point.
-    Compose the five parts of ``emitted_subtotal`` at each prefix from these
-    shared reductions. The recheck certifies exactly
+    discrepancy once per checked count, and accumulate the exact phase prefix
+    once per point, since the phases do not depend on the count.
+    Compose the five parts of B_p (``_emitted_parts``) at each prefix from
+    these shared reductions. The recheck certifies exactly
     these parameters, so the code that builds the circuit applies the leaf
     times that ``rotation_schedule`` forms from h_hat and these identity
     increments between adjacent points. Other emitted values need their own
     recheck. Accept only if each exact
-    ``B_p <= val(epsilon_p)``, then round each B_p upward. A failure
-    refuses with the power, target allowance and offending contribution
-    values. No retry is made.
+    ``B_p <= val(epsilon_p)``, then round each B_p upward.
+
+    Correction. The first count inverts only the trotter and pruning terms, so
+    the rounding of h_hat, the phases and the angles can exceed the margin they
+    leave. After a failure, recheck the subdivision m+1 exactly, and then the
+    count m_lo that ``_common_envelope_count`` proposes. Every checked count is
+    compared with ``max_steps`` through its largest prefix count r(p_max), and
+    only m_lo needs the normal premise of that rule. Each recheck forms the step
+    and leaf times of its own m on the same grid and takes O(L+K) scalar
+    reductions for L kept terms and K powers, so at most two are added. There is
+    no commutator count, no circuit and no search over m, and proposing a count
+    never enlarges an allowance. When neither count is confirmed, the refusal
+    gives the power, target allowance, contribution values and margin of each
+    failed count. It says that this rule confirmed no count, not that the target
+    error is unattainable, and it does not promise that a larger allowance
+    passes.
 
     Special cases. Without positive powers there is no evolution and no
     phase increment, r(0) = 0 and the subtotal is zero after the zero-power
@@ -1909,8 +1933,8 @@ def _select_common_step(evaluation, *, coefficients, identity, tau, allowances, 
                         max_steps):
     """Return (``select_common_step``'s selection, the exact prefix subtotals, the certified increments).
 
-    The second value maps every requested power to ``emitted_subtotal``'s
-    exact (total, parts) of its accepted emitted prefix, and the third maps
+    The second value maps every requested power to the exact (total, parts)
+    of its accepted emitted prefix (``_emitted_parts``), and the third maps
     it to the binary64 identity phase increment the recheck certified before
     that power position. Both are empty when no positive power exists. A
     caller reports the components of each prefix and places exactly these
@@ -1939,8 +1963,8 @@ def _select_common_step(evaluation, *, coefficients, identity, tau, allowances, 
     dropped_mass = exact_mass
     if evaluation.coefficient < 0:
         raise ValueError("W must be nonnegative")
-    if type(max_steps) is not int or max_steps < 1:
-        raise ValueError("max_steps must be a positive integer")
+    if max_steps is not None and (type(max_steps) is not int or max_steps < 1):
+        raise ValueError("max_steps must be a positive integer or None")
     powers = tuple(sorted(allowances))
     if any(type(p) is not int or p < 0 for p in powers):
         raise ValueError("use nonnegative integer powers")
@@ -1950,48 +1974,110 @@ def _select_common_step(evaluation, *, coefficients, identity, tau, allowances, 
     positive = tuple(p for p in powers if p)
     if not positive:
         return None, {}, {}
-    h, counts = common_steps(evaluation.coefficient, tau, powers, allowances, dropped_mass)
+    _, ideal = common_steps(evaluation.coefficient, tau, powers, allowances, dropped_mass)
     g = reduce(gcd, positive)
     p_max = positive[-1]
-    m = counts[p_max] // (p_max // g)
-    if counts[p_max] > max_steps:
-        raise ValueError(
-            f"common step count {counts[p_max]} at power {p_max} exceeds max_steps={max_steps}"
-        )
-    # float(Fraction) raises OverflowError instead of returning inf.
-    if h > Fraction(float_info.max):
-        raise ValueError("the common step is not a finite binary64 number")
-    h_hat = float(h)
-    if h_hat == 0 and coefficients:
-        raise ValueError("the common step rounds to zero for positive-time evolution")
-    half_angles = tuple(0.5 * h_hat * value for value in coefficients)
-    if not all(isfinite(value) for value in half_angles):
-        raise ValueError("emitted phases and angles must be finite")
-    dt, hi, ci = Fraction(tau), Fraction(h_hat), Fraction(identity)
-    mass, angle_per_step = _common_reductions(coefficients, hi, half_angles)
-    phase = Fraction(0)
-    increments, previous = [], 0
-    bounds = {}
+    m = ideal[p_max] // (p_max // g)
+
+    def admit(subdivisions, remedy):
+        count = p_max // g * subdivisions
+        if exceeds(count, max_steps):
+            raise ResourceLimitError(
+                f"common step count {count} at power {p_max} exceeds the step limit {max_steps}, the "
+                f"max_trotter_steps of a QPE method or the max_steps of select_common_step. Raise it to at least "
+                f"{count}{remedy}"
+            )
+
+    admit(m, ", or raise the allowance to need fewer steps")
+    dt, ci = Fraction(tau), Fraction(identity)
+    # The identity schedule does not depend on m, so every checked count emits these increments.
+    increments, phases, phase, previous = {}, {}, Fraction(0), 0
     for p in powers:
         try:
-            increments.append(-(p - previous) * tau * identity)
+            increments[p] = -(p - previous) * tau * identity
         except OverflowError:
             raise ValueError("emitted phases and angles must be finite") from None
         previous = p
-        if not isfinite(increments[-1]):
+        if not isfinite(increments[p]):
             raise ValueError("emitted phases and angles must be finite")
-        phase += Fraction(increments[-1])
-        total, parts = _emitted_parts(
-            evaluation.coefficient, dropped_mass, mass, angle_per_step, phase,
-            p*dt, hi, ci, counts[p],
+        phase += Fraction(increments[p])
+        phases[p] = phase
+
+    def emit(subdivisions):
+        """Return h_hat, the exact (total, parts) of every prefix, and the first power over its allowance, or None."""
+        h = g * dt / subdivisions
+        # float(Fraction) raises OverflowError instead of returning inf.
+        if h > Fraction(float_info.max):
+            raise ValueError("the common step is not a finite binary64 number")
+        h_hat = float(h)
+        if h_hat == 0 and coefficients:
+            raise ValueError("the common step rounds to zero for positive-time evolution")
+        half_angles = tuple(0.5 * h_hat * value for value in coefficients)
+        if not all(isfinite(value) for value in half_angles):
+            raise ValueError("emitted phases and angles must be finite")
+        hi = Fraction(h_hat)
+        mass, angle_per_step = _common_reductions(coefficients, hi, half_angles)
+        totals = {p: _emitted_parts(
+            evaluation.coefficient, dropped_mass, mass, angle_per_step, phases[p],
+            p*dt, hi, ci, p // g * subdivisions,
+        ) for p in powers}
+        return h_hat, totals, next((p for p in powers if totals[p][0] > Fraction(allowances[p])), None)
+
+    def missed(subdivisions, h_hat, totals, p):
+        # B_p > epsilon_p is the same as time + identity + angles > epsilon_p - trotter - pruning.
+        # common_steps inverts only the right side, and the left side is the rounding of h_hat, the
+        # phases and the angles, which is zero on the ideal rational grid.
+        total, parts = totals[p]
+        margin = Fraction(allowances[p]) - parts["trotter"] - parts["pruning"]
+        return (
+            f"common step count {p // g * subdivisions} (m={subdivisions}, h_hat={h_hat!r}) does not meet the "
+            f"allowance {allowances[p]!r} at power {p}: emitted subtotal {_upward_float(total)!r} with contributions "
+            + ", ".join(f"{name}={_upward_float(value)!r}" for name, value in parts.items())
+            + f", and the trotter and pruning terms leave a margin of {float(margin)!r} below the allowance"
         )
-        if total > Fraction(allowances[p]):
-            raise ValueError(
-                f"common step h_hat={h_hat!r} does not meet the allowance {allowances[p]!r} "
-                f"at power {p}: emitted subtotal {_upward_float(total)!r} with contributions "
-                + ", ".join(f"{name}={_upward_float(value)!r}" for name, value in parts.items())
+
+    def corrected(subdivisions, first):
+        """Return the count and emission that pass after ``first`` failed, or refuse (``_common_envelope_count``)."""
+        tried = [missed(subdivisions, *first)]
+
+        def unconfirmed(why):
+            return ValueError(
+                "; ".join(tried) + f". {why} This conservative rule for proposing step counts confirmed no feasible "
+                "count, which does not show that the target error is unattainable. A larger allowance, the "
+                "controlled_power_error_budget of a QPE method or the allowances of select_common_step, can be tried, "
+                "but none is guaranteed to pass, because each allowance has its own counts and its own exact check"
             )
-        bounds[p] = (total, parts)
+
+        def admit_proposed(proposed):
+            admit(proposed, " so that the exact check can test this count. Smaller counts failed it: "
+                  + "; ".join(tried))
+
+        subdivisions += 1
+        admit_proposed(subdivisions)
+        emission = emit(subdivisions)
+        if emission[2] is None:
+            return subdivisions, emission
+        tried.append(missed(subdivisions, *emission))
+        proposed, why = _common_envelope_count(
+            evaluation.coefficient, coefficients, dt, ci, dropped_mass, g, allowances, phases)
+        if proposed is None:
+            raise unconfirmed(why)
+        admit_proposed(proposed)
+        step = float(g * dt / proposed)
+        if not (_is_normal(step) and _is_normal(0.5 * step)):
+            raise unconfirmed(f"The proposed m={proposed} gives the step {step!r}, whose half is below the normal "
+                              "binary64 range, so the rounding bound that proposes it does not apply.")
+        emission = emit(proposed)
+        if emission[2] is None:
+            return proposed, emission
+        tried.append(missed(proposed, *emission))
+        raise unconfirmed("That last count is the one the conservative rounding bound proposes.")
+
+    emission = emit(m)
+    if emission[2] is not None:
+        m, emission = corrected(m, emission)
+    h_hat, bounds, _ = emission
+    counts = {p: p // g * m for p in powers}
     # Scalar allowance of the whole trajectory: the least per-power residual
     # after the non-formula contributions, rescaled to r_max steps.
     r_max = counts[p_max]
@@ -2026,7 +2112,7 @@ def _select_common_step(evaluation, *, coefficients, identity, tau, allowances, 
         common_power_allowances=tuple((p, float(allowances[p])) for p in powers),
         common_recheck_outcome="accepted",
         common_prefix_bounds=tuple(published.items()),
-    ), bounds, dict(zip(powers, increments, strict=True))
+    ), bounds, increments
 
 
 def build_trotter_evolution_circuit(

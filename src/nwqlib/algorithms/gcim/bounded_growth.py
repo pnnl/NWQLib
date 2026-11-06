@@ -9,8 +9,8 @@ at most ``candidates_per_round`` such extensions from their projected
 matrix columns and appends the best one. The functions here are pure: they
 read chains, integers and small projected matrices and never touch a Run.
 ``frontier`` chooses the extensions of one round, ``reference_cx_bound``
-and ``generator_cx_weight`` give the CX-count bound of a chain under an
-explicit ``basis_depth_limit``, and ``current_projection``,
+and ``fermionic_circuits.generator_cx_count`` give the CX-count bound of a
+chain under an explicit ``basis_depth_limit``, and ``current_projection``,
 ``candidate_score`` and ``ritz_gain`` evaluate the score of one extension.
 With shots, ``sampled_metric`` and ``sampled_eligibility`` decide from the
 overlap moments of the measured settings whether an extension's sampled
@@ -67,7 +67,7 @@ def frontier(basis, cursor, *, pool_size, theta, growth, weight=None, reference_
 
     With ``growth.basis_depth_limit`` set, ``weight(g)`` returns ``(w, None)``
     with the CX count bound of generator g at ``theta``
-    (``generator_cx_weight``) or ``(None, reason)`` when it is unknown, and
+    (``fermionic_circuits.generator_cx_count``) or ``(None, reason)`` when it is unknown, and
     an extension's bound is ``reference_bound`` plus the weight of every
     literal item, repeats included. An extension with an unknown bound has
     reason ``"depth_unknown"``, one above the limit ``"above_depth_limit"``,
@@ -168,76 +168,6 @@ def reference_cx_bound(preparation, num_qubits):
     return None, f"the reference preparation {implementation!r} has no CX count"
 
 
-def generator_cx_weight(definition):
-    """Return ``(w, None)`` with the canonical CX count bound of one generator circuit, or ``(None, reason)``.
-
-    ``definition`` is the top-level circuit of the uncontrolled forward
-    generator gate that ``fermionic_circuits.build_generator_circuit``
-    built. Each top-level instruction is read once, with no wrapper
-    definition opened, no synthesis, transpilation or simulation, and its
-    count under a lowering to one-qubit U and CX gates is added, assuming
-    no cancellation or parallel execution, so ``w`` bounds the CX depth of
-    the generator:
-
-    - a standard one-qubit gate and the circuit's global phase: 0;
-    - CX: 1, CZ: 1 (H-CX-H on the target), SWAP: 3 (three alternating CX),
-      RXX, RYY, RZZ: 2 (one-qubit basis changes around CX-RZ-CX);
-    - an RY with k >= 1 controls: ``2 M_k`` with ``M_k`` the CX count of a
-      k-controlled X (``_mcx_counts.MCX_CX_BY_CONTROLS[k - 1]``), from
-      ``C^k RY(phi) = RY(phi/2) X_k RY(-phi/2) X_k`` (rightmost factor
-      first). With the controls inactive both ``X_k`` act as the identity
-      and the rotations cancel, and with them active ``X RY(t) X = RY(-t)``
-      gives ``RY(phi)``. Open controls add one-qubit X gates only;
-    - the Gray-code multiplexor wrapper of ``_multiplexors._rotation_multiplexor``
-      (a plain ``Gate`` named ``ucry`` on k + 1 qubits with its table of
-      ``2**k`` angles): ``2**k``, one CX per Gray-code position, 0 for
-      k = 0.
-
-    Any other instruction, a controlled RY with more controls than the
-    table holds, and an unbound or nonfinite parameter make the count
-    unknown. The identities are those of ideal real angles. They add no
-    synthesis and claim nothing about the numerical error of the actual
-    generator circuit. The count is a pre-routing bound, not the native
-    two-qubit depth of an executable circuit, which
-    ``ADAPT.max_native_two_qubit_depth`` checks separately.
-    """
-    from qiskit.circuit import ControlledGate, Gate
-    from qiskit.circuit.library import (
-        CXGate, CZGate, HGate, IGate, PhaseGate, RXGate, RXXGate, RYGate, RYYGate, RZGate, RZZGate,
-        SdgGate, SGate, SwapGate, SXdgGate, SXGate, TdgGate, TGate, UGate, XGate, YGate, ZGate)
-    from nwqlib.subroutines._mcx_counts import MCX_CX_BY_CONTROLS
-
-    single = (HGate, IGate, PhaseGate, RXGate, RYGate, RZGate, SdgGate, SGate, SXdgGate, SXGate,
-              TdgGate, TGate, UGate, XGate, YGate, ZGate)
-    fixed = {CXGate: 1, CZGate: 1, SwapGate: 3, RXXGate: 2, RYYGate: 2, RZZGate: 2}
-    total = 0
-    for instruction in definition.data:
-        operation = instruction.operation
-        name = operation.name
-        # base_class names the public gate class also for Qiskit's singleton
-        # instances of parameterless gates, such as H, whose own type is private.
-        kind = operation.base_class
-        if kind in single:
-            count = 0
-        elif kind in fixed:
-            count = fixed[kind]
-        elif isinstance(operation, ControlledGate) and type(operation.base_gate) is RYGate:
-            controls = operation.num_ctrl_qubits
-            if not 1 <= controls <= len(MCX_CX_BY_CONTROLS) or operation.num_qubits != controls + 1:
-                return None, f"RY with {controls} controls has no tabulated CX count"
-            count = 2 * MCX_CX_BY_CONTROLS[controls - 1]
-        elif (kind is Gate and name == "ucry" and operation.num_qubits >= 1
-              and len(operation.params) == 1 << (operation.num_qubits - 1)):
-            controls = operation.num_qubits - 1
-            count = (1 << controls) if controls else 0
-        else:
-            return None, f"instruction {name!r} on {operation.num_qubits} qubits has no CX count"
-        if not all(isinstance(value, (int, float)) and isfinite(value) for value in operation.params):
-            return None, f"instruction {name!r} has an unbound or nonfinite parameter"
-        total += count
-    return total, None
-
-
 def current_projection(h0, coordinates, offset_free_energy):
     """Return the fixed inputs of every candidate score of one round, from the current solve.
 
@@ -289,6 +219,12 @@ def candidate_score(current, h0, s, d0, independence_cutoff):
     - The score is ``ritz_gain(delta, rho)``, the decrease
       ``E - lambda_-`` of the lowest eigenvalue of the 2-by-2 projection on
       ``{Psi, q}``.
+
+    The Gram matrix, the overlap coordinates, ``eta`` and
+    ``independence_cutoff`` are dimensionless, while ``h0``, ``K0``, ``E0`` and
+    ``d0`` multiply by a under ``A -> aA + bI`` with a > 0. So ``rho`` and
+    ``delta`` multiply by a, and ``ritz_gain(a delta, a rho) = a ritz_gain(delta, rho)``,
+    which leaves the ranking of the extensions unchanged in exact arithmetic.
 
     By Rayleigh-Ritz inclusion the lowest Ritz value of the kept span plus
     q lies at or below ``lambda_-``, so the score is a lower bound on the

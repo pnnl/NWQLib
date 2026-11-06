@@ -1,9 +1,9 @@
 # %% [markdown]
 # # Quantum resource estimates at up to 100 qubits in seconds: linear systems, ODEs, eigenvalues and optimization
 #
-# No state-vector simulator can hold 100 qubits, whose amplitudes alone occupy $2\times10^{31}$ bytes. In seconds, this notebook plans five quantum algorithms at that size, namely the quantum linear-system solver (QLS), Linear Combination of Hamiltonian Simulation (LCHS) for linear ODEs, quantum phase estimation (QPE) with the QCELS method, quantum Hamiltonian descent (QHD) and the generator-coordinate-inspired method (GCiM). It builds and simulates no circuit for them and labels every count as exact, an upper bound, an estimate or unavailable.
+# No state-vector simulator can hold 100 qubits, whose amplitudes alone occupy $2\times10^{31}$ bytes. In seconds, this notebook plans five quantum algorithms at up to that size, namely the quantum linear-system solver (QLS), Linear Combination of Hamiltonian Simulation (LCHS) for linear ODEs, quantum phase estimation (QPE) with the QCELS method, quantum Hamiltonian descent (QHD) and the generator-coordinate-inspired method (GCiM). It builds and simulates no circuit for them and labels every count as exact, an upper bound, an estimate or unavailable.
 #
-# Install with `python -m pip install "nwqlib[aer,notebook]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook]"` in a clone of the repository instead. The planned circuits reach 109 logical qubits. Separate cells build and compile circuits of up to 25 qubits for an optional comparison, and the planning numbers do not depend on it. The full notebook, including those cells, took 16.4 s in the recorded run with Python 3.12.14, Qiskit 2.6.0 and Aer 0.18.0 on macOS arm64.
+# Install with `python -m pip install "nwqlib[aer,notebook]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook]"` in a clone of the repository instead. The planned circuits reach 109 logical qubits. Separate cells build and compile circuits of up to 25 qubits for an optional comparison, and the planning numbers do not depend on it. The full notebook, including those cells, took 22 s in the recorded run with Python 3.12.14, Qiskit 2.6.0 and Aer 0.18.0 on macOS arm64.
 #
 # > **How to read this notebook.** The overview and "Before committing" come first, and the explanation starts at Section 1.
 # >
@@ -329,8 +329,8 @@ show_card(SIZES, qls, qls_cx, lchs, lchs_cx, qpe, qpe_fold, qpe_cx, gcim_cx, pla
 #
 # | Label | Meaning | Numbers with this label here |
 # | --- | --- | --- |
-# | Exact count | An integer that the planned construction fixes | qubits, encoding queries, LCHS branches, product-formula steps, measurement settings, shots, QPE logical operations and CX gates, one-hot QHD rotations |
-# | Upper bound | A value that the named count, or the named ideal error component, cannot exceed | LCHS, QHD and GCiM CX gates before optimization and routing, binary QHD rotation slots, and the error bounds |
+# | Exact count | An integer that the planned construction fixes | qubits, encoding queries, LCHS branches, product-formula steps, measurement settings, shots, QPE logical operations and CX gates |
+# | Upper bound | A value that the named count, or the named ideal error component, cannot exceed | LCHS, QHD and GCiM CX gates before optimization and routing, QHD rotation slots, and the error bounds |
 # | Estimate | A library value recorded with `numerical_estimate` or `estimate` evidence, not as a bound | QLS CX gates, the one-hot QHD preparation error |
 # | Unavailable | No resource formula of the construction covers the quantity, and it is never reported as zero | circuit depth and T gates of the QLS and LCHS plans (Appendix B) |
 #
@@ -347,12 +347,10 @@ show_card(SIZES, qls, qls_cx, lchs, lchs_cx, qpe, qpe_fold, qpe_cx, gcim_cx, pla
 
 # %%
 from nwqlib import prepare
-from nwqlib.execution import ExecutionLimits
 
 SMALL_SIZES = (4, 6, 8, 12, 16)  # system qubits of the compiled QLS and LCHS checks, with the accuracy controls above
 SMALL_SPINS = (4, 8)             # spins of the compiled QPE checks, with the schedule and allowance above
 LEVEL_0 = {"basis_gates": ["cx", "u"], "optimization_level": 0, "seed_transpiler": 7, "approximation_degree": 1.0}
-BUILD_ONLY = ExecutionLimits(max_simulation_qubits=32)  # allows building the 25-qubit LCHS circuit, nothing is simulated
 
 
 def small_plan(family, q):
@@ -373,9 +371,9 @@ for family in ("QLS", "LCHS"):
     for q in SMALL_SIZES:
         selected_small = small_plan(family, q)
         law = estimate(selected_small, context=CX).quantity("cx")
-        prepared = prepare(selected_small, progress=False, limits=BUILD_ONLY)  # builds the circuit, runs nothing
+        prepared = prepare(selected_small, progress=False)  # builds the circuit, runs nothing
         with prepared.run:                                       # the prepared Run holds the circuit until the block ends
-            inventory = prepared.inspect_resources(max_operations=10_000_000, transpile_options=LEVEL_0)
+            inventory = prepared.inspect_resources(transpile_options=LEVEL_0)
             if family == "QLS" and q == SMALL_SIZES[0]:
                 optimized_cx = prepared.inspect_resources(
                     transpile_options={**LEVEL_0, "optimization_level": 3})["operations"].get("cx", 0)
@@ -471,7 +469,7 @@ show_table(ledger, headers=("Plan at q = 100", "Logical qubits", "CX gates", "Sh
 # %% [markdown]
 # **Will it run?** Planning checks each workload against a named limit before it builds anything. The next cell plans the heat flow of Section 2 with a construction-work limit below what that plan needs. Planning stops and names the limit and the amount.
 #
-# Appendix D lists the limits that bind near these sizes.
+# Appendix D gives what these plans need against an explicit limit.
 
 # %%
 tight = lchs_method.revise(max_select_work=20_000_000)  # the 100-qubit construction needs 30,047,903
@@ -510,7 +508,7 @@ print(f"At q = 100 the estimate's calls total is {number(qls_cx[100].quantity('c
 #
 # The estimate's `calls` total, printed below the table, counts every block invocation, including the preparation of $b$, rotations and projectors. It is not an oracle-query count, which is the degree $d$.
 #
-# **How does the requested tolerance set the cost?** `compare` plans the 100-qubit system for four tolerances in one call and keeps every row without ranking them. For each polynomial the table gives the residual bound that NWQLib stores and the same residual evaluated exactly at its numerical stationary points.
+# **How does the requested tolerance set the cost?** `compare` plans the 100-qubit system for four tolerances in one call and keeps every row without ranking them. For each polynomial the table gives the residual check value that planning compared with ε and the residual evaluated exactly at its numerical stationary points.
 
 # %%
 from fractions import Fraction
@@ -554,11 +552,11 @@ def candidate_residual(reconstruction):
 
 
 residual_checks = [(row.method.epsilon_inv, candidate_residual(row.plan.reconstruction),
-                    Fraction(float(row.plan.reconstruction.polynomial.certificate))) for row in sweep.rows]
-precision = [(row.method.epsilon_inv, row.plan.reconstruction.degree, row.plan.reconstruction.polynomial.certificate,
+                    Fraction(float(row.plan.reconstruction.polynomial.residual_check_value))) for row in sweep.rows]
+precision = [(row.method.epsilon_inv, row.plan.reconstruction.degree, row.plan.reconstruction.polynomial.residual_check_value,
               float(candidate), number(row.estimate.quantity("cx")))
              for row, (_, candidate, _) in zip(sweep.rows, residual_checks, strict=True)]
-show_table(precision, headers=("Requested tolerance ε", "Degree d = encoding queries", "Residual bound (stored)",
+show_table(precision, headers=("Requested tolerance ε", "Degree d = encoding queries", "Residual check value",
                                "Residual at numerical stationary candidates", "CX estimate per attempt"))
 fig, ax = plt.subplots(figsize=(6.5, 3.2), layout="constrained")
 ax.semilogx([row[0] for row in precision], [row[1] for row in precision], "o-", color="#0072B2")
@@ -571,11 +569,11 @@ plt.show()
 print(f"compare selected and estimated the four candidates in {SECONDS['QLS compare']:.2f} s.")
 
 # %% [markdown]
-# Each stored bound limits the relative error of the ideal inverse polynomial when the encoded spectrum lies in $[1/\kappa,1]$. It excludes the phase-fit error, the finite-precision arithmetic of the circuit, state preparation and measurement. In the table the exact residual at the stationary candidates lies below each stored bound.
+# Each check value is a numerical check of the largest relative error of the inverse polynomial when the encoded spectrum lies in $[1/\kappa,1]$, computed in binary64 with an allowance for its own rounding. It excludes the phase error, the finite-precision arithmetic of the circuit, state preparation and measurement. In the table the exact residual at the stationary candidates lies below each check value.
 #
-# <details><summary>How the residual bound is computed</summary>
+# <details><summary>How the residual check value is computed</summary>
 #
-# The residual $R(x)=\kappa xP(x)-1$ has degree $d+1$. NWQLib bounds it by its maximum at $M$ affine Chebyshev-zero samples $x_j$ of $[1/\kappa,1]$ divided by $\cos[\pi(d+1)/(2M)]$ (Ehlich and Zeller, [doi:10.1007/BF01111276](https://doi.org/10.1007/BF01111276), Satz 2, Eqs. (12)–(14)), and an odd $P$ makes $R$ even, which covers the negative interval too. The exact residual at the numerical stationary candidates is a lower bound on the maximum and a cross-check, not a substitute for the upper bound.
+# $P$ approximates the relative minimax polynomial of degree $d=2m-1$, whose residual $\kappa xP(x)-1$ has maximum $\delta_m=\operatorname{sech}(m\beta)$ on $1/\kappa\le|x|\le1$, with $\beta=2\operatorname{artanh}(1/\kappa)$ ([Proposition 23](../docs/mathematics.md#r23)). The stored coefficients differ from that polynomial by rounding, and $\kappa x$ times the difference is a polynomial of degree $d+1$. In exact arithmetic its maximum at $M=4(d+2)$ Chebyshev-zero samples of $[-1,1]$ divided by $\cos[\pi(d+1)/(2M)]$ bounds it (Ehlich and Zeller, [doi:10.1007/BF01111276](https://doi.org/10.1007/BF01111276), Satz 2, Eqs. (12)–(14)). NWQLib evaluates this formula in binary64, which gives an estimate $F$ that can fall below the true maximum, and the check value is $(\delta_m+F)+(F+R)$, with $R$ four machine epsilons times the bit length of $M$. The exact residual at the numerical stationary candidates is a lower bound on the maximum and a cross-check of the check value.
 #
 # </details>
 #
@@ -674,7 +672,7 @@ show_table([(q, number(lchs_cx[q].quantity("logical_width", location="logical_de
 #
 # $$r_p=\max\Bigl(1,\Bigl\lceil\sqrt{W_{\rm up}|t_p|^3/(\epsilon_p-|t_p|d)}\Bigr\rceil\Bigr),$$
 #
-# evaluated by exact rational inversion. Each recorded power bound adds pruning, represented-time displacement (the error from the difference between the requested evolution time and the total time represented by its steps), identity-phase formation and rotation-angle formation (rounding while forming the gate angles) to the product-formula error of the circuit step, and is recorded rounded upward. One commutator count, the count of anticommuting pairs and nonzero nested commutators among the Pauli terms, serves every power. Its work and the exact arithmetic of the per-power check are counted against `max_work` as separate stages, and both fit the default of $10^9$ (Appendix D).
+# evaluated by exact rational inversion. Each recorded power bound adds pruning, represented-time displacement (the error from the difference between the requested evolution time and the total time represented by its steps), identity-phase formation and rotation-angle formation (rounding while forming the gate angles) to the product-formula error of the circuit step, and is recorded rounded upward. One commutator count, the count of anticommuting pairs and nonzero nested commutators among the Pauli terms, serves every power. Its work is counted against `max_work` as a separate stage and fits a cap of $10^9$, and the exact per-power check is not counted (Appendix D).
 #
 # </details>
 #
@@ -755,7 +753,7 @@ print(f"{len(commuting_terms)} commuting terms, coefficient 1-norm {commuting.re
 #
 # <details><summary>How each encoding applies its phases and counts its rotations</summary>
 #
-# Binary applies each phase table either as Walsh rotations, one Z-string rotation per nonzero Walsh coefficient, or as a dense diagonal over all basis states of its registers, and takes whichever needs fewer CX gates. It also uses a full QFT with bit-reversal relabeling for the kinetic factor. One-hot classifies every angle used in the circuit exactly as arbitrary, exact T or Clifford. Binary instead bounds its rotation slots, the places where a rotation can appear before its angle is classified, so its formula includes exact T angles and slots that a dense diagonal leaves unused.
+# Binary applies each phase table either as Walsh rotations, one Z-string rotation per nonzero Walsh coefficient, or as a dense diagonal over all basis states of its registers, and takes whichever needs fewer CX gates. It also uses a full QFT with bit-reversal relabeling for the kinetic factor. The planned rotation formula of each encoding bounds its rotation slots, the places where a rotation can appear before its angle is classified, so it includes exact T angles and, for binary, slots that a dense diagonal leaves unused. The actual count of arbitrary rotations needs each angle classified as arbitrary, exact T or Clifford, which `circuit_resources` does for a stated synthesis budget. Appendix A gives the one-hot count, and Appendix E compares the count with the formula on small circuits.
 #
 # </details>
 #
@@ -940,9 +938,9 @@ show_table([
 #
 # ### A. Formulas and independent checks
 #
-# **CX counts.** Each QLS encoding query of the three-band stencil uses two address qubits. It costs a quantum Fourier transform and its inverse, $2q(q-1)$ CX for their controlled phases and $6\lfloor q/2\rfloor$ for their swaps, $4q$ for q four-entry uniformly controlled RZ gates, and 6 for the coefficient diagonal and its preparation pair. Each of the $d+1$ projector phases adds two two-control X gates at 6 CX each and two pair-controlled CX gates. Together,
+# **CX counts.** Each QLS encoding query of the three-band stencil $A=\tfrac32I-\tfrac14S-\tfrac14S^\dagger$ uses two address qubits for the labels of the bands $+1$, $-1$ and $0$, with magnitudes $\tfrac14$, $\tfrac14$ and $\tfrac32$. It costs a quantum Fourier transform and its inverse, $2q(q-1)$ CX for their controlled phases and $6\lfloor q/2\rfloor$ for their swaps, and $4q$ for q four-entry uniformly controlled RZ gates. The positive coefficient preparation and its inverse cost 4 and the address phase diagonal 2. Because A is Hermitian, the encoding also exchanges the labels of the two conjugate shifts $S$ and $S^\dagger$, whose equal magnitudes leave the coefficient state unchanged, and this exchange is one CX with an open control. Each of the $d+1$ projector phases adds two two-control X gates at 6 CX each and two pair-controlled CX gates. Together,
 #
-# $$C_{\rm QLS}(q,d)=d\bigl[2q(q-1)+6\lfloor q/2\rfloor+4q+6\bigr]+14(d+1).$$
+# $$C_{\rm QLS}(q,d)=d\bigl[2q(q-1)+6\lfloor q/2\rfloor+4q+7\bigr]+14(d+1).$$
 #
 # The LCHS circuit with $P$ padded address slots prepares the branch weights and applies their address phases at $3(P-2)$ CX. Each Strang step applies three uniformly controlled rotations and two shifts, each shift with a Fourier-transform pair, so with $r$ steps
 #
@@ -964,22 +962,22 @@ show_table([
 #
 # $$W=g^3\left(\frac{C_{12}}{3}+\frac{C_{24}}{6}\right).$$
 #
-# The cell evaluates each relation from the problem data or the plans' records, independently of NWQLib's own evaluation, and compares. The LCHS coefficient $B$ is compared with the record of a one-step plan of the same branches, since the plan with $r$ steps records $B/r^2$. It evaluates the LCHS bounds in binary64 arithmetic. NWQLib evaluates the kernel-tail and quadrature bounds in binary64 arithmetic as well, in other forms of the same formulas, and the Strang coefficient exactly from upper values of the weight moduli, rounding its records upward. The two evaluations of each LCHS bound therefore agree only up to rounding, and each comparison has a window in units of $u=2^{-53}$, derived for these inputs from the operations of both paths. The independent Strang step count must hold for every coefficient within $15u$ of the independent value, an interval that contains the exact coefficient LCHS inverts. The independent QPE oracle evaluates the full Pauli-triangle coefficient $W$ in exact rational arithmetic from the stored binary64 coefficients. NWQLib's coefficient satisfies $W\le W_{\rm up}\le W(1+\delta)$, where $\delta$ follows from power-of-two scaling, outward multiplication and the two levels of block reduction. The QPE record stores $W_{\rm up}$, the reduction block and the commutator-count variant, and the cell reads them from the record. The implementation uses the coefficient arithmetic described above. For each power $p\ge1$ the cell then recomputes the step count $r_p$ of Section 3 in exact rational arithmetic from $W_{\rm up}$, the stored binary64 time of the power and the allowance, together with the count that the exact coefficient $W$ would give. With the binary64 step time $h$ of the circuit, the stored time divided by $r_p$, the half angles $a_j$ of the circuit, the coefficient sum $M=\sum_j|c_j|$ and $A=2\sum_j|a_j-hc_j/2|$, it evaluates the complete power bound
+# The cell evaluates each relation from the problem data or the plans' records, independently of NWQLib's own evaluation, and compares. The LCHS coefficient $B$ is compared with the record of a one-step plan of the same branches, since the plan with $r$ steps records $B/r^2$. It evaluates the LCHS bounds in binary64 arithmetic. NWQLib evaluates the kernel-tail and quadrature bounds in binary64 arithmetic as well, in other forms of the same formulas, and the Strang coefficient exactly from upper values of the weight moduli, rounding its records upward. The two evaluations of each LCHS bound therefore agree only up to rounding, and each comparison has a window in units of $u=2^{-53}$, derived for these inputs from the operations of both paths. The independent Strang step count must hold for every coefficient within $15u$ of the independent value, an interval that contains the exact coefficient LCHS inverts. The independent QPE oracle evaluates the full Pauli-triangle coefficient $W$ in exact rational arithmetic from the stored binary64 coefficients. NWQLib's coefficient satisfies $W\le W_{\rm up}\le W(1+\delta)$, where $\delta$ follows from power-of-two scaling, outward multiplication and the two levels of block reduction. The QPE record stores $W_{\rm up}$, the reduction block and the commutator-count variant, and the cell reads them from the record. The implementation uses the coefficient arithmetic described above. For each power $p\ge1$ the cell then recomputes the step count $r_p$ of Section 3 in exact rational arithmetic from $W_{\rm up}$, the stored binary64 time of the power and the allowance, together with the count that the exact coefficient $W$ would give. With the binary64 step time $h$ of the circuit, the stored time divided by $r_p$, its binary64 half $s$, the half angles $a_j$ of the circuit and the coefficient sum $M=\sum_j|c_j|$ of the $L$ terms, the angle error $A=2\sum_j|a_j-hc_j/2|$ has the a priori bound $A_{\rm up}=2u|s|M+2^{-1074}(L+M)$ that NWQLib records, and the cell checks $A\le A_{\rm up}$ exactly. It then evaluates the complete power bound
 #
-# $$B_p=|t_p|d+r_p\bigl(W_{\rm up}|h|^3+A\bigr)+M\,|r_ph-t_p|+|\phi+t_pc_I|$$
+# $$B_p=|t_p|d+r_p\bigl(W_{\rm up}|h|^3+A_{\rm up}\bigr)+M\,|r_ph-t_p|+|\phi+t_pc_I|$$
 #
-# exactly from the stored binary64 values, with $t_p=p\,\tau$ formed exactly, and compares its upward rounding with the recorded bound. Here $d$, the identity coefficient $c_I$ and the identity phase $\phi=-p\tau c_I$ of the circuit are zero for these chains. The recorded bound must also lie between $B_p$ evaluated with $W$ and with $W(1+\delta)$, each rounded upward. The recheck work that planning counts against `max_work` before this exact arithmetic is NWQLib's own value, shown without an independent check.
+# exactly from the stored binary64 values, with $t_p=p\,\tau$ formed exactly, and compares its upward rounding with the recorded bound. Here $d$, the identity coefficient $c_I$ and the identity phase $\phi=-p\tau c_I$ of the circuit are zero for these chains. The recorded bound must also lie between $B_p$ evaluated with $W$ and with $W(1+\delta)$, each rounded upward.
 
 # %%
 from fractions import Fraction as Q
 from math import asinh, ceil, cos, exp, frexp, fsum, inf, isclose, isqrt, nextafter, pi
 
-from nwqlib.algorithms.qpe.powers import independent_recheck_work, rotation_schedule
+from nwqlib.algorithms.qpe.powers import rotation_schedule
 
 
 def qls_cx_formula(q, d):
-    """C_QLS(q, d) = d [2q(q-1) + 6 floor(q/2) + 4q + 6] + 14(d + 1), the elementary count above."""
-    return d * (2 * q * (q - 1) + 6 * (q // 2) + 4 * q + 6) + 14 * (d + 1)
+    """C_QLS(q, d) = d [2q(q-1) + 6 floor(q/2) + 4q + 7] + 14(d + 1), the elementary count above."""
+    return d * (2 * q * (q - 1) + 6 * (q // 2) + 4 * q + 7) + 14 * (d + 1)
 
 
 def lchs_cx_formula(q, slots, r):
@@ -1054,13 +1052,15 @@ def exact_census(terms, *, order=2):
         a.append(abs(Q(float(coefficient))))
     p = len(a)
     pair_sum = square_sum = triple_sum = Q(0)
-    E = F = N = 0
+    E = F = N = widest = 0
     for i, (xi, zi) in enumerate(masks):
+        row = 0
         for j in range(i + 1, p):
             xj, zj = masks[j]
             if ((xi & zj).bit_count() + (zi & xj).bit_count()) % 2 == 0:
                 continue
             E += 1
+            row += 1
             N += p - i - 1
             pair_sum += a[i] * a[j]
             square_sum += a[i]**2 * a[j]
@@ -1069,16 +1069,18 @@ def exact_census(terms, *, order=2):
                 if ((xk & (zi ^ zj)).bit_count() + (zk & (xi ^ xj)).bit_count()) % 2:
                     F += 1
                     triple_sum += a[i] * a[j] * a[k]
+        widest = max(widest, row)
     if order == 1:
         W = pair_sum
     else:
         W = triple_sum/3 + square_sum/6
-    return W, E, N, F
+    return W, E, N, F, widest
 
-def census_delta(magnitudes, E, F, block, *, order=2):
+def census_delta(magnitudes, widest, *, order=2):
     d = order + 1
+    p = len(magnitudes)
     positive = [Q(float(v)) for v in magnitudes if v > 0]
-    if not positive or E == 0:
+    if not positive or widest == 0:
         return Q(0)
     e = frexp(float(max(positive)))[1]
     xmin = min(positive) / Q(2)**e
@@ -1094,12 +1096,12 @@ def census_delta(magnitudes, E, F, block, *, order=2):
         k = max(0, n - 1)
         assert 2*k*u < 1
         return mul*(1 + 2*u)/(1 - 2*k*u)
-    def blocked(n):
-        return reduction(min(block, n))*reduction((n+block-1)//block)
+    # A nested mass sums at most p-1 suffix terms, a row of A at most `widest` products and the
+    # final reduction p row sums, each enclosed upward.
     if order == 1:
-        factor = scale**2*mul*blocked(E)
+        factor = scale**2*mul*reduction(widest)*reduction(p)
     else:
-        factor = scale**3*mul**2*max(blocked(E), blocked(F))
+        factor = scale**3*mul**2*reduction(p - 1)*reduction(widest)*reduction(p)
     return factor - 1
 
 def upward(value):
@@ -1135,8 +1137,10 @@ def check_power(selected_qpe, W_exact, delta_W):
         h = power.evolution_time / r                       # the emitted binary64 step time
         half_angles = rotation_schedule(terms, h)[:len(terms)]
         A = 2 * sum((abs(Q(angle) - Q(h) * c / 2) for (_, angle), c in zip(half_angles, coefficients, strict=True)), Q(0))
+        A_up = 2 * Q(1, 2**53) * abs(Q(0.5 * h)) * M + (len(terms) + M) / Q(2**1074)
+        assert A <= A_up
         t = Q(power.power) * Q(rec.tau)
-        other = r * A + M * abs(r * Q(h) - t)              # pruning, identity coefficient and phase are zero here
+        other = r * A_up + M * abs(r * Q(h) - t)           # pruning, identity coefficient and phase are zero here
         bound = W_up * r * abs(Q(h))**3 + other
         assert bound <= Q(allowance) and power.total_error == upward(bound)
         low = upward(Q(W_exact) * r * abs(Q(h))**3 + other)
@@ -1153,27 +1157,23 @@ for key, selected_qpe in [*qpe.items(), (("Commuting", 100), commuting)]:
     assert key[0] == "Commuting" or terms == chain_terms(key[1], key[0])
     assert rec.common_step is None and rec.powers[0].steps == 0
     assert rec.pruned_mass == 0 and rec.identity_coefficient == 0
-    W_exact, E, N, F = exact_census(terms)
-    assert rec.bound_variant == "exact_census"
+    W_exact, E, N, F, widest = exact_census(terms)
+    assert rec.bound_variant == "exact_census" and rec.nested_word_tests == (len(terms[0][0]) + 63) // 64 * N
     W_rec = Q(*rec.bound_coefficient)
-    delta = census_delta([abs(c) for _, c in terms], E, F, rec.census_block)
+    delta = census_delta([abs(c) for _, c in terms], widest)
     assert W_exact <= W_rec <= W_exact*(1 + delta)
     rows = check_power(selected_qpe, W_exact, delta)
     qpe_power_checks.append((key, rows))
-    recheck_work = independent_recheck_work(W_rec, rec.pruned_mass, tuple(power.power for power in rec.powers),
-                                            tuple(c for _, c in terms), rec.identity_coefficient, rec.tau,
-                                            selected_qpe.method.controlled_power_error_budget,
-                                            selected_qpe.method.max_trotter_steps)[0]
     qpe_checks.append((key[0], key[1], float(W_exact), float(W_rec/W_exact - 1) if W_exact else 0.0, float(delta),
-                       len(rows), sum(r == r_exact for _, r, r_exact, *_ in rows), recheck_work))
+                       len(rows), sum(r == r_exact for _, r, r_exact, *_ in rows)))
 show_table(qpe_checks, headers=("Chain", "q", "Exact coefficient W", "Coefficient relative excess", "Derived upper window",
-                                "Powers checked", "Powers whose count W also gives", "Recheck work (NWQLib)"),
+                                "Powers checked", "Powers whose count W also gives"),
            digits=6)
 
 # %% [markdown]
 # Every elementary count equals NWQLib's value, the independent LCHS bounds agree with the records within their windows, and the independent Strang step count equals the one LCHS chose, with its rounding margin.
 #
-# For all six QPE plans and the commuting chain, every step count equals the count that the formula gives from the recorded coefficient, every recorded power bound equals the upward rounding of the independently evaluated $B_p$ and lies inside the interval that the exact coefficient and its derived rounding enclosure give, and every recheck count fits the default `max_work`.
+# For all six QPE plans and the commuting chain, every step count equals the count that the formula gives from the recorded coefficient, every recorded power bound equals the upward rounding of the independently evaluated $B_p$ and lies inside the interval that the exact coefficient and its derived rounding enclosure give.
 #
 # The windows assume round-to-nearest, ties-to-even basic arithmetic and `Fraction`-to-float conversion, normal nonzero intermediate values, at most $2u$ relative error for `pow`, `exp`, `log`, `expm1` and for complex `abs` through the platform's `hypot`, and at most $3u$ for `math.fsum` of positive terms.
 #
@@ -1185,9 +1185,9 @@ show_table(qpe_checks, headers=("Chain", "q", "Exact coefficient W", "Coefficien
 #
 # Each one-variable table has $K-1$ nonzero entries and each pair table $(K-1)^2$. One-hot applies each table entry as a phase controlled on the grid points it involves. A one-variable phase costs one rotation and no CX, and a pair phase three rotations and two CX.
 #
-# The one-hot kinetic product has $3K$ fused links at two CX and two rotations each. The uniform one-hot start is prepared by three chains of rotations, one per variable, which add $9(K-1)$ CX, and their final links supply six exact T angles, which leaves $6(K-2)$ arbitrary rotations. Thus, for these evolution angles, none of which is a Clifford or T angle,
+# The one-hot kinetic product has $3K$ fused links at two CX and two rotations each. The uniform one-hot start is prepared by three chains of rotations, one per variable, which add $9(K-1)$ CX and $6(K-1)$ rotation slots. Their final links supply six exact T angles, which leaves $6(K-2)$ arbitrary rotations. Thus, for these evolution angles, none of which is a Clifford or T angle, the circuit has $R_{\rm oh}$ arbitrary rotations, and the planned upper bound $R_{\rm oh}^{\rm ub}$ also counts the six exact T angles,
 #
-# $$Q_{\rm oh}=3K,\qquad C_{\rm oh}=9(K-1)+6K+4(K-1)^2,\qquad R_{\rm oh}=6(K-2)+6K+3(K-1)+6(K-1)^2.$$
+# $$Q_{\rm oh}=3K,\qquad C_{\rm oh}=9(K-1)+6K+4(K-1)^2,\qquad R_{\rm oh}=6(K-2)+6K+3(K-1)+6(K-1)^2,\qquad R_{\rm oh}^{\rm ub}=R_{\rm oh}+6.$$
 #
 # For $K=8$, 16 and 32 the fewer-CX choice (`BinarySynthesis`, option `min_cx`) selects Walsh rotations for the five potential tables and dense diagonals for the three kinetic tables. The uniform H preparation adds no CX or arbitrary rotations.
 #
@@ -1205,7 +1205,7 @@ show_table(qpe_checks, headers=("Chain", "q", "Exact coefficient W", "Coefficien
 #
 # The difference changes the product formula as well as the gate count, so the lower count is not a claim of improvement at matched accuracy. Rotation counts can also differ by convention.
 #
-# The first midpoint weight is $b(\Delta t/2)\approx2.5\times10^{-10}$ and the potential exponent about $2.5\times10^{-13}$, so a count that treats angles within $10^{-12}$ of a Clifford angle as Clifford would drop this example's potential rotations. The one-hot formula and Appendix E's count of angles used in the circuit include those angles and count exact T angles separately, while the binary formula bounds slots before classification.
+# The first midpoint weight is $b(\Delta t/2)\approx2.5\times10^{-10}$ and the potential exponent about $2.5\times10^{-13}$, so a count that treats angles within $10^{-12}$ of a Clifford angle as Clifford would drop this example's potential rotations. The count $R_{\rm oh}$ and Appendix E's count of angles used in the circuit include those angles and count exact T angles separately, while the planned upper bounds of both encodings count slots before classification.
 #
 # **QHD ideal-evolution bound.** The `evolution` entry of `circuit_resources(plan)` is an outward-evaluated upper bound for the finite model, on the valid one-hot subspace or the complete binary register.
 #
@@ -1223,9 +1223,9 @@ show_table(qpe_checks, headers=("Chain", "q", "Exact coefficient W", "Coefficien
 
 # %%
 def qhd_count_formulas(k, encoding):
-    """Q, C and R of Appendix A for the one-hot or binary construction on K points per variable."""
+    """Q, C and the rotation upper bound of Appendix A for the one-hot or binary construction on K points per variable."""
     if encoding == "one_hot":
-        return 3 * k, 9 * (k - 1) + 6 * k + 4 * (k - 1) ** 2, 6 * (k - 2) + 6 * k + 3 * (k - 1) + 6 * (k - 1) ** 2
+        return 3 * k, 9 * (k - 1) + 6 * k + 4 * (k - 1) ** 2, 6 * (k - 2) + 6 * k + 3 * (k - 1) + 6 * (k - 1) ** 2 + 6
     m = k.bit_length() - 1
     return (3 * m, 6 * m * (m - 1) + 3 * (k - 2) + 3 * m * (m - 1) + 4 * m * m,
             9 * m * (m - 1) + 3 * (k - 1) + 3 * m * (m + 1) // 2 + 2 * (m * m + 2 * m))
@@ -1270,7 +1270,7 @@ for (qhd_k, qhd_encoding), qhd_p in qhd_plans.items():
 show_table([(k, QHD_ENCODINGS[encoding], *(f"{formula:,} / {format_value(record)}" for formula, record in zip(formulas, records)),
              float(reference), bound, "yes" if reference <= Fraction(bound) <= reference * (1 + Fraction(32, 2**53)) else "no")
             for (k, encoding, formulas, records), (reference, bound) in zip(qhd_count_checks, qhd_bound_checks)],
-           headers=("K", "Encoding", "Qubits, formula / NWQLib", "CX, formula / NWQLib", "Rotations, formula / NWQLib",
+           headers=("K", "Encoding", "Qubits, formula / NWQLib", "CX, formula / NWQLib", "Rotation upper bound, formula / NWQLib",
                     "Evolution bound, reference", "Evolution bound, NWQLib", "Within the 32u window"), digits=6)
 qhd_sources = {encoding: {source.name: source for source in qhd_ledgers[32, encoding].error_sources}
                for encoding in QHD_ENCODINGS}
@@ -1315,7 +1315,7 @@ show_table([(q, *(f"{formula:,} / {format_value(record)}" for formula, record in
 # | QLS degree | The polynomial that planning chose, not a theorem of globally optimal degree | Exact count | Exact degree of that polynomial |
 # | QLS encoding queries | $d$ occurrences of the forward or adjoint encoding in the inverse recipe | Exact count | Derived from the construction |
 # | QLS CX | `estimate`, evidence `numerical_estimate` | Estimate | CX estimate of the construction |
-# | QLS residual bound | Binary64 evaluation of the polynomial norming bound | Upper bound | Analytic bound evaluated numerically |
+# | QLS residual check value | $\delta_m$ plus the binary64 norming estimate of the coefficient rounding, with an allowance for the rounding of that estimate | None | Numerical check compared with ε, without an arithmetic enclosure |
 # | LCHS tail, quadrature and Strang bounds | `plan.facts`, evidence `numerical_estimate`, error measured on the physical vector | Upper bound | Analytic component bounds evaluated numerically |
 # | LCHS CX | `upper_bound`, evidence `external_specification` | Upper bound | Elementary gate slots before optimization and routing |
 # | QPE steps and per-power bound | `QPEPower.steps` and `QPEPower.total_error` | Exact count and upper bound | Exact integer chosen by planning and analytic bound evaluated numerically |
@@ -1323,7 +1323,7 @@ show_table([(q, *(f"{formula:,} / {format_value(record)}" for formula, record in
 # | QPE CX | `estimate` with `basis="cx"`, `exact`, evidence `proved_relation` | Exact count | For Qiskit 2.6.0's decomposition of each controlled Pauli rotation into CX and single-qubit gates, before optimization and routing |
 # | QHD widths | `estimate` with `basis="selected_logical"`, `exact` | Exact count | Logical qubits of one circuit |
 # | QHD CX | `estimate` with `basis="cx"`, `upper_bound` | Upper bound | Before routing. It equals the level-0 compiled count for the three small circuits of Appendix E |
-# | QHD arbitrary rotations | `estimate` with `basis="selected_logical"`, `exact` for one-hot and `upper_bound` for binary | Exact count or upper bound | The binary formula counts rotation slots before classification, including exact T angles |
+# | QHD arbitrary rotations | `estimate` with `basis="selected_logical"`, `upper_bound` | Upper bound | Both formulas count rotation slots before classification, including exact T angles. Appendix E gives the actual counts of small circuits |
 # | QHD ideal-evolution bound | `circuit_resources(plan).evolution`, evaluated outward | Upper bound | Distance of the ideal split step from the exact evolution of the finite model, capped at 2 |
 # | GCiM width, settings and shots | `estimate` with the serial schedule, `exact` | Exact count | The width includes the ancilla qubit |
 # | GCiM CX | `estimate` with `basis="cx"`, `upper_bound` | Upper bound | All settings at all shots, before optimization and routing |
@@ -1368,14 +1368,13 @@ show_table(capacity, headers=("Selected plan", "Circuit width n", "State-vector 
 #
 # ### D. Limits at this scale
 #
-# The instances above use NWQLib's default planning limits. Each limit applies to one named stage of planning or construction. The LCHS figures below come from the work formula of the periodic construction with the quadrature that LCHS chose, and the commutator limits from integer formulas for each stage. They establish no execution time or allocation at their largest widths.
+# The instances above use NWQLib's default planning limits, under which `max_work` sets no limit and `max_bytes` is the physical memory. Each explicit limit applies to one named stage of planning or construction. The LCHS figures below come from the work formula of the periodic construction with the quadrature that LCHS chose, and the commutator figures from integer formulas for each stage. They establish no execution time or allocation at their largest widths.
 #
-# The largest term counts that the commutator-count limit allows are calculated from `census_work` and `choose_census_block`, which evaluate integer formulas without constructing or planning a Hamiltonian of that size.
+# The largest term count below is calculated from the work formula of the pair scan, an integer formula evaluated without constructing or planning a Hamiltonian of that size.
 #
-# - **QLS planning limit.** QLS limits the planning work of checking its circuit description with `QLS(max_admission_steps=1_000_000)`. At q = 100, κ = 2 and tolerance 0.001, the default output and a `NormSquared()` output each need 50,228 units. With `PeriodicStencil(q, mass=1.0, diffusion=1.0)`, κ = 5, and planning with the default output chooses degrees 17, 27, 39 and 51 for tolerances 0.1 to 0.0001 at q = 80, 90 and 100. Its largest case, degree 51 at q = 100, needs 111,140 units and is planned within the default limit. A degree-39 plan takes about 2.4 s.
-# - **LCHS planning limit.** The default `max_select_work=1_000_000_000` limits the construction work of SELECT. The main configuration, with 0.005 for the kernel cutoff and quadrature together and 0.005 for the Strang product, has 270 nodes, nine address bits and r=23, and needs 30,047,903 work units and 152,327,488 bytes at q = 100. The configuration with 0.01 for the kernel cutoff and quadrature and 0.001 for the Strang product has 216 nodes, eight address bits and r=49, and needs 40,641,549 / 51,150,119 / 62,893,489 work units and 206,202,624 / 259,577,504 / 319,224,384 bytes at q = 80 / 90 / 100. All fit within the default. With the nodes of the main configuration, a Strang allowance of 0.001 instead gives r=52. These are projections from the construction formulas for these configurations.
-# - **QPE planning limits.** Planning checks the work of each QPE stage against `max_work=1_000_000_000` before the stage starts. The work of the commutator count of $L$ Pauli terms on q qubits is checked twice, each time including $2Lq$ units for reading the Pauli labels, once for the term masks and once for the support sum that the CX formula uses. Before any pair is tested, the work of the full Pauli-triangle count is checked at the upper bound that $L$ and q give, 8,039,800 units for the 100-qubit Ising chain and 27,059,700 for the Heisenberg chain. Once the anticommuting pairs are known, it is checked again at the observed numbers of pairs and nested tests, 140,591 and 424,746 units, and planning uses the full expression when that work fits and the relaxation otherwise. At q = 100, the commutator count alone allows the initial full bound for at most 851 and the relaxed bound for at most 18,224 nonidentity terms that remain after pruning. The relaxed initial formula is `200*p+6*P+2*p=3*p**2+199*p`, with `P=p*(p-1)/2`, and includes its weighted-degree contraction, which uses the sums of coefficient magnitudes over the terms that anticommute with each Pauli term. These are scalar calculations with the stated input shapes, not Plans constructed at those term counts. The sampled settings of Section 3 choose a separate step count for each power, so no work is set aside to choose one step duration shared by all powers. Before the exact per-power check of their 33 powers, planning checks the work of that check as a stage of its own, 702,784 units for the 100-qubit Ising chain and 811,584 for the Heisenberg chain. The [QPE guide](../docs/algorithms/qpe.md) gives the work formula of this stage. Storage and step-count limits apply separately.
-# - **QCELS analysis grid.** The default 4096-point grid with these 33 times needs 281,153,664 work units, within the same limit. Section 3 requests 256 points to keep the run short. The effective grid has 257 points because QCELS uses at least $8P+1$ for the maximum power $P$. It is a finite workload, not an accuracy guarantee.
+# - **LCHS planning limit.** An explicit `max_select_work=1_000_000_000` limits the construction work of SELECT. Its default `None` sets no work cap. The main configuration, with 0.005 for the kernel cutoff and quadrature together and 0.005 for the Strang product, has 270 nodes, nine address bits and r=23, and needs 30,047,903 work units and 152,327,488 bytes at q = 100. The configuration with 0.01 for the kernel cutoff and quadrature and 0.001 for the Strang product has 216 nodes, eight address bits and r=49, and needs 40,641,549 / 51,150,119 / 62,893,489 work units and 206,202,624 / 259,577,504 / 319,224,384 bytes at q = 80 / 90 / 100. All fit within that explicit cap. With the nodes of the main configuration, a Strang allowance of 0.001 instead gives r=52. These are projections from the construction formulas for these configurations.
+# - **QPE planning limits.** Planning checks the work of each QPE stage against `max_work`, when it is set, before the stage starts. The counts below are compared with a cap of $10^9$. The commutator count of $L$ Pauli terms on q qubits reads the Pauli labels in $2Lq$ units, once for the term masks and once for the support sum that the CX formula uses. Before any pair is tested, this work and the $wL(L-1)/2$ pair tests, with $w=\lceil q/64\rceil$ mask words, are checked: 79,800 units for the 100-qubit Ising chain and 149,700 for the Heisenberg chain. The pair scan counts the $w\,N(A)$ nested word tests of the full Pauli-triangle expression, 40,394 and 182,964, below the threshold of 1,300,000,000, so planning uses the full expression for both chains and then checks its work, 140,591 and 424,746 units. A work or memory limit refuses the expression that the count chose and does not replace it by the relaxation. At q = 100 the pair scan alone fits the cap for at most 31,523 nonidentity terms that remain after pruning. A full expression with close to 1,300,000,000 word tests needs more than $10^9$ units, so under this cap planning refuses it and states the work it needs. These are scalar calculations with the stated input shapes, not Plans constructed at those term counts. The sampled settings of Section 3 choose a separate step count for each power, and the exact per-power check of their 33 powers is not counted against `max_work`. An explicit `max_bytes` or `max_trotter_steps` applies separately.
+# - **QCELS analysis grid.** The default 4096-point grid with these 33 times needs 281,153,664 work units, below an explicit billion-unit work cap. Section 3 requests 256 points to keep the run short. The effective grid has 257 points because QCELS uses at least $8P+1$ for the maximum power $P$. It is a finite workload, not an accuracy guarantee.
 #
 # ### E. Accuracy of the estimates
 #
@@ -1383,7 +1382,7 @@ show_table(capacity, headers=("Selected plan", "Circuit width n", "State-vector 
 #
 # For a QPE plan, `prepare(plan, settings="all")` builds the circuit of each of the 66 settings without submitting anything, and the compiled count weights each circuit by the shots of its setting.
 #
-# The LCHS circuits at 12 and 16 system qubits have 21 and 25 qubits, above the default limit of 20 qubits for local simulation, so that cell raised `max_simulation_qubits` to build them. Nothing is simulated. The panel below holds the comparison.
+# The LCHS circuits at 12 and 16 system qubits have 21 and 25 qubits. They are built and compiled, and nothing is simulated. The panel below holds the comparison.
 
 # %% jupyter={"source_hidden": true}
 # Display helper for the accuracy panel of Appendix E. Nothing in this cell calls NWQLib.
@@ -1407,7 +1406,7 @@ The following saved comparisons use Qiskit 2.6.0 at optimization level 1, with C
 
 | Existing notebook | Label | CX from the formula | Compiled CX | Ratio R | $100(R-1)$ |
 | --- | --- | ---: | ---: | ---: | ---: |
-| [QLS introduction](qls_linear_system_intro.ipynb) | Estimate | 7,846 | 7,704 | 1.01843 | 1.84% |
+| [QLS introduction](qls_linear_system_intro.ipynb) | Estimate | 6,988 | 6,854 | 1.01955 | 1.96% |
 | [QHD introduction](qhd_optimization_intro.ipynb) | Upper bound | 13,790 | 13,790 | 1.00000 | 0% |
 | [LCHS scientific example](lchs_scientific.ipynb) | Upper bound | 1,122,428 | 554,288 | 2.02499 | 102.5% |
 
@@ -1433,7 +1432,7 @@ QPE's step counts and controlled-evolution error bounds have the separate meanin
 show_accuracy_panel(compiled_checks, optimized_cx)
 
 # %% [markdown]
-# **QHD circuits.** The next cells prepare three QHD circuits with the settings of Section 4, at $K=4$ in both encodings and at $K=8$ in binary, which reuses the Section 4 plan. They cover both kinetic selections of the binary synthesis, Walsh rotations at $K=4$ and dense diagonals at $K=8$, and stay within the default 20-qubit preparation limit.
+# **QHD circuits.** The next cells prepare three QHD circuits with the settings of Section 4, at $K=4$ in both encodings and at $K=8$ in binary, which reuses the Section 4 plan. They cover both kinetic selections of the binary synthesis, Walsh rotations at $K=4$ and dense diagonals at $K=8$.
 #
 # Each circuit is compiled at optimization level 0 with the settings above and compared with the CX formula. The rotation count reads the prepared circuit's gate definitions, independently of the resource formula, before the decomposition into CX and U gates, which would lose the angle classification.
 #
@@ -1493,7 +1492,8 @@ qhd_compiled, qhd_objective_matches = {}, True
 for qhd_key in ((4, "one_hot"), (4, "binary"), (8, "binary")):
     qhd_small = qhd_plans.get(qhd_key) or plan(qhd_problem, method=qhd_method(*qhd_key), execution="quantum",
                                                 shots=1, seed=7)
-    qhd_small_ledger = circuit_resources(qhd_small)
+    # A synthesis budget makes circuit_resources classify the rotation angles.
+    qhd_small_ledger = circuit_resources(qhd_small, synthesis_epsilon=1e-3)
     qhd_objective_matches &= all(qhd_grid_value(qhd_small.reconstruction, index, qhd_key[0])
                                  == qhd_direct_value(index, qhd_key[0]) for index in product(range(qhd_key[0]), repeat=3))
     qhd_prepared = prepare(qhd_small, settings="all", progress=False)  # builds the circuit, runs nothing
@@ -1516,7 +1516,7 @@ show_table([(k, QHD_ENCODINGS[encoding], row["width"], row["cx_law"], row["cx"],
 print("The stored potential tables and constant equal the quadratic at every grid point:", qhd_objective_matches)
 
 # %% [markdown]
-# Compare the compiled CX counts with their formulas in the table above. The one-hot rotation formula counts arbitrary rotations in the circuit. The binary formulas bound rotation slots before classification, including exact T angles and, at $K=8$, slots that the dense diagonal leaves unused.
+# Compare the compiled CX counts with their formulas in the table above. The rotation formulas bound rotation slots before classification, including Clifford and exact T angles and, for binary at $K=8$, slots that the dense diagonal leaves unused. In the $K=4$ one-hot circuit, the 99 emitted arbitrary rotations equal $R_{\rm oh}$, and the six exact T angles bring them to the upper bound $R_{\rm oh}^{\rm ub}=105$.
 #
 # The $K=4$ binary circuit selects Walsh rotations for its kinetic tables and has no dense diagonal, so its `diagonal_wrap` source is `not_applicable`, while the $K=8$ circuit has dense diagonals and an `unavailable` wrap error.
 
@@ -1552,11 +1552,11 @@ show_table([(3, gcim_compiled["circuits"], gcim_compiled["one_execution"], gcim_
 #
 # **A linear system.** The first cell of this notebook is the template. `PeriodicStencil(q, mass, diffusion)` needs a positive mass and no potential, and the right-hand side must be a product of one-qubit states from `ingest_product`.
 #
-# A general right-hand side has $2^q$ entries and lies outside this compact route. `selected.reconstruction.degree` is the number of encoding queries, and the CX estimate describes one coherent attempt. Appendix D lists the planning limits that bind near these sizes.
+# A general right-hand side has $2^q$ entries and lies outside this compact route. `selected.reconstruction.degree` is the number of encoding queries, and the CX estimate describes one coherent attempt. Appendix D gives what these plans need against an explicit limit.
 #
 # **Heat flow.** The periodic LCHS route solves homogeneous dynamics $du/dt=-Lu$, with no source term, for a `PeriodicStencil`. It supports quantum execution only, with direct state preparation and the second-order product formula. The cell starts from a basis state from `ingest_occupation`, and a product state from `ingest_product` is also a compact input.
 #
-# LCHS selects the step count from `trotter_synthesis_tolerance` as in Section 2, and the cell prints it with the CX upper bound of one attempt. Appendix D lists the planning limits that bind near these sizes.
+# LCHS selects the step count from `trotter_synthesis_tolerance` as in Section 2, and the cell prints it with the CX upper bound of one attempt. Appendix D gives what these plans need against an explicit limit.
 
 # %%
 from nwqlib import LinearDynamics, NormSquared, estimate, plan
@@ -1576,9 +1576,9 @@ print(f"{my_plan.reconstruction.step_counts[0]} Strang steps, "
       f"at most {my_resources.quantity('cx').fact.value.numerator:,} CX gates per attempt")
 
 # %% [markdown]
-# **A Hamiltonian as Pauli terms.** QPE takes a dense matrix or a list of `(label, coefficient)` pairs with real coefficients, where the rightmost label character acts on qubit 0. At q = 100 the default commutator-count limits are 851 terms for the initial full bound and 18,224 for the relaxation, after identity and pruned terms are removed (Appendix D).
+# **A Hamiltonian as Pauli terms.** QPE takes a dense matrix or a list of `(label, coefficient)` pairs with real coefficients, where the rightmost label character acts on qubit 0. QPE's `max_work` defaults to `None`, so the work of its commutator count has no limit unless you set one, and `max_bytes`, by default the physical memory, limits its arrays (Appendix D).
 #
-# The exact per-power check has its own work check, and this cell's Ising chain counts 702,784 work units for it. The cell prints the steps of the longest power, the total shots and the CX gates over all shots. Replacing `"ising"` by `"heisenberg"` gives the Heisenberg chain of Section 3.
+# The cell prints the steps of the longest power, the total shots and the CX gates over all shots. Replacing `"ising"` by `"heisenberg"` gives the Heisenberg chain of Section 3.
 
 # %%
 from nwqlib import Eigenproblem, estimate, plan

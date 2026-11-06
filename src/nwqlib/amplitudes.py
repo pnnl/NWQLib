@@ -8,7 +8,7 @@ state that the simulator returned and never reconstructs a missing state
 from counts.
 """
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from nwqlib._limits import exceeds, memory_limit
 
 import sys
 from typing import Literal
@@ -23,9 +23,6 @@ from nwqlib._validation import NUMERICAL_RELATION_RTOL, validate_normalized_mass
 
 AMPLITUDE_MASS_LABELS = ("algorithm_success_mass", "physical_slice_mass")
 AMPLITUDE_MASS_UNAVAILABLE = "nonzero selected mass is not representable in binary64"
-# A direct helper has a finite known-array envelope. A Run supplies its actual
-# selected backend allowance. This is neither a Plan limit nor process RSS.
-DEFAULT_AMPLITUDE_BYTES = DEFAULT_MAX_BYTES
 
 
 def _slice(native, free, fixed, *, size=None):
@@ -167,7 +164,7 @@ class AmplitudeReadout(Record):
     def has_physical_projection(self):
         return bool(self.conditions) or self.output.basis.dimension != 1 << len(self.coordinates)
 
-    def admit_materialization(self, *, max_bytes=DEFAULT_AMPLITUDE_BYTES, max_bytes_source=None):
+    def admit_materialization(self, *, max_bytes=None, max_bytes_source=None):
         """Check the bytes of the simulator's returned state and of the known projection scratch before allocation.
 
         The finite bound includes the complex state data, the requested gather,
@@ -175,16 +172,22 @@ class AmplitudeReadout(Record):
         projection. It excludes undocumented SDK workspace and process overhead.
         An error message appends ``max_bytes_source``, when given, to name where
         ``max_bytes`` comes from, such as a Run's ``max_data_bytes``.
+        ``max_bytes=None`` uses the physical memory of this computer, and no
+        check is made where the platform does not report it.
         """
-        if type(max_bytes) is not int or max_bytes < 0:
-            raise ValueError("amplitude max_bytes must be a nonnegative integer")
-        source = "" if max_bytes_source is None else f", {max_bytes_source}"
-        native_limit = min(sys.maxsize // 16, max_bytes // 16)
+        if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+            raise ValueError("amplitude max_bytes must be None or a nonnegative integer")
+        limit = memory_limit(max_bytes)
+        if max_bytes is None:
+            allowance = f"the physical memory ({limit} bytes)"
+        else:
+            allowance = f"max_bytes={max_bytes}" + ("" if max_bytes_source is None else f", {max_bytes_source}")
+        native_limit = None if limit is None else min(sys.maxsize // 16, limit // 16)
         # 2**bit_length(m) > m, so this rejects a native vector of more than
         # native_limit complex128 entries before 2**width is formed.
-        if self.width >= max(1, native_limit.bit_length()):
+        if native_limit is not None and self.width >= max(1, native_limit.bit_length()):
             raise ValueError(f"native amplitude return of 2**{self.width} complex128 entries exceeds the "
-                             f"known-array allowance max_bytes={max_bytes}{source}")
+                             f"known-array allowance {allowance}")
         native, size = 1 << self.width, self.output.basis.dimension
         # 16 bytes per native complex128 amplitude, plus the registered
         # 192-byte allowance per requested output entry (output.basis.dimension)
@@ -196,9 +199,9 @@ class AmplitudeReadout(Record):
             wider = 1 << len(free)
             contiguous = not free or free == tuple(range(free[0], free[0] + len(free)))
             payload += (16 if contiguous else 80) * wider + 8 * len(free)
-        if payload > max_bytes:
+        if exceeds(payload, limit):
             raise ValueError(f"amplitude projection needs {payload} known array bytes, more than the allowance "
-                             f"max_bytes={max_bytes}{source}")
+                             f"{allowance}")
         return payload
 
     def select(self, native):
@@ -212,7 +215,7 @@ class AmplitudeReadout(Record):
                       size=self.output.basis.dimension)
 
 
-def reduce_amplitudes(readout, native, *, max_bytes=DEFAULT_AMPLITUDE_BYTES, max_bytes_source=None):
+def reduce_amplitudes(readout, native, *, max_bytes=None, max_bytes_source=None):
     """Return the requested vector, physical norm, reason for absence and selected masses.
 
     ``max_bytes`` and ``max_bytes_source`` go to ``admit_materialization``.
@@ -220,7 +223,9 @@ def reduce_amplitudes(readout, native, *, max_bytes=DEFAULT_AMPLITUDE_BYTES, max
     Returns:
         ``(vector, physical_scale, unavailable, masses)``. vector is the
         unit direction or the recovered physical amplitudes of the selected
-        coordinates, or None. physical_scale is the recovered physical norm
+        coordinates, or None. Its entries are finite: the selected amplitudes
+        are checked once, and normalization or physical scaling returns only
+        finite values. physical_scale is the recovered physical norm
         as a PhysicalScale, or None without a recovery. unavailable is an
         UnavailableOutput with the reason when vector is None. masses is
         ``(algorithm_success_mass, physical_slice_mass)`` when
@@ -271,7 +276,8 @@ def reduce_amplitudes(readout, native, *, max_bytes=DEFAULT_AMPLITUDE_BYTES, max
             return None, physical_scale, UnavailableOutput(output=readout.output,
                 reason="unit vector is undefined for a zero selected branch"), masses
         return direction, physical_scale, None, masses
-    result = recovery.apply_vector(selected)
+    # selected was checked finite above, so the scaling does not check it again.
+    result = recovery._scale_finite(selected)
     if result is None:
         return None, physical_scale, UnavailableOutput(output=readout.output,
             reason="selected physical vector is not representable in complex128"), masses

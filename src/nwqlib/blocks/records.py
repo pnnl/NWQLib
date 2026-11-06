@@ -276,12 +276,11 @@ class SelectedKernel(Record):
         application_bytes: Upper bound, using the Run's JSON byte accounting, on
             the saved size of the sequence of ``KernelApplication`` records
             returned by each invocation when the Method fixes them at selection.
-            The Run sets aside this many bytes along with the declared outputs.
-            At completion, the smaller of this value and the returned sequence's
-            JSON byte bound is deducted from the metadata byte count before it is
-            compared with ``ExecutionLimits.max_completion_metadata_bytes``.
-            Bytes beyond the declared bound count toward that metadata allowance.
-            The default, ``0``, leaves all these bytes to the metadata allowance.
+            The Run sets aside this many bytes of
+            ``ExecutionLimits.max_data_bytes`` along with the declared outputs
+            before the invocation runs. The bound is not enforced. The returned
+            records are saved at their actual size, like the other records of
+            the completed invocation. The default, ``0``, sets nothing aside.
     """
 
     schema_version: Literal[3] = 3

@@ -3,7 +3,7 @@
 The ADAPT iteration itself is ``adapt_acquisition.drive_adapt``.
 """
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from nwqlib._limits import ResourceLimitError, exceeds
 
 from math import pi
 from types import SimpleNamespace
@@ -14,7 +14,6 @@ from nwqlib.algorithms._eigen_inputs import (
     eigen_operator,
     eigen_state,
     preparation_requirements,
-    DEFAULT_CONVERSION_WORK,
 )
 from nwqlib.algorithms._eigen_support import eigen_error_model
 from nwqlib.blocks import SelectedBlock, SelectedConstruction
@@ -57,11 +56,16 @@ from nwqlib.subroutines.fermionic_circuits import (
 )
 from nwqlib.subroutines.fermionic_pool import (
     FermionicGenerator,
-    _check_generator_work,
     _snapshot_generator,
 )
 from .adapt_actions import action_sizes
-from .adapt_inputs import prepare_adapt_inputs
+from .adapt_inputs import (
+    DEFAULT_ENERGY_CHANGE_PER_SCALE,
+    DEFAULT_GRADIENT_FLOOR_PER_SCALE,
+    DEFAULT_PAULI_CUTOFF_PER_SCALE,
+    energy_scale,
+    prepare_adapt_inputs,
+)
 from .adapt_records import (
     AdaptReconstruction,
     ADAPTResult,
@@ -82,6 +86,7 @@ from .fixed_basis import (
     sampled_setting_count,
 )
 from .pencil import _projected_solve_bytes, _projected_solve_work
+from .pencil_sampling import pilot_split
 from .pencil_workflow import ONE_QUERY_ESTIMATE
 
 METHOD = Source(
@@ -214,10 +219,11 @@ def _admit_generator_routes(pool, *, max_bytes, max_products, vacuum=False):
     """Reject during planning a generator that no circuit route supports, and return whether all commute and the vacuum reason.
 
     This is the eligibility part of ``fermionic_circuits._plan_generator_circuit``.
-    Its numeric charge for a generator of ``m`` rows on ``q`` qubits,
-    ``m*(32 + 8*digits)`` bytes and ``m*(q*digits + 1) + m(m-1)/2*(digits + 1)``
-    work, is the planning estimate for the mask construction and the pair
-    scan of the commutation test. Two Pauli words with bit masks ``(x_i, z_i)`` and
+    Its work charge for a generator of ``m`` rows on ``q`` qubits,
+    ``m*(q + 1) + m(m-1)/2``, counts the letters read into the masks and the
+    pair scan of the commutation test, compared with an explicit
+    ``max_products``. The masks of one generator are small beside the
+    generator itself. Two Pauli words with bit masks ``(x_i, z_i)`` and
     ``(x_j, z_j)`` commute exactly when ``popcount(x_i & z_j) +
     popcount(z_i & x_j)`` is even, and a generator whose terms do not all
     commute must be a normalized default GSD double
@@ -274,17 +280,15 @@ def _admit_generator_routes(pool, *, max_bytes, max_products, vacuum=False):
     numeric charge above, which is no qualified combined bound for them. The
     count of bucket keys is no CPU, heap or complete scalar-work guarantee.
     """
-    from sys import int_info
     from nwqlib.operators._pauli import _pauli_masks
 
     commuting, reason = True, None
     for generator in pool:
         rows = generator.pauli_terms
         m, q = len(rows), generator.num_qubits
-        digits = max(1, (q + int_info.bits_per_digit - 1) // int_info.bits_per_digit)
-        pairs = m * (m - 1) // 2
-        _check_generator_work(max_bytes, max_products, payload_bytes=m * (32 + 8 * digits),
-                              work=m * (q * digits + 1) + pairs * (digits + 1))
+        # One mask pair per row from its q letters, and one commutation test per
+        # pair of rows, which grows with m**2 and allocates nothing more.
+        _check_products(m * (q + 1) + m * (m - 1) // 2, max_products)
         masks = tuple(_pauli_masks(label) for label, _ in rows)
         if all(((x & masks[j][1]).bit_count() + (z & masks[j][0]).bit_count()) % 2 == 0
                for i, (x, z, _) in enumerate(masks) for j in range(i)):
@@ -304,7 +308,7 @@ def _admit_generator_routes(pool, *, max_bytes, max_products, vacuum=False):
             continue
         commuting = False
         try:
-            _require_default_double(generator, max_bytes=max_bytes, max_products=max_products)
+            _require_default_double(generator, max_bytes=max_bytes)
         except _UnsupportedDefaultGenerator as error:
             raise ValueError(
                 f"pool generator {generator.pool_index} has no exact compiler route: {error}"
@@ -313,15 +317,21 @@ def _admit_generator_routes(pool, *, max_bytes, max_products, vacuum=False):
 
 
 class CompilerPlans:
-    """Generator compiler plans built when a generator is first selected, keyed by pool index.
+    """Generator compiler plans, keyed by pool index, built when a circuit of the generator is first constructed.
 
-    ``construct_adapt``, ``_native_preparation``, the optimization shift-rule
-    selection and ``adapt_archive`` read this one map. An entry is built by
-    ``fermionic_circuits._plan_generator_circuit`` for the checked
-    generator at its pool index and reused for every later angle, and each
-    entry compiles that same generator object. ``built()`` returns only the
-    plans constructed so far, which are the ones a Plan archive and a Run
-    checkpoint save (``adapt_archive``). ``saved`` and ``restore`` take
+    That includes a selected generator and the candidate extensions whose
+    rows a bounded round constructs and measures, also when the round ranks
+    them below its winner. ``construct_adapt``, ``_native_preparation``, the
+    optimization shift-rule selection and ``adapt_archive`` read this one
+    map. An entry is built by ``fermionic_circuits._plan_generator_circuit``
+    for the checked generator at its pool index and reused for every later
+    angle, and each entry compiles that same generator object. ``built()``
+    returns only the plans constructed so far, which are the ones a Plan
+    archive and a Run checkpoint save (``adapt_archive``), so a reopened Run
+    rebuilds each recorded preparation with the same construction. Bounded
+    growth's depth screening reads a plan through ``peek``, which keeps no
+    plan it builds, so a generator that only depth screening examined has
+    none saved. ``saved`` and ``restore`` take
     ``(pool index, kind, active modes, occupation blocks)``
     entries saved from the same Plan, restoring its compiler blocks by pool index.
     """
@@ -350,12 +360,17 @@ class CompilerPlans:
             self._built[index] = plan
         return self._built[index]
 
+    def peek(self, index):
+        """Return the plan of pool index ``index``, built without keeping it when it is not yet built."""
+        return self._built.get(index) or _plan_generator_circuit(self._pool[index], **self._limits)
+
     def built(self):
         """Return ``((pool index, plan), ...)`` of the plans constructed so far, by pool index."""
         return tuple(sorted(tuple(self._built.items())))
 
 
-def _construction(inputs, reference, method, length, compiler_plans, slot_bound, execution, shots, acquisition):
+def _construction(inputs, reference, method, length, compiler_plans, slot_bound, execution, shots, acquisition,
+                  frontier=None):
     """Choose the one parameterized construction that every ADAPT query reuses.
 
     The adaptive trajectory is unknown at planning time, so the Plan fixes a
@@ -370,7 +385,8 @@ def _construction(inputs, reference, method, length, compiler_plans, slot_bound,
     chain's angles from one evaluation. Its known workspace is the bounded
     set of cached state vectors and Hamiltonian actions held at one time,
     and, with optimization, the memory set aside for energy-and-gradient
-    evaluations. A supplied Qiskit reference circuit adds a statevector
+    evaluations, ``frontier``, the ``classical_frontier_bytes`` that
+    planning checked. A supplied Qiskit reference circuit adds a statevector
     construction whose cost is declared unknown.
 
     Quantum execution uses one circuit block per query family. ``screen`` and
@@ -425,35 +441,8 @@ def _construction(inputs, reference, method, length, compiler_plans, slot_bound,
     )
     experiments, definitions, blocks, kernels = [], [], [], []
     if execution == "classical":
-        d = 1 << q
-        # Declared host workspace: the classical query frontier of
-        # adapt_acquisition.bind_classical (cached_state_vectors + 12
-        # complex128 state vectors, 8L + 12 for the default growth),
-        # the Plan's packed action tables (adapt_actions.build_action_tables),
-        # the largest shared action remainder max_A(B_A - 32d) beside the
-        # input and output vectors the frontier already holds,
-        # and the processed Hamiltonian's payload plus the additional bytes for
-        # removing its mean diagonal (inputs.offset_free_requirements[0]). This
-        # additional byte charge is zero for dense or Pauli input and for a zero shift.
-        # With optimization, an energy-and-gradient query with k <= L generators
-        # has a vector and scalar-array allowance of 16 (C_cache + 2k + 12) d + 24k,
-        # where C_cache counts the vectors already held by the Run's caches.
-        # Using C_cache <= 8L and k <= L, the Plan reserves
-        # 16 (10L + 12) d + 24L on top of the named non-vector terms
-        # (adapt_acquisition._classical_energy_gradient).
+        known_bytes = frontier
         tables = inputs.cache["action_tables"]
-        vectors = (
-            16 * (10 * length + 12) * d + 24 * length
-            if method.optimize_every_m is not None
-            else 16 * (cached_state_vectors(method, length) + 12) * d
-        )
-        known_bytes = (
-            vectors
-            + tables["resident_bytes"]
-            + max((size - 32 * d for size in action_sizes(inputs, d)), default=0)
-            + inputs.hamiltonian.manifest.payload_bytes
-            + inputs.offset_free_requirements[0]
-        )
         supplied = reference.preparation.implementation == "qiskit.supplied"
         workspace = (
             Workspace(location="host", purpose="workspace", bytes=known_bytes, source=HOST),
@@ -589,18 +578,17 @@ def _construction(inputs, reference, method, length, compiler_plans, slot_bound,
         # l_right + 2 l_left <= 3 length occurrences, at most `length` of
         # them adjoints, and both chains' components. An adjoint
         # (qiskit_compat.inverse_realized_gate) has as many top-level
-        # instructions as its forward gate and copies the definitions of
-        # its Gray-code RY multiplexors, both of which B already counts, and
-        # it also copies the definition of each multi-controlled RY with
-        # k >= 2 controls, which B counts as one instruction. That
-        # definition has at most 96 instructions, the Qiskit 2.6.0 count for
-        # k = 5 that _realized_adjoint checks before copying, and a
-        # generator has at most 128 such gates (at most five pair/split
-        # factors, and at most sum k_b (k_b - 1)/2 <= 2 * 2**6 Givens
-        # rotations of the shared-index blocks, none in the commuting and
-        # four-distinct routes), so an adjoint adds at most 96 * 128 = 12288.
-        # W_restore = 2 W_reference + 3 length (1 + B) + 12288 length
-        # + 2 length (T_max + 1) + 8q + 7. Outside the generators and phase
+        # instructions as its forward gate, and its copies of the Gray-code
+        # RY multiplexor definitions are as long as the forward ones that B
+        # counts. These static logical slots count each multi-controlled RY
+        # as one instruction, so
+        # W_restore = 2 W_reference + 3 length (1 + B) + 2 length (T_max + 1)
+        # + 8q + 7. An adjoint also copies the Qiskit definition of each
+        # multi-controlled RY, whose length grows with its controls. That
+        # copy is counted when the adjoint is built
+        # (adapt_acquisition._realized_adjoint) and joins the receipt of the
+        # preparation that built it, not this law. No Run limit counts
+        # construction slots. Outside the generators and phase
         # gates both have at most one H and two X, two controlled-reference
         # instructions and 2q + 2 readout rotations, 2q + 7 <= 8q + 7.
         # "vacuum_reference" uses the reference-row construction only for
@@ -615,8 +603,7 @@ def _construction(inputs, reference, method, length, compiler_plans, slot_bound,
                 construction_work = max(construction_work,
                                         reference_work + length * (1 + slot_bound) + phases + 8 * q + 7)
             else:
-                construction_work = (reference_work + 3 * length * (1 + slot_bound) + 12288 * length
-                                     + 2 * phases + 8 * q + 7)
+                construction_work = reference_work + 3 * length * (1 + slot_bound) + 2 * phases + 8 * q + 7
         mode = f"shots:{acquisition.matrix_measurement}" if shots else "exact"
         phase = "reference and generator physical phase kept under internal control/inverse"
         cost_context = ("selected actual prefix only; declared maximum logical construction slots, native "
@@ -631,7 +618,9 @@ def _construction(inputs, reference, method, length, compiler_plans, slot_bound,
             cost_context = (f"{rule}: declared maximum logical construction slots "
                             + ("max(W_reference_pair, W_prefix)" if rule == "vacuum_reference"
                                else "W_restore")
-                            + ", with adjoint copies and phase gates; not native depth, synthesis, CPU or RSS")
+                            + ", with phase gates and with each multi-controlled RY of an adjoint as one slot; the "
+                              "copies of their Qiskit definitions are counted in the preparation receipt when an "
+                              "adjoint is built; not native depth, synthesis, CPU or RSS")
         for name in ("screen", "energy", "pair"):
             ports = ((QuantumPort(name="control", width=1),) if name == "pair" else ()) + (
                 QuantumPort(name="system", width=q),
@@ -896,8 +885,10 @@ class BoundedRitzGrowth(Record):
     These operational limits end the growth, given in
     `ADAPTResult.stop_reason`:
 
-    - `max_basis_size`, or `max_iterations` once that many chains have been
-      added.
+    - `constant_hamiltonian` after the reference, when the Problem's operator
+      is a multiple of the identity, so that every state has the same energy.
+    - `max_basis_size` once the basis holds that many states, or
+      `max_iterations` once that many chains have been added.
     - `flat_counter`: consecutive energy changes below
       `energy_change_tolerance`, as in the default growth, with the pool
       size P in place of the number of unselected generators.
@@ -951,6 +942,10 @@ class BoundedRitzGrowth(Record):
         max_chain_length: Required, positive. Largest number of generator
             occurrences in one chain, repeats included. It is not a circuit
             depth.
+        max_basis_size: Default `64`, positive. The growth stops with
+            `max_basis_size` when the basis holds this many states, the
+            reference included. An operational limit on the work, not a
+            convergence parameter.
         basis_depth_limit: Default `None`, which sets no limit and adds no
             work. A nonnegative integer D admits only an extension whose CX
             count bound is at most D, with D itself admitted. The bound is
@@ -988,70 +983,130 @@ class BoundedRitzGrowth(Record):
     candidates_per_round: PositiveInt = 4
     max_candidate_scans: PositiveInt = 256
     max_chain_length: PositiveInt
+    max_basis_size: PositiveInt = 64
     basis_depth_limit: Count | None = None
     independence_cutoff: Annotated[Real, Field(gt=0, lt=1)] | None = None
 
 
 def bounded_basis_size(method):
-    """Return the largest basis of a bounded-growth ADAPT run: the reference and one chain per round, at most ``max_basis_size``."""
-    return min(method.max_basis_size, method.max_iterations + 1)
+    """Return the largest basis of a bounded-growth ADAPT run: the reference and one chain per round, at most ``BoundedRitzGrowth.max_basis_size``."""
+    return min(method.basis_growth.max_basis_size, method.max_iterations + 1)
 
 
-def _admit_final_stages(method, b, num_qubits, groups, terms, quadratures):
-    """Check the final pilot and main stages of a ``PencilSampling`` Plan on its largest basis before any query.
+def _admit_final_stages(method, b, groups, quadratures):
+    """Check before any query that ``PencilSampling.total_shots`` gives every final setting two pilot and two main shots.
 
     ``b`` is the largest basis that the Plan can reach, ``2*min(max_iterations,
-    pool size)`` states of the default growth or ``bounded_basis_size``,
-    ``groups`` the resolved Hamiltonian groups, ``terms`` the number L of
-    nonidentity terms and ``quadratures`` the resolved quadratures. The
+    pool size)`` states of the default growth or ``bounded_basis_size``, and
+    ``groups`` the resolved Hamiltonian groups. The
     m = ``sampled_setting_count(b, G, quadratures)`` settings of that basis
     bound those of every basis a run can end with, because
     m(b + 1) - m(b) = G + Q b max(1, G) >= 0 with Q measured quadratures, so
     B = ``total_shots`` >= 4m gives every final setting two pilot and two
-    main shots. A run that stops earlier may need less. The grouped pass of
-    one stage of at most B shots on that basis is charged with the
-    stage-budget form of ``grouped_pass_requirements``: one ``(L_g, H)``
-    descriptor per group with the K = ``sampled_setting_count(b, 1, Q)``
-    settings of each group as copies and P = b(b+1)/2 pairs, or for a
-    pencil without nonidentity terms one ``(0, H)`` descriptor with the m
-    overlap settings as copies and P = b(b-1)/2, H = min(B, 2**(n+1)) and the
-    oriented view. H does not shrink with the settings of an early stop, so
-    every table of a smaller final basis stays inside the bound. The bytes
-    are compared with ``max_bytes`` and the work with ``max_products``.
+    main shots. B belongs to the Plan, and a Run cannot change it once its
+    growth has spent its shots, so the check comes before the first query.
+    A run that stops earlier may need less. The grouped analysis of the
+    stages is checked on the basis that growth ends with
+    (``_admit_final_analysis``).
     """
     budget = method.sampling.total_shots
     m = sampled_setting_count(b, len(groups), quadratures)
     reduce = ("max_iterations or the pool size, which set it as 2*min(max_iterations, pool size)"
               if method.basis_growth is None
-              else "max_iterations or max_basis_size, which set it as min(max_basis_size, max_iterations + 1)")
+              else "max_iterations or BoundedRitzGrowth.max_basis_size, which set it as "
+                   "min(max_basis_size, max_iterations + 1)")
     if budget < 4 * m:
         raise ValueError(
             f"ADAPT.sampling needs PencilSampling.total_shots of at least 4m = {4 * m} shots, two pilot and two "
             f"main shots for each of the m = {m} grouped settings of the largest basis this Plan can reach, {b} "
             f"states, but it is {budget}. A run that stops with a smaller basis may need fewer shots. Raise "
             f"PencilSampling.total_shots, or reduce the largest basis through {reduce}.")
-    bins = min(budget, 1 << (num_qubits + 1))
-    chunks, copies, pairs = (
-        ([(len(group), bins) for group in groups], sampled_setting_count(b, 1, quadratures), b * (b + 1) // 2)
-        if groups else ([(0, bins)], m, b * (b - 1) // 2))
-    size, work = grouped_pass_requirements(num_qubits, chunks, terms, b, settings=m, pairs=pairs, oriented=True,
-                                           copies=copies, shot_total=budget)
-    for field, need, limit in (("max_bytes", size, method.max_bytes), ("max_products", work, method.max_products)):
-        if need > limit:
-            unit = "data bytes" if field == "max_bytes" else "work units"
-            raise ValueError(
-                f"The grouped analysis of one PencilSampling stage of at most {budget} shots on the largest basis "
-                f"this ADAPT Plan can reach, {b} states, has a planning bound of {need} {unit}, above "
-                f"{field}={limit}. This bound is conservative and can refuse a run whose final basis and "
-                f"allocation would fit. Raise ADAPT.{field} to at least {need}, or reduce "
-                f"PencilSampling.total_shots, the number of grouped Pauli terms or the largest basis through "
-                f"{reduce}.")
+
+
+def _admit_final_analysis(method, b, num_qubits, groups, terms, quadratures):
+    """Check the grouped analysis of one final ``PencilSampling`` stage on the basis of ``b`` states that growth ended with.
+
+    The Run calls it when growth stops, before the first pilot circuit.
+    ``groups`` are the resolved Hamiltonian groups and ``terms`` the number L
+    of nonidentity terms. With m = ``sampled_setting_count(b, G, quadratures)``
+    settings, the larger stage of S = max(``pilot_split(total_shots,
+    pilot_fraction, m)``) shots is charged with the stage-budget form of
+    ``grouped_pass_requirements``: one ``(L_g, H)`` descriptor per group
+    with the K = ``sampled_setting_count(b, 1, Q)`` settings of each group
+    as copies, or for a pencil without nonidentity terms one ``(0, H)``
+    descriptor with the m overlap settings as copies, H = min(S, 2**(n+1))
+    and the oriented view, as in FixedGCIM planning. The bytes are compared
+    with ``max_bytes``, None meaning the physical memory, and the work with
+    ``max_products``, None meaning no limit. A refusal comes before any
+    stage circuit, and the measurements of the growth stay in the Run.
+    """
+    m = sampled_setting_count(b, len(groups), quadratures)
+    stage = max(pilot_split(method.sampling.total_shots, method.sampling.pilot_fraction, m))
+    bins = min(stage, 1 << (num_qubits + 1))
+    chunks, copies = (([(len(group), bins) for group in groups], sampled_setting_count(b, 1, quadratures))
+                      if groups else ([(0, bins)], m))
+    size, work = grouped_pass_requirements(num_qubits, chunks, terms, b, oriented=True, copies=copies,
+                                           shot_total=stage)
+    what = (f"the grouped analysis of one final PencilSampling stage of at most {stage} shots on the final basis "
+            f"of {b} states")
+    kept = "The stages were refused before their first circuit, and the measurements of the growth stay in this Run."
+    try:
+        _check_bytes(size, method.max_bytes, what)
+    except ResourceLimitError as error:
+        remedy = ("On a computer with more memory, load_run reopens this Run and resume continues it."
+                  if method.max_bytes is None else
+                  f"For this basis and shot budget, set ADAPT.max_bytes to at least {size} in a new Plan. "
+                  "The new Plan measures the growth again.")
+        raise ResourceLimitError(f"{error}. {kept} {remedy}") from None
+    if exceeds(work, method.max_products):
+        raise ResourceLimitError(f"{what} needs {work} work units, exceeding ADAPT.max_products={method.max_products}. "
+                                 f"{kept} For this basis and shot budget, set ADAPT.max_products to at least {work} "
+                                 "in a new Plan. The new Plan measures the growth again.")
 
 
 def independence_floor(method):
     """Return the exact independence floor of bounded growth: ``independence_cutoff``, or ADAPT's ``overlap_cutoff`` when it is None."""
     cutoff = method.basis_growth.independence_cutoff
     return method.overlap_cutoff if cutoff is None else cutoff
+
+
+def classical_frontier_bytes(method, inputs, length, q):
+    """Return the dominant bytes of the largest classical ADAPT query, without its reference preparation.
+
+    A query of ``adapt_acquisition.bind_classical`` on d = 2**q amplitudes
+    and L = ``length`` holds, by route:
+
+    - a pair query, with two chains, the vectors of the Run's state and
+      ``(H - cI)`` column caches, at most C = ``cached_state_vectors``
+      together, and 12 working complex128 vectors, such as the query state,
+      H|state>, a generator action, the two Taylor buffers, the Ritz state
+      and its residual, and for a pair query on a dense matrix the state
+      copy and one row of A that removing the mean diagonal holds;
+    - an energy query, with one chain and so at most C - 2L cached vectors,
+      the same working vectors and, for the gradient of a chain of k <= L
+      generators (``adapt_acquisition._classical_energy_gradient``), its
+      k + 1 forward states, of which the reference is already counted, so
+      k more, k raw tangents and three scalar arrays of norms, step counts
+      and the gradient of 24k bytes, within C + 12 vectors and 24L bytes. Inside ``taylor_action_derivative`` at most 2k + 8
+      vectors coexist, within that count.
+
+    Every classical Plan can run an energy query of any chain, with or
+    without ``optimize_every_m``, so 16 (C + 12) d + 24L bytes bound both
+    routes. Added are the Plan's packed action tables
+    (``adapt_actions.build_action_tables``), the processed Hamiltonian's
+    payload, the largest shared action remainder max_A(B_A - 32d) beside
+    the input and output vectors already counted
+    (``adapt_actions.action_sizes``), and the bytes of removing the mean
+    diagonal (``inputs.offset_free_requirements[0]``), zero for dense or
+    Pauli input and for a zero shift. Every query has at most these
+    arrays, so planning checks them once, with the reference preparation's
+    bytes, before any query.
+    """
+    d = 1 << q
+    vectors = 16 * (cached_state_vectors(method, length) + 12) * d + 24 * length
+    return (vectors + inputs.cache["action_tables"]["resident_bytes"]
+            + max((size - 32 * d for size in action_sizes(inputs, d)), default=0)
+            + inputs.hamiltonian.manifest.payload_bytes + inputs.offset_free_requirements[0])
 
 
 def cached_state_vectors(method, length):
@@ -1066,9 +1121,13 @@ def cached_state_vectors(method, length):
     vectors. Every prefix of a bounded-growth chain is a chain of the
     basis, because each added chain extends a basis chain by one generator,
     so a bounded basis of at most B states (``bounded_basis_size``) has B
-    prefixes, and each cache holds at most B + 2L vectors. The count is of
-    live cache entries, not a bound on the Run's whole memory, its results
-    or its archives.
+    prefixes, and each cache holds at most B + 2L vectors. The two query
+    chains need not belong to the basis, because ``Plan.resolve`` and
+    ``prepare_experiment`` accept any legal point and its binder shares the
+    Run's caches with the controller. The controller's own queries hold at
+    most 4L, or about 2(B + 1) with bounded growth, and direct pair points
+    reach the full count. The count is of live cache entries, not a bound
+    on the Run's whole memory, its results or its archives.
     """
     if method.basis_growth is None:
         return 8 * length
@@ -1151,24 +1210,33 @@ class ADAPT(Method):
             an explicit pool.
         theta: Default `pi/4`, nonzero. Angle in radians of each selected
             generator's exponential.
-        gradient_norm_floor: Default `1e-8`, nonnegative. The run stops when
-            the norm of the pool gradients falls below it.
-        energy_change_tolerance: Default `1e-6`, positive. Absolute change
-            between consecutive energies below which the flat counter counts
-            a round.
+        gradient_norm_floor: Default `None`, which planning replaces by
+            `1e-8 Omega`, where `Omega = ||H - tr(H) I/d||_F / sqrt(d)` is the
+            root-mean-square scale of the Problem's operator H on its original
+            dimension d, in its energy unit. For a Pauli sum, Omega is the
+            2-norm of the nonidentity coefficients. Omega sets the three
+            defaults of this page and is neither an energy-error bound nor an
+            optimal tolerance, and it can grow with the number of terms. A
+            nonnegative number is used as given, as an absolute value in the
+            unit of H, so convert it with the unit. The run stops when the norm
+            of the pool gradients is at or below the floor. The value used is
+            `plan.reconstruction.gradient_norm_floor`.
+        energy_change_tolerance: Default `None`, which planning replaces by
+            `1e-6 Omega`. A positive number is used as given, as an absolute value
+            in the unit of H. The flat counter counts a round when the change
+            between consecutive energies is below it. The value used is
+            `plan.reconstruction.energy_change_tolerance`.
         t_auto_fraction: Default `0.2`, in (0, 1]. Fraction of the unselected
             pool size that sets `T_auto`.
         t_user: Default `10`. Cap `T_usr` on consecutive flat rounds in the
             rule `min(T_auto, T_usr)`. A fractional round count is rounded up.
         max_iterations: Default `8`. Largest number of selection rounds. The
-            basis holds at most ``2*min(max_iterations, pool size)`` states, so
-            `max_basis_size=64` allows at most 32 selections for a pool of
-            more than 32 members. The default limits the cost. With exact
-            evaluation and the spin-adapted pool, the H4 chain of the eigenvalue example reaches
+            basis holds at most ``2*min(max_iterations, pool size)`` states.
+            The default limits the cost. With exact evaluation and the
+            spin-adapted pool, the H4 chain of the eigenvalue example reaches
             FCI at the eighth selection, and 10-qubit LiH is then 0.46 mHa
-            above its FCI energy. With `max_iterations=32`, the largest that
-            `max_basis_size=64` allows for these pools, the flat counter stops
-            them at selections 18 and 19
+            above its FCI energy. With `max_iterations=32` the flat counter
+            stops them at selections 18 and 19
             ([Engineering constants](../../ENGINEERING_CONSTANTS.md)).
         overlap_cutoff: Default `1e-12`, positive. Overlap eigenvalue cutoff
             that defines the kept Gram subspace.
@@ -1180,28 +1248,30 @@ class ADAPT(Method):
             basis, which only classical execution can evaluate. It differs
             from the pencil's `projected_residual` `||H c - E S c||` in basis
             coordinates.
-        residual_norm_tolerance: Default `1.6e-3`, positive. Threshold on that
-            full-state residual for the residual stop, in the Hamiltonian's
-            energy unit.
+        residual_norm_tolerance: Default `None`. Positive threshold on that
+            full-state residual, in the Hamiltonian's energy unit, required
+            with `stop_criterion="residual_norm"`.
         optimize_every_m: Default `None`, no optimization. Optimize the
             generator angles of the product state every m selected generators.
         optimize_rounds_n: Default `None`. Largest number of BFGS iterations
             per optimization, required together with the other two
-            optimization settings.
+            optimization settings. BFGS minimizes the dimensionless
+            `(E - c)/Omega`, with `c` the identity component of H, and stops
+            when every derivative of E in the selected angles is at most
+            `1e-5 Omega` in magnitude, unless an iteration or evaluation limit
+            or a failed line search ends it first. This stationarity heuristic
+            bounds neither the residual nor the ground-energy error. Recorded
+            energies stay in the unit of H.
         optimize_max_evaluations: Default `None`. Largest number of energy
             evaluations when optimization is enabled, counted as distinct
             evaluated parameter points. A classical point is one energy-and-gradient
             evaluation, whose work record includes its forward, derivative
             and reverse Taylor work.
-        max_basis_size: Default `64`. Limit on the size of the growing trial
-            basis, checked before matrix construction.
-        max_pool_size: Default `1024`. Limit on the number of generators,
-            checked before a pool is expanded.
-        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
-            the known bytes of the pool, matrices, states and readout
-            workspace.
-        max_products: Default `1_000_000_000`. Limit on the counted work of
-            conversion, matrices and operator products. It also limits,
+        max_bytes: Default `None`, the physical memory of this computer.
+            Limit on the known bytes of the pool, matrices, states and
+            readout workspace.
+        max_products: Default `None`, no limit. Optional limit on the counted
+            work of conversion, matrices and operator products. It also limits,
             separately, the exact synthesis of the dense unitaries in a
             supplied reference circuit and Qiskit's control of them. Before a
             classical query (one evaluation of gradients, matrix elements or
@@ -1217,12 +1287,18 @@ class ADAPT(Method):
             classical run keeps a dense or sparse Hamiltonian in its form,
             padded when needed. `"dense_pauli"` also permits the conversion of
             sparse matrices and of larger dense matrices, within
-            `max_conversion_work` and `max_bytes`.
-        max_conversion_work: Default `100_000_000`. Separate limit on the
-            work of the chosen input conversion.
-        pauli_coefficient_cutoff: Default `1e-14`, nonnegative. Operator
-            coefficients at or below it in magnitude are removed, and the
-            sum of the removed magnitudes is recorded.
+            `max_bytes`.
+        pauli_coefficient_cutoff: Default `None`, which planning replaces by
+            `1e-14 Omega`. A nonnegative number is used as given, as an absolute
+            value in the unit of H. Nonidentity Pauli coefficients of the
+            Hamiltonian and coefficients of each `[H, A_j]` at or below it in
+            magnitude are removed, and the identity coefficient of H stays
+            whole. The sum of the removed Hamiltonian magnitudes is
+            `plan.reconstruction.hamiltonian_dropped_l1`, which `print(result)`
+            shows when it is nonzero, and each pool member records its
+            commutator's separately. The value used is
+            `plan.reconstruction.pauli_coefficient_cutoff`. A classical run of
+            a dense or sparse matrix removes nothing.
         input_symmetry_tolerance: Default `1e-12`, nonnegative. Largest
             relative Frobenius-norm correction that the anti-Hermitian
             projection of each pool generator may make. The Hamiltonian has
@@ -1241,9 +1317,11 @@ class ADAPT(Method):
             says nothing about the imaginary parts of matrix elements of the
             original operator. With a scalar processed Hamiltonian the
             default growth measures nothing, and `quadratures` then has no
-            effect. Bounded Ritz growth on such a Hamiltonian still measures
-            overlaps whenever its basis can hold more than the reference, so
-            its request is resolved as for any measured Plan.
+            effect. So does bounded Ritz growth on an original operator that
+            is a multiple of the identity. When an explicit cutoff leaves the
+            scalar, bounded Ritz growth still measures overlaps whenever its
+            basis can hold more than the reference, so its request is
+            resolved as for any measured Plan.
             `pair_preparation="vacuum_reference"` and `"vacuum_restore"`
             control only the reference preparation B and run the generator
             chains without control. They need the exponential of every pool
@@ -1281,17 +1359,19 @@ class ADAPT(Method):
             instead grows an explicit list of short generator chains, one
             scored extension per round, at the fixed angle `theta`. Each of
             its added chains counts toward `max_iterations`, and its basis stops
-            growing at `max_basis_size` states. It screens no gradients, so
+            growing at its `max_basis_size` states. It screens no gradients, so
             `gradient_norm_floor` has no effect and the commutators
             `[H, A_j]` are not formed. `ADAPT` raises `ValueError` for it
             together with `optimize_every_m` or
             `stop_criterion="residual_norm"`. With shots it supports the
             default grouped measurement, and planning raises `ValueError`
             when `acquisition` requests `matrix_measurement="termwise"`.
-            With a scalar processed Hamiltonian and `max_basis_size>1`,
-            quantum planning still resolves the measurement choices because
-            evaluating extensions can need overlaps. With `max_basis_size=1`
-            the Plan measures nothing and keeps the request unused.
+            When an explicit cutoff leaves a scalar processed Hamiltonian and
+            `max_basis_size>1`, quantum planning still resolves the
+            measurement choices because evaluating extensions can need
+            overlaps. With `max_basis_size=1` or an original operator that is
+            a multiple of the identity, the Plan measures nothing and keeps
+            the request unused.
         max_native_two_qubit_depth: Default `None`, which requests no depth
             limit. `None` is neither a depth of 0 nor evidence that the
             circuits suit a device. A nonnegative integer D requires each
@@ -1336,7 +1416,8 @@ class ADAPT(Method):
             prepared by `nwqlib.prepare` (`prepared.run.prepared_artifacts`).
         sampling: Default `None`, with which a run with shots takes
             `eigenvalue` and `pencil` from the same measurements that chose
-            the basis. A
+            the basis. Selecting from those measurements can bias the value
+            low, and `ADAPTResult.overlap_noise` reports this population. A
             [`PencilSampling`][nwqlib.algorithms.gcim.fixed_basis.PencilSampling]
             measures the final basis again once its growth has stopped: a
             pilot stage with uniform shots, one decision of the shots of
@@ -1344,13 +1425,19 @@ class ADAPT(Method):
             measurements alone form `eigenvalue`, `pencil` and the group
             moments of the Result. The stages follow the rules of
             `PencilSampling` for the grouped settings of the final basis,
-            and `ADAPTResult.shot_allocation` records the decision. `shots=`
+            and `ADAPTResult.shot_allocation` records the decision. Measuring
+            again removes that reuse, and it does not guarantee a smaller error
+            on every problem. `shots=`
             still sets the shots of every query that grows the basis, and
             `total_shots` is a separate budget of the two final stages. When
             the final basis has settings to measure and both stages
             complete, the Run spends `total_shots` in addition to the shots
-            of the growth. A Run that ends during the stages counts the
-            shots already submitted, up to `total_shots` stage shots.
+            of the growth. The Plan fixes that cost, so the Run starts each
+            query of the growth only while `max_total_shots` leaves room for
+            its shots and `total_shots` more, and a Run without that room is
+            refused before its first growth circuit. A Run that ends during
+            the stages counts the shots already submitted, up to
+            `total_shots` stage shots.
             A final basis without settings adds no shots. The
             main measurements are new, but the basis was chosen from the
             earlier ones, so the estimate is conditional on that basis.
@@ -1365,10 +1452,13 @@ class ADAPT(Method):
             shots. Before the first query, planning requires at least four
             of the `total_shots` for every setting of the largest basis the
             Plan can reach, `2*min(max_iterations, pool size)` states, or
-            `min(max_basis_size, max_iterations + 1)` with `basis_growth`,
+            `min(BoundedRitzGrowth.max_basis_size, max_iterations + 1)` with
+            `basis_growth`,
             so a run that stops with a smaller basis may have needed fewer
-            shots. It also checks the analysis of one stage of `total_shots`
-            shots on that basis against `max_bytes` and `max_products`.
+            shots. The grouped analysis of one stage is checked against
+            `max_bytes` and `max_products` on the basis that growth ends
+            with, before the first pilot shot. A refusal there keeps the
+            measurements of the growth in the Run.
             `nwqlib.estimate(plan)` still reports the totals of the whole
             Plan as unavailable, and one prepared query is estimated
             normally. The stages follow every scientific stop of the
@@ -1394,8 +1484,9 @@ class ADAPT(Method):
 
     Raises:
         ValueError: If `theta` is zero, if only some of the three
-            optimization settings are given, if an explicit pool is empty
-            or has more than `max_pool_size` members, or if `basis_growth`
+            optimization settings are given, if an explicit pool is empty,
+            if `stop_criterion="residual_norm"` has no
+            `residual_norm_tolerance`, or if `basis_growth`
             is combined with optimization or `stop_criterion="residual_norm"`,
             or has no `independence_cutoff` while `overlap_cutoff` is at
             least 1.
@@ -1414,32 +1505,28 @@ class ADAPT(Method):
         (0,) pool_exhausted -1.0
     """
 
-    # max_pool_size, max_products and max_basis_size are untuned workload
-    # ceilings, and the numerical defaults below are registered with their
-    # revisit conditions in docs/ENGINEERING_CONSTANTS.md.
-    max_pool_size: PositiveInt = 1024
-    max_bytes: PositiveInt = DEFAULT_MAX_BYTES
-    max_products: PositiveInt = 1_000_000_000
+    # The numerical defaults below are registered with their revisit conditions
+    # in docs/ENGINEERING_CONSTANTS.md. max_products sets no limit by default.
+    max_bytes: PositiveInt | None = None
+    max_products: PositiveInt | None = None
     input_conversion: Literal["auto", "dense_pauli"] = "auto"
-    max_conversion_work: PositiveInt = DEFAULT_CONVERSION_WORK
     initial_state: StateData
     pool: Any
     n_spatial_orbitals: PositiveInt | None = None
     theta: Real = pi / 4
-    gradient_norm_floor: Annotated[Real, Field(ge=0)] = 1e-8
-    energy_change_tolerance: Annotated[Real, Field(gt=0)] = 1e-6
+    gradient_norm_floor: Annotated[Real, Field(ge=0)] | None = None
+    energy_change_tolerance: Annotated[Real, Field(gt=0)] | None = None
     t_auto_fraction: Annotated[Real, Field(gt=0, le=1)] = 0.20
     t_user: PositiveInt = 10
     max_iterations: PositiveInt = 8
     overlap_cutoff: Annotated[Real, Field(gt=0)] = 1e-12
     symmetrize_matrices: bool = True
     stop_criterion: Literal["flat_counter", "residual_norm"] = "flat_counter"
-    residual_norm_tolerance: Annotated[Real, Field(gt=0)] = 1.6e-3
+    residual_norm_tolerance: Annotated[Real, Field(gt=0)] | None = None
     optimize_every_m: PositiveInt | None = None
     optimize_rounds_n: PositiveInt | None = None
     optimize_max_evaluations: PositiveInt | None = None
-    max_basis_size: PositiveInt = 64
-    pauli_coefficient_cutoff: Annotated[Real, Field(ge=0)] = 1e-14
+    pauli_coefficient_cutoff: Annotated[Real, Field(ge=0)] | None = None
     input_symmetry_tolerance: Annotated[Real, Field(ge=0)] = 1e-12
     acquisition: PencilAcquisition = PencilAcquisition()
     basis_growth: BoundedRitzGrowth | None = None
@@ -1452,21 +1539,16 @@ class ADAPT(Method):
     def _pool(cls, value, info):
         """Copy an explicit pool, or pass a built-in pool name through.
 
-        The member count is checked against ``max_pool_size`` before any
-        member is copied. Each ``FermionicGenerator`` is checked and copied by
+        Each ``FermionicGenerator`` is checked and copied by
         ``_snapshot_generator`` and every other entry by ``operator_input``.
         """
         if isinstance(value, str):
             return value
         if type(value) not in (tuple, list) or not value:
             raise ValueError("pool must be a named family or finite nonempty sequence")
-        cap = info.data.get("max_pool_size", 1024)
-        if len(value) > cap:
-            raise ValueError(f"pool has {len(value)} members, more than ADAPT(max_pool_size={cap})")
-        max_bytes = info.data.get("max_bytes", DEFAULT_MAX_BYTES)
-        max_products = info.data.get("max_products", 1_000_000_000)
+        max_bytes = info.data.get("max_bytes")
         return tuple(
-            _snapshot_generator(g, max_bytes=max_bytes, max_products=max_products)
+            _snapshot_generator(g)
             if isinstance(g, FermionicGenerator)
             else operator_input(g, max_bytes=max_bytes)
             for g in value
@@ -1488,18 +1570,23 @@ class ADAPT(Method):
 
     @model_validator(mode="after")
     def _controls(self):
-        """Reject a zero angle, a partial set of optimization controls and bounded growth with an optimizer or a residual stop.
+        """Reject a zero angle, a partial set of optimization controls, a residual stop without its tolerance and bounded growth with an optimizer or a residual stop.
 
         At ``theta = 0`` every generator exponential ``exp(theta A)`` is the
         identity, so each new basis state would repeat the reference.
         Optimization needs its period, BFGS iteration limit and total
-        evaluation limit together. ``BoundedRitzGrowth`` keeps every angle
+        evaluation limit together. The residual ``||(H - E) psi||`` has the
+        energy unit of H, and no default value suits every unit.
+        ``BoundedRitzGrowth`` keeps every angle
         at ``theta``, so that the effect of the fixed-angle basis can be read
         on its own, and it computes no full-space residual. Its exact
         independence floor must lie in (0, 1).
         """
         if self.theta == 0:
             raise ValueError("new-generator theta must be nonzero")
+        if self.stop_criterion == "residual_norm" and self.residual_norm_tolerance is None:
+            raise ValueError("stop_criterion='residual_norm' needs a residual_norm_tolerance in the energy unit "
+                             "of the Hamiltonian")
         enabled = self.optimize_every_m is not None
         if enabled != (self.optimize_rounds_n is not None) or enabled != (
             self.optimize_max_evaluations is not None
@@ -1526,32 +1613,30 @@ class ADAPT(Method):
         """Check the generator pool and choose the gradient, matrix-element and energy queries.
 
         After k selections the basis holds 2k states, so
-        `2*min(pool size, max_iterations)` bounds the projected dimension,
-        which must not exceed `max_basis_size`. For an explicit pool this
-        bound is checked before conversion and commutator formation. A named
-        pool is checked after it is enumerated, under that enumeration's own
-        byte and product limits. A `BoundedRitzGrowth` basis holds at most
-        `min(max_basis_size, max_iterations + 1)` states, because each round
-        adds one chain or ends the run with one of its stop reasons, and its
-        run stops when it reaches `max_basis_size`.
+        `2*min(pool size, max_iterations)` bounds the projected dimension. A
+        `BoundedRitzGrowth` basis holds at most
+        `min(BoundedRitzGrowth.max_basis_size, max_iterations + 1)` states,
+        because each round adds one chain or ends the run with one of its
+        stop reasons, and its run stops when it reaches that `max_basis_size`.
 
         Raises:
-            ValueError: If `2*min(pool size, max_iterations)` exceeds
-                `max_basis_size` without `basis_growth`, if classical
-                execution is given shots, if `stop_criterion="residual_norm"`
+            ValueError: If classical execution is given shots, if `stop_criterion="residual_norm"`
                 is used without classical execution, or if `basis_growth`
                 is used with shots and a requested
                 `matrix_measurement="termwise"`, or sets a
-                `basis_depth_limit` while the reference's CX count bound
-                exceeds it, the reference has no CX count or execution is
-                classical. Also if `sampling` is used with classical
+                `basis_depth_limit` with classical execution. Also if
+                `sampling` is used with classical
                 execution, or, when the Plan measures anything, with
                 `shots=None` or a requested `matrix_measurement="termwise"`,
                 with fewer than four of its `total_shots` for each setting
-                of the largest reachable basis, or with an analysis of one
-                stage on that basis above `max_bytes` or `max_products`.
+                of the largest reachable basis.
+            ResourceLimitError: If `basis_growth` sets a `basis_depth_limit`
+                while the reference's CX count bound exceeds it or the
+                reference has no CX count.
             ApplicabilityError: If the Problem names a fixed subspace, which
-                the changing basis of ADAPT does not implement.
+                the changing basis of ADAPT does not implement, or if the
+                input has more than 64 qubits, because the Hamiltonian action
+                holds each Pauli mask in one 64-bit word.
         """
         growth = self.basis_growth
         if growth is not None and shots is not None and self.acquisition.matrix_measurement == "termwise":
@@ -1564,15 +1649,6 @@ class ADAPT(Method):
         if growth is not None and growth.basis_depth_limit is not None and execution == "classical":
             raise ValueError("BoundedRitzGrowth(basis_depth_limit=...) reads the CX counts of the generator "
                              "circuits that quantum execution builds; classical execution builds none")
-        if (
-            growth is None
-            and isinstance(self.pool, tuple)
-            and 2 * min(len(self.pool), self.max_iterations) > self.max_basis_size
-        ):
-            raise ValueError(
-                f"maximum selected ADAPT basis holds {2 * min(len(self.pool), self.max_iterations)} states "
-                f"(2 * min(pool size {len(self.pool)}, max_iterations={self.max_iterations})), above "
-                f"ADAPT(max_basis_size={self.max_basis_size})")
         if problem.subspace is not None:
             raise ApplicabilityError(
                 "ADAPT's changing trial basis does not implement a supplied fixed scientific subspace"
@@ -1592,24 +1668,18 @@ class ADAPT(Method):
             if isinstance(self.pool, tuple)
             else []
         )
-        conversion_work = 0
+        # Every matrix to convert is checked for applicability and transform
+        # bytes before the first conversion, so an unsuitable generator is
+        # refused before the Hamiltonian is converted.
         for matrix in matrices:
             if "pauli_terms" not in matrix.manifest.access:
-                conversion_work += conversion_requirements(
-                    matrix,
-                    input_conversion=self.input_conversion,
-                    max_conversion_work=self.max_conversion_work,
-                    max_bytes=self.max_bytes,
-                )[2]
-        if conversion_work > self.max_conversion_work:
-            raise ValueError("ADAPT complete input conversion exceeds max_conversion_work")
+                conversion_requirements(matrix, input_conversion=self.input_conversion, max_bytes=self.max_bytes)
         operator = eigen_operator(
             problem,
             output,
             max_bytes=self.max_bytes,
             as_pauli=execution == "quantum",
             input_conversion=self.input_conversion,
-            max_conversion_work=self.max_conversion_work,
             pad_classical=True,
         )
         reference = eigen_state(self.initial_state, problem, max_bytes=self.max_bytes)
@@ -1620,12 +1690,32 @@ class ADAPT(Method):
 
             bound, reason = reference_cx_bound(reference.preparation, reference.basis.dimension.bit_length() - 1)
             if bound is None:
-                raise ValueError(f"BoundedRitzGrowth(basis_depth_limit=...) needs a CX count bound of the "
-                                 f"reference: {reason}")
+                raise ResourceLimitError(f"BoundedRitzGrowth(basis_depth_limit=...) needs a CX count bound of the "
+                                         f"reference: {reason}")
             if bound > growth.basis_depth_limit:
-                raise ValueError(f"the reference preparation has a CX count bound of {bound}, above "
-                                 f"BoundedRitzGrowth(basis_depth_limit={growth.basis_depth_limit})")
+                raise ResourceLimitError(f"the reference preparation has a CX count bound of {bound}, above "
+                                         f"BoundedRitzGrowth(basis_depth_limit={growth.basis_depth_limit})")
         reference_requirements = preparation_requirements(reference)
+        # The three energy thresholds are resolved once, from the original operator and dimension, so that
+        # converting or padding the input never picks a second set. For a > 0, H -> aH + bI multiplies Omega and
+        # each default by a, and the gradients, the energy changes and the commutator coefficients scale with
+        # a too, because [I, A] = 0 for a dimensionless generator A. That makes the shared cutoff dimensionally
+        # consistent for commutator coefficients, which does not make the two pruning errors equivalent. In exact
+        # arithmetic, with identical ordered numerical generators and identical dimensionless parameter
+        # coordinates, the same reference and dimensionless options, and explicit absolute controls converted
+        # with the unit, the defaults keep the screening and stopping decisions, and each round by induction
+        # gives the same selected sequence and E' = aE + b. A user who rescales the numerical generators with
+        # the unit changes the parameterization, which is outside this claim. The claim needs every
+        # state-producing optimizer, projected eigenspace representative and acquisition decision to be
+        # equivariant, which is why optimization.optimize_product scales what BFGS receives. Sampled runs need
+        # the corresponding measurement populations and outcomes, not an integer seed, and corresponding
+        # restarts. Finite precision, independently drawn shots, ties and degenerate eigenspaces are outside this
+        # exact equality, and a < 0 exchanges the minimum and maximum. It covers the selected sequence and the
+        # energy, not every diagnostic flag: the sampled enclosure window of _projected_eigensolver is not
+        # centered, so an identity shift can change that flag.
+        scale = energy_scale(problem.A, max_bytes=self.max_bytes, max_products=self.max_products)
+        cutoff = (DEFAULT_PAULI_CUTOFF_PER_SCALE * scale if self.pauli_coefficient_cutoff is None
+                  else self.pauli_coefficient_cutoff)
         inputs = prepare_adapt_inputs(
             operator,
             reference,
@@ -1633,17 +1723,11 @@ class ADAPT(Method):
             execution=execution,
             shots=shots,
             original_dimension=problem.dimension,
-            original_hamiltonian=problem.A.reference,
-            reference_requirements=reference_requirements,
+            cutoff=cutoff,
         )
         if growth is None:
             length = min(self.max_iterations, len(inputs.pool))
             size = 2 * length
-            if size > self.max_basis_size:
-                raise ValueError(
-                    f"maximum selected ADAPT basis holds {size} states "
-                    f"(2 * min(pool size {len(inputs.pool)}, max_iterations={self.max_iterations})), above "
-                    f"ADAPT(max_basis_size={self.max_basis_size})")
         else:
             length, size = growth.max_chain_length, bounded_basis_size(self)
         # After `length` selections the legacy basis has 2 * length states
@@ -1682,9 +1766,11 @@ class ADAPT(Method):
         # the reference diagonal has no settings. The quadratures choice is
         # then unused, as in FixedGCIM. The bounded controller obtains the
         # overlap row of each candidate against the reference in its first
-        # round whenever its basis can grow beyond the reference, also for a
-        # scalar Hamiltonian, so that Plan acquires.
-        acquires = bool(inputs.nonidentity) or growth is not None and bounded_basis_size(self) > 1
+        # round whenever its basis can grow beyond the reference, also when
+        # an explicit cutoff leaves a scalar Hamiltonian, so that Plan
+        # acquires. An original H = cI (scale 0) ends after the reference
+        # under either growth (drive_adapt).
+        acquires = bool(inputs.nonidentity) or scale != 0 and growth is not None and bounded_basis_size(self) > 1
         if self.sampling is not None and acquires:
             # The supported route of PencilSampling, whose final stages
             # choose the shots of grouped counts settings, with a selection
@@ -1706,8 +1792,7 @@ class ADAPT(Method):
         if self.sampling is not None and acquisition.matrix_measurement is not None:
             # `size` is the largest basis this Plan can reach, the bound of
             # both growth rules above.
-            _admit_final_stages(self, size, reference.basis.dimension.bit_length() - 1, inputs.energy_groups,
-                                len(inputs.nonidentity), acquisition.quadratures)
+            _admit_final_stages(self, size, inputs.energy_groups, acquisition.quadratures)
         if (acquisition.pair_preparation in ("controlled", "vacuum_reference", "vacuum_restore")
                 and reference.preparation.implementation == "qiskit.supplied"):
             # Under the resolved "controlled" rule each Hadamard-test and
@@ -1724,11 +1809,17 @@ class ADAPT(Method):
             # no rule and control nothing. The vacuum rule concerns the
             # generators after the reference and says nothing about the
             # reference's own synthesis, so this charge stays as it is.
+            # Planning reads only the definitions that the circuit has built.
+            # One that is not built, such as a StatePreparation's, leaves its
+            # part unknown: an explicit max_products is refused, and otherwise
+            # the known part is checked here and the construction checks the
+            # built gate before it synthesizes (adapt_acquisition._reference_gate).
             from nwqlib.subroutines._dense_synthesis import admit_dense_syntheses
-            from nwqlib.subroutines.qiskit_compat import dense_control_counts, dense_synthesis_widths
-            admit_dense_syntheses(dense_synthesis_widths(reference._native),
-                                  controls=(dense_control_counts(reference._native, 1),),
-                                  max_work=self.max_products, max_bytes=self.max_bytes,
+            from nwqlib.subroutines.qiskit_compat import dense_gatewise_charges, refuse_unbuilt_limit
+            widths, counts, unbuilt = dense_gatewise_charges(reference._native, 1, built=True)
+            if unbuilt is not None and self.max_products is not None:
+                refuse_unbuilt_limit(unbuilt, f"ADAPT.max_products={self.max_products}")
+            admit_dense_syntheses(widths, controls=(counts,), max_work=self.max_products, max_bytes=self.max_bytes,
                                   operation="ADAPT controlled reference synthesis")
         compiler_plans, slot_bound = (), 0
         if execution == "quantum":
@@ -1740,8 +1831,12 @@ class ADAPT(Method):
             compiler_plans = CompilerPlans(
                 inputs.pool, max_bytes=self.max_bytes, max_products=self.max_products
             )
+        frontier = None
+        if execution == "classical":
+            frontier = classical_frontier_bytes(self, inputs, length, reference.basis.dimension.bit_length() - 1)
+            _check_bytes(frontier + reference_requirements[0], self.max_bytes, "ADAPT classical frontier")
         construction, experiments, blocks = _construction(
-            inputs, reference, self, length, compiler_plans, slot_bound, execution, shots, acquisition
+            inputs, reference, self, length, compiler_plans, slot_bound, execution, shots, acquisition, frontier
         )
         rec = AdaptReconstruction(
             reference=reference.preparation,
@@ -1754,6 +1849,12 @@ class ADAPT(Method):
             num_qubits=reference.basis.dimension.bit_length() - 1,
             hamiltonian_action_work=inputs.hamiltonian_work,
             hamiltonian_dropped_l1=inputs.dropped_l1,
+            energy_scale=scale,
+            pauli_coefficient_cutoff=cutoff,
+            gradient_norm_floor=(DEFAULT_GRADIENT_FLOOR_PER_SCALE * scale if self.gradient_norm_floor is None
+                                 else self.gradient_norm_floor),
+            energy_change_tolerance=(DEFAULT_ENERGY_CHANGE_PER_SCALE * scale if self.energy_change_tolerance is None
+                                     else self.energy_change_tolerance),
             groups=inputs.groups,
             energy_groups=inputs.energy_groups,
             processing=inputs.processing,
@@ -1803,11 +1904,12 @@ class ADAPT(Method):
         The workspace check rejects a point whose ``pair_reducer.pair_bytes``
         exceeds ``max_bytes``. Before the first query of a newly entered exact
         quantum matrix stage, the ADAPT iteration checks a lower bound on the
-        registered work of the stage's new pair reductions against
-        ``max_products`` (``adapt_acquisition._new_pencil_queries``). A resumed
-        matrix stage skips this stage check. Each query receives the whole
-        ``max_products`` as its allowance. The work record is read, never
-        changed.
+        registered work of the stage's new pair reductions against an
+        explicit ``max_products`` (``adapt_acquisition._new_pencil_queries``).
+        A resumed matrix stage skips this stage check. Each query receives the
+        whole ``max_products`` as its allowance, or None, with no pair work
+        computed, when ``max_products`` is None. The work record is read,
+        never changed.
         """
         import json
         from .pair_reducer import pair_bytes
@@ -1816,7 +1918,7 @@ class ADAPT(Method):
             if item.kind == "reduction":
                 _check_bytes(pair_bytes(json.loads(item.parameters)), self.max_bytes,
                              "ADAPT pair reduction workspace")
-        return int(self.max_products)
+        return self.max_products
 
     def before_submit(self, plan, prepared, *, run):
         """Refuse a circuit whose native two-qubit depth exceeds `max_native_two_qubit_depth` or is unavailable, before the Run records its submission.
@@ -2097,7 +2199,7 @@ class ADAPT(Method):
             return ("I" * r.num_qubits + "Z",)
         if experiment == "screen":
             removed = {i for i, _ in chain(values, "r")}
-            labels, members = active_screen_labels(r.pool, label_cache(plan), removed, r.max_selections)
+            labels, members = active_screen_labels(r.pool, label_cache(plan), removed)
             ordered, groups = screen_labels(r.pool, label_cache(plan)), r.groups
         else:
             labels = tuple(t.label for t in r.nonidentity_terms)
@@ -2166,7 +2268,7 @@ class ADAPT(Method):
         if not plan.construction.kernels:
             return ()
         work = query_work(plan, experiment, program)
-        if work > self.max_products:
+        if exceeds(work, self.max_products):
             raise ValueError(
                 f"ADAPT classical query needs {work} scalar products, exceeding "
                 f"max_products={self.max_products}. Later queries with longer "

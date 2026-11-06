@@ -3,7 +3,7 @@
 This page lists the classes and functions for adding a method: the `Method` base class and its hooks, the checker and registry for a new method, the `Program` (NWQLib's description of a circuit as named steps), the blocks a Program calls, the readouts it requests and the hooks that save its data. [Add a Method](../algorithm_protocol.md) states every requirement of a Method, and [Run your own circuit](../own_circuit.md) builds the smallest Method step by step.
 
 ```python
-from nwqlib.algorithms import AlgorithmDescriptor, ApplicabilityError, Method
+from nwqlib.algorithms import AlgorithmDescriptor, ApplicabilityError, Method, ResourceLimitError
 from nwqlib.algorithms.authoring import MethodCase, check_method
 from nwqlib.blocks import SelectedConstruction, lower_qiskit, select_preparation
 from nwqlib.ir import (
@@ -28,7 +28,7 @@ From a shell, `python -m nwqlib check-method my_methods:case` runs the same chec
 
 | Task | Entries |
 | --- | --- |
-| Write the Method class | [`Method`](#nwqlib.algorithms.protocol.Method), [`AlgorithmDescriptor`](#nwqlib.algorithms.protocol.AlgorithmDescriptor), [`ApplicabilityError`](#nwqlib.algorithms.protocol.ApplicabilityError) |
+| Write the Method class | [`Method`](#nwqlib.algorithms.protocol.Method), [`AlgorithmDescriptor`](#nwqlib.algorithms.protocol.AlgorithmDescriptor), [`ApplicabilityError`](#nwqlib.algorithms.protocol.ApplicabilityError), [`ResourceLimitError`](#nwqlib._limits.ResourceLimitError) |
 | Tie a Plan and a Result to their inputs and data | [`Plan._bind`](#nwqlib.core.planning.Plan._bind), [`Result._attach`](#nwqlib.core.analysis.Result._attach), [`Result.validate_plan`](#nwqlib.core.analysis.Result.validate_plan) |
 | Inspect a prepared circuit and its resources | [`PreparedHandle`](#nwqlib._prepared_execution.PreparedHandle) |
 | Check a Method against its case | [`MethodCase`](#nwqlib.algorithms.authoring.MethodCase), [`check_method`](#nwqlib.algorithms.authoring.check_method) |
@@ -51,6 +51,8 @@ Subclass `Method`, give it a `descriptor`, and implement `plan` and `analyze`. T
         - analyze
         - prepare
         - prepare_all_refusal
+        - has_row_templates
+        - row_templates
         - query_catalog_reason
         - execute
         - error_model
@@ -65,7 +67,19 @@ Subclass `Method`, give it a `descriptor`, and implement `plan` and `analyze`. T
     options:
       heading_level: 3
 
+::: nwqlib.algorithms.protocol.RowTemplate
+    options:
+      heading_level: 3
+
+::: nwqlib.core.planning.StaticPoint
+    options:
+      heading_level: 3
+
 ::: nwqlib.algorithms.protocol.ApplicabilityError
+    options:
+      heading_level: 3
+
+::: nwqlib._limits.ResourceLimitError
     options:
       heading_level: 3
 
@@ -515,6 +529,10 @@ A Plan's experiments name the readout each circuit returns. Reducers that turn a
         - saved_state_error
         - saved_state_probability_window
         - state_error
+
+::: nwqlib.execution.TemplateBinding
+    options:
+      heading_level: 3
 
 ## Save and restore a method's data
 

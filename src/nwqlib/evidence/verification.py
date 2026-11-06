@@ -7,12 +7,12 @@ verifications. Nothing here takes measurements or solves an eigenproblem.
 """
 
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import ClassVar, Literal
 
 from pydantic import model_validator
 
 from nwqlib.core.records import Complex128, Nonnegative, Rational, Record, Source, Text, Unit
-from ._work import DEFAULT_MAX_INTEGER_BITS, ExactArithmetic
 from .error_model import CheckDomain, CheckSpec, ErrorFrame, FramedFact, _assemble_check
 from .records import Evidence, Fact
 
@@ -147,40 +147,40 @@ class ProjectedVerificationOptions(Record):
             data_description="criterion scalar and source result identity; raw diagnostics stay in that result") for criterion in self.comparisons)
 
 
-def _parts(value, arithmetic):
+def _parts(value):
     """Return the exact real and imaginary parts of a stored Complex128 or real entry."""
     if isinstance(value, Complex128):
-        return arithmetic.fraction(value.real), arithmetic.fraction(value.imag)
-    return arithmetic.fraction(value), arithmetic.fraction(0)
+        return Fraction(value.real), Fraction(value.imag)
+    return Fraction(value), Fraction(0)
 
 
-def _hermiticity(matrix, arithmetic):
+def _hermiticity(matrix):
     """Return max over i, j of the absolute real and imaginary parts of (S - S†)_ij, exactly.
 
     ``(S - S†)_ij = S_ij - conj(S_ji)`` has real part ``Re S_ij - Re S_ji``
     and imaginary part ``Im S_ij + Im S_ji``. Because
     ``(S - S†)_ji = -conj((S - S†)_ij)``, the scan visits only ``j >= i``,
-    including the diagonal, whose defect is ``2 |Im S_ii|``. A missing
-    matrix returns None.
+    including the diagonal, whose defect is ``2 |Im S_ii|``. The value is a
+    derived certificate quantity compared with a threshold, and a rounded
+    subtraction could fall below it, so the components are exact
+    ``Fraction`` values of the stored binary64 entries. A missing matrix
+    returns None.
     """
     if matrix is None:
         return None
     size = len(matrix)
     if any(len(row) != size for row in matrix):
         raise ValueError("stored Gram matrix must be square")
-    defect = arithmetic.fraction(0)
+    defect = Fraction(0)
     for i in range(size):
         for j in range(i, size):
-            ar, ai = _parts(matrix[i][j], arithmetic)
-            br, bi = _parts(matrix[j][i], arithmetic)
-            for component in (arithmetic.subtract(ar, br), arithmetic.add(ai, bi)):
-                component = arithmetic.absolute(component)
-                if arithmetic.le(defect, component):
-                    defect = component
+            ar, ai = _parts(matrix[i][j])
+            br, bi = _parts(matrix[j][i])
+            defect = max(defect, abs(ar - br), abs(ai + bi))
     return defect
 
 
-def _publish(result, options, checks, metrics, *, max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
+def _publish(result, options, checks, metrics):
     """Bind each computed scalar check value to one new verification record, keeping the raw facts.
 
     Each raw fact is first evaluated against its check, so that a value
@@ -192,18 +192,18 @@ def _publish(result, options, checks, metrics, *, max_integer_bits=DEFAULT_MAX_I
     """
     from nwqlib.execution import KernelApplication, VerificationReceipt, verification_invocation
 
-    arithmetic = ExactArithmetic(max_integer_bits=max_integer_bits)
     raw = []
     for check, value in zip(checks, metrics, strict=True):
         fields = dict(quantity=check.name, unit=check.frame.unit, scope=check.frame.scope)
         if value is None:
             fields.update(availability="unknown", reason="selected stored diagnostic unavailable; no computation was replayed")
         else:
-            ratio = arithmetic.fraction(value)
-            fields.update(availability="concrete", value=Rational(numerator=ratio.numerator, denominator=ratio.denominator),
+            # A binary64 value or an exact Fraction, stored as its exact ratio.
+            numerator, denominator = value.as_integer_ratio()
+            fields.update(availability="concrete", value=Rational(numerator=numerator, denominator=denominator),
                           evidence=Evidence(kind="numerical_estimate", source=options.source))
         fact = FramedFact(frame=check.frame, bindings=(), fact=Fact(**fields))
-        _assemble_check(check, artifact_id=result.content_id, fact=fact, max_integer_bits=max_integer_bits)
+        _assemble_check(check, artifact_id=result.content_id, fact=fact)
         raw.append(fact)
     application = KernelApplication(name=options.name, implementation=options.source, arguments=(), facts=tuple(raw))
     receipt = VerificationReceipt(plan_id=result.plan_id, result_id=result.content_id,
@@ -242,7 +242,7 @@ def witness_check_facts(receipt, result, checks):
     return tuple(witnessed)
 
 
-def verify_projected(result, *, options: ProjectedVerificationOptions, max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
+def verify_projected(result, *, options: ProjectedVerificationOptions):
     """Run the projected checks on a Result's saved diagnostics, without solving again.
 
     `result.verify(checks=options)` calls this for Lanczos, FixedGCIM and
@@ -253,8 +253,6 @@ def verify_projected(result, *, options: ProjectedVerificationOptions, max_integ
     Args:
         result (Result): A Lanczos, FixedGCIM or ADAPT Result with its Plan.
         options (ProjectedVerificationOptions): The selected criteria.
-        max_integer_bits (int): Bit limit of the exact arithmetic. Default
-            4096.
 
     Returns:
         verification (tuple): `(receipt, facts)`: the `VerificationReceipt`
@@ -266,8 +264,6 @@ def verify_projected(result, *, options: ProjectedVerificationOptions, max_integ
     Raises:
         TypeError: If `options` is not a `ProjectedVerificationOptions`, or
             the Result supplies no projected diagnostics.
-        ValueError: If an exact intermediate value needs more than
-            `max_integer_bits` bits.
     """
     if type(options) is not ProjectedVerificationOptions:
         raise TypeError("projected verification requires concrete selected options")
@@ -275,7 +271,6 @@ def verify_projected(result, *, options: ProjectedVerificationOptions, max_integ
     diagnostics = result.projected_diagnostics()
     if type(diagnostics) is not ProjectedDiagnostics:
         raise TypeError("producer must return actual ProjectedDiagnostics")
-    arithmetic = ExactArithmetic(max_integer_bits=max_integer_bits)
     values = []
     for criterion in options.comparisons:
         if criterion == "overlap_normalization":
@@ -283,16 +278,10 @@ def verify_projected(result, *, options: ProjectedVerificationOptions, max_integ
         elif criterion == "projected_backward_error":
             value = diagnostics.backward_error
         elif criterion == "gram_hermiticity":
-            value = _hermiticity(diagnostics.overlap, arithmetic)
+            value = _hermiticity(diagnostics.overlap)
         else:
-            spectrum = diagnostics.spectrum
-            value = None
-            if spectrum:
-                minimum = arithmetic.fraction(spectrum[0])
-                for item in spectrum[1:]:
-                    item = arithmetic.fraction(item)
-                    if arithmetic.le(item, minimum):
-                        minimum = item
-                value = arithmetic.subtract(arithmetic.fraction(0), minimum) if minimum < 0 else arithmetic.fraction(0)
+            # The minimum and its negation are exact in binary64.
+            minimum = min(diagnostics.spectrum) if diagnostics.spectrum else None
+            value = None if minimum is None else -minimum if minimum < 0 else 0.0
         values.append(value)
-    return _publish(result, options, checks, values, max_integer_bits=max_integer_bits)
+    return _publish(result, options, checks, values)

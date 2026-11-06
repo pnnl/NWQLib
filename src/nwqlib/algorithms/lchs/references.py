@@ -5,6 +5,7 @@ Its Eq. (2) specializes to exp(-A*T)u0 + integral exp(-A*(T-s))b ds.
 These binary64 evaluations are references, not certified rounding bounds.
 """
 
+from nwqlib._limits import exceeds
 from nwqlib._linalg_laws import MAX_EXPONENTIAL_NORM, expm_requirements, seeded_norm_estimates
 from nwqlib.operators.access import _check_bytes
 
@@ -17,7 +18,7 @@ def dense_work(checks, counts, *, work, peak_bytes):
     """
     _check_bytes(peak_bytes, checks.max_bytes, "LCHS reference arrays")
     total = counts.get("dense_work", 0) + work
-    if total > checks.max_dense_work:
+    if exceeds(total, checks.max_dense_work):
         raise ValueError("LCHS reference exceeds max_dense_work before numerical work")
     counts["dense_work"] = total
     counts["known_peak_bytes"] = max(counts.get("known_peak_bytes", 0), peak_bytes)

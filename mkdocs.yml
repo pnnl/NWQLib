@@ -156,6 +156,8 @@ nav:
       - Glossary: glossary.md
       - Conventions: conventions.md
       - Mathematics: mathematics.md
+      - QSP phase synthesis: algorithms/qsp_phase_derivation.md
+      - LCHS derivations: algorithms/lchs_derivations.md
       - Limitations and open work: ROADMAP.md
       - Dependency issues: dependency_issues.md
       - References: references.md

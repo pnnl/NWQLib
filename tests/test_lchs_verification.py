@@ -181,13 +181,14 @@ def test_explicit_ivp_signed_rhs_consistency_and_rhs_cap(monkeypatch):
 
 def test_selected_grid_preserves_padded_source_phase_and_archive_without_selection(tmp_path, monkeypatch):
     from nwqlib.algorithms.lchs import time_independent_terms as terms
+    from nwqlib.algorithms.lchs import selection
     problem = nwqlib.LinearDynamics(A=np.diag([-.1+.2j,.1-.2j,.3+.1j]),
         initial_state=.5*np.exp(1j*np.pi/3)*np.array([1,1j,.5]), source=[.25j,0,.1], time=.1)
     chosen = nwqlib.plan(problem, method=method(duhamel_nodes=2), execution="quantum")
     assert sum(register.width for register in chosen.construction.program.registers) <= 13
     result = nwqlib.solve(chosen)
     saved = result.save(tmp_path/"quantum")
-    monkeypatch.setattr(terms, "generate_lchs_quadrature", lambda *a, **k: pytest.fail("quadrature reselected"))
+    monkeypatch.setattr(selection, "dense_common", lambda *a, **k: pytest.fail("quadrature reselected"))
     monkeypatch.setattr(terms, "generate_lchs_product_formula_select_plan", lambda *a, **k: pytest.fail("PF reselected"))
     restored = nwqlib.load_result(saved)
     receipt, facts = restored.verify(checks=LCHSVerification(reference="selected_grid"))
@@ -203,7 +204,48 @@ def test_selected_grid_preserves_padded_source_phase_and_archive_without_selecti
         restored.verify(checks=LCHSVerification(reference="selected_grid", max_node_evaluations=1))
 
 
-def test_fixed_pf_selected_grid_never_reselects_steps_and_keeps_identity_phase(monkeypatch):
+def test_selected_grid_applies_the_source_slots_that_planning_kept(tmp_path):
+    """Initial 2**220 and source 2**-1000 under source_drop_allowance: at T = 2**-990 planning omits the source
+    application, and at T = 2**-928 three of its four nonzero slots, whose PREP amplitudes underflow."""
+    from math import ldexp
+    initial, source = np.array([ldexp(1., 220), 0.]), np.array([0., ldexp(1., -1000)])
+
+    def kept_sum(chosen):
+        # The finite sum of the kept slots, formed from the diagonal A.
+        data, shift = chosen._native["native_data"], chosen.reconstruction.psd_shift
+        layout, nodes, coefficients = data.source_layout, data.quadrature.k_nodes, data.quadrature.coefficients
+        total = np.zeros(2, dtype=complex)
+        for item, slots in zip(layout.applications, layout.application_slots, strict=True):
+            vector = initial if item.kind == "initial" else source
+            total += item.weight*np.exp(shift*item.elapsed_time)*vector*sum(
+                coefficients[j]*np.exp(-1j*item.elapsed_time*nodes[j]*(np.array([.25, .5])+shift))
+                for j, slot in enumerate(slots) if layout.amplitudes[slot] > 0)
+        return total
+
+    for backend, time, kept, omitted, evaluations in (("dense_exact", ldexp(1., -990), 1, 0, 4),
+            ("dense_exact", ldexp(1., -928), 2, 3, 5), ("trotter", ldexp(1., -928), 2, 3, 5)):
+        problem = nwqlib.LinearDynamics(A=np.diag([.25, .5]), initial_state=initial, source=source, time=time)
+        chosen = nwqlib.plan(problem, method=method(hamiltonian_evolution_backend=backend, trotter_steps=2,
+            duhamel_nodes=1, source_drop_allowance=1e-200), execution="quantum")
+        assert chosen._native["native_data"].source_layout.dropped_bound.mantissa > 0
+        result = nwqlib.solve(chosen)
+        restored = nwqlib.load_result(result.save(tmp_path/f"{backend}-{kept}"))
+        receipt, facts = restored.verify(checks=LCHSVerification(reference="selected_grid"))
+        counts = arguments(receipt)
+        assert counts["applications"] == kept and counts.get("application_1_omitted_nodes", 0) == omitted
+        # A dense reference forms one eigensystem per applied node of each node set, and a product-formula
+        # reference applies one branch per applied slot.
+        assert counts["eigh_calls" if backend == "dense_exact" else "fixed_pf_completed"] == evaluations
+        if backend == "dense_exact":
+            assert facts[0].fact.value.value == pytest.approx(np.linalg.norm(result.solution-kept_sum(chosen)),
+                                                              rel=1e-12)
+        else:
+            assert facts[0].fact.value.value < 1e-14*np.linalg.norm(initial)
+            _, refined = restored.verify(checks=LCHSRefinement(components=("fixed_pf",)))
+            assert refined[0].fact.value.value >= 0
+
+
+def test_fixed_pf_selected_grid_never_reselects_steps_and_keeps_identity_phase(monkeypatch, tmp_path):
     from nwqlib.algorithms.lchs import time_independent_terms as terms
     matrix = np.array([[.5,.25j],[.25j,.2]])
     result = nwqlib.solve(nwqlib.LinearDynamics(A=matrix, initial_state=[0,0], source=[1,1j], time=.3),
@@ -223,15 +265,22 @@ def test_fixed_pf_selected_grid_never_reselects_steps_and_keeps_identity_phase(m
     # decomposes L and H or reads the stored node table.
     assert counts["pauli_decomposition_attempts"] == counts["pauli_decomposition_completed"] == 0
     assert not counts["stored_node_read_work"] > 0
+    # A loaded Result maps its saved arrays read-only from the archive. Its
+    # check evaluates the same saved finite sum with the same steps.
+    restored = nwqlib.load_result(result.save(tmp_path/"pf"))
+    receipt, facts = restored.verify(checks=LCHSVerification(reference="selected_grid"))
+    assert facts[0].fact.value.value < 2e-10
+    counts = arguments(receipt)
+    assert counts["applications"] == 2 and counts["fixed_pf_completed"] == 8
+    assert all(value == 2 for name, value in counts.items() if name.endswith("_steps"))
 
 
 def test_refinement_propagates_all_physical_components_once_without_vector(monkeypatch):
-    from nwqlib.algorithms.lchs import host, inhomogeneous_theory as theory
+    from nwqlib.algorithms.lchs import host, inhomogeneous_theory as theory, refinement
     from nwqlib.algorithms.lchs.analysis import fact
     from nwqlib.execution import KernelApplication
     from nwqlib.ir import Binding
 
-    corrupt = False
     def supplied(plan, data):
         specs = [(False,0.,1.)]+[(True,node,weight) for node,weight in
             zip(plan.reconstruction.source_nodes,plan.reconstruction.source_weights,strict=True)]
@@ -239,55 +288,78 @@ def test_refinement_propagates_all_physical_components_once_without_vector(monke
             arguments=(Binding(parameter="start_time",value=Float64(value=start)),
                 Binding(parameter="elapsed_time",value=Float64(value=plan.problem.elapsed_time-start)),
                 Binding(parameter="weight",value=Float64(value=weight)),
-                Binding(parameter="source_application",value=int(source) if not corrupt else 1),
+                Binding(parameter="source_application",value=int(source)),
                 Binding(parameter="recovery_scale",value=Float64(value=1.))),
             facts=tuple(fact(name, nwqlib.Solution().frame(plan.problem), .125)
                         for name in ("kernel_approximation", "k_quadrature"))) for index,(source,start,weight) in enumerate(specs))
         return np.array([1.,2.,2.,0.], dtype=complex), None, apps
     monkeypatch.setattr(host, "_evolve", supplied)
     from nwqlib.core.records import Unit
-    problem = nwqlib.LinearDynamics(A=np.eye(3), initial_state=[1,0,0], source=[1j,0,0], time=.5,
+    # A = L + iH with L = I and H = .2 on the (0, 1) pair, a normal A with
+    # eigenvalues 1 +- .2i and 1, so ||A|| = sqrt(1.04) and ||H|| = .2.
+    A = np.eye(3, dtype=complex)
+    A[0, 1] = A[1, 0] = .2j
+    problem = nwqlib.LinearDynamics(A=A, initial_state=[1,0,0], source=[1j,0,0], time=.5,
         unit=Unit(symbol="amplitude", dimension="custom"), time_unit=Unit(symbol="s", dimension="time"))
     result = nwqlib.solve(problem, method=method(duhamel_nodes=1), output=nwqlib.NormSquared(), execution="classical")
     assert result.artifact is None and result.value == 9
     calls = []
-    def norm(matrix):
-        calls.append(matrix.shape)
-        return 1. if matrix.shape == (3,3) else 0.
+    norm, remainder = refinement._spectral_norm, theory._duhamel_quadrature_error_bound
+    def recorded(matrix, checks, counts, *, hermitian=False):
+        value = norm(matrix, checks, counts, hermitian=hermitian)
+        calls.append((matrix.shape, hermitian))
+        return value
     def duhamel(**kwargs):
         calls.append("duhamel")
-        assert kwargs["matrix_norm"] == 1. and kwargs["node_count"] == 1
-        assert kwargs["lambda_min_before_psd_conversion"] == 0.  # Actual A⊕0 PSD minimum.
-        return theory._DuhamelBoundEvaluation(value=.25, unusable_nonzero=False)
-    monkeypatch.setattr(theory, "_scaling_safe_spectral_norm", norm)
+        assert kwargs["node_count"] == 1
+        assert kwargs["lower_bound"] == 0.  # Actual A⊕0 PSD minimum.
+        return remainder(**kwargs)
+    monkeypatch.setattr(refinement, "_spectral_norm", recorded)
     monkeypatch.setattr(theory, "_duhamel_quadrature_error_bound", duhamel)
     checks = LCHSRefinement(components=("spectral_norms", "duhamel"))
     with pytest.raises(ValueError, match="max_dense_work"):
         result.verify(checks=checks.revise(max_dense_work=1))
     assert not calls
     receipt, facts = result.verify(checks=checks)
-    # Two applications: 2*(1/8+1/8)+1/4=3/4 physical L2 error.
-    # The NormSquared bridge uses radius3: (3/4)*(6+3/4)=81/16.
-    assert {entry.fact.quantity:entry.fact.value.value for entry in facts} == {
-        "duhamel_quadrature":.25, "algorithmic_approximation":81/16}
-    assert calls == [(3,3),(4,4),"duhamel"]
+    # One Duhamel node (m = 1): T**3*(1!)**4/(3*(2!)**3)*||A||**2*||b|| =
+    # T**3*1.04/24 (DLMF 3.5.19, 3.5.21). Two applications add
+    # 2*(1/8+1/8), and the NormSquared bridge at radius 3 gives e*(6+e).
+    # The singular values and the log-domain evaluation agree with these
+    # expressions to a few binary64 roundings.
+    duhamel_bound = .5**3*1.04/24
+    error = 2*(1/8+1/8)+duhamel_bound
+    values = {entry.fact.quantity:entry.fact.value.value for entry in facts}
+    assert values.keys() == {"duhamel_quadrature", "algorithmic_approximation"}
+    assert values["duhamel_quadrature"] == pytest.approx(duhamel_bound, rel=1e-14, abs=0)
+    assert values["algorithmic_approximation"] == pytest.approx(error*(6+error), rel=1e-14, abs=0)
+    # ||A|| (no PSD shift, so also ||A + shift*I||) from the singular values
+    # of the original A, ||H|| from the eigenvalues of the original H, and
+    # the Duhamel remainder reuses ||A||.
+    assert calls == [((3,3), False), ((3,3), True), "duhamel"]
+    raw = raw_values(receipt)
+    assert raw["refinement.matrix_norm"] == pytest.approx(np.sqrt(1.04), rel=1e-14, abs=0)
+    assert raw["refinement.h_norm"] == pytest.approx(.2, rel=1e-14, abs=0)
+    counts = arguments(receipt)
+    assert (counts["spectral_svd_completed"], counts["spectral_eigvalsh_completed"]) == (1, 1)
     assert receipt.artifact_ids == ()
     assert {entry.fact.evidence.options_id for entry in facts} == {checks.content_id} == {receipt.options_id}
     assert next(entry.frame.unit.symbol for entry in receipt.applications[0].facts
                 if entry.fact.quantity=="refinement.matrix_norm") == "1/(s)"
     assessment = result.assess(absolute_tolerance=6., facts=facts)
     assert assessment.status == "INCONCLUSIVE"  # Native rounding was not acquired.
-    assert calls == [(3,3),(4,4),"duhamel"]
-    corrupt = True
-    wrong = nwqlib.solve(result.plan)
-    with pytest.raises(ValueError, match="recorded physical schedule"):
-        wrong.verify(checks=checks)
-    assert calls == [(3,3),(4,4),"duhamel"]
+    assert calls == [((3,3), False), ((3,3), True), "duhamel"]
+    # The Duhamel remainder alone needs ||A|| of this non-Hermitian A, one
+    # values-only singular value decomposition.
+    calls.clear()
+    _, alone = result.verify(checks=LCHSRefinement(components=("duhamel",)))
+    assert calls == [((3,3), False), "duhamel"]
+    assert {entry.fact.quantity:entry.fact.value.value for entry in alone}["duhamel_quadrature"] == values["duhamel_quadrature"]
 
 
-def test_constant_source_solution_lies_within_its_refined_bound_of_the_closed_form():
+def test_constant_source_solution_lies_within_its_refined_bound_of_the_closed_form(monkeypatch):
     # A Hermitian A = V diag(lam) V^T gives u(T) = V [exp(-lam T) V^T u0 + (1 - exp(-lam T))/lam V^T b],
     # the solution of du/dt = -A u + b in ACL arXiv:2312.03916v2, Eq. (2), with no SciPy exponential.
+    from nwqlib.algorithms.lchs import refinement
     A, initial, source, elapsed = np.array([[.6, .1], [.1, .3]]), np.array([1., 0.]), np.array([.2, -.1]), 3.
     lam, vectors = np.linalg.eigh(A)
     expected = vectors @ (np.exp(-lam*elapsed)*(vectors.T @ initial) - np.expm1(-lam*elapsed)/lam*(vectors.T @ source))
@@ -297,8 +369,40 @@ def test_constant_source_solution_lies_within_its_refined_bound_of_the_closed_fo
     planned = {item.fact.quantity:item.fact for item in chosen.facts}
     assert planned["duhamel_quadrature"].value is None  # Unknown until refinement evaluates it.
     result = nwqlib.solve(chosen)
+    # H = 0, so ||A|| = max |lam| comes from the eigenvalues of L that
+    # planning computed. Neither component, alone or together, decomposes A
+    # again. Without a PSD shift ||A + shift*I|| = ||A||.
+    monkeypatch.setattr(refinement, "_spectral_norm", lambda *a, **k: pytest.fail("Hermitian A was decomposed again"))
     _, facts = result.verify(checks=LCHSRefinement(components=("duhamel",)))
-    bound = {item.fact.quantity:item.fact.value.value for item in facts}["algorithmic_approximation"]
+    values = {item.fact.quantity:item.fact.value.value for item in facts}
+    # T**3*||A||**2*||b||/24 for m = 1, with no growth because lam > 0.
+    assert values["duhamel_quadrature"] == pytest.approx(elapsed**3*lam.max()**2*np.linalg.norm(source)/24,
+                                                         rel=1e-14, abs=0)
+    receipt, joint = result.verify(checks=LCHSRefinement(components=("spectral_norms", "duhamel")))
+    raw, counts = raw_values(receipt), arguments(receipt)
+    assert raw["refinement.matrix_norm"] == raw["refinement.prepared_matrix_norm"] == pytest.approx(
+        lam.max(), rel=1e-14, abs=0)
+    assert raw["refinement.h_norm"] == 0
+    assert {item.fact.quantity:item.fact.value.value for item in joint}["duhamel_quadrature"] == values["duhamel_quadrature"]
+    assert (counts["spectral_svd_attempts"], counts["spectral_eigvalsh_attempts"], counts["planned_l_endpoint_norms"]) == (0, 0, 1)
+    # A shifted, padded Hermitian A = B ⊕ .4 with lambda_min(B) < 0: the
+    # planned shift s acts on all four encoded coordinates, so
+    # ||A_pad + s*I|| = max over the eigenvalues of B, .4 and the padding 0
+    # of |lambda + s|, while ||A|| = max |lambda| keeps the physical spectrum.
+    block = np.array([[-.3, .2j], [-.2j, .7]])
+    shifted_a = np.zeros((3, 3), dtype=complex)
+    shifted_a[:2, :2], shifted_a[2, 2] = block, .4
+    shifted = nwqlib.solve(nwqlib.LinearDynamics(A=shifted_a, initial_state=[1., 0., 0.], source=[0., 0., .5j],
+                                                 time=.2), method=LCHS(duhamel_nodes=2), execution="classical")
+    s = shifted.plan.reconstruction.psd_shift
+    spectrum = np.append(np.linalg.eigvalsh(block), [.4, 0.])
+    assert s > 0 and shifted.plan.reconstruction.encoded_dimension == 4
+    receipt, _ = shifted.verify(checks=LCHSRefinement(components=("spectral_norms", "duhamel")))
+    raw = raw_values(receipt)
+    assert raw["refinement.matrix_norm"] == pytest.approx(np.abs(spectrum).max(), rel=1e-14, abs=0)
+    assert raw["refinement.prepared_matrix_norm"] == pytest.approx(np.abs(spectrum+s).max(), rel=1e-14, abs=0)
+    assert raw["refinement.h_norm"] == 0 and arguments(receipt)["planned_l_endpoint_norms"] == 1
+    bound = values["algorithmic_approximation"]
     # Method-error-bounded class: the refined algorithmic_approximation bounds the physical
     # L2 error of the kernel, k-quadrature and Duhamel stages together. The relative 1e-12
     # allows for binary64 evaluation of the finite sum and of the reference.
@@ -483,8 +587,8 @@ def test_refinement_spectral_norm_admits_its_singular_values():
     # makes about 2.4 * 64**2 divisions, each with five further operations,
     # near 59,000 units. A max_dense_work of 380,000 therefore lies below the
     # actual work and must be refused before the decomposition. A charge of
-    # the reduction and the 4 * 64**2 entrywise scan alone, 365,910, would
-    # admit it. The default cap admits the norm.
+    # the reduction and the 64**2 scan for a nonzero entry alone, 353,622,
+    # would admit it. The default cap admits the norm.
     from nwqlib.algorithms.lchs.refinement import _spectral_norm
     generator = np.random.default_rng(3)
     matrix = generator.normal(size=(64, 64)) + 1j*generator.normal(size=(64, 64))

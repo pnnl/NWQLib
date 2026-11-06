@@ -1,57 +1,9 @@
 """Actual ADAPT input and point-domain admission, without compatibility records."""
 
-import json
-
 import pytest
 from test_adapt_primary import plan_for
 from nwqlib.algorithms.gcim import ADAPT
 from nwqlib.operators import ingest_pauli
-
-
-def _compact_json_size(value):
-    return len(json.dumps(value, separators=(",", ":"), ensure_ascii=True, allow_nan=False))
-
-
-def _compact_reconstruction_law(rec):
-    """Measure JSON independently of all production admission helpers."""
-    saved = json.loads(rec.model_dump_json())
-    own_json = _compact_json_size(saved)
-    own_json -= sum(_compact_json_size(member) for member in saved["pool"])
-    own_json -= sum(_compact_json_size(term) for term in saved["terms"])
-    b = tables_json = table_count = 0
-    for member, data in zip(rec.pool, saved["pool"], strict=True):
-        if member.commutator is not None:
-            table_count += 1
-            b += member.commutator.labels.array.nbytes
-            b += member.commutator.coefficients.array.nbytes
-            tables_json += _compact_json_size({"commutator": data["commutator"]})
-    records = len(rec.terms) + sum(len(member.terms) for member in rec.pool)
-    other = records * (6 * rec.num_qubits + 360) + 3 * sum(
-        2048 + 128 * len(member.fermion_terms)
-        + 16 * sum(len(ops) for _, ops in member.fermion_terms)
-        + 16 * (len(member.spatial_indices) + len(member.spin_orbital_indices or ()))
-        for member in rec.pool
-    )
-    indices = sum(map(len, rec.groups)) + sum(map(len, rec.energy_groups))
-    # own_json already includes both complete readout group lists.
-    # Keep the table call's existing two-character empty index allowance.
-    j = tables_json + own_json + (2 if table_count else 0)
-    return other + 2 * b + 4 * j + 16 * indices
-
-
-def _reconstruction_charges(monkeypatch):
-    import nwqlib.algorithms.gcim.adapt_inputs as owner
-
-    checked = []
-    original = owner._check_bytes
-
-    def observe(size, limit, what, *args, **kwargs):
-        if what.startswith("ADAPT reconstruction records"):
-            checked.append(size)
-        return original(size, limit, what, *args, **kwargs)
-
-    monkeypatch.setattr(owner, "_check_bytes", observe)
-    return checked
 
 
 def test_original_hermiticity_and_explicit_pool_correction_have_distinct_owners():
@@ -109,7 +61,15 @@ def test_named_pool_enumeration_is_admitted_before_it_starts(
         plan(work)
 
 
-def test_reconstruction_pauli_records_and_commutator_arrays_are_charged_their_json(monkeypatch):
+def test_commutator_table_holds_the_exact_rows_and_its_construction_is_checked_where_it_is_built(monkeypatch):
+    """The [H, A] table holds the exact commutator rows, and building it is the byte check that binds.
+
+    The commutator construction counts its pair tiles, surviving products,
+    sort and conversion against ``max_bytes`` before each allocation. Half
+    its largest count refuses planning at that check, and the largest count
+    passes it.
+    """
+    import nwqlib.algorithms.gcim.adapt_inputs as owner
     from qiskit.quantum_info import SparsePauliOp
 
     rows = (("IIIZ", 0.5), ("IIZZ", 0.25), ("IZIZ", 0.125),
@@ -119,20 +79,29 @@ def test_reconstruction_pauli_records_and_commutator_arrays_are_charged_their_js
         pool=(ingest_pauli((("IIIY", 1j),), num_qubits=4),),
         initial_state=(1,) + (0,) * 15,
     )
-    checked = _reconstruction_charges(monkeypatch)
+    checked = []
+    original = owner._check_bytes
+
+    def observe(size, limit, what, *args, **kwargs):
+        if what == "ADAPT commutators":
+            checked.append(size)
+        return original(size, limit, what, *args, **kwargs)
+
+    monkeypatch.setattr(owner, "_check_bytes", observe)
     rec = plan_for(**settings).reconstruction
     h = SparsePauliOp.from_list(rows)
     a = SparsePauliOp.from_list((("IIIY", 1j),))
     expected = tuple(sorted((label, c.real) for label, c in (h @ a - a @ h).simplify().to_list()))
     assert rec.pool[0].commutator.rows() == expected
-    assert len(rec.terms) + sum(len(m.terms) for m in rec.pool) == 6
     table = rec.pool[0].commutator
     assert table.labels.array.nbytes + table.coefficients.array.nbytes == 160
     needed = max(checked)
-    assert needed >= _compact_reconstruction_law(rec)
-    plan_for(max_bytes=needed, **settings)
-    with pytest.raises(ValueError, match="ADAPT reconstruction records and decoded label cache needs"):
-        plan_for(max_bytes=needed - 1, **settings)
+    with pytest.raises(ValueError, match="ADAPT commutators needs about"):
+        plan_for(max_bytes=needed // 2, **settings)
+    try:
+        plan_for(max_bytes=needed, **settings)
+    except ValueError as error:
+        assert "ADAPT commutators" not in str(error)
 
 
 @pytest.mark.parametrize("execution", ("quantum",))
@@ -148,44 +117,147 @@ def test_largest_projected_solve_work_is_admitted_at_planning(execution):
     assert plan_for(execution=execution, max_products=work).reconstruction.max_selections == 2
 
 
-def test_label_cache_charge_covers_the_decoded_cache_it_reserves():
-    """The per-Plan decoded label cache fits its allowance on ten synthetic pools.
+def test_explicit_pool_has_no_member_count_limit():
+    # A pool of 1100 explicit one-qubit generators plans, since only the allocation checks of the members, their
+    # tables and the selection bound the pool.
+    pool = tuple(ingest_pauli((("Y", 1j * (1 + k / 1100)),), num_qubits=1) for k in range(1100))
+    selected = plan_for(execution="classical", pool=pool, max_iterations=1)
+    assert len(selected.reconstruction.pool) == 1100
 
-    Each pool has K members with pairwise distinct commutator labels,
-    r rows per member on q qubits, and S selections. The label encoding
-    requires K*r <= 4**q, so the distinct-label population is R = K*r.
-    The cache decodes the rows, sorts the screen and energy labels, and
-    fills active-label entries through their clearing boundary: limit K
-    for sampled calls and S for exact calls. Its traced incremental peak
-    must not exceed the default label_cache_bytes allowance.
+
+def test_commutator_index_matches_the_decoded_rows_and_keeps_one_screening_round():
+    """The label index gives each member's decoded rows, the sorted distinct labels and bit-identical gradients.
+
+    Synthetic pools with K members of r rows on q qubits, with labels
+    shared between members, cover the packed path up to 32 qubits and the
+    code-row path at 33. Indexing the distinct labels with a member's
+    indices returns the labels of its decoded rows in row order, the
+    labels are the sorted distinct ones, and the coefficient-weighted sum
+    of random measured values equals the row-by-row fsum. The active labels
+    of a screening round are the union over the members not removed, and
+    only the current round's union stays in the cache.
     """
-    import itertools
-    import tracemalloc
+    from math import fsum
     from types import SimpleNamespace
+    import numpy as np
 
-    from nwqlib.algorithms.gcim.adapt_inputs import label_cache_bytes
-    from nwqlib.algorithms.gcim.adapt_records import (
-        active_screen_labels, commutator_rows, energy_labels, screen_labels)
+    from nwqlib.algorithms.gcim.adapt_records import active_screen_labels, commutator_index, screen_labels
     from nwqlib.algorithms.gcim.fixed_basis import PauliArrays
 
-    for q, K, r, S in ((2, 3, 0, 2), (2, 3, 1, 2), (8, 12, 19, 4), (10, 12, 257, 4), (20, 5, 1024, 3)):
-        members = [[("".join("IXYZ"[(i >> (2 * j)) & 3] for j in reversed(range(q))), float(i + 1))
-                    for i in range(k * r, (k + 1) * r)] for k in range(K)]
-        pool = tuple(SimpleNamespace(commutator=PauliArrays.from_rows(rows, q)) for rows in members)
-        energies = tuple(label for label, _ in members[0][:min(r, 5)])
-        for sampled in (False, True):
-            tracemalloc.start()
-            baseline = tracemalloc.get_traced_memory()[0]
-            cache = {}
-            commutator_rows(pool, cache)
-            labels = screen_labels(pool, cache)
-            energy_labels(energies, cache)
-            limit = K if sampled else S
-            keys = itertools.chain.from_iterable(itertools.combinations(range(K), k) for k in range(S + 1))
-            for key in itertools.islice(keys, limit + 2):
-                active_screen_labels(pool, cache, key, limit)
-            peak = tracemalloc.get_traced_memory()[1]
-            tracemalloc.stop()
-            assert len(labels) == K * r
-            charge = label_cache_bytes(q, (r,) * K, K, len(energies), S, sampled=sampled)
-            assert charge >= peak - baseline
+    rng = np.random.default_rng(5)
+    for q, K, r in ((1, 3, 2), (6, 5, 9), (32, 4, 7), (33, 4, 7)):
+        population = sorted({"".join(rng.choice(list("IXYZ"), q)) for _ in range(3 * r)})
+        members = [sorted({label: float(rng.normal()) for label in rng.choice(population, r)}.items())
+                   for _ in range(K)]
+        pool = tuple(SimpleNamespace(commutator=PauliArrays.from_rows(rows, q)) for rows in members) + (
+            SimpleNamespace(commutator=None),)
+        cache = {}
+        labels, indices = commutator_index(pool, cache)
+        assert labels == screen_labels(pool, cache) == tuple(sorted({label for rows in members for label, _ in rows}))
+        assert len(indices[-1]) == 0
+        measured = {label: float(rng.normal()) for label in labels}
+        values = np.array([measured[label] for label in labels])
+        for member, rows, index in zip(pool, members, indices):
+            assert tuple(labels[k] for k in index) == tuple(label for label, _ in rows) == tuple(
+                label for label, _ in member.commutator.rows())
+            assert fsum(member.commutator.coefficients.array * values[index]) == fsum(
+                c * measured[label] for label, c in member.commutator.rows())
+        for removed in ({0}, {0, 1}, set()):
+            active, members_set = active_screen_labels(pool, cache, removed)
+            union = sorted({label for i, rows in enumerate(members) if i not in removed for label, _ in rows})
+            assert active == tuple(union) and members_set == frozenset(union)
+            assert cache["active_screen_labels"][0] == frozenset(removed)
+
+
+def test_classical_frontier_is_checked_once_at_planning_against_the_physical_memory_by_default(monkeypatch):
+    """Classical ADAPT checks its largest query's dominant arrays once at planning, and no query checks again.
+
+    For H = Z_9 + 0.5 X...X on ten qubits from |0...0> with pool i Y_9 and
+    i Y_0, the default ``max_bytes`` is None, the physical memory. The Plan's check holds
+    ``classical_frontier_bytes`` plus the reference preparation's bytes,
+    the largest query's arrays. An explicit ``max_bytes`` of half that
+    refuses the Plan before any query, and the reported amount passes this
+    check. The run of the unrefused Plan
+    makes no further frontier check.
+    """
+    from nwqlib import solve
+    from nwqlib.algorithms.gcim import adapt
+    from nwqlib.operators import access
+
+    assert ADAPT(initial_state=(1, 1), pool="spin_adapted_sd", n_spatial_orbitals=1).max_bytes is None
+    checks, real = [], access._check_bytes
+
+    def counted(size, max_bytes, operation="input"):
+        if operation == "ADAPT classical frontier":
+            checks.append((size, max_bytes))
+        return real(size, max_bytes, operation)
+
+    for module in (adapt, access):
+        monkeypatch.setattr(module, "_check_bytes", counted)
+    from nwqlib.problems import ingest_occupation
+
+    setting = dict(execution="classical", A=ingest_pauli((("Z" + "I" * 9, 1.0), ("X" * 10, .5)), num_qubits=10),
+                   initial_state=ingest_occupation((0,) * 10, num_qubits=10),
+                   pool_rows=((("Y" + "I" * 9, 1j),), (("I" * 9 + "Y", 1j),)))
+    plan = plan_for(**setting)
+    ((need, limit),) = checks
+    assert limit is None and need == adapt.classical_frontier_bytes(
+        plan.method, plan._native["inputs"], plan.reconstruction.max_selections, 10
+    ) + plan.reconstruction.reference_action_bytes
+    with pytest.raises(ValueError, match=f"ADAPT classical frontier needs about {need} bytes"):
+        plan_for(**setting, max_bytes=need // 2)
+    try:
+        plan_for(**setting, max_bytes=need)
+    except ValueError as error:
+        assert "ADAPT classical frontier" not in str(error)
+    del checks[:]
+    solve(plan, progress=False)
+    assert not checks
+
+
+def test_every_classical_plan_charges_the_energy_query_of_its_longest_chain():
+    """One frontier holds with or without optimization, and a direct energy point of L generators fits it.
+
+    Any classical Plan binds an energy point through ``prepare_experiment``,
+    so ``classical_frontier_bytes`` is 16(C + 12)d + 24L for both values of
+    ``optimize_every_m`` and is the host workspace the Plan declares. On the
+    Plan without optimization, for H = Z_9 + 0.5 X...X on ten qubits with
+    pool i Y_9 and i Y_0, the energy and gradient point of L =
+    ``max_selections`` generators runs, and the arrays its query allocates
+    stay within that frontier. Its preparation, traced apart, allocates
+    about 635 kB of records at 8, 10 and 12 qubits alike and no state
+    vector, so it is outside the frontier's array count.
+    """
+    import tracemalloc
+    from nwqlib._prepared_execution import Run, prepare_experiment, submit_experiment
+    from nwqlib.algorithms.gcim import adapt
+    from nwqlib.algorithms.gcim.adapt_acquisition import _point
+    from nwqlib.problems import ingest_occupation
+
+    setting = dict(execution="classical", A=ingest_pauli((("Z" + "I" * 9, 1.0), ("X" * 10, .5)), num_qubits=10),
+                   initial_state=ingest_occupation((0,) * 10, num_qubits=10),
+                   pool_rows=((("Y" + "I" * 9, 1j),), (("I" * 9 + "Y", 1j),)))
+    plans = (plan_for(**setting),
+             plan_for(**setting, optimize_every_m=1, optimize_rounds_n=2, optimize_max_evaluations=3))
+    length = plans[0].reconstruction.max_selections
+    frontiers = [adapt.classical_frontier_bytes(p.method, p._native["inputs"], length, 10) for p in plans]
+    assert frontiers[0] == frontiers[1] == plans[0].construction.kernels[0].workspace[0].bytes \
+        == plans[1].construction.kernels[0].workspace[0].bytes
+    right = tuple((i % 2, 0.1 * (i + 1)) for i in range(length))
+
+    def energy(traced):
+        with Run(plans[0]) as run:
+            handle = prepare_experiment(_point(plans[0], "energy", right=right), run=run)
+            if traced:
+                tracemalloc.start()
+            try:
+                values = submit_experiment(handle, run=run).values
+                return {v.label: v.value for v in values}, tracemalloc.get_traced_memory()[1]
+            finally:
+                tracemalloc.stop()
+
+    # A first point leaves the one-time allocations of the process outside the traced peak.
+    energy(False)
+    scalars, peak = energy(True)
+    assert {"energy", *(f"gradient_{i}" for i in range(length))} <= set(scalars)
+    assert peak <= frontiers[0]

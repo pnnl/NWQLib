@@ -113,7 +113,7 @@ def _qhd_report():
 def _lchs_resource_snapshot(operation, *, qsp=False):
     from nwqlib import LinearDynamics, NormSquared, estimate, plan, prepare
     from nwqlib.algorithms.lchs import LCHS, ProviderConfig
-    from nwqlib.algorithms.lchs.quantum_resources import sample_resources
+    from nwqlib.algorithms.lchs.quantum_resources import resource_breakdown
     from nwqlib.resources import ResourceContext
 
     method = LCHS(
@@ -133,8 +133,9 @@ def _lchs_resource_snapshot(operation, *, qsp=False):
         raise ValueError("snapshot exceeds its declared 13-qubit native scope")
     if operation == "formula":
         return estimate(selected, context=ResourceContext(basis="cx")).model_dump(mode="json")
-    if operation == "sample":
-        return sample_resources(selected, max_qubits=13)
+    if operation == "breakdown":
+        return [dict(entry, blocks=[dict(row, laws=[law.model_dump(mode="json") for law in row["laws"]])
+                                    for row in entry["blocks"]]) for entry in resource_breakdown(selected)]
     if operation != "full":
         raise ValueError("unknown snapshot resource operation")
     prepared = prepare(selected)
@@ -163,9 +164,9 @@ ARTIFACT_BUILDERS = {
     "reports/qls.json": _qls_report,
     "reports/qhd.json": _qhd_report,
     "resource_estimates/lchs_full.json": lambda: _lchs_resource_snapshot("full"),
-    "resource_estimates/lchs_sample.json": lambda: _lchs_resource_snapshot("sample"),
+    "resource_estimates/lchs_breakdown.json": lambda: _lchs_resource_snapshot("breakdown"),
     "resource_estimates/lchs_formula.json": lambda: _lchs_resource_snapshot("formula"),
-    "resource_estimates/lchs_qsp_sample.json": lambda: _lchs_resource_snapshot("sample", qsp=True),
+    "resource_estimates/lchs_qsp_breakdown.json": lambda: _lchs_resource_snapshot("breakdown", qsp=True),
     "resource_estimates/lchs_qsp_formula.json": lambda: _lchs_resource_snapshot(
         "formula", qsp=True
     ),

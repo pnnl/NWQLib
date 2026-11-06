@@ -50,10 +50,7 @@ For a remote backend, choose the backend and a folder before preparation. The fo
 ```python
 from nwqlib.backends import IBMRuntimeBackend
 
-backend = IBMRuntimeBackend(
-    device="YOUR-IBM-DEVICE", instance="YOUR-IBM-INSTANCE",
-    max_input_bytes=65_536,
-)
+backend = IBMRuntimeBackend(device="YOUR-IBM-DEVICE", instance="YOUR-IBM-INSTANCE")
 prepared = nwqlib.prepare(selected, backend=backend, directory="provider-run")
 with prepared.run as run:
     nwqlib.submit(prepared)
@@ -61,7 +58,7 @@ with prepared.run as run:
     print(run.exposure)
 ```
 
-`max_input_bytes` limits the size of each prepared circuit that this Run saves before submission, serialized as QPY (Qiskit's binary circuit format). Choose a limit that fits the prepared circuits. Constructing the backend reads no credentials and does not contact the service.
+Constructing the backend reads no credentials and does not contact the service.
 
 Preparation can itself wait for remote compilation. `submit` returns the Run when the Method reaches its next stopping point. `run.result` is `None` while scientific output is pending. `run.save(path)` copies the Run's current state at that point into a new folder, including the original preparation IDs, provider job locators (the saved references to the provider jobs, such as their job IDs), completed observations and the Method's iteration state. If `directory` is omitted, remote execution creates the folder `~/.nwqlib/runs/<run_id>`. Read its path from `run.directory`.
 
@@ -88,7 +85,23 @@ An interrupted local attempt, such as a classical computation or a local Aer cal
 
 When an uncancelled Run reopens an interrupted synchronous Aer attempt with no saved job locator, its in-process result is unavailable. The recorded failure text is then the one written on reopening, which states that the in-process result is unavailable and does not assert that the underlying execution failed.
 
-Inspect the saved observations and counted work, then close or cancel the Run. To execute the `Plan` again, start a new Run. Nothing is resubmitted in the original Run. A remote job with a job locator, or a supported way to recover that locator, stays pending and can still be retrieved. NWQ-Sim can recover a lost launch acknowledgement from the original submission UUID even when no job locator was saved. A Method that can finish from the data already collected may return its Result before this error is raised.
+Inspect the saved observations and counted work, then close or cancel the Run. To execute the `Plan` again, start a new Run. Nothing is resubmitted in the original Run. A remote job with a job locator, or a supported way to recover that locator, stays pending and can still be retrieved. Cancelling such a job sends one request and reads the job, and a request that fails is sent again by a later call on the reopened Run until the job is recorded as ended ([Cancel, close and handle failures](prepared_execution.md#cancel-close-and-handle-failures)). When a provider or the local system confirms that a job ended with no result so far, `wait()` raises `RunFailed` with `stage="recovery"` instead of polling, and a later `resume()` can still collect a result that arrives afterwards. NWQ-Sim can recover a lost launch acknowledgement from the original submission UUID even when no job locator was saved. A Method that can finish from the data already collected may return its Result before this error is raised.
+
+## Rebuild an interrupted preparation {#rebuild-an-interrupted-preparation}
+
+A preparation is counted before its circuit is built, so one that fails or is interrupted before its circuit is saved stays counted without a preparation record. A common cause is `max_data_bytes` stopping the Run while it saves a circuit, which can happen in the middle of a `Plan`, after earlier jobs have run. In a `Plan` whose settings are fixed in advance, `run.resume()` and `run.wait()` then raise `PreparationNotRebuilt`, a `RuntimeError`, and submit nothing more, because preparing that setting again is new counted work. To ask for that work, reopen a closed Run with `load_run`, raise the limit that stopped it with `run.extend_limits(max_data_bytes=...)`, call `run.resume(rebuild_preparations=True)` once and continue with `run.wait()`. That call prepares each such setting once more before anything new is submitted, and the Run then continues as usual.
+
+- **What it keeps.** Each setting keeps its bindings and runtime seed. Jobs already submitted keep their provider job IDs and are not sent again, and an attempt whose outcome is uncertain stays uncertain. A compiled circuit with parameters that is already saved is reused without compiling it again.
+- **What it costs.** The earlier attempt stays counted, and each new circuit preparation counts against `max_total_circuits`, so `run.trace.preparations` can exceed the number of settings. That limit caps preparations and measurement attempts separately, not their sum. The new circuit counts against `max_data_bytes` like any other. Before the first new preparation, the Run compares the preparations that the rest of the `Plan` still needs with `max_total_circuits`, so a budget too small for them refuses with nothing new counted, and `run.extend_limits(max_total_circuits=...)` raises it.
+- **What the request covers.** The request ends with that call. A preparation that fails again stays counted, and going on needs another call with `rebuild_preparations=True`. `run.wait()` never rebuilds. When no setting needs rebuilding, the call is an ordinary `resume`.
+
+In NWQLib's checks on Aer and on an offline IBM test service, the value of a rebuilt Run equals the value of an uninterrupted Run of the same `Plan`. A provider's compilation can change with its device calibration and its sampling is random, so on a live device the same seed does not promise the same bits, and this recovery has been checked only offline.
+
+The option covers local preparation in a `Plan` with fixed settings. Three cases fall outside it:
+
+- A remote preparation with saved local data continues by reading its original upload or compilation job from the provider, and an upload or compilation is never started a second time ([Nexus](nexus.md)).
+- A Method whose later settings depend on earlier outcomes keeps its own refusal, and the option adds no preparation to it. ADAPT, RWPE, Lanczos with `SensitivitySampling`, and FixedGCIM and QFD with `PencilSampling` work this way. A new Run with a larger limit prepares the `Plan` again and can repeat earlier jobs, and the original saved observations stay readable. `resume_augmented_lagrangian` and `resume_box_refinement` do not make this request either, as described under [QHD constrained and refinement runs](#qhd-constrained-and-refinement-runs).
+- A limit that is part of the saved backend configuration or of the `Plan` cannot be raised in the Run, such as `max_input_bytes` of IonQ and Nexus or the Method's `max_bytes`. A preparation that such a limit refuses fails again when rebuilt, and passing the limit needs a new Run, which repeats earlier jobs.
 
 ## Methods that iterate between rounds
 
@@ -98,7 +111,7 @@ RWPE, Lanczos sensitivity sampling and ADAPT continue their own iteration on thi
 
 Each unrefined QHD augmented-Lagrangian round and each box-refinement level executes its `Plan` in its own Run. Automatic inequality selection (`inequality_form="auto"`) can plan additional inner Plans for comparison before that execution. The constrained run saves the round's resolved inequality representation before its first inner Run and reuses it on resume. With `directory=...`, both `solve_augmented_lagrangian` and `refine_box` create these Runs on disk under one directory and keep an outer record of the completed rounds and levels. `resume_augmented_lagrangian` and `resume_box_refinement` continue an unfinished round's or level's Run with `load_run` under the rules above and never give it a second Run ([QHD guide](algorithms/qhd.md#constrained-problems)).
 
-Resume reopens the recorded inner Run with its recorded `Plan` and run log. Completed work stays in the outer record and is counted once. A recoverable Run can continue, including a remote result that becomes available after interruption. Some interrupted local preparation, measurement or classical evolution cannot be completed from the saved Run.
+Resume reopens the recorded inner Run with its recorded `Plan` and run log. Completed work stays in the outer record and is counted once. A recoverable Run can continue, including a remote result that becomes available after interruption. An interrupted local measurement or classical evolution cannot be completed from the saved Run. An interrupted local preparation stops resume too, because resume makes no new preparation. To prepare it again, open the Run of that round or level under the directory with `load_run`, call `run.resume(rebuild_preparations=True)` ([rebuild an interrupted preparation](#rebuild-an-interrupted-preparation)) and resume again.
 
 By default, a Run that cannot be finished raises an error with a recovery note. With `end_at_unfinishable=True`, such a Run after a completed round or level can instead return `termination="inner_failed"` with the completed results and counted work. If no round or level has completed, the error is still raised. A folder whose run log has no saved header cannot be reopened, even with `end_at_unfinishable=True`. For such a folder, follow the error's instruction about removing that named inner folder before retrying. Resume does not remove or recreate it automatically. When an existing run log cannot be read, keep the folder and retry when it is readable. Its resource counts can be unknown.
 
@@ -129,9 +142,11 @@ Load saved `.qpy` circuit entries through NWQLib's loaders (`load_run`, `load_re
 
 <a id="saved-folders-are-read-only"></a>Treat a saved Run folder as read-only, as for a saved Result. [Saved folders are read-only](saved_evidence.md#saved-folders-are-read-only) lists the loading checks.
 
-`ExecutionLimits.max_data_bytes`, 10 GB by default, limits the saved data and file bytes of a Run. It does not bound the temporary memory of Qiskit or other SDKs, the process memory (RSS) or the serialization time. Data count against it when they are written, and loading reads a saved folder without counting its files again.
+When set, `ExecutionLimits.max_data_bytes` limits the saved data and file bytes of a Run before it starts new work, and the records of work already started can take the saved total beyond it ([Limits on circuits, shots and data](prepared_execution.md#limits-on-circuits-shots-and-data)). It does not bound the temporary memory of Qiskit or other SDKs, the process memory (RSS) or the serialization time. Data count against it when they are written, and loading reads a saved folder without counting its files again.
 
 A Run folder holds `run.json`, the selection file (normally `selection.json`), the run log `run.sqlite` with its adjacent `.lock` file, and the files these reference. They form one Run, and `run.json` alone is not sufficient for continuation. A folder with `run.sqlite` and no `run.json` comes from a Run whose creation stopped before any preparation or measurement, and `load_run` adds a note saying so. [Saved formats](development/execution.md#saved-formats) describes the files.
+
+A relative `directory` is resolved once, when the Run is created or reopened, so changing the working directory, as `%cd` does in a notebook, does not affect the open Run. The folder can be moved between sessions, because `load_run` finds its files from the path it is given.
 
 Keep the whole folder available while using a restored `Plan` or Result. Numerical arrays load as read-only NumPy mappings, and their bytes are not normalized or regenerated. Run folders must also stay writable for run-log updates, the lock and new cache files. Available output arrays are restored with their manifests. Missing bytes remain unavailable and do not trigger another measurement.
 

@@ -214,31 +214,61 @@ def hermitian_eigensystem_work(dimension):
     return 8 * dimension**3 + 32 * dimension**2
 
 
-def least_squares_work(rows, columns):
-    """Return the work units of numpy.linalg.lstsq for an m x c matrix and one right-hand side.
+def complex_schur_work(dimension):
+    """Return the estimated work units of the complex Schur form and Schur vectors of a d-square matrix.
 
-    numpy.linalg.lstsq runs LAPACK's gelsd. When m is at least 1.6 c, as
-    for every caller, gelsd first factors the matrix by Householder QR,
-    c**2 (m - c/3) multiply-adds, and applies the reflectors to the
-    right-hand side. It then reduces the c-square triangular factor to
-    bidiagonal form, ceil(4 c**3/3) multiply-adds, so the two
-    factorizations take m c**2 + c**3. It solves the bidiagonal system
-    through its singular value decomposition. At order 25 and below that
-    solve accumulates the right singular vectors by QR sweeps, whose plane
-    rotations take about 4 c**3 units at two sweeps per singular value.
-    Above 25 it uses divide and conquer with a compact representation of
-    the vectors, whose leaves of order at most 25 take the same sweeps and
-    whose merges solve secular equations in O(c**2) work per level. The
-    formula counts m c**2 + c**3 for the factorizations, 4 min(c, 25) c**2 for the
-    bidiagonal solve and 8 m c for NumPy's copies of the matrix and the
-    right-hand side, the reflectors applied to it and the remaining vector
-    work.
+    scipy.linalg.schur(output="complex") runs LAPACK's zgees with
+    JOBVS='V'. It reduces the matrix to upper Hessenberg form (zgehrd),
+    about (5/3) d**3 multiply-adds, forms the unitary factor of that
+    reduction (zunghr), about (2/3) d**3, then updates the Schur form T
+    and vectors Z by QR iteration (zhseqr). LAPACK can use multishift QR
+    for larger blocks. The estimate models this stage in single-shift
+    sweeps that update T across its full width and update Z.
+    A sweep on an active block of order k applies
+    k - 1 reflectors of order two. Each updates about d entry pairs of T and
+    d of Z, at about four units per pair, so a sweep costs about 8 d k
+    units. The number of sweeps depends on how fast eigenvalues deflate
+    (LAPACK Working Note 121, https://www.netlib.org/lapack/lawnspdf/lawn121.pdf),
+    and two sweeps per eigenvalue, the assumption of
+    ``hermitian_eigensystem_work``, give about 8 d**3 units, so about
+    10.3 d**3 in all. Published rough guides are larger. Golub and Van Loan
+    (Matrix Computations, 4th ed., Johns Hopkins University Press, 2013,
+    ISBN 978-1-4214-0794-4, Sec. 7.5.6, p. 391) count about 25 d**3 real
+    flops for the real Schur form with its orthogonal factor, about two
+    Francis steps per deflation, and Eigen's ComplexSchur documentation
+    (https://libeigen.gitlab.io/eigen/docs-master/classEigen_1_1ComplexSchur.html)
+    gives about 25 d**3 complex flops with the unitary factor. These are
+    about 12.5 d**3 multiply-adds in each algorithm's scalar arithmetic.
+    The formula counts 13 d**3, which covers the nominal estimates
+    and about 2.7 sweeps per eigenvalue in the count above, and 32 d**2 for
+    the permutation balancing, copies, shifts and reflector generation. It
+    is an estimate, not a bound on the iterations.
 
     Args:
-        rows: m, the number of rows, at least 1.6 c.
-        columns: c, the number of unknowns.
+        dimension: d, the order of the matrix.
 
     Returns:
         The work in units.
     """
-    return rows * columns**2 + columns**3 + 4 * min(columns, 25) * columns**2 + 8 * rows * columns
+    return 13 * dimension**3 + 32 * dimension**2
+
+
+def qr_work(rows, columns):
+    """Return the work units of the reduced QR factorization of an m x c matrix with m >= c.
+
+    numpy.linalg.qr in its default reduced mode runs LAPACK's zgeqrf, or
+    dgeqrf for real input, and then forms the m x c factor Q with zungqr or
+    dorgqr. LAPACK's operation counts for the two steps are each
+    c**2 (m - c/3) multiply-adds, so together they stay below 2 m c**2.
+    The formula counts 2 m c**2 for them and 8 m c for NumPy's copy of the
+    input, the copy of Q it returns, the extraction of R and the
+    Householder scalars.
+
+    Args:
+        rows: m, the number of rows.
+        columns: c, the number of columns, at most m.
+
+    Returns:
+        The work in units.
+    """
+    return 2 * rows * columns**2 + 8 * rows * columns

@@ -95,7 +95,7 @@ def restricted_kinetic_sparse(grid: OneHotGrid) -> scipy.sparse.csr_matrix:
     Dirichlet grids the links form a chain and a boundary point has one
     neighbor. On the periodic grid they form a cycle, the wrap link gives
     points 0 and K-1 their second neighbor, and each variable's matrix is
-    circulant (``kinetic.KineticCompiler``). At K = 2, which only the binary
+    circulant (``onehot_schedule.hopping_layers``). At K = 2, which only the binary
     encoding accepts, the two links join the same pair of points and their
     entries add to ``-1/h**2``, the periodic stencil ``(I - X)/h**2``. The
     diagonal stays in this matrix, whereas the compiled product moves it into
@@ -251,7 +251,7 @@ def apply_hopping(view: np.ndarray, qubits, angle) -> None:
     of the one-excitation sector cancel on ``|00>`` and ``|11>``. A block
     ``exp(-i*t*c*(XX+YY))`` therefore has the two-state matrix
     ``[[cos v, -i sin v], [-i sin v, cos v]]`` with ``v = 2tc``.
-    ``KineticCompiler.compile`` forms ``c = RN(-a/RN(RN(4*h)*h))`` and stores
+    ``onehot_schedule.hopping_layers`` forms ``c = RN(-a/RN(RN(4*h)*h))`` and
     ``angle = RN(RN(2*t)*c)``, and the doubled duration passes the range
     check and is exact, so the stored angle is the reference of this
     evaluation. For positive
@@ -316,7 +316,7 @@ def _run_ir_product(
     return view.reshape(-1)
 
 
-def onehot_product_state_error(steps, *, start) -> float:
+def onehot_product_state_error(schedule, *, start) -> float:
     """First-order 2-norm error budget delta of ``_run_ir_product`` from the Plan's start vector.
 
     The one-hot product reference is the ordered product of analytic
@@ -374,28 +374,24 @@ def onehot_product_state_error(steps, *, start) -> float:
     part. Underflowing state components need absolute local
     terms for an all-orders extension, which is not established here.
 
-    ``steps`` are the Plan's ``QHDBlock`` groups and ``start`` the bound
+    ``schedule`` is the Plan's ``QHDOneHotSchedule``, whose counts are the
+    kept blocks, each with a nonzero angle, and ``start`` the bound
     ``initial_state.restricted_state_error`` of the Method's initial state,
     in units of u.
     """
     from nwqlib._validation import GLOBAL_PHASE_STATE_ROUNDOFF, UNIT_ROUNDOFF
 
-    charge = 0
-    for group in steps:
-        for block in group:
-            if block.angle == 0:
-                continue
-            charge += (ONEHOT_HOPPING_STATE_ROUNDOFF if block.kind == "kinetic"
-                       else ONEHOT_PROJECTOR_STATE_ROUNDOFF)
-    count = charge + GLOBAL_PHASE_STATE_ROUNDOFF
+    projectors = sum(count for _s, count in schedule.projector_blocks)
+    count = (ONEHOT_HOPPING_STATE_ROUNDOFF * schedule.hopping_blocks + ONEHOT_PROJECTOR_STATE_ROUNDOFF * projectors
+             + GLOBAL_PHASE_STATE_ROUNDOFF)
     upward = float(count)
     if upward < count:
         upward = math.nextafter(upward, math.inf)
     return UNIT_ROUNDOFF * (start + upward)
 
 
-def onehot_product_sizes(dimension: int, num_grid_points: int, steps, *, start_work: int, start_bytes: int,
-                         held_bytes: int) -> tuple[int, int]:
+def onehot_product_sizes(dimension: int, num_grid_points: int, num_variables: int, schedule, *, start_work: int,
+                         start_bytes: int, held_bytes: int) -> tuple[int, int]:
     """Return ``(work_units, workspace_bytes)`` of one ``_run_ir_product`` evolution and its final phase.
 
     The one-hot product reference applies each projector phase or two-slice
@@ -416,12 +412,14 @@ def onehot_product_sizes(dimension: int, num_grid_points: int, steps, *, start_w
     and writes, and the scalar trigonometry/support checks) and
     ``B_H,scratch = 80 S_H``. For B_P projector and B_H hopping occurrences,
     ``W_onehot = W_start + sum_P W_P + sum_H W_H + D`` and
-    ``B_onehot = B_held + H0 + max{B_start, 16D + max(max_P 32 S_P, max_H 80 S_H)}``.
+    ``B_onehot = B_held + H0 + T + max{B_start, 16D + max(max_P 32 S_P, max_H 80 S_H)}``,
+    with ``T = onehot_schedule.derivation_bytes`` of the support sizes of
+    the schedule's providers, the transient storage that derives the blocks
+    of one step (``native.raw_blocks``).
     The last D is the final scalar phase pass. Empty maxima are zero. There
     is one state, and all per-block scratch is released before the next
-    block. Empty support and zero angle return before these arrays, so only
-    the scalar checks of such a block are counted, the ``2s+5`` or 8 of its
-    formula. This evaluation has no cached Pauli matrices, shifted-CSR
+    block. The kept blocks have nonzero angles and nonempty supports, so
+    every counted block applies its arrays. This evaluation has no cached Pauli matrices, shifted-CSR
     workspace or expm call terms. ``method.restricted_sizes`` and
     ``verification._reference_sizes`` use this same formula for
     ``theory_flavor="ir_product"`` on the one-hot encoding.
@@ -429,32 +427,24 @@ def onehot_product_sizes(dimension: int, num_grid_points: int, steps, *, start_w
     ``start_work`` and ``start_bytes`` are the start vector's work
     (``initial_state.start_vector_work``) and explicit payload
     (``initial_state.restricted_state``), and ``held_bytes`` the caller's
-    existing buffers that stay in memory (``B_held``). ``steps`` are the
-    Plan's ``QHDBlock`` groups. ``H0`` is ``compiler.H0``.
+    existing buffers that stay in memory (``B_held``). ``schedule`` is the
+    Plan's ``QHDOneHotSchedule``, whose kept blocks all have nonzero angles
+    and nonempty supports. ``H0`` is ``compiler.H0``.
     """
     from .compiler import H0
+    from .onehot_schedule import derivation_bytes
 
     k = num_grid_points
+    derivation = derivation_bytes(k, num_variables, (p.support_size for p in schedule.providers))
     hopping_slice = dimension // k
-    work = start_work + dimension
-    scratch = 0
-    for group in steps:
-        for block in group:
-            if block.kind == "kinetic":
-                if block.angle == 0:
-                    work += 8
-                    continue
-                work += 12 * hopping_slice + 8
-                scratch = max(scratch, 80 * hopping_slice)
-            else:
-                s = len(block.support)
-                if s == 0 or block.angle == 0:
-                    work += 2 * s + 5
-                    continue
-                active = dimension // k**s
-                work += dimension + 3 * active + 2 * s + 5
-                scratch = max(scratch, 32 * active)
-    return work, held_bytes + H0 + max(start_bytes, 16 * dimension + scratch)
+    work = start_work + dimension + schedule.hopping_blocks * (12 * hopping_slice + 8)
+    scratch = 80 * hopping_slice if schedule.hopping_blocks else 0
+    for s, count in schedule.projector_blocks:
+        if count:
+            active = dimension // k**s
+            work += count * (dimension + 3 * active + 2 * s + 5)
+            scratch = max(scratch, 32 * active)
+    return work, held_bytes + H0 + derivation + max(start_bytes, 16 * dimension + scratch)
 
 def run_binary_product(grid: OneHotGrid, method, reconstruction, state: np.ndarray) -> np.ndarray:
     """Apply the Plan's binary blocks to a restricted state in lexicographic order.
@@ -539,7 +529,9 @@ def run_binary_product(grid: OneHotGrid, method, reconstruction, state: np.ndarr
             low = [slice(None)] * tensor.ndim
             high = list(low)
             low[a], high[a] = 0, 1
-            low, high = tuple(low), tuple(high)
+            # The Hadamard map (x0, x1) -> ((x0 + x1)/sqrt(2), (x0 - x1)/sqrt(2)) on complex amplitudes writes through
+            # these views. The Ellipsis keeps a writable array when the index fixes every axis, as for K = 2, d = 1.
+            low, high = (*low, Ellipsis), (*high, Ellipsis)
             x0 = tensor[low].copy()
             np.add(x0, tensor[high], out=tensor[low])
             np.subtract(x0, tensor[high], out=tensor[high])

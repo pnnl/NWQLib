@@ -532,6 +532,46 @@ def test_an_interrupted_preparation_or_evolution_stops_resume_and_keeps_the_oute
         assert resume_augmented_lagrangian(tmp_path / name, backend=None).record.content_id == ended.record.content_id
 
 
+@pytest.mark.parametrize("layer", ("round", "level"))
+def test_a_stopped_preparation_finishes_through_its_own_run_and_then_the_outer_resume(tmp_path, layer):
+    """The route that the guides give for a round or level whose preparation was charged without a record.
+
+    The outer resume refuses and prepares nothing. ``run.resume(rebuild_preparations=True)`` on the Run of that
+    round or level adds one preparation, and the outer resume then finishes. The oracle is the uninterrupted durable
+    run of the same seed, whose record must agree field by field apart from the identities (``_assert_same_run``).
+    """
+    from nwqlib.scientist import load_run
+
+    if layer == "round":
+        def run(directory, progress=False):
+            return _solve(directory=directory, progress=progress)
+
+        def finish(directory):
+            return resume_augmented_lagrangian(directory, backend=None, progress=False)
+        outer, inner = lambda result: result.record, "iterations/**/run"
+    else:
+        problem = Optimization(objective=(x - sp.Rational(3, 10)) ** 2 + (y + sp.Rational(1, 5)) ** 2, variables=(x, y),
+                               bounds=BOX)
+
+        def run(directory, progress=False):
+            return refine_box(problem, qhd=QHD_SMALL, options=REFINED, execution="classical", seed=3,
+                              directory=directory, progress=progress)
+
+        def finish(directory):
+            return resume_box_refinement(directory, backend=None, progress=False)
+        outer, inner = lambda result: result, "levels/**/run"
+    whole = run(tmp_path / "whole")
+    with pytest.raises(KeyboardInterrupt):
+        run(tmp_path / "cut", progress=_stop_at("prepare", 3))
+    with pytest.raises(PreparationNotRebuilt):
+        finish(tmp_path / "cut")
+    with load_run(sorted((tmp_path / "cut").glob(inner))[-1], backend=None, progress=False) as stopped:
+        assert stopped.trace.preparations == 1
+        stopped.resume(rebuild_preparations=True)
+        assert stopped.trace.preparations == 2 and stopped.result is not None
+    _assert_same_run(outer(finish(tmp_path / "cut")), outer(whole))
+
+
 def test_a_slack_round_resumes_with_its_committed_representation(tmp_path, counted):
     """Round 1 commits its inequality representation before it creates its Run, and the process stops in that Run.
 

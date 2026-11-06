@@ -52,6 +52,32 @@ def test_external_hadamard_three_independent_states_and_wrong_pair():
     assert results[0].analyze().value == pytest.approx(1.0, rel=0, abs=2e-12)
 
 
+def test_external_method_limit_gives_a_limited_row_and_an_option_error_raises():
+    """A Method raises the public class for its own limit. Any other ValueError is no row and stops the comparison."""
+    import nwqlib
+    from nwqlib._limits import ResourceLimitError as library_class
+    from nwqlib.algorithms import ResourceLimitError
+
+    assert ResourceLimitError is library_class
+
+    class AtItsLimit(HadamardPauliExpectation):
+        def plan(self, problem, **options):
+            raise ResourceLimitError("this Method needs 64 work units, above its limit of 8")
+
+    class WithABadOption(HadamardPauliExpectation):
+        def plan(self, problem, **options):
+            raise ValueError("this option conflicts with that one")
+
+    problem = Expectation(state=(1.0, 0.0), observable=ingest_pauli((("Z", 1.0),), num_qubits=1))
+    compared = nwqlib.compare(problem, methods=(AtItsLimit(), HadamardPauliExpectation()), seed=7)
+    assert compared.rows[0].plan is None and compared.rows[0].resource_limited
+    assert "64 work units" in compared.rows[0].reason
+    assert compared.rows[1].plan is not None and not compared.rows[1].resource_limited
+    with pytest.raises(ValueError, match="conflicts") as raised:
+        nwqlib.compare(problem, methods=(WithABadOption(), HadamardPauliExpectation()), seed=7)
+    assert type(raised.value) is ValueError
+
+
 def test_registry_loads_only_exact_selected_factory_and_never_source_paths(monkeypatch):
     import _hadamard_method as implementation
 

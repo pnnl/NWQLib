@@ -100,44 +100,53 @@ def _relative_error(actual, expected):
     return np.linalg.norm(actual - expected) / np.linalg.norm(expected)
 
 
+def _relative_error_bound(reconstruction):
+    """Return ``e + k s delta`` of the inverse route.
+
+    Automatic dense selection puts every eigenvalue or singular value of A/alpha in
+    the polynomial domain, where the relative error of x is at most
+    ``e + k s delta/||y||`` with ``||y|| >= 1`` (``qls.verification._comparisons``):
+    e is the polynomial's check value, k the domain parameter, s the rescale and
+    delta the actual phase residual.
+    """
+    rec = reconstruction
+    return rec.polynomial.residual_check_value + rec.polynomial_kappa * rec.polynomial.rescale * rec.phase_error
+
+
 @pytest.mark.parametrize("A", [
     np.array([[1.1, 0.1], [0.1, 0.9]]),  # Hermitian inverse route
     np.array([[1.5, 0.4], [-0.2, 1.1]]),  # Hermitian dilation of a general A
 ], ids=["hermitian", "general"])
 def test_quantum_solution_and_scalars_keep_physical_scale_sign_and_phase(A):
-    # Method-error-bounded class. Automatic dense selection puts every eigenvalue or
-    # singular value of A/alpha in the polynomial domain, so the relative error of x is
-    # at most epsilon_inv (docs/algorithms/qls.md, Inverse polynomial accuracy). The
-    # added 1e-9 allows for the phase-fit term, about 1e-15, and statevector rounding.
-    epsilon = QLS().epsilon_inv
-    allowance = epsilon + 1e-9
+    # Method-error-bounded class (_relative_error_bound). The added 1e-9 allows for
+    # statevector rounding.
     b0 = np.array([1.0, 0.25])
     # RHS scaling b -> c b gives x -> c x, including a negative sign and a complex phase.
     for c in (-3.0, 2.5 * np.exp(1j * np.pi / 3), 1e-3j):
-        x = nwqlib.solve(LinearSystem(A=A, b=c * b0), method=QLS(), seed=7).x
-        assert _relative_error(x, np.linalg.solve(A, c * b0)) <= allowance
+        result = nwqlib.solve(LinearSystem(A=A, b=c * b0), method=QLS(), seed=7)
+        assert _relative_error(result.x, np.linalg.solve(A, c * b0)) <= _relative_error_bound(result.plan.reconstruction) + 1e-9
     # Simultaneous scaling (A, b) -> (c A, c b) leaves x unchanged. A negative c keeps a
     # Hermitian A Hermitian, so each instance stays on its route.
     for c in (-2.0, 1e-4, 1e4):
-        x = nwqlib.solve(LinearSystem(A=c * A, b=c * b0), method=QLS(), seed=7).x
-        assert _relative_error(x, np.linalg.solve(A, b0)) <= allowance
-    # Physical scalars of x for a complex b. With ||x_hat - x|| <= epsilon ||x||, the
-    # quadratic form differs by at most ||O|| (2 epsilon + epsilon**2) ||x||**2, and the
-    # normalized expectation by 2 ||O|| epsilon / (1 - epsilon) (docs/mathematics.md,
-    # Proposition 30, with delta = epsilon ||x|| and ||x_hat|| >= (1 - epsilon) ||x||).
+        result = nwqlib.solve(LinearSystem(A=c * A, b=c * b0), method=QLS(), seed=7)
+        assert _relative_error(result.x, np.linalg.solve(A, b0)) <= _relative_error_bound(result.plan.reconstruction) + 1e-9
+    # Physical scalars of x for a complex b. With ||x_hat - x|| <= r ||x||, the
+    # quadratic form differs by at most ||O|| (2 r + r**2) ||x||**2, and the
+    # normalized expectation by 2 ||O|| r / (1 - r) (docs/mathematics.md,
+    # Proposition 30, with delta = r ||x|| and ||x_hat|| >= (1 - r) ||x||).
     b = 2.5 * np.exp(1j * np.pi / 3) * b0
     x = np.linalg.solve(A, b)
     O = np.array([[0.3, 0.1 - 0.2j], [0.1 + 0.2j, -0.2]])
     norm_O, mass = np.linalg.norm(O, 2), float(np.vdot(x, x).real)
     quadratic = float(np.vdot(x, O @ x).real)
     cases = (
-        (QuadraticForm(observable=O), quadratic, norm_O * (2 * epsilon + epsilon**2) * mass),
-        (NormSquared(), mass, (2 * epsilon + epsilon**2) * mass),
-        (NormalizedExpectation(observable=O), quadratic / mass, 2 * norm_O * epsilon / (1 - epsilon)),
+        (QuadraticForm(observable=O), quadratic, lambda r: norm_O * (2 * r + r**2) * mass),
+        (NormSquared(), mass, lambda r: (2 * r + r**2) * mass),
+        (NormalizedExpectation(observable=O), quadratic / mass, lambda r: 2 * norm_O * r / (1 - r)),
     )
     for output, expected, bound in cases:
-        value = nwqlib.solve(LinearSystem(A=A, b=b), method=QLS(), output=output, seed=7).value
-        assert abs(value - expected) <= bound + 1e-9 * abs(expected)
+        result = nwqlib.solve(LinearSystem(A=A, b=b), method=QLS(), output=output, seed=7)
+        assert abs(result.value - expected) <= bound(_relative_error_bound(result.plan.reconstruction)) + 1e-9 * abs(expected)
 
 
 def test_compared_accuracy_settings_solve_within_their_own_inverse_tolerance():
@@ -152,9 +161,9 @@ def test_compared_accuracy_settings_solve_within_their_own_inverse_tolerance():
     for row, epsilon in zip(comparison.rows, epsilons, strict=True):
         result = nwqlib.solve(row)
         assert result.plan.content_id == row.plan.content_id
-        # Method-error-bounded class, as in the scaling test above: the relative error is
-        # at most the row's own epsilon_inv, whose higher-degree phases run on Aer.
-        assert _relative_error(result.x, exact) <= epsilon + 1e-9
+        # Method-error-bounded class, as in the scaling test above, for the row's own
+        # polynomial and higher-degree phases, which run on Aer.
+        assert _relative_error(result.x, exact) <= _relative_error_bound(result.plan.reconstruction) + 1e-9
         degrees.append(row.plan.reconstruction.degree)
         cx.append(row.estimate.quantity("cx").fact.value.value)
     # docs/algorithms/qls.md: a smaller epsilon_inv raises the degree and the CX count.
@@ -194,11 +203,12 @@ def test_planned_encoding_archive_keeps_constructor_phases_and_frames(
         # own term table, so the archive names problem.A instead of copying it.
         from nwqlib.operators import ingest_pauli
 
-        selected = choose(A=ingest_pauli((("I", 2.0), ("X", -1.0)), num_qubits=1), b=[1.0, 1j], kappa=3.0)
+        selected = choose(A=ingest_pauli((("I", 2.0), ("X", -1.0)), num_qubits=1), b=[1.0, 1j], kappa=3.0,
+                          phase_residual_tolerance=1e-6)
     else:
         # I, X, Y and Z terms, so the saved packed table exercises every label letter.
         A = np.array([[2.0, -1.0 + 0.5j], [-1.0 - 0.5j, 1.5]])
-        selected = choose(A=A, b=[1.0, 1j], block_encoding_implementation=family)
+        selected = choose(A=A, b=[1.0, 1j], block_encoding_implementation=family, phase_residual_tolerance=1e-6)
     saved = save_plan(selected, ArchiveFiles(tmp_path, 4_000_000))
     decomposition = saved["selected"]["encoding"].get("decomposition")
     assert (decomposition is not None and decomposition.get("reference") == "problem.A") == (
@@ -206,10 +216,11 @@ def test_planned_encoding_archive_keeps_constructor_phases_and_frames(
     monkeypatch.setattr(QLS, "plan", forbidden)
     monkeypatch.setattr(owner, "select_polynomial", forbidden)
     monkeypatch.setattr("nwqlib.subroutines.block_encoding.core.plan_block_encoding", forbidden)
-    monkeypatch.setattr("nwqlib.subroutines.qsp.phases.solve_symmetric_qsp_phases", forbidden)
+    monkeypatch.setattr("nwqlib.subroutines.qsp.phases.solve_wx_qsp_phases", forbidden)
     monkeypatch.setattr(np.linalg, "svd", forbidden)
     loaded = load_plan(saved, ArchiveFiles(tmp_path, 4_000_000))
     assert loaded.content_id == selected.content_id
+    assert loaded.method.phase_residual_tolerance == 1e-6 and loaded.reconstruction.phase_tolerance == 1e-6
     assert loaded._native["encoding"].record == selected._native["encoding"].record
     # The saved Pauli table decodes to the selected labels and coefficients.
     assert loaded._native["encoding"]._payload.decomposition == selected._native["encoding"]._payload.decomposition
@@ -217,6 +228,40 @@ def test_planned_encoding_archive_keeps_constructor_phases_and_frames(
     result = nwqlib.solve(loaded)
     expected = np.linalg.solve(A, [1.0, 1j])
     np.testing.assert_allclose(result.x, expected, rtol=0.01, atol=0.01)
+
+
+def test_phase_target_keeps_the_polynomial_and_an_explicit_value_stands():
+    """``epsilon_inv`` stays the polynomial's target and the phases have their own.
+
+    With k = 10 and s about 1.1, the default ``.1*.01/(k s)``, about 9e-5, is far above the preset 1e-12,
+    so normal accuracy stops the solver at a residual the preset would refuse. An explicit target stands
+    on either side of the default and of the preset, with the same polynomial. At ``epsilon_inv=1e-12``
+    the preset decides, and the phases are those of the solver's own default. A target no attempt can
+    meet still refuses and names the control. A shortcut keeps the preset unless told otherwise.
+    """
+    from nwqlib.subroutines.qsp.phases import solve_wx_qsp_phases
+
+    A, b = np.diag([1.0, 0.1]), [1.0, 1.0]
+    fields = dict(alpha=1.0, kappa=10.0)
+    default = choose(A=A, b=b, **fields).reconstruction
+    k, s = default.polynomial_kappa, default.polynomial.rescale
+    assert default.polynomial.residual_check_value <= .01
+    assert default.phase_tolerance == pytest.approx(.1 * .01 / (k * s), rel=1e-15, abs=0)
+    assert 1e-12 < default.phase_error <= default.phase_tolerance
+    for explicit in (1e-3, 1e-13):
+        rec = choose(A=A, b=b, phase_residual_tolerance=explicit, **fields).reconstruction
+        assert rec.polynomial == default.polynomial
+        assert rec.phase_tolerance == explicit and rec.phase_error <= explicit
+    strict = choose(A=A, b=b, epsilon_inv=1e-12, **fields).reconstruction
+    assert strict.phase_tolerance == 1e-12
+    preset = solve_wx_qsp_phases(tuple(c / strict.polynomial.rescale for c in strict.polynomial.coefficients))
+    assert strict.phase_solution == preset.phases and strict.phase_fft_lengths == preset.evidence.fft_lengths
+    with pytest.raises(ValueError, match="phase_residual_tolerance") as refusal:
+        choose(A=A, b=b, phase_residual_tolerance=1e-30, **fields)
+    assert refusal.value.evidence.coefficient_residual > 1e-30
+    shortcut = dict(A=A, b=b, solver="shortcut_native_svp", output=StateVector(normalization="unit", global_phase="modulo_global_phase"))
+    assert choose(**shortcut, **fields).reconstruction.phase_tolerance == 1e-12
+    assert choose(**shortcut, phase_residual_tolerance=1e-6, **fields).reconstruction.phase_tolerance == 1e-6
 
 
 @pytest.mark.parametrize("q", [1, 2, 3])
@@ -239,15 +284,13 @@ def test_periodic_stencil_and_product_rhs_solve_like_their_dense_arrays(q):
     expected = np.linalg.solve(dense, b)
     compact = LinearSystem(A=operator_input(PeriodicStencil(q, mass=mass, diffusion=diffusion)),
                            b=ingest_product(pairs))
-    # Method-error-bounded class: the analytic endpoints m and m + 4 nu put the spectrum
-    # of A/alpha in the polynomial domain, so the relative error is at most epsilon_inv
-    # (docs/algorithms/qls.md, Inverse polynomial accuracy). The added 1e-9 allows for
-    # the phase-fit term and statevector rounding.
-    allowance = QLS().epsilon_inv + 1e-9
+    # Method-error-bounded class (_relative_error_bound): the analytic endpoints m and
+    # m + 4 nu put the spectrum of A/alpha in the polynomial domain. The added 1e-9
+    # allows for statevector rounding.
     for problem in (compact, LinearSystem(A=dense, b=b)):
         result = nwqlib.solve(problem, method=QLS(), seed=7)
         assert result.plan.reconstruction.width <= 11
-        assert _relative_error(result.x, expected) <= allowance
+        assert _relative_error(result.x, expected) <= _relative_error_bound(result.plan.reconstruction) + 1e-9
 
 
 def test_two_qubit_pauli_a_solves_like_its_matrix():
@@ -263,13 +306,11 @@ def test_two_qubit_pauli_a_solves_like_its_matrix():
     # K >= alpha/sigma_min(A), with alpha the coefficient one-norm.
     alpha = sum(abs(c) for _, c in terms)
     kappa = 1.0001 * alpha / np.linalg.svd(matrix, compute_uv=False)[-1]
-    # Method-error-bounded class: K puts the spectrum of A/alpha in the polynomial domain,
-    # so the relative error is at most epsilon_inv. The added 1e-9 allows for the
-    # phase-fit term and statevector rounding.
-    allowance = QLS().epsilon_inv + 1e-9
+    # Method-error-bounded class (_relative_error_bound): K puts the spectrum of A/alpha in
+    # the polynomial domain. The added 1e-9 allows for statevector rounding.
     for A in (ingest_pauli(terms, num_qubits=2), SparsePauliOp.from_list(list(terms))):
-        x = nwqlib.solve(LinearSystem(A=A, b=b), method=QLS(kappa=kappa), seed=7).x
-        assert _relative_error(x, expected) <= allowance
+        result = nwqlib.solve(LinearSystem(A=A, b=b), method=QLS(kappa=kappa), seed=7)
+        assert _relative_error(result.x, expected) <= _relative_error_bound(result.plan.reconstruction) + 1e-9
 
 
 def test_supplied_complex_global_phase_survives_control_inverse_and_archive(tmp_path, monkeypatch):
@@ -306,7 +347,7 @@ def test_supplied_complex_global_phase_survives_control_inverse_and_archive(tmp_
     result.save(tmp_path / "result")
     monkeypatch.setattr(QLS, "plan", forbidden)
     monkeypatch.setattr(np.linalg, "svd", forbidden)
-    monkeypatch.setattr("nwqlib.subroutines.qsp.phases.solve_symmetric_qsp_phases", forbidden)
+    monkeypatch.setattr("nwqlib.subroutines.qsp.phases.solve_wx_qsp_phases", forbidden)
     loaded = nwqlib.load_result(tmp_path / "result")
     np.testing.assert_array_equal(loaded.x, result.x)
     assert loaded.plan.method.encoding is loaded.plan._native["encoding"]
@@ -533,11 +574,17 @@ def test_samples_follow_the_solution_distribution_in_original_coordinates():
     # Statistical class with a fixed seed. Given the n selected shots, the
     # Bretagnolle-Huber-Carol inequality bounds the total variation distance by
     # sqrt((3 log 2 + log(1/delta))/(2 n)) except with probability delta = 1e-6. The
-    # computed direction is within 2 epsilon_inv of x/||x|| in L2, which bounds the total
-    # variation distance between the two outcome distributions by 2 epsilon_inv.
-    radius = sqrt((3 * log(2) + log(1e6)) / (2 * n)) + 2 * QLS().epsilon_inv
+    # computed direction is within 2 r of x/||x|| in L2 for r = _relative_error_bound,
+    # which bounds the total variation distance between the two outcome distributions by 2 r.
+    radius = sqrt((3 * log(2) + log(1e6)) / (2 * n)) + 2 * _relative_error_bound(result.plan.reconstruction)
     assert radius < 0.2
     assert 0.5 * np.abs(empirical - [0.6, 0.3, 0.1]).sum() <= radius
+    # The sample arrays are Result data, stored in bytes objects whose memory cannot be made writable.
+    for array in (indices, counts):
+        while isinstance(array.base, np.ndarray):
+            array = array.base
+        with pytest.raises(ValueError):
+            array.setflags(write=True)
 
 
 def test_run_archive_keeps_already_constructed_queries(tmp_path, monkeypatch):
@@ -799,3 +846,158 @@ def test_dense_query_syntheses_of_a_run_match_the_planning_charge(monkeypatch, g
     nwqlib.solve(selected, progress=False)
     assert calls == [3 if route == "auto" else 2] * syntheses
     assert controls == [(1, (2,))] * syntheses
+
+
+def test_an_empty_readout_grouping_accepts_the_caps_that_pauli_grouping_accepts():
+    """With no nonidentity label to group, ``qwc_groups`` makes no comparison and validates only the cap.
+
+    It accepts what ``PauliTerms.group`` accepts, None (no limit) or a positive
+    Python or NumPy integer, and refuses zero under the caller's limit name.
+    """
+    from nwqlib._quantum_readout import qwc_groups
+
+    for terms, width in (((("I", 1.0),), 1), ((("XI", 0.0), ("II", 1.0)), 2), ((), 1)):
+        for cap in (None, 1, np.int64(1)):
+            assert qwc_groups(terms, width, max_comparisons=cap, max_bytes=None,
+                              limit_name="QLS.max_work") == ((), (), 0)
+        with pytest.raises(ValueError, match="QLS.max_work"):
+            qwc_groups(terms, width, max_comparisons=0, max_bytes=None, limit_name="QLS.max_work")
+
+
+def test_an_identity_observable_plans_without_grouping_under_the_default_limits(tmp_path):
+    """A sampled identity observable on two coordinates plans one unrotated setting with no comparison.
+
+    Its only Pauli label is the identity, so planning groups nothing under the
+    default ``max_work=None``. The default limits stay None in the Plan and in
+    the Plan reopened from its archive, whose content hash is unchanged.
+    """
+    selected = choose(A=np.array([[1.0, 0.2], [0.1, 1.5]]), b=[1.0, 0.5],
+                      output=NormalizedExpectation(observable=np.eye(2)), shots=12)
+    assert selected.method.max_work is None and selected.method.max_bytes is None
+    rec = selected.reconstruction
+    assert rec.grouping_comparisons == 0 and [s.label for s in rec.settings] == ["I"]
+    saved = save_plan(selected, ArchiveFiles(tmp_path, None))
+    loaded = load_plan(saved, ArchiveFiles(tmp_path, None))
+    assert loaded.method.max_work is None and loaded.method.max_bytes is None
+    assert loaded.content_id == selected.content_id
+
+
+def test_a_known_planning_requirement_is_checked_against_the_physical_memory_by_default(monkeypatch):
+    """``refuse_known_need`` reads a byte cap of None as the physical memory and names it in the refusal.
+
+    An explicit cap applies as given, and a requirement equal to the limit is admitted.
+    """
+    from nwqlib import _limits
+    from nwqlib.operators.access import refuse_known_need
+
+    monkeypatch.setattr(_limits, "physical_memory_bytes", lambda: 3199)
+    with pytest.raises(ValueError, match=r"physical memory \(3199 bytes\) that QLS.max_bytes=None allows"):
+        refuse_known_need("QLS", "max_bytes", None, 3200, "the phase solve")
+    with pytest.raises(ValueError, match="QLS.max_bytes=3199 is below"):
+        refuse_known_need("QLS", "max_bytes", 3199, 3200, "the phase solve")
+    monkeypatch.setattr(_limits, "physical_memory_bytes", lambda: 3200)
+    refuse_known_need("QLS", "max_bytes", None, 3200, "the phase solve")
+    refuse_known_need("QLS", "max_bytes", 3200, 3200, "the phase solve")
+
+
+def _circuit_memory_cases():
+    """Small circuits of the routes with a law, with the original QLS options."""
+    from nwqlib.operators import PeriodicStencil, ingest_pauli
+    from nwqlib.problems.inputs import ingest_occupation
+
+    rng = np.random.default_rng(3)
+    hermitian = rng.normal(size=(8, 8))
+    hermitian = (hermitian+hermitian.T)/np.linalg.norm(hermitian+hermitian.T, 2)+np.eye(8)
+    general = hermitian+.2*rng.normal(size=(8, 8))
+    circulant = sum(c*np.roll(np.eye(16), offset, axis=1) for offset, c in ((0, 2.), (1, .3), (-1, .3), (2, .1), (-2, .1)))
+    zero = ingest_occupation("000", num_qubits=3)
+    return (
+        ("stencil q=3", nwqlib.LinearSystem(A=PeriodicStencil(3, mass=.5, diffusion=.25), b=zero), dict(epsilon_inv=.05)),
+        ("stencil general b", nwqlib.LinearSystem(A=PeriodicStencil(3, mass=.5, diffusion=.25), b=rng.normal(size=8)),
+         dict(epsilon_inv=.05)),
+        ("three address qubits", nwqlib.LinearSystem(A=circulant, b=np.eye(16)[0]), dict(epsilon_inv=.05)),
+        ("Pauli without CX", nwqlib.LinearSystem(A=ingest_pauli([("I", 2.), ("Z", 1.)], num_qubits=1), b=[1., 0.]),
+         dict(kappa=3., epsilon_inv=.05)),
+        ("Pauli two address qubits", nwqlib.LinearSystem(A=ingest_pauli([("II", 3.), ("ZX", .5), ("XZ", .25)], num_qubits=2),
+         b=[1., 0., 0., 0.]), dict(kappa=4., epsilon_inv=.05)),
+        ("dense", nwqlib.LinearSystem(A=hermitian, b=np.eye(8)[0]), dict(epsilon_inv=.05)),
+        ("dense controlled gatewise", nwqlib.LinearSystem(A=general, b=np.eye(8)[0]),
+         dict(epsilon_inv=.05, dense_control_route="gatewise")),
+        ("dense controlled whole", nwqlib.LinearSystem(A=general, b=np.eye(8)[0]),
+         dict(epsilon_inv=.05, dense_control_route="whole_matrix")),
+    )
+
+
+@pytest.mark.parametrize("name,problem,options", _circuit_memory_cases(), ids=lambda value: value if isinstance(value, str) else "")
+def test_circuit_memory_law_follows_the_positions_and_tables_of_each_route(name, problem, options, tmp_path):
+    """The memory estimate of a circuit stays near what its operation classes keep on Aer.
+
+    Relation: each top-level position keeps about 1.5 KB and a multiplexer or
+    unitary also keeps its table (quantum._query_memory). The built circuit
+    supplies the positions and tables, and the estimate never builds one. CX is
+    not the unit: the Pauli query holds no CX and still keeps three positions.
+    """
+    from nwqlib.blocks.lowering import _count_definition
+
+    chosen = nwqlib.plan(problem, method=QLS(**options), output=nwqlib.NormSquared(), execution="quantum", seed=7)
+    counted = _count_definition(chosen.construction, blocks=chosen.blocks)
+    assert counted.native_unknown == 0
+    circuit = nwqlib.prepare(chosen, progress=False).circuits[0]
+    tables = sum(np.asarray(parameter).size*16 for item in circuit.data if item.operation.name in ("multiplexer", "unitary")
+                 for parameter in item.operation.params)
+    built = 1500*len(circuit.data)+tables
+    assert built/2 <= counted.native_bytes <= 2*built
+
+    # A saved and reloaded Plan keeps the same comparison for its next preparation.
+    loaded = load_plan(save_plan(chosen, ArchiveFiles(tmp_path, 10**8)), ArchiveFiles(tmp_path, 10**8))
+    assert _count_definition(loaded.construction, blocks=loaded.blocks).native_bytes == counted.native_bytes
+
+
+def test_preparation_refuses_a_qls_circuit_before_building_it_and_plans_stay_available(monkeypatch):
+    """A compact QLS plans and estimates without its circuit's memory, and prepare checks that memory first.
+
+    The historical q=8, mass=.001 circuit grew memory by about 1.17 GB, so a
+    limit of 1e8 bytes refuses it, while nothing about planning changes. A
+    controlled query outside the laws stays uncounted rather than estimated.
+    """
+    from nwqlib.blocks import lowering
+    from nwqlib.operators import PeriodicStencil, ingest_pauli
+    from nwqlib.problems.inputs import ingest_product
+    from nwqlib.resources import ResourceContext
+
+    def product(q):
+        return ingest_product([[np.cos(.3+.1*j), np.sin(.3+.1*j)] for j in range(q)])
+
+    nwqlib.estimate(nwqlib.plan(nwqlib.LinearSystem(A=PeriodicStencil(100, mass=1., diffusion=.25), b=product(100)),
+                                method=QLS(epsilon_inv=.01), seed=7), context=ResourceContext(basis="cx"))
+    chosen = nwqlib.plan(nwqlib.LinearSystem(A=PeriodicStencil(8, mass=.001, diffusion=.25), b=product(8)),
+                         method=QLS(epsilon_inv=.01, max_bytes=10**8), seed=7)
+    monkeypatch.setattr(lowering, "_ConstructorContext", lambda *a, **k: pytest.fail("circuit was constructed"))
+    with pytest.raises(ValueError, match=r"preparing this circuit needs about \d+ bytes, exceeding max_bytes"):
+        nwqlib.prepare(chosen, progress=False)
+    monkeypatch.undo()
+
+    pauli = nwqlib.plan(nwqlib.LinearSystem(A=ingest_pauli([("I", 2.), ("X", .5j)], num_qubits=1), b=[1., 0.]),
+                        method=QLS(kappa=4., epsilon_inv=.05), output=nwqlib.NormSquared(), execution="quantum", seed=7)
+    assert {block.record.signature.name: block._native_bytes for block in pauli.blocks}["original_A_query_c1"] is None
+
+
+@pytest.mark.parametrize("solver,factor_bytes", (("shortcut_native_svp", lambda a: 128*a*a), ("shortcut_dilation", lambda a: 64*(2*a)**2)))
+def test_classical_shortcut_admits_the_lapack_workspace_of_its_factorization(solver, factor_bytes):
+    """A classical shortcut's limit covers its LAPACK workspace, not only its result arrays.
+
+    Relation: ZGESDD and ZHEEVD hold the workspace their documentation states
+    beside the input copy and the factors (host_planning.selected_work), the
+    sum qpe.powers also uses, so a limit equal to that sum leaves no room for
+    the other arrays. Twice that sum is enough.
+    """
+    rng = np.random.default_rng(5)
+    n = 64
+    hermitian = rng.normal(size=(n, n))
+    matrix = ((hermitian+hermitian.T)/np.linalg.norm(hermitian+hermitian.T, 2)+3*np.eye(n))/4
+    problem = nwqlib.LinearSystem(A=matrix, b=np.eye(n)[0])
+    options = dict(solver=solver, kappa=3., alpha=1., epsilon_inv=1e-6, encoded_solution_norm_estimate=1.5)
+    output = nwqlib.StateVector(normalization="unit", global_phase="modulo_global_phase")
+    with pytest.raises(ValueError, match="max_bytes"):
+        nwqlib.plan(problem, method=QLS(**options, max_bytes=factor_bytes(2*n)), output=output, execution="classical")
+    nwqlib.plan(problem, method=QLS(**options, max_bytes=2*factor_bytes(2*n)), output=output, execution="classical")

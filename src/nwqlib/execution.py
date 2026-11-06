@@ -1,27 +1,29 @@
 """Execution records that need no quantum SDK, and the entry points that prepare and run a Plan."""
 
-from nwqlib._limits import DEFAULT_MAX_BYTES, DEFAULT_MAX_DIRECT_AMPLITUDES
-
 from collections.abc import Mapping
 from enum import Enum
 from hashlib import sha256
+from math import inf
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Literal
 from uuid import uuid4
 
 import numpy as np
-from pydantic import AwareDatetime, Field, PrivateAttr, StrictBool, StrictInt, model_validator
+from pydantic import AwareDatetime, Field, PrivateAttr, StrictBool, model_validator
 
+from nwqlib._limits import physical_memory_bytes
 from nwqlib._validation import (
     AER_STATEVECTOR_ROUNDOFF_PER_OPERATION,
     MAX_COUNT,
     NWQSIM_CPU_SV_ROUNDOFF_PER_OPERATION,
+    add_up as _add_up,
     exact_probability_window,
     native_state_error,
     validate_normalized_mass,
 )
 from nwqlib._phase_product import corrected_mass_window, corrected_state_error
 from nwqlib.core.planning import MAX_RUNTIME_SEED, ObservationSpec, Realization, RuntimeOptions, reducer_outputs
-from nwqlib.core.records import ContentID, Nonnegative, PositiveInt, Real, Record, Source, Text
+from nwqlib.core.records import StrictInteger, ContentID, Nonnegative, PositiveInt, Real, Record, Source, Text
 from nwqlib.artifacts import ArtifactManifest, ReadoutArray, UnavailableOutput, probability_readout
 from nwqlib.evidence.error_model import FramedFact
 from nwqlib.ir import Binding
@@ -70,15 +72,29 @@ class LogicalPreparationReceipt(Record):
     measured, kept so that inspection and reopening never lower again.
     dynamic_visits counts the visits of checked dynamic IR nodes, not native
     gates. reserved_work is the value of the size formula for the dynamic
-    nodes and definitions, not the Run's reservation or measured CPU time or
-    memory. defined_selections are the native definition templates actually
+    nodes and definitions, plus the instructions appended while the circuit
+    was built by copying gate definitions that already existed. At present
+    these are the definitions of the multi-controlled RY gates that the
+    adjoints of ADAPT's `"vacuum_restore"` pair construction copy. Each
+    preparation counts the copies its own construction made. Preparations
+    that are pending together, before any of their records is saved, each
+    build such an adjoint and count it, and `max_total_circuits` bounds how
+    many the Run prepares. Once a record that counts an adjoint is saved,
+    later preparations in the same open Run reuse it without counting it
+    again, and a reopened Run counts it when it builds it again. The copies
+    of a failed or cancelled preparation, like the rest of its
+    construction work, enter no record. reserved_work is None when a
+    definition that the circuit reaches has unknown construction work, such
+    as the controlled query of a supplied gate whose definition was not
+    built at planning. No Run limit applies to reserved_work, and it is not
+    measured CPU time or memory. defined_selections are the native definition templates actually
     built, including cached bases, and are not counts of specializations or
     operations. The exact call arguments remain in the Realization that
     planning chose.
     """
 
     dynamic_visits: Count
-    reserved_work: Count
+    reserved_work: Count | None
     defined_selections: tuple[ContentID, ...]
 
 
@@ -122,6 +138,9 @@ class NativeDepth(Record):
     whose observable is measured with circuits that the provider builds. A
     qualified depth describes only that one prepared circuit, not other
     settings of the same Plan, and only the operations inside it. The
+    experiments of one compiled template, or of one circuit folded from it,
+    run the same gates on the same qubits with their own parameter values,
+    so their depth is that of the circuit bound to its first row. The
     provider's qubit initialization before each shot and the delay between
     shots are outside the circuit. The depth leaves them out and says nothing
     about their duration or cost.
@@ -186,6 +205,76 @@ _ROUNDOFF_PER_OPERATION = {
 }
 
 
+class TemplateBinding(Record):
+    """The parameter values that bind a compiled template circuit to one point of a static Plan.
+
+    A point is an experiment, or one combination of values of an
+    experiment's range axes. A backend that binds parameterized circuits
+    (IBM Runtime and Aer) compiles one template for each group of points of a
+    static Plan whose circuits differ only in rotation angles
+    (`Method.row_templates`). Each point keeps its own preparation record
+    with this binding, and the records of one template share its `snapshot`
+    and saved circuit (`payload`).
+
+    IBM fractional gates run RZZ(θ) only for 0 ≤ θ ≤ π/2. When the compiled
+    template keeps RZZ angles that are parameters, each point runs a
+    circuit made from the compiled one in which every such angle is folded
+    into that range, without compiling again
+    ([`IBMRuntimeBackend`][nwqlib.backends.ibm_runtime.IBMRuntimeBackend],
+    `use_fractional_gates`). The points that need the same correction
+    gates (`correction`) share one such circuit, its `snapshot` and its
+    saved copy (`payload`), and the compiled template is saved once
+    (`base`).
+
+    Attributes:
+        key: The Method's identifier of the template's gate sequence and
+            readout (`RowTemplate.key`).
+        parameters: Names of the parameters of the circuit that this
+            point runs, in the order of `values` and of the columns of
+            the provider's binding array. With a `correction`, they are the
+            compiled template's parameters that the folded circuit still
+            uses, one angle for each distinct parameterized RZZ angle and one
+            global-phase parameter.
+        values: This point's value of each parameter. With a
+            `correction`, the angles are the folded RZZ angles and the
+            global-phase parameter is a multiple of π/2.
+        compiled: Whether this record's preparation compiled the template.
+            The other records of the template use that compiled circuit,
+            bound directly or through a circuit folded from it, without
+            compiling or lowering again, so their
+            `construction_work_reserved` is zero.
+        correction: Default `None`. For a compiled template with
+            parameterized RZZ angles, one digit `2c + b` for each distinct
+            such angle, in the order of its first gate in the compiled
+            template. For this point's angle θ = kπ + r with
+            -π/2 ≤ r ≤ π/2, b is 1 when r < 0 (an X gate before and after
+            RZZ(|r|)) and c is k mod 2 (an RZ(π) gate on each of the two
+            qubits). `None` when the compiled template has no parameterized
+            RZZ angle, and then the point binds the compiled template
+            itself.
+        base: Default `None`. Where the compiled template is saved, from
+            which a later preparation builds the circuit of a correction not
+            yet used, for records with a `correction` in a Run saved to a
+            folder. Otherwise `None`.
+    """
+
+    key: Text
+    parameters: tuple[Text, ...]
+    values: tuple[Real, ...]
+    compiled: StrictBool
+    correction: Text | None = None
+    base: "PayloadRef | None" = None
+
+    @model_validator(mode="after")
+    def _columns(self):
+        """One value per distinct parameter name, and a saved compiled template only for a folded circuit."""
+        if len(set(self.parameters)) != len(self.parameters) or len(self.values) != len(self.parameters):
+            raise ValueError("a template binding has one value for each distinct parameter")
+        if self.base is not None and self.correction is None:
+            raise ValueError("only a folded template binding names its saved compiled template")
+        return self
+
+
 class PreparedArtifact(Record):
     """The preparation record of one circuit or classical computation: what was built, for which target, and its roundoff bounds.
 
@@ -199,7 +288,7 @@ class PreparedArtifact(Record):
     record loads no circuit data. The fields below are read-only.
 
     Attributes:
-        schema_version: Fixed `9`. Version of the saved record format.
+        schema_version: Fixed `10`. Version of the saved record format.
         execution: `"quantum_circuit"` or `"host_kernel"`, the kind of
             preparation.
         plan_id: Content hash of the Plan.
@@ -221,7 +310,11 @@ class PreparedArtifact(Record):
             (`Source` records).
         preparation_time: Time of the preparation.
         construction_work_reserved: Circuit construction work counted before
-            execution, in work units.
+            execution, in work units: `logical.reserved_work` of the record
+            that built the circuit, the definitions its own construction
+            copied included (`LogicalPreparationReceipt`), and zero for a
+            record that binds an already compiled template. `None` when that
+            work is unknown.
         logical: Record of how the logical circuit was built, or None for a
             classical preparation.
         native_operations: Prepared operation count, or None when unavailable.
@@ -294,6 +387,19 @@ class PreparedArtifact(Record):
             including no product or multiplication by the represented
             factor ``(1.0, ±0.0)`` under the classical arithmetic model.
             ``None`` means the classical correction was not assessed.
+        initial_state_error: Upper bound on ``| ||v||_2**2 - 1 |`` for the
+            state vector ``v`` that the simulator set directly as its initial
+            state, in place of building the circuit of a direct state
+            preparation, or `None` when no state was set directly. Aer sets
+            it on a noiseless statevector target when such a preparation is
+            the circuit's first instruction and is executed, that is, the
+            readout observes the state after it. It bounds both the 2-norm
+            distance from ``v`` to the unit state ``v/||v||_2`` and the
+            deviation of its total probability from one, and
+            ``probability_window`` and ``state_error`` add it to their
+            bounds for the other operations. It is computed from ``v`` with
+            exact rational arithmetic and rounded upward
+            ([Engineering constants](../ENGINEERING_CONSTANTS.md#probability-windows-of-exact-execution)).
         native_depth: The native two-qubit depth of the prepared circuit on
             the backend's target (`NativeDepth`), computed once at preparation
             and kept unchanged after the Run is reopened. `None` means the
@@ -305,9 +411,21 @@ class PreparedArtifact(Record):
             when its depth is not qualified, or when a package version in
             `environment` differs from the installed one
             (`nwqlib.backends.inspection.check_native_depth_cap`).
+        template: The values that bind this point (an experiment, or one
+            combination of its range-axis values) to a compiled template
+            circuit shared with other points
+            ([`TemplateBinding`][nwqlib.execution.TemplateBinding]), or `None`
+            for a circuit prepared for this point alone. With a
+            template, `snapshot`, `payload`, `native_operations`,
+            `native_depth` and `environment` describe the circuit that this
+            experiment runs:
+            the compiled template, or with `template.correction` the circuit
+            folded from it for that correction. The target, compiler, native
+            layouts and options are those of the compilation, and `runtime`
+            is the seed that compiled the template.
     """
 
-    schema_version: Literal[9] = 9
+    schema_version: Literal[10] = 10
     execution: Literal["quantum_circuit", "host_kernel"] = "quantum_circuit"
     plan_id: ContentID
     realization_id: ContentID
@@ -323,7 +441,7 @@ class PreparedArtifact(Record):
     native_basis: tuple[Text, ...]
     environment: tuple[Source, ...]
     preparation_time: Text
-    construction_work_reserved: Count
+    construction_work_reserved: Count | None
     logical: LogicalPreparationReceipt | None
     native_operations: Count | None
     host_preparation_work_reserved: Count = 0
@@ -341,7 +459,9 @@ class PreparedArtifact(Record):
     body_length: Count | None = None
     boundaries: tuple[Count, ...] = ()
     statevector_roundoff: tuple[Nonnegative, Nonnegative] | None = None
+    initial_state_error: Nonnegative | None = None
     native_depth: NativeDepth | None = None
+    template: TemplateBinding | None = None
 
     @property
     def probability_window(self) -> float:
@@ -350,20 +470,23 @@ class PreparedArtifact(Record):
         It is ``max(1e-12, (c*G + 2**(n+1) + 10)*u)`` for G backend operations,
         the circuit width n, the executing simulator's per-instruction
         constant c and ``u = 2**-53``, as [Engineering
-        constants](../ENGINEERING_CONSTANTS.md) derives. A target without a
-        derived constant of its own uses Aer's, the larger one. Classical
-        preparations and unknown counts keep the fixed floor ``1e-12``.
+        constants](../ENGINEERING_CONSTANTS.md) derives, plus
+        ``initial_state_error`` when the initial state was set directly. A
+        target without a derived constant of its own uses Aer's, the larger
+        one. Classical preparations and unknown counts keep the fixed floor
+        ``1e-12``.
         """
         per_operation = _ROUNDOFF_PER_OPERATION.get(self.target.name, AER_STATEVECTOR_ROUNDOFF_PER_OPERATION)
-        return exact_probability_window(self.native_operations, len(self.logical_to_native),
-                                        per_operation=per_operation)
+        return _add_up(exact_probability_window(self.native_operations, len(self.logical_to_native),
+                                                per_operation=per_operation), self.initial_state_error)
 
     def state_error(self, resolved=()):
         """Return ``(delta, None)`` for this execution's final-state budget, or ``(None, reason)``.
 
         delta is ``native_state_error`` of the backend operation count with the
         target's derived per-instruction constant, a first-order bound on
-        ``||psi_hat - exp(i phi) psi||_2`` against the unitary backend circuit.
+        ``||psi_hat - exp(i phi) psi||_2`` against the unitary backend circuit,
+        plus ``initial_state_error`` when the initial state was set directly.
         Here ``psi_hat`` is the computed state, ``psi`` is the ideal unit
         state of that circuit and ``phi`` is one common global phase.
         It describes distance modulo one common global phase. It does not
@@ -396,7 +519,7 @@ class PreparedArtifact(Record):
         unresolved = sorted(set(self.probability_window_exclusions) - set(resolved))
         if unresolved:
             return None, "outside the roundoff derivation: " + ", ".join(unresolved)
-        return native_state_error(self.native_operations, per_operation), None
+        return _add_up(native_state_error(self.native_operations, per_operation), self.initial_state_error), None
 
     def saved_state_error(self, resolved=()):
         """Return ``(delta_saved, reason)``: ``state_error(resolved)`` after the classical correction of a saved state.
@@ -448,11 +571,12 @@ class PreparedArtifact(Record):
         if self.execution == "host_kernel":
             if (self.selected_kernel_id is None or self.logical is not None or self.native_operations is not None
                     or self.quantum_layout or self.classical_layout or self.native_basis
-                    or self.construction_work_reserved or self.observation.kind != "host_scalars"
+                    or self.construction_work_reserved != 0 or self.observation.kind != "host_scalars"
                     or self.population != "unconditional" or self.payload is not None
                     or self.native_quantum_layout or self.native_classical_layout or self.logical_to_native
                     or self.backend_configuration_id is not None or self.provider_options_json is not None
-                    or self.probability_window_exclusions is not None or self.native_depth is not None):
+                    or self.probability_window_exclusions is not None or self.native_depth is not None
+                    or self.template is not None):
                 raise ValueError("host preparation cannot fabricate quantum lowering or population")
         elif (self.logical is None or self.selected_kernel_id is not None
               or self.host_preparation_work_reserved or self.observation.kind == "host_scalars"):
@@ -712,7 +836,7 @@ class VerificationReceipt(Record):
         >>> call = receipt.applications[0]
         >>> for fact in call.facts:
         ...     print(fact.fact.quantity, fact.fact.value.value)
-        reference_error 0.0008214720329548587
+        reference_error 0.0008214720329520691
         reference_error.reference_norm 0.9608378411789008
         >>> counts = {item.parameter: item.value for item in call.arguments}
         >>> print(counts["expm_completed"], counts["matvec_completed"])
@@ -772,7 +896,7 @@ class ReducedValues(Record):
     component: Count
     real: tuple[Real, ...] = ()
     imaginary: tuple[Real, ...] = ()
-    integers: tuple[StrictInt, ...] = ()
+    integers: tuple[StrictInteger, ...] = ()
 
 
 Statistic = Annotated[PauliValue | CountBin | ProbabilityArrays | ScalarValue | EstimateValue | ReducedValues,
@@ -1230,7 +1354,7 @@ class ObservationChunk(Record):
             output = ReadoutArray(component=component, dtype="uint64" if component == "indices" else "float64",
                                   shape=array.shape)
             if store is not None:
-                handle = store._publish(array, output=output, provenance=provenance, private=True)
+                handle = store._publish(array, output=output, provenance=provenance, private=True, finite=True)
                 manifests[component], arrays[component] = handle.manifest, handle._array
             else:
                 array.flags.writeable = False
@@ -1620,8 +1744,9 @@ class ObservationChunk(Record):
         # record.
         bound = 1 + receipt.probability_window
         kind = self.observation.kind
-        # The saved total is math.fsum of the published values, so this is
-        # the exact predicate fsum(p_j) <= fl(1+w) (artifacts.probability_readout).
+        # The saved total is the correctly rounded math.fsum of the published
+        # values, which depends only on those values. The window holds for any
+        # summation tree (artifacts.probability_readout).
         if kind == "probabilities" and self.values[0].mass > bound:
             raise ValueError("probability marginal exceeds unit population beyond the roundoff window "
                              "of its executed circuit")
@@ -1703,92 +1828,117 @@ class ExecutionLimits(Record):
     Build it with keyword arguments and pass it as `limits=` to
     [`solve`][nwqlib.scientist.solve] or `prepare`, for example
     `ExecutionLimits(max_total_shots=10_000_000)`. Every argument is
-    optional, and every limit is inclusive. The `max_total_*` limits,
-    `max_data_bytes` and `max_synthesis_work` count totals over the whole
-    Run. Planning does not use these limits. A Method checks its own
+    optional, and every limit is inclusive. The `max_total_*` limits and
+    `max_data_bytes` count totals over the whole Run. Planning does not use
+    these limits. A Method checks its own
     planning limits, such as `Lanczos.max_bytes`. Raise a limit of an
     existing Run with `Run.extend_limits`.
 
     Attributes:
-        max_simulation_qubits: Default `20`. Largest circuit width that a
-            local simulator (Aer or the local NWQ-Sim backend) accepts. A
-            20-qubit complex128 statevector needs 16 MiB.
-        simulator_memory_mb: Default `8192` (MiB, 8 GiB). Memory allowance of
-            the local simulator for the quantum state and its known working
-            arrays. Aer receives it as `max_memory_mb`. It is an upper limit
-            that the memory needs of a simulation are checked against, not
-            memory set aside in advance, and it does not bound the memory of
-            the Python process. Raising it does not raise
-            `max_simulation_qubits`.
-        max_total_circuits: Default `512`. Largest number of circuit
+        simulator_memory_mb: Default `None`, the physical memory of the
+            computer that runs the simulation. Memory allowance of the local
+            simulator for the quantum state and its known working arrays. Aer
+            receives it as `max_memory_mb`. It is an upper limit that the
+            memory needs of a simulation are checked against, not memory set
+            aside in advance, and it does not bound the memory of the Python
+            process. When the physical memory cannot be read, NWQLib makes no
+            check of its own and Aer applies its own default.
+        max_total_circuits: Default `None`, no limit on a local simulator and
+            `512` on any other backend. Largest number of circuit
             preparations, and separately of circuit execution attempts.
-        max_total_shots: Default `1_000_000`. Largest total of shots reserved
+        max_total_shots: Default `None`, no limit on a local simulator and
+            `1_000_000` on any other backend. Largest total of shots reserved
             for circuit executions, including attempts whose outcome is
-            uncertain.
-        max_data_bytes: Default 10 GB (decimal, `10_000_000_000` bytes).
-            Largest size of the Run's recorded data and numerical arrays. It
-            does not bound the memory of the Python process.
-        max_completion_metadata_bytes: Default `65_536`. JSON metadata
-            allowed for each completed circuit execution or classical
-            computation that the Method runs on this computer, in addition to
-            the numeric values, arrays and records of classical computations
-            that it declares.
-        max_direct_amplitudes: Default `65_536` (`2**16`, a 16-qubit
-            state). Largest amplitude count of a direct magnitude and phase
-            state preparation that the Run synthesizes.
-        max_synthesis_work: Default `1_000_000_000` work units. Largest total work of
-            the exact syntheses of dense unitaries that the Run makes while
-            it prepares circuits. It counts the syntheses of a backend that
-            translates a circuit to its gate basis. When building the Qiskit circuit adds control
-            to a circuit block, it also counts the exact syntheses needed
-            for that control and Qiskit's work to control the synthesized
-            circuits. The default allows the synthesis
-            of one dense unitary on 8 qubits (5.2e8 units) and rejects one on
-            9 qubits (4.0e9 units). The work of a preparation's syntheses is
-            checked against the remaining allowance before the first of them
-            starts. Each distinct matrix is synthesized and counted once while
-            the Run is open, and again after the Run is reopened. A rejected
-            preparation still counts against `max_total_circuits` and leaves
-            its experiment unprepared, so a later call can prepare it after
-            the limit is raised. Syntheses that a Method counts against its
-            own limits at planning are not counted here. The work unit and
-            the synthesis cache are defined in [Explicit workflow and reference
-            controls](../ENGINEERING_CONSTANTS.md#explicit-workflow-and-reference-controls).
+            uncertain. A Run on a backend other than Aer or the local NWQ-Sim
+            backend sets these two budgets when the given limits leave them
+            `None`, and `run.extend_limits(max_total_shots=None)` removes one.
+        max_data_bytes: Default `None`, no limit. Size of recorded data and
+            numerical arrays beyond which the Run starts no new work. It
+            counts what the Run stores, in its folder when it has one, not the
+            memory of the computer. Before a circuit or classical computation runs,
+            the Run sets aside room for its declared results, and preparation
+            records, arrays, checkpoints, caches and results are counted when
+            they are saved. Records about work that has already started, such
+            as its status, timing, provider messages, failure text and the
+            descriptive data saved with its results, are always saved and
+            counted at their actual size. The saved total can therefore exceed
+            `max_data_bytes`, by an amount that depends on those records. The
+            Run then starts no new work, saves no new results and cannot be
+            saved to a new folder until `run.extend_limits(max_data_bytes=...)`
+            raises the limit above the saved total. A Run whose saved total
+            exceeds the limit can still be reopened and read. The limit does
+            not bound the memory of the Python process.
     """
 
-    schema_version: Literal[5] = 5
-    # The defaults are untuned local choices that a caller raises explicitly for a
-    # larger intended workload. docs/ENGINEERING_CONSTANTS.md registers them under
-    # "Explicit workflow and reference controls" (qubits, memory, circuits,
-    # shots, direct amplitudes and synthesis work), "Shared byte default"
-    # (max_data_bytes) and "Local journal scalar admission" (completion
-    # metadata). A 20-qubit complex128 statevector needs 16 MiB. The qubit cap
-    # applies to Aer and the local NWQ-Sim backend. Aer receives
-    # simulator_memory_mb as max_memory_mb, its cap on quantum-state storage.
-    # Its 8 GiB default is a ceiling sized so that common research workloads
-    # need no memory override, not an estimate of their need. Aer documents
-    # max_memory_mb as the largest quantum-state storage it accepts, raising an
-    # error when a state needs more, so the value allocates nothing itself.
-    # The synthesis work of 10**9 units, 0.65 to 1.1 s on one core, admits the
-    # synthesis of one dense unitary on 8 qubits (5.2 * 10**8 units) in a Run
-    # and refuses one on 9 qubits (4.0 * 10**9 units).
-    max_simulation_qubits: PositiveInt = 20
-    simulator_memory_mb: PositiveInt = 8192
-    max_total_circuits: PositiveInt = 512
-    max_total_shots: PositiveInt = 1_000_000
-    max_data_bytes: PositiveInt = DEFAULT_MAX_BYTES
-    max_completion_metadata_bytes: PositiveInt = 65_536
-    max_direct_amplitudes: PositiveInt = DEFAULT_MAX_DIRECT_AMPLITUDES
-    max_synthesis_work: PositiveInt = 1_000_000_000
+    schema_version: Literal[6] = 6
+    # Every limit defaults to None. A Run on a backend that may charge fills
+    # in the circuit and shot budgets of PAID_BUDGETS (with_paid_budgets).
+    # max_data_bytes bounds stored data, not memory, so the physical memory is
+    # no measure of it. The memory of the computer is the natural limit of a
+    # local simulation, so simulator_memory_mb defaults to it
+    # (simulator_memory), and the width of a simulated circuit has no limit
+    # of its own. Aer receives the resolved memory as max_memory_mb, its cap
+    # on quantum-state storage. Aer
+    # documents max_memory_mb as the largest quantum-state storage it accepts,
+    # raising an error when a state needs more, and 0 as the system memory, so
+    # the value allocates nothing itself.
+    simulator_memory_mb: PositiveInt | None = None
+    max_total_circuits: PositiveInt | None = None
+    max_total_shots: PositiveInt | None = None
+    max_data_bytes: PositiveInt | None = None
+
+    def simulator_memory(self):
+        """Return the simulator memory allowance in MiB: `simulator_memory_mb`, else the physical memory, else None."""
+        if self.simulator_memory_mb is not None:
+            return self.simulator_memory_mb
+        memory = physical_memory_bytes()
+        return None if memory is None else memory >> 20
+
+
+# Backend kinds that simulate on this machine: local Aer and a locally launched
+# NWQ-Sim runner. They and host execution are also the backends on which
+# prepare(plan, settings="all") prepares every setting, because their
+# preparation is local lowering with no remote compilation or provider charge,
+# and the backends on which a Run sets no circuit or shot budget of its own
+# (with_paid_budgets).
+LOCAL_SIMULATORS = frozenset({"qiskit_aer", "nwqsim"})
+# The circuit and shot budgets of a Run on a backend other than a local
+# simulator, whose provider may charge for both. They are untuned starting
+# budgets, registered in docs/ENGINEERING_CONSTANTS.md ("Explicit workflow and
+# reference controls"), that a caller raises or removes explicitly.
+PAID_BUDGETS = MappingProxyType({"max_total_circuits": 512, "max_total_shots": 1_000_000})
+
+
+def with_paid_budgets(limits, backend):
+    """Return ``limits`` with the unset PAID_BUDGETS filled in, unless ``backend`` is None or a local simulator.
+
+    Every backend whose ``kind`` is not in LOCAL_SIMULATORS, a backend
+    without a kind included, may charge for its circuits and shots. A value
+    the caller set is kept.
+    """
+    if backend is None or getattr(backend, "kind", None) in LOCAL_SIMULATORS:
+        return limits
+    unset = {name: value for name, value in PAID_BUDGETS.items() if getattr(limits, name) is None}
+    return limits.revise(**unset) if unset else limits
+
+
+def _unbounded(value):
+    """Read an optional limit for comparison: None, no limit, is larger than every number."""
+    return inf if value is None else value
 
 
 class LimitAmendment(Record):
     """One raise of a Run's limits, with the Run's counts just before it.
 
     `Run.extend_limits` records one in `run.limit_amendments` for each call
-    that raises a limit. Each raises at least one limit and lowers none, and
-    the counts it records lie within the old limits. The fields below are
-    read-only.
+    that raises a limit, and no other code makes one. That call raises at
+    least one limit, lowers none, and refuses a raise whose `max_data_bytes`
+    is below the data bytes the Run has counted. The Run checks new work
+    against its limits before it starts, so the counts of circuits and
+    shots recorded here lie within the old limits. The data
+    bytes lie within the new `max_data_bytes` and can exceed the old one,
+    because records of work that had already started can be saved beyond
+    that limit. The fields below are read-only.
 
     Attributes:
         sequence: Position in the Run's history of raises, from 1.
@@ -1808,11 +1958,9 @@ class LimitAmendment(Record):
             `pending_output_bytes`. Both byte counts describe the data the
             Run accounts for, never physical memory.
         pending_output_bytes: Bytes set aside for outputs not yet received.
-        synthesis_work: Work of the exact syntheses of dense unitaries
-            counted against `max_synthesis_work` so far.
     """
 
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     sequence: PositiveInt
     recorded_at: AwareDatetime
     old: ExecutionLimits
@@ -1822,37 +1970,6 @@ class LimitAmendment(Record):
     raw_shots: Count
     stored_data_bytes: Count
     pending_output_bytes: Count
-    synthesis_work: Count
-
-    @model_validator(mode="after")
-    def _increase(self):
-        """Require at least one cap to grow and none to shrink, with counters inside the old caps."""
-        names = ExecutionLimits.model_fields.keys() - {"schema_version", "parent_id"}
-        changes = tuple(getattr(self.new, name) - getattr(self.old, name) for name in names)
-        if min(changes) < 0 or max(changes) == 0:
-            raise ValueError("limit amendment requires an actual increase without decreases")
-        if (max(self.circuit_preparations, self.circuit_attempts) > self.old.max_total_circuits
-                or self.raw_shots > self.old.max_total_shots
-                or self.stored_data_bytes + self.pending_output_bytes > self.old.max_data_bytes
-                or self.synthesis_work > self.old.max_synthesis_work):
-            raise ValueError("pre-amendment counters exceed the old execution limits")
-        return self
-
-
-def _validate_limit_amendments(amendments, *, current):
-    """Check an ordered history of limit amendments without reading or repeating any execution."""
-    previous = None
-    counts = (0, 0, 0, 0)
-    for sequence, amendment in enumerate(amendments, 1):
-        if amendment.sequence != sequence or previous is not None and amendment.old != previous:
-            raise ValueError("limit amendment history has invalid ordering or old/new continuity")
-        updated = (amendment.circuit_preparations, amendment.circuit_attempts, amendment.raw_shots,
-                   amendment.synthesis_work)
-        if any(new < old for old, new in zip(counts, updated, strict=True)):
-            raise ValueError("limit amendment history resets cumulative execution counters")
-        previous, counts = amendment.new, updated
-    if previous is not None and current != previous:
-        raise ValueError("current execution limits differ from their amendment history")
 
 
 class ConsumptionEvent(Record):
@@ -1991,10 +2108,13 @@ def point_chunk_key(result_key, point):
 class SubmissionItem(Record):
     """The exact position of one acquisition among the results of its submission.
 
-    item identifies the submitted circuit or Qiskit primitive unified bloc
-    (PUB). result_key is the decoder's stable chunk key, not a flattened
-    histogram. The optional child job and provider result identifiers belong
-    to the association with the provider's results.
+    item is the position of the submitted circuit in its submission.
+    result_key is the decoder's stable chunk key, not a flattened histogram,
+    and locates the item's results: for IBM Runtime the position of its
+    Qiskit primitive unified bloc (PUB), or ``"p:j"`` for row j of a
+    parameterized template PUB p, which holds several items. The optional
+    child job and provider result identifiers belong to the association with
+    the provider's results.
     """
 
     schema_version: Literal[2] = 2
@@ -2037,9 +2157,20 @@ class SubmissionRecord(Record):
     stops further retrieval and releases the bytes reserved for pending
     output. A failed submission with consumed results can still have
     uncertain attempts whose work stays counted in the exposure.
+    `terminal_without_result` marks an uncertain submission whose job the
+    provider or the local system has confirmed as ended with no result so far.
+    `Run.wait` then stops with `RunFailed` instead of polling, while `Run.resume`
+    can still collect a result that arrives later.
+    `cancel_requested` holds the reason of `Run.cancel` once a cancellation
+    request for this job goes out, and returns to None when the request fails,
+    so a later refresh sends it again. `refresh_failure` holds the text of the
+    last failed refresh of this job, a failed read or a failed cancellation
+    request. The next successful read clears it, so it stays on a completed
+    submission when the request failed in the same refresh whose read found the
+    job finished.
     """
 
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     submission_id: Text
     run_id: Text
     backend: Source
@@ -2056,6 +2187,7 @@ class SubmissionRecord(Record):
     native_simulations: Count | None = None
     timing: TimingObservation | None = None
     results_consumed: StrictBool = False
+    terminal_without_result: StrictBool = False
 
     @model_validator(mode="after")
     def _association(self):
@@ -2079,6 +2211,8 @@ class SubmissionRecord(Record):
             raise ValueError("an unacknowledged intent cannot contain a known job locator")
         if self.results_consumed and self.status not in {"completed", "failed", "cancelled"}:
             raise ValueError("only terminal provider results can be fully consumed")
+        if self.terminal_without_result and self.status != "uncertain":
+            raise ValueError("only an uncertain submission can be terminal without a result")
         return self
 
 
@@ -2104,7 +2238,8 @@ class ExecutionTrace(Record):
             computations that the Method runs on this computer, counted in
             `host_preparations`.
         construction_work_reserved: Circuit construction work counted in this
-            Run, in work units.
+            Run, in work units, the sum of `construction_work_reserved` over
+            its saved preparation records. `None` once one of them is `None`.
         events: Every attempt (`ConsumptionEvent` records), in order, failed
             and uncertain ones included.
         submissions: The circuit submissions (`SubmissionRecord` records),
@@ -2120,8 +2255,17 @@ class ExecutionTrace(Record):
         data_bytes_reserved: Bytes set aside for outputs, summed over the
             attempts.
         data_bytes: Bytes of the Run's saved data when the trace was taken.
-        synthesis_work_reserved: Work of the exact syntheses of dense
-            unitaries counted against `max_synthesis_work` in this Run.
+            Records of work that had already started can make it exceed
+            `limits.max_data_bytes`.
+        synthesis_work: Work of the exact syntheses of dense unitaries that
+            the Run's saved preparations made, in the work units of the dense
+            synthesis size rule, not measured operations or time. Each distinct
+            matrix counts once while the Run object is open, and again when a
+            reopened Run synthesizes it again. A preparation that failed or
+            was interrupted before its lowering result was saved counts none.
+            For a controlled transformed block the syntheses are also part of
+            `construction_work_reserved` when that is known, so the two
+            fields overlap and are not added.
         local_prepared_ids: Content hashes of the successful preparations
             made in this Run.
         cancel_requested: The reason given to `Run.cancel`, or `None`. A
@@ -2139,7 +2283,7 @@ class ExecutionTrace(Record):
     run_id: Text
     plan_id: ContentID
     preparations: Count
-    construction_work_reserved: Count
+    construction_work_reserved: Count | None
     events: tuple[ConsumptionEvent, ...]
     submissions: tuple[SubmissionRecord, ...] = ()
     host_preparations: Count = 0
@@ -2148,7 +2292,7 @@ class ExecutionTrace(Record):
     host_work_reserved: Count = 0
     data_bytes_reserved: Count = 0
     data_bytes: Count = 0
-    synthesis_work_reserved: Count = 0
+    synthesis_work: Count = 0
     local_prepared_ids: tuple[ContentID, ...] = ()
     cancel_requested: Text | None = None
     termination_reason: Text | None = None
@@ -2176,21 +2320,11 @@ class ExecutionTrace(Record):
 
     @model_validator(mode="after")
     def _host_reservations(self):
-        """Check the limits, submissions and host reservations against the recorded
-        attempts.
+        """Check the submissions and host reservations against the recorded attempts.
+
+        The limit amendments are the Run's own records, written by
+        ``Run.extend_limits``, so their history is not checked again here.
         """
-        _validate_limit_amendments(self.limit_amendments, current=self.limits)
-        if self.limits is not None and self.data_bytes > self.limits.max_data_bytes:
-            raise ValueError("captured data bytes exceed this trace's execution limit")
-        if self.limits is not None and self.synthesis_work_reserved > self.limits.max_synthesis_work:
-            raise ValueError("reserved synthesis work exceeds this trace's execution limit")
-        if self.limit_amendments:
-            last = self.limit_amendments[-1]
-            if (last.circuit_preparations > self.preparations - self.host_preparations
-                    or last.circuit_attempts > sum(event.execution == "quantum_circuit" for event in self.events)
-                    or last.raw_shots > sum(event.shots for event in self.events)
-                    or last.synthesis_work > self.synthesis_work_reserved):
-                raise ValueError("limit amendment counters exceed this trace's actual population")
         self._acquisitions = {}
         if len({s.submission_id for s in self.submissions}) != len(self.submissions):
             raise ValueError("trace submission identities must be distinct")
@@ -2288,7 +2422,7 @@ class RunFailed(RuntimeError):
 
 
 __all__ += [
-    "RegisterMap", "LogicalPreparationReceipt", "NativeDepth", "PreparedArtifact", "PauliValue", "CountBin", "ProbabilityArrays",
+    "RegisterMap", "LogicalPreparationReceipt", "NativeDepth", "TemplateBinding", "PreparedArtifact", "PauliValue", "CountBin", "ProbabilityArrays",
     "PayloadRef", "CountsSampling", "EstimateValue", "ReducedValues",
     "Histogram", "ObservationChunk", "ObservationView", "ConsumptionEvent", "ExecutionTrace", "TimingObservation", "ExecutionLimits", "LimitAmendment",
     "JobLocator", "SubmissionItem", "SubmissionRecord", "RunFailed",

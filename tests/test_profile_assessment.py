@@ -33,7 +33,7 @@ def _memory_limit(value, location):
                  kind="capacity_stock", value=value, scope=location)
 
 
-def _capacity_fixture(*, parallel=False, workspace_bytes=5 * 2**30, unknown=False):
+def _capacity_fixture(*, parallel=False, workspace_bytes=5 * 2**30, unknown=False, resident=()):
     plan, _, profile, allocation, *_ = stored_inputs()
     # Two one-qubit calls to the same actual HZH recipe. Declared workspace is
     # simultaneous per invocation: 5 GiB serial reuse, 10 GiB parallel demand.
@@ -58,7 +58,7 @@ def _capacity_fixture(*, parallel=False, workspace_bytes=5 * 2**30, unknown=Fals
     allocation = allocation.revise(locations=("gpu0", "gpu1"), topology="independent_devices",
                                   configuration_id=profile.configuration.content_id,
                                   limits=tuple(_memory_limit(8 * 2**30, loc) for loc in ("gpu0", "gpu1")))
-    return _select_workload(plan, plan.resolve("expectation"), ResourceContext()), profile, allocation
+    return _select_workload(plan, plan.resolve("expectation"), ResourceContext(resident=resident)), profile, allocation
 
 
 def test_calibration_number_interval_and_dependent_only_freshness_domain():
@@ -92,36 +92,66 @@ def test_calibration_number_interval_and_dependent_only_freshness_domain():
     assert missing[0].lower_seconds is None and missing[0].upper_seconds is None
 
 
-def test_per_location_parallel_failure_and_serial_legal_peak():
+def test_parallel_calls_add_and_serial_calls_reuse_declared_memory_per_location():
     serial, profile, allocation = _capacity_fixture()
     parallel, _, _ = _capacity_fixture(parallel=True)
     serial_axis = _assess_capacity(serial, profile, allocation, AT)
     parallel_axis = _assess_capacity(parallel, profile, allocation, AT)
     serial_peak = next(item for item in serial_axis.details if item.quantity == "memory")
     parallel_peak = next(item for item in parallel_axis.details if item.quantity == "memory")
-    assert serial_peak.fact.value.numerator == 5 * 2**30 and serial_peak.status == "feasible"
-    assert parallel_peak.fact.value.numerator == 10 * 2**30 and parallel_peak.status == "infeasible"
+    assert serial_peak.fact.value.numerator == 5 * 2**30
+    assert parallel_peak.fact.value.numerator == 10 * 2**30
+    # A declared size is an estimate, so neither side of the 8-GiB grant proves a fit or a failure,
+    # and the reason carries the direction that the status no longer can.
+    assert serial_peak.status == parallel_peak.status == "conditional"
+    assert "fits" in serial_peak.reason and "exceeds" in parallel_peak.reason
     # Neither case pools gpu0 and gpu1 into a spurious 16-GiB device.
     assert serial_peak.limit.scope == parallel_peak.limit.scope == "gpu0"
-    assert parallel_axis.status == "infeasible"
+    assert parallel_axis.status == "conditional"
+    # A known subtotal above the grant says so beside the unknown total.
+    unknown, _, _ = _capacity_fixture(workspace_bytes=10 * 2**30, unknown=True)
+    subtotal = next(item for item in _assess_capacity(unknown, profile, allocation, AT).details
+                    if item.quantity == "known_memory")
+    assert subtotal.fact.value.numerator == 10 * 2**30
+    assert subtotal.status == "conditional" and "exceeds" in subtotal.reason
+    # Resident bytes alone above the grant stay conditional and rule out a serial schedule as the remedy.
+    declared = Workspace(location="gpu0", purpose="input", bytes=9 * 2**30, source=SYNTHETIC_SOURCE)
+    resident, _, _ = _capacity_fixture(resident=(declared,))
+    resident_axis = _assess_capacity(resident, profile, allocation, AT)
+    detail = next(item for item in resident_axis.details if item.quantity == "declared resident memory")
+    assert detail.status == resident_axis.status == "conditional"
+    assert "exceed" in detail.reason and "any schedule" in detail.reason and detail.limit.scope == "gpu0"
+    # A grant above the device's hard stock is a fact about the grant, not a declared size.
+    hard = profile.revise(limits=(*profile.limits, _memory_limit(4 * 2**30, "gpu0")))
+    hard_axis = _assess_capacity(serial, hard, allocation, AT)
+    stock = next(item for item in hard_axis.details if item.quantity == "allocation stock")
+    assert stock.status == hard_axis.status == "infeasible"
 
 
-def test_large_state_body_rejects_by_bounded_integer_comparison():
+def test_state_body_is_exact_while_a_saved_record_can_hold_it():
     inputs = stored_inputs()
     plan, _, profile, allocation, *_ = inputs
-    # Width metadata only: 100000 qubits. No vector/matrix/power-sized buffer is made.
-    program = Program(root="allocate", definitions=(Definition(id="allocate", node=Allocate(wire="q")),),
-                      registers=(Register(name="q", width=100_000),))
-    construction = SelectedConstruction(program=program, selections=())
-    plan = plan.revise(construction=construction, error_model=plan.error_model.revise(construction_id=construction.content_id))
     experiment = plan.experiments[0]
-    plan = plan.revise(experiments=(experiment.revise(observation=experiment.observation.revise(
-        kind="probabilities", labels=(), qubits=(0,))),))
-    workload = _select_workload(plan, plan.resolve("expectation"), ResourceContext())
-    detail = next(d for d in _assess_capacity(workload, profile, allocation, AT).details if d.quantity == "native state body")
-    assert detail.status == "infeasible" and detail.fact.availability == "unknown"
-    assert "integer-output" in detail.fact.reason
-    assert len(detail.model_dump_json()) < 10_000
+    probabilities = experiment.observation.revise(kind="probabilities", labels=(), qubits=(0,))
+
+    def body(width):
+        # Width metadata only. No vector, matrix or unstorable power is made.
+        program = Program(root="allocate", definitions=(Definition(id="allocate", node=Allocate(wire="q")),),
+                          registers=(Register(name="q", width=width),))
+        construction = SelectedConstruction(program=program, selections=())
+        wide = plan.revise(construction=construction, experiments=(experiment.revise(observation=probabilities),),
+                           error_model=plan.error_model.revise(construction_id=construction.content_id))
+        workload = _select_workload(wide, wide.resolve("expectation"), ResourceContext())
+        return next(d for d in _assess_capacity(workload, profile, allocation, AT).details
+                    if d.quantity == "native state body")
+
+    # 16 * 2**14280 < 10**4300 <= 16 * 2**14281.
+    assert body(14_280).fact.value.numerator == 16 << 14_280
+    for width in (14_281, 100_000):
+        detail = body(width)
+        assert detail.status == "infeasible" and detail.fact.availability == "unknown"
+        assert "4300 decimal digits" in detail.fact.reason
+        assert len(detail.model_dump_json()) < 10_000
     # A one-qubit body needs 32 bytes, while a density-matrix body needs 64 bytes.
     _, small = _workload(inputs)
     roomy = allocation.revise(limits=(_memory_limit(48, "logical_device"),))
@@ -264,12 +294,12 @@ def test_joined_accuracy_keeps_real_point_restrictions_and_target_reference(guar
             result.revise(accuracy=axis)
 
 
-def test_upper_memory_envelope_is_not_a_proved_failure():
+def test_a_declared_peak_over_exclusive_paths_is_not_a_failure():
     from nwqlib.ir import Branch, ClassicalStage, ClassicalValue
     workload, profile, allocation = _capacity_fixture(workspace_bytes=10 * 2**30)
     original = workload.construction
     # An exclusive unresolved branch can choose the 10-GiB call or an empty
-    # path. The maximum is an upper envelope; the lower requirement is not 10.
+    # path, so the peak of 10 GiB above the grant does not show that the run needs them.
     definitions = tuple(d for d in original.program.definitions if d.id not in {"body", "root"}) + (
         Definition(id="coin", node=ClassicalStage(implementation=SYNTHETIC_SOURCE, outputs=("coin",))),
         Definition(id="empty", node=Sequence()),

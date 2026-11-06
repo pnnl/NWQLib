@@ -28,7 +28,8 @@ scalar-operation and byte units, not measured CPU time or memory
 (docs/CODE_TOUR.md, "Byte and work budgets").
 """
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from nwqlib._limits import ResourceLimitError, exceeds, memory_limit
+from nwqlib.algorithms._eigen_inputs import _mean_diagonal
 
 from dataclasses import dataclass
 from math import fsum, isfinite, pi
@@ -73,7 +74,7 @@ from nwqlib.ir import (
 from nwqlib.operators import OperatorInput
 from nwqlib.operators.access import Count
 from nwqlib.operators.inputs import ingest_dense
-from nwqlib.operators._pauli import pauli_coefficients
+from nwqlib.operators._pauli import pauli_coefficient_masks
 from nwqlib.problems import Eigenphase, Eigenproblem, Eigenvalue, SpectralEstimation
 from nwqlib.problems.inputs import StateInput, ingest_vector
 from nwqlib.problems.records import StateData
@@ -290,40 +291,55 @@ def _safe_time(matrix, supplied, *, phase_radius=pi):
     """Return (tau, R, selection label) for a dense Hamiltonian.
 
     R = ||H||_inf, the largest absolute row sum, bounds every |E| because
-    any induced norm bounds the spectral radius. The automatic time
-    tau = 0.9*phase_radius/R keeps every scaled eigenvalue tau*E inside
-    [-0.9*phase_radius, 0.9*phase_radius]. QCELS, RFE and RWPE use
-    phase_radius = pi, so tau*E stays on one branch of the eigenphase.
-    SPE passes numerical.spe_phase_radius. The 0.9 margin is an untuned
-    default registered in docs/ENGINEERING_CONSTANTS.md (QPE automatic time),
-    not a paper constant. A supplied time is returned unchanged, and R is
+    any induced norm bounds the spectral radius. The automatic time is the
+    rounded quotient tau = 0.9*phase_radius/R. The factor 0.9 is an untuned
+    default registered in docs/ENGINEERING_CONSTANTS.md (QPE automatic
+    time), not a paper constant, and sets a nominal target with a 10 percent
+    margin against aliasing. The computed R carries a relative error of
+    order D*u from hypot and the D-term sums, so tau*||H||_inf can exceed
+    0.9*phase_radius by a relative O(D*u), and the margin keeps
+    tau*|E| < phase_radius. QCELS, RFE and RWPE use phase_radius = pi, so
+    tau*E stays on one branch of the eigenphase. SPE passes
+    numerical.spe_phase_radius. A supplied time is returned unchanged, and R is
     still reported for the aliasing check. A zero matrix returns tau = 1 and
     R = 0. R is None when it overflows binary64. This reads the dense input
     matrix and performs no eigensolve.
+
+    The row sums of |H_ij| are formed directly. Only when R overflows,
+    which needs entries near the binary64 maximum, are they formed again
+    from the components divided by the largest one, so that the automatic
+    time stays finite and positive. R is then None, so the Plan's
+    aliasing_bound_sufficient is False and the record does not claim that
+    aliasing is excluded. That time is a planning value. A time above the
+    binary64 maximum, from subnormal entries, is clamped to that maximum.
+    The clamped time is smaller, so tau*|E| stays inside the margin, but the
+    eigenphases need not be resolved. Neither path makes a later
+    eigendecomposition or exponential at such magnitudes feasible.
     """
-    # Scaled row-sum calculation avoids complex scaling underflow and
-    # overflowing an otherwise representable conservative time.
-    scale = max(float(np.max(np.abs(matrix.real))), float(np.max(np.abs(matrix.imag))))
-    if scale == 0:
+    with np.errstate(over="ignore"):
+        bound = float(np.max(np.sum(np.abs(matrix), axis=1), initial=0.0))
+    if bound == 0:
         return (
             (1.0 if supplied is None else supplied),
             0.0,
             "zero Hamiltonian" if supplied is None else "supplied",
         )
-    magnitudes = np.hypot(matrix.real / scale, matrix.imag / scale)
-    scaled_bound = float(np.max(np.sum(magnitudes, axis=1)))
     with np.errstate(over="ignore"):
-        bound = float(np.multiply(scale, scaled_bound))
-        tau = float(min(np.divide(0.9 * phase_radius / scaled_bound, scale), np.finfo(float).max))
+        if isfinite(bound):
+            tau = float(min(np.divide(0.9 * phase_radius, bound), np.finfo(float).max))
+        else:
+            scale = max(float(np.max(np.abs(matrix.real))), float(np.max(np.abs(matrix.imag))))
+            scaled_bound = float(np.max(np.sum(np.hypot(matrix.real / scale, matrix.imag / scale), axis=1)))
+            tau = float(min(np.divide(0.9 * phase_radius / scaled_bound, scale), np.finfo(float).max))
     return (
         (tau if supplied is None else supplied),
         (bound if isfinite(bound) else None),
-        ("scaled absolute row-sum bound" if supplied is None else "supplied"),
+        ("absolute row-sum bound" if supplied is None else "supplied"),
     )
 
 
 def _analysis_size(options, count, *, power_span, complex_points):
-    """Return (work, bytes) declared for one estimator analysis, or for RWPE its iteration loop.
+    """Return (work, bytes, sample bytes, law) declared for one QCELS, SPE or RFE analysis.
 
     ``count`` is the number of scalar samples (query settings) and
     ``complex_points`` the number N of distinct complex points after the two
@@ -331,10 +347,14 @@ def _analysis_size(options, count, *, power_span, complex_points):
     the limits before the schedule is drawn, and reanalysis checks it again
     before a changed grid is evaluated, so max_work and max_bytes bound the
     analysis before it runs. The values are operation-size units, not measured CPU time
-    (docs/ENGINEERING_CONSTANTS.md, QCELS finite complex search).
+    (docs/ENGINEERING_CONSTANTS.md, QCELS finite complex search). The sample
+    bytes are the part of the bytes that follows the samples and complex points
+    rather than the grid. ``law`` tells a refusal what those bytes hold and
+    which choices reduce them.
     """
     if options.estimator == "qcels":
         grid = numerical.qcels_grid_size(options.grid_size, power_span)
+        sample_bytes = 256 * max(1, count) + 128 * complex_points
         # Work. One objective evaluation costs 32 size units per complex
         # point (exponential, product, mean, centered squares and reduction).
         # The G grid points plus at most G local minima, each refined with
@@ -347,29 +367,60 @@ def _analysis_size(options, count, *, power_span, complex_points):
         return (
             32 * (1 + numerical.QCELS_BRACKET_EVALUATIONS) * grid * complex_points
             + 64 * max(1, count),
-            32 * grid + 256 * max(1, count) + 128 * complex_points,
+            32 * grid + sample_bytes,
+            sample_bytes,
+            f"Its grid has max(grid_size, 8*(max(p) - min(p)) + 1) = {grid} points for the planned powers p, at 32 "
+            "bytes each, beside 256 bytes per sample and 128 per complex point. The largest power grows with "
+            "max_time/tau, or with max_time for unitary input, so a Plan with a smaller max_time/tau or num_times, or "
+            "a smaller grid_size while it sets that maximum, needs less.",
         )
-    if options.estimator == "rwpe":
-        # RWPE analysis reads only the saved Gaussian moments, so the law
-        # covers the controller instead. It charges 2 units when it starts
-        # and 32 for each choice and each update (controller.py), and the last
-        # update runs after the last shot. The floor of 64 covers the 16 units
-        # of the final analysis (_analysis) when max_steps is 0. On resume an
-        # interrupted choice or update is charged again, and the controller
-        # admits that charge when it happens. Bytes are a constant allowance
-        # per step.
-        return max(64, 2 + 64*options.max_steps), 256+256*options.max_steps
-    elif options.estimator == "rfe":
+    if options.estimator == "rfe":
         grid, rows = options.num_frequencies, count
+        law = (f"It holds 160 bytes for each of its {grid} frequencies, set by num_frequencies, and 128 bytes for each "
+               f"of its {rows} samples, which grow with num_samples. A Plan with a smaller num_frequencies or "
+               "num_samples needs less.")
     else:
         grid = options.grid_size
         rows = count
+        law = (f"It holds 160 bytes for each of its {grid} threshold points, set by grid_size, and 128 bytes for each "
+               f"of its {rows} samples, which grow with num_samples. A smaller grid_size, or a Plan with a smaller "
+               "num_samples, needs less.")
     # SPE and RFE evaluate one complex row of length `grid` per drawn power
     # (numerical.spe_cdf, numerical.rfe), and each draw has two scalar
     # samples. The law charges 16 units per grid point and sample plus 64 per
     # sample for pooling. Bytes: an allowance of 160 per grid point for the
     # coordinates, accumulator and row temporaries, and 128 per sample.
-    return 16 * grid * max(1, rows) + 64 * max(1, rows), 160 * grid + 128 * rows
+    return 16 * grid * max(1, rows) + 64 * max(1, rows), 160 * grid + 128 * rows, 128 * rows, law
+
+
+def _plan_only_offer(config, amount, sample_bytes, reason):
+    """Return the refusal text that offers an explicit limit to a Plan used only for its estimates, or None.
+
+    An explicit max_bytes applies as given, also above the physical memory, so a
+    Plan can be made when what exceeds the memory is an array that planning does
+    not hold. ``amount`` is the size of the analysis that the Plan's next check
+    compares, so one retry passes it. Samples are different: planning builds the
+    schedule and the Plan's records from them, so no limit is offered when
+    ``sample_bytes``, the samples' part of that amount, does not fit the limit.
+    ``max_bytes`` bounds neither those records nor the process memory.
+    """
+    if exceeds(sample_bytes, memory_limit(config.max_bytes)):
+        return None
+    return (f"A Plan used only for its resource estimates can set {type(config).__name__}.max_bytes to at least "
+            f"{amount}, because {reason}. Its schedule and Plan records still grow with the samples, and solving it "
+            "still needs the analysis arrays.")
+
+
+def _admit_analysis(options, count, *, power_span, complex_points, planning=False):
+    """Check one QCELS, SPE or RFE analysis against the limits before it runs (``_analysis_size``).
+
+    Planning allocates none of the analysis arrays, so ``planning`` adds the
+    offer of ``_plan_only_offer``. Reanalysis does allocate them.
+    """
+    work, payload, sample_bytes, law = _analysis_size(options, count, power_span=power_span, complex_points=complex_points)
+    offer = (_plan_only_offer(options, payload, sample_bytes, "planning allocates none of these arrays")
+             if planning else None)
+    options._admit(work, payload, f"The {type(options).__name__} analysis", law, plan_only=offer)
 
 
 def _native_blocks(data, blocks):
@@ -401,10 +452,12 @@ def trajectory_labels(width):
     return "I" * width + "X", "I" * width + "Y"
 
 
-def _quantum_program(data, queries, selection, shots, route):
+def _quantum_program(data, queries, selection, shots, route, executed):
     """Build the quantum Program of the given route from the constructions chosen for its powers.
 
-    ``route`` is ``trajectory``, ``sampled`` or ``rwpe``.
+    ``route`` is ``trajectory``, ``sampled`` or ``rwpe``. ``executed`` is the
+    number of leading ``queries`` that a Run measures, all of them except for
+    RWPE with ``max_steps=0``. The Program root declares those experiments.
 
     Exact static trajectory. For a fixed unitary V, normalized phi and
     nonnegative integer powers p_1 < ... < p_K, the body prepares once
@@ -626,11 +679,14 @@ def _quantum_program(data, queries, selection, shots, route):
                            readout=ReadoutDetails(qubits=()))
             )
         experiments = tuple(experiments)
-        root = (
-            batches[0]
-            if route == "rwpe"
-            else define("schedule", Sequence(children=tuple(batches)))
-        )
+        # The root declares the whole workload. RWPE's feedback angles depend on
+        # its data, but its step count, powers and shots do not, so for shots m_j
+        # and a feedback-independent count vector c_j of experiment j the folded
+        # total is sum_j m_j c_j with sum_j m_j shots. Counts that depend on the
+        # angle stay unavailable through the symbolic feedback parameter. RWPE
+        # with max_steps=0 keeps its one template query and runs no experiment,
+        # so its sum is empty.
+        root = define("schedule", Sequence(children=tuple(batches[:executed])))
         classical = (ClassicalValue(name="readout", dtype="bits", width=1),)
     program = Program(
         root=root,
@@ -657,7 +713,8 @@ def _bind_host(plan, data, declaration):
 
     For each query (power p, ancilla phase s) the kernel returns
     Re(exp(i*s)*z_p) with z_p = sum_j w_j*exp(-i*E_j*tau*p), or
-    sum_j w_j*lambda_j**p for unitary input, from one dense
+    sum_j w_j*exp(i*p*theta_j) for unitary input, with theta_j the angle of the
+    eigenvalue lambda_j, from one dense
     eigendecomposition and the prepared spectral weights w_j
     (numerical.overlap). This is the noiseless value of the ancilla <Z> in
     method._quantum_program. Binding performs no eigensolve. The
@@ -1035,11 +1092,7 @@ def _static_estimate(plan, samples, options, *, mean_window=None):
     """
     rec = plan.reconstruction
     powers = tuple(power.power for power in rec.powers)
-    options._admit(
-        *_analysis_size(
-            options, len(samples), power_span=max(powers) - min(powers), complex_points=len(powers)
-        )
-    )
+    _admit_analysis(options, len(samples), power_span=max(powers) - min(powers), complex_points=len(powers))
     grouped = {}
     for sample in samples:
         grouped.setdefault(sample.experiment, []).append(sample)
@@ -1169,34 +1222,54 @@ def _schedule_size(config, tau):
     SPE and RFE draws are grouped, two per power for the static estimators and
     one per RWPE step.
     ``maximum`` is the largest power the schedule can contain, which
-    max_power caps: the largest QCELS power, 2*fourier_degree+1 for SPE,
-    K-1 for RFE and the last relative time 1/sigma for RWPE. Planning
+    an explicit max_power limits: the largest QCELS power, 2*fourier_degree+1
+    for SPE, K-1 for RFE and the last relative time 1/sigma for RWPE. Planning
     calls this before the method RNG draws the schedule, so an oversized
     schedule or a power above max_power is rejected before any draw or
-    construction. The size checked against the limits is 8 work units and
-    64 bytes per unit of ``frontier``, which counts the schedule entries
-    plus 2*fourier_degree+1 for SPE (the filter's maximum frequency) or K for
-    RFE (its number of frequencies).
+    construction. The size checked against the memory limit is 64 bytes per
+    unit of ``frontier``, which counts the schedule entries plus
+    2*fourier_degree+1 for SPE (the filter's maximum frequency) or K for RFE
+    (its number of frequencies). Its work grows no faster, so max_work does
+    not apply. Planning allocates the samples and the SPE filter. K only bounds
+    the RFE draws (numerical.planned_power_schedule), so RFE alone can offer an
+    explicit limit here (``_plan_only_offer``), at its analysis size, which
+    exceeds 64*(2*S + K) for every S and K. The Plan's query, power and Program
+    records are not part of this size.
     """
+    offer = None
     if config.estimator == "qcels":
         positive, maximum = numerical.qcels_schedule_size(config, tau)
         # A single positive linspace point is power 1, not the far endpoint.
         maximum = 1 if positive == 1 else maximum
         count = 2 * (1 + positive)
         frontier = count
+        law = (f"It holds 64 bytes for each of its {count} entries, two for power 0 and two for each of its {positive} "
+               "positive powers, min(num_times, P) with P = floor(max_time/tau), floor(max_time) for unitary input, or "
+               "10 without max_time. A smaller num_times, or a smaller max_time/tau while P sets that minimum, needs "
+               "less.")
     elif config.estimator == "spe":
         maximum, count = 2*config.fourier_degree+1, 2*config.num_samples
         frontier = maximum + count
+        law = (f"It allows 64 bytes for each of its {count} samples, 2*num_samples, and each of its {maximum} filter "
+               "frequencies, 2*fourier_degree + 1. Planning allocates the samples and the filter weights, so a smaller "
+               "num_samples or fourier_degree needs less.")
     elif config.estimator == "rfe":
         maximum = config.num_frequencies - 1
         count = 2 * config.num_samples
         frontier = count + config.num_frequencies
+        law = (f"It allows 64 bytes for each of its {count} samples, 2*num_samples, and each of its "
+               f"{config.num_frequencies} frequencies, num_frequencies. Planning allocates the samples, and "
+               "num_frequencies only bounds their powers here. A smaller num_samples or num_frequencies needs less.")
+        _, later, sample_bytes, _ = _analysis_size(config, count, power_span=maximum, complex_points=count // 2)
+        offer = _plan_only_offer(config, later, sample_bytes, "that is its later analysis size and planning draws "
+                                                              "powers below num_frequencies without holding them")
     else:
         maximum = 1/numerical.rwpe_scale(config.prior_std, max(0, config.max_steps-1))
         count = frontier = max(1, config.max_steps)
-    if maximum > config.max_power:
-        raise ValueError(f"selected QPE power {maximum} exceeds max_power={config.max_power}")
-    config._admit(8 * frontier, 64 * frontier)
+        law = f"It holds 64 bytes for each of its {count} steps, max(1, max_steps). A smaller max_steps needs less."
+    if exceeds(maximum, config.max_power):
+        raise ResourceLimitError(f"selected QPE power {maximum} exceeds max_power={config.max_power}")
+    config._admit(None, 64 * frontier, f"The {type(config).__name__} schedule", law, plan_only=offer)
     return count, maximum
 
 
@@ -1255,7 +1328,6 @@ def _analysis(
     settings=None,
     gaussian=None,
     processed=0,
-    controller_work=0,
     stop_reason=None,
 ):
     """Return the QPEAnalysis Result for existing samples, without new observations.
@@ -1280,7 +1352,6 @@ def _analysis(
             ("RWPE Gaussian moments require their saved controller state",) if gaussian is None else ()
         )
         if gaussian is not None:
-            config._admit(16, 256)
             estimate = numerical.rwpe_estimate(
                 gaussian.mean, gaussian.standard_deviation, tau=plan.reconstruction.tau
             )
@@ -1328,7 +1399,6 @@ def _analysis(
         complete=complete,
         gaussian=gaussian,
         processed_steps=processed,
-        controller_work=controller_work,
         stop_reason=stop_reason,
         analysis_settings=tuple(
             Binding(parameter=name, value=value if type(value) is int else Float64(value=value))
@@ -1337,12 +1407,19 @@ def _analysis(
         facts=exact_readout_sampling(plan, observations, random_draws=random_draws),
         **_exposure_fields(exposure),
     )
-    result.validate_plan(plan)
+    # Result._attach checks the Result against the Plan (validate_plan) on
+    # every route that returns it: analysis, run completion and loading.
     return result
 
 
-def _split_pauli_terms(raw, rtol):
-    """Return (identity, pruned_mass, labels, coefficients) from (label, coefficient) Pauli pairs.
+def _split_pauli_terms(rows, rtol, *, num_qubits, max_bytes):
+    """Return (identity, pruned_mass, labels, coefficients) from packed Pauli rows.
+
+    ``rows`` is ``(x, z, coefficients)``, the X and Z masks and complex
+    coefficients of a Pauli table (operators._pauli.PauliTerms), or None.
+    The split reads the arrays, and labels are decoded only for the kept
+    rows, which the reconstruction record stores and the product formula
+    applies. PauliTerms.labels checks their bytes against ``max_bytes``.
 
     - identity: the real coefficient c_I of the all-identity label. It is not
       a Pauli rotation. _quantum_program applies it on the control through
@@ -1365,21 +1442,23 @@ def _split_pauli_terms(raw, rtol):
     The cutoff pauli_pruning_rtol is registered in
     docs/ENGINEERING_CONSTANTS.md.
     """
+    from nwqlib.operators._pauli import PauliTerms
     from nwqlib.subroutines.trotterization.error_budget import upper_dropped_mass
 
-    identity, mass, labels, coefficients = 0.0, 0.0, (), ()
-    if raw:
-        if any(complex(c).imag != 0 for _, c in raw):
-            raise ValueError("imaginary Pauli coefficients are not discarded")
-        cutoff = rtol * max(abs(c) for _, c in raw)
-        identity = fsum(float(complex(c).real) for label, c in raw if not set(label) - {"I"})
-        dropped = [c for label, c in raw if set(label) - {"I"} and abs(c) <= cutoff]
-        mass = upper_dropped_mass(complex(c).real for c in dropped)
-        kept = tuple((label, float(complex(c).real)) for label, c in raw
-                     if set(label) - {"I"} and abs(c) > cutoff)
-        labels = tuple(label for label, _ in kept)
-        coefficients = tuple(coefficient for _, coefficient in kept)
-    return identity, mass, labels, coefficients
+    if rows is None or not len(rows[2]):
+        return 0.0, 0.0, (), ()
+    x, z, coefficients = rows
+    if np.any(coefficients.imag != 0):
+        raise ValueError("imaginary Pauli coefficients are not discarded")
+    values = coefficients.real
+    magnitudes = np.abs(values)
+    cutoff = rtol * float(magnitudes.max())
+    identity_rows = ~(x.any(axis=1) | z.any(axis=1))
+    small = magnitudes <= cutoff
+    kept = ~identity_rows & ~small
+    pairs = PauliTerms._snapshot(num_qubits, x[kept], z[kept], coefficients[kept]).labels(max_bytes=max_bytes)
+    return (fsum(values[identity_rows].tolist()), upper_dropped_mass(values[~identity_rows & small].tolist()),
+            tuple(label for label, _ in pairs), tuple(values[kept].tolist()))
 
 
 def _host_construction(method, data, d, queries, powers):
@@ -1394,16 +1473,24 @@ def _host_construction(method, data, d, queries, powers):
     workspace bytes.
     """
     # Size law of the host kernel for dimension D:
-    # - 8*D**3 work: the dense eigendecomposition (numerical.nominal_eigensystem).
+    # - numerical.nominal_eigensystem_work(D): the dense eigendecomposition
+    #   (numerical.nominal_eigensystem), the Schur form of a unitary.
     # - 16*D**2 work: projecting the reference on the eigenvectors.
     # - 16*D per distinct power in one invocation: the D-term spectral sum of
     #   numerical.overlap. A static batch evaluates all powers, RWPE one.
-    # - 64 work units and 64 bytes per query for the scalar outputs.
-    # - 160*D**2 + 128*D bytes: an allowance of ten D x D and eight
-    #   length-D complex128 arrays for the eigensystem, reference and weights.
+    # - 64 work units per query for the scalar outputs.
+    # - 80*D**2 bytes for the dominant arrays of the eigendecomposition
+    #   (numerical.diagonalize_hermitian): the input, its Fortran-ordered
+    #   copy, LAPACK's copy that becomes the eigenvectors, and ZHEEVD's
+    #   complex workspace of D**2 + 2*D entries and real workspace of
+    #   2*D**2 + 5*D + 1 values. The real DSYEVD route and the Schur form of
+    #   a unitary need less, and projecting the reference afterwards holds
+    #   the input, the eigenvectors and their conjugate.
     per_batch = 1 if method.estimator == "rwpe" else len(powers)
-    work = 8 * d**3 + 16 * d * d + 16 * d * per_batch + 64 * len(queries)
-    payload = 160 * d * d + 128 * d + 64 * len(queries)
+    kind = "unitary" if data.tau is None else "hamiltonian"
+    work = (numerical.nominal_eigensystem_work(d, kind=kind) + 16 * d * d + 16 * d * per_batch
+            + 64 * len(queries))
+    payload = 80 * d * d
     method._admit(work, payload)
     labels = (
         ("z",) if method.estimator == "rwpe" else tuple(f"z_{i}" for i in range(len(queries)))
@@ -1523,18 +1610,25 @@ class _QPEMethod(Method):
             terms with `abs(c) <= pauli_pruning_rtol*max abs(c)` are dropped,
             and their L1 mass is counted against each power's error
             allowance.
-        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
-            the bytes of the input and analysis arrays whose sizes are known
-            in advance.
-        max_work: Default `1_000_000_000`. Limit on the work units counted
-            for the likelihood, the grid and the choice of the controlled
-            evolutions. A work unit is one scalar operation in a count
-            derived from the problem sizes by formula and checked before the
-            computation runs, not a measured time.
-        max_power: Default `100_000`. Largest absolute evolution time in
-            units of tau, including the non-integer times of RWPE.
-        max_trotter_steps: Default `1_000_000`. Largest number of
-            product-formula steps per controlled power.
+        max_bytes: Default `None`, the physical memory of this computer.
+            Limit on the bytes of the input and analysis arrays whose sizes
+            are known in advance, and on a coarse estimate of a circuit's
+            memory, compared when the circuit is prepared and before it is
+            built. It does not bound the process memory.
+        max_work: Default `None`, no limit. Optional limit on the work
+            units of each planning stage whose work grows faster than its
+            arrays: the SVD that forms the polar factor of a dense unitary
+            input, each dense block, the pair scan of the Pauli commutation
+            table and the commutator count, the analysis of QCELS, SPE and
+            RFE, the classical routine and the dense-to-Pauli conversion.
+            Each stage is compared before it runs, and their sum is not
+            compared. A work unit is one scalar operation in a count
+            derived from the problem sizes by formula, not a measured time.
+        max_power: Default `None`, no limit. Optional positive limit on the
+            largest absolute evolution time in units of tau, including the
+            non-integer times of RWPE.
+        max_trotter_steps: Default `None`, no limit. Optional positive limit
+            on the number of product-formula steps per controlled power.
     """
 
     result_type: ClassVar[type] = QPEAnalysis
@@ -1546,28 +1640,42 @@ class _QPEMethod(Method):
     pauli_pruning_rtol: Nonnegative = 1e-12
 
     # Selected scalar/array limits, independent of Run exposure and SDK internals.
-    max_bytes: PositiveInt = DEFAULT_MAX_BYTES
-    max_work: PositiveInt = 1_000_000_000
-    max_power: PositiveInt = 100_000
-    max_trotter_steps: PositiveInt = 1_000_000
+    max_bytes: PositiveInt | None = None
+    max_work: PositiveInt | None = None
+    max_power: PositiveInt | None = None
+    max_trotter_steps: PositiveInt | None = None
 
-    def _admit(self, work, payload_bytes):
-        """Raise ValueError if work > max_work or bytes > max_bytes, naming the Method class, the exceeded limits and both sizes.
+    def _admit(self, work, payload_bytes, stage="A selected QPE numerical stage", law=None, *, plan_only=None):
+        """Raise ResourceLimitError if one stage's work > max_work (when set) or its bytes exceed the memory limit.
 
-        Callers pass the size formula of the next step before running it, so
-        a rejected step never starts.
+        ``work`` is None for a stage whose work grows no faster than its
+        bytes, so that only the byte check applies. The memory limit is
+        max_bytes, or the physical memory of this computer when max_bytes is
+        None. Callers pass the size formula of the next stage before running
+        it, so a rejected stage never starts. The message gives what the
+        stage needs beside each exceeded limit, and the value to raise an
+        explicit limit to. ``stage`` names the stage, and ``law`` states what
+        its size holds and which choices reduce it, where the Method's own
+        fields control it. ``plan_only`` is the text of ``_plan_only_offer``,
+        shown against the physical memory, where no explicit limit has been set.
         """
-        if work > self.max_work or payload_bytes > self.max_bytes:
-            name = type(self).__name__
-            exceeded = [(field, need) for field, need, cap in (
-                ("max_work", work, self.max_work), ("max_bytes", payload_bytes, self.max_bytes))
-                if need > cap]
-            raise ValueError(
-                "selected QPE numerical/schedule work exceeds "
-                + " and ".join(f"{name}.{field}" for field, _ in exceeded)
-                + f": requires work={work}, bytes={payload_bytes}; "
-                f"max_work={self.max_work}, max_bytes={self.max_bytes}. Raise "
-                + " and ".join(f"{name}.{field} to at least {need}" for field, need in exceeded) + ".")
+        memory = memory_limit(self.max_bytes)
+        name = type(self).__name__
+        needs, remedies = [], [] if law is None else [law]
+        if work is not None and exceeds(work, self.max_work):
+            needs.append(f"{work} work units, above {name}.max_work={self.max_work}")
+            remedies.append(f"Raise {name}.max_work to at least {work}.")
+        if exceeds(payload_bytes, memory):
+            if self.max_bytes is None:
+                needs.append(f"{payload_bytes} bytes, above the physical memory {memory} of this computer")
+                if plan_only is not None:
+                    remedies.append(plan_only)
+            else:
+                needs.append(f"{payload_bytes} bytes, above {name}.max_bytes={memory}")
+                remedies.append(f"Raise {name}.max_bytes to at least {payload_bytes}.")
+        if needs:
+            raise ResourceLimitError(f"{stage} needs " + " and ".join(needs) + "."
+                                     + "".join(" " + remedy for remedy in remedies))
 
     def _inputs(self, problem, output):
         """Check Hamiltonian or unitary inputs and pad only explicit finite dense matrices.
@@ -1613,14 +1721,14 @@ class _QPEMethod(Method):
             if operator.reference.representation != "dense":
                 raise ApplicabilityError("non-power-of-two QPE requires explicit small dense input")
             padded = 1 << (d - 1).bit_length()
-            # P = padded dimension. Work: 16 units per padded entry for
-            # filling, copying and checking. Bytes: an allowance of four
-            # P x P complex128 arrays, the padded matrix and the copies that
+            # P = padded dimension. Bytes: an allowance of four P x P
+            # complex128 arrays, the padded matrix and the copies that
             # ingest_dense makes for its snapshot and Hermiticity comparison.
-            self._admit(16 * padded * padded, 64 * padded * padded)
+            # Filling, copying and checking them is work of the same order.
+            self._admit(None, 64 * padded * padded)
             matrix = np.zeros((padded, padded), dtype=complex)
             matrix[:d, :d] = operator.dense_array()
-            dummy = 1.0 if unitary else fsum(float(matrix[i, i].real) / d for i in range(d))
+            dummy = 1.0 if unitary else _mean_diagonal(operator, max_bytes=self.max_bytes)
             matrix[d:, d:] = dummy * np.eye(padded - d)
             operator = ingest_dense(matrix, max_bytes=self.max_bytes)
             vector = np.zeros(padded, dtype=complex)
@@ -1682,7 +1790,7 @@ class _QPEMethod(Method):
         if execution == "classical":
             # The query-independent part of the host-kernel law that
             # _host_construction admits in full once the schedule is known.
-            self._admit(8 * d**3 + 16 * d * d, 160 * d * d + 128 * d)
+            self._admit(numerical.nominal_eigensystem_work(d, kind=kind) + 16 * d * d, 80 * d * d)
             if not _scalar_reference_available(state) and state.preparation.implementation not in (
                 "qiskit.direct",
                 "qiskit.product",
@@ -1700,61 +1808,48 @@ class _QPEMethod(Method):
             raise ApplicabilityError("product powers need a Hamiltonian")
         if backend == "dense_exact" and representation != "dense":
             raise ApplicabilityError("dense_exact requires explicit dense input")
-        if representation == "dense":
-            from nwqlib.operators.access import refuse_known_need
-
-            # The dense phases below are checked one at a time against the
-            # same limits. Their known needs combine by maximum here, before
-            # the range scan: the range scan (8D**2 work) or unitary
-            # validation (4D**3 work), both 96D**2 bytes, and a requested
-            # dense Pauli conversion (32(q+1)D**2 work, (192(q+1)+q)D**2
-            # bytes). The classical spectral core is admitted above, and
-            # explicit padding in _inputs.
-            phases = [(4 * d**3 if kind == "unitary" else 8 * d * d, 96 * d * d)]
-            if execution == "quantum" and kind == "hamiltonian" and backend == "trotter_error_budgeted":
-                phases.append((32 * (width + 1) * d * d, (192 * (width + 1) + width) * d * d))
-            refuse_known_need(type(self).__name__, "max_work", self.max_work, max(work for work, _ in phases),
-                              "selected power construction and coefficient-dependent step selection")
-            refuse_known_need(type(self).__name__, "max_bytes", self.max_bytes, max(size for _, size in phases),
-                              "selected census structure and power-construction workspace")
         # Select a positive Hamiltonian time and record its spectral-radius basis.
         # Unitary-only input already defines phase and has no Hamiltonian time scale.
-        tau, radius, tau_selection, raw = None, None, "unitary input", ()
+        # Each dense phase below is checked against the limits before it runs.
+        tau, radius, tau_selection, rows = None, None, "unitary input", None
         phase_radius = (numerical.spe_phase_radius(self.fourier_degree, self.filter_beta,
                                                  self.overlap_lower_bound)
                         if self.estimator == "spe" else pi)
+        polar = None
         if representation == "dense":
-            # Work: 4*D**3 for the product U^dagger U of the unitarity check,
-            # or 8*D**2 for the elementwise row sums of _safe_time. Bytes: an
-            # allowance of six D x D complex128 temporaries (96*D**2).
-            self._admit(4 * d**3 if kind == "unitary" else 8 * d * d, 96 * d * d)
             matrix = target.dense_array()
             if kind == "unitary":
-                from nwqlib.subroutines._matrix_checks import is_unitary
-
-                # Entrywise atol 1e-8 on U^dagger U - I, registered in
-                # docs/ENGINEERING_CONSTANTS.md (_matrix_checks.is_unitary).
-                if not is_unitary(matrix):
-                    raise ValueError("QPE unitary input violates numerical unitarity")
+                # One SVD forms the polar base that every power, gap, spectral
+                # consumer and verification uses, V = polar(A), and its
+                # singular values decide the unitarity check of A
+                # (powers.polar_base).
+                polar = polar_base(matrix, self)
             else:
+                # Bytes: the input and, on the scaled path for overflowing
+                # row sums, four D x D float64 temporaries (48*D**2). The
+                # elementwise row sums of _safe_time are work of that order.
+                self._admit(None, 48 * d * d)
                 tau, radius, tau_selection = _safe_time(
                     matrix, self.tau, phase_radius=phase_radius)
                 if execution == "quantum" and backend == "trotter_error_budgeted":
-                    # pauli_coefficients runs width block levels of O(D**2)
-                    # arithmetic and then one O(D**2) pass that checks the
-                    # coefficients and assembles their labels. The law charges
-                    # width+1 such passes at 32*D**2 work units and 192*D**2
-                    # bytes of numerical traffic each, plus width*D**2 bytes
-                    # of label text for at most D**2 Pauli words.
-                    self._admit(32 * (width + 1) * d * d, (192 * (width + 1) + width) * d * d)
-                    raw = pauli_coefficients(matrix)
+                    # The block transform runs width levels of O(D**2)
+                    # arithmetic and one O(D**2) pass that checks the
+                    # coefficients, 32*D**2 work units each. Bytes: the
+                    # input, the two active levels and their componentwise
+                    # temporaries, four D x D complex128 arrays. The masks of
+                    # the nonzero words are checked once their number is
+                    # known (pauli_coefficient_masks), and the labels of the
+                    # kept words in _split_pauli_terms.
+                    self._admit(32 * (width + 1) * d * d, 64 * d * d)
+                    rows = pauli_coefficient_masks(matrix, max_bytes=self.max_bytes)
         else:
-            raw = target.pauli_terms().labels()
-            if any(c.imag != 0 for _, c in raw):
+            table = target.pauli_terms()
+            rows = table.x, table.z, table.coefficients
+            if np.any(rows[2].imag != 0):
                 raise ValueError("Hamiltonian Pauli coefficients must be real")
             # sum_j |c_j|, identity included, bounds ||H||, so the automatic
             # time uses the same estimator-specific phase radius as _safe_time.
-            radius = fsum(abs(c.real) for _, c in raw)
+            radius = fsum(np.abs(rows[2].real).tolist())
             tau = (
                 self.tau
                 if self.tau is not None
@@ -1764,18 +1859,14 @@ class _QPEMethod(Method):
         if tau is not None and (not isfinite(tau) or tau <= 0):
             raise ValueError("Hamiltonian tau must remain positive and finite")
         identity, mass, labels, coefficients = _split_pauli_terms(
-            raw, self.pauli_pruning_rtol)
+            rows, self.pauli_pruning_rtol, num_qubits=width, max_bytes=self.max_bytes)
         # Admit estimator work before drawing the schedule, then select each
         # distinct power once for reuse across its interference quadratures.
         count, maximum = _schedule_size(self, tau)
-        self._admit(
-            *_analysis_size(
-                self,
-                count,
-                power_span=maximum,
-                complex_points=count // 2,
-            )
-        )
+        if self.estimator != "rwpe":
+            # RWPE analysis reads only its saved Gaussian moments, and each
+            # step of its loop is scalar arithmetic, so it has no size law.
+            _admit_analysis(self, count, power_span=maximum, complex_points=count // 2, planning=True)
         schedule = numerical.planned_power_schedule(self, tau, rng.method)
         if self.estimator in {"spe", "rfe"}:
             # One query per distinct drawn (power, quadrature), weighted by its
@@ -1805,11 +1896,7 @@ class _QPEMethod(Method):
         )
         if route == "trajectory" and any(type(q.power) is not int or q.power < 0 for q in queries):
             raise ValueError("an exact QPE trajectory observes only nonnegative integer powers")
-        base = None
-        if kind == "unitary":
-            # One polar base per Plan: every power, gap, spectral consumer
-            # and verification uses V = polar(A) (powers.polar_base).
-            base = ingest_dense(polar_base(matrix, self), max_bytes=self.max_bytes)
+        base = None if polar is None else ingest_dense(polar, max_bytes=self.max_bytes)
         data = _Input(target, state, tau, base)
         selection = select_powers(
             target=target,
@@ -1829,7 +1916,8 @@ class _QPEMethod(Method):
         declaration = None
         if execution == "quantum":
             construction, experiments, blocks = _quantum_program(
-                data, queries, selection, shots, route
+                data, queries, selection, shots, route,
+                self.max_steps if route == "rwpe" else len(queries),
             )
         else:
             construction, experiments, declaration = _host_construction(
@@ -1837,7 +1925,7 @@ class _QPEMethod(Method):
             )
             blocks = ()
         evaluation = selection.evaluation
-        census = selection.census_block is not None
+        census = selection.census
         reconstruction = QPEReconstruction(
             target=target.reference,
             original_target=(
@@ -1866,7 +1954,7 @@ class _QPEMethod(Method):
             bound_variant=evaluation.bound_variant if census else None,
             bound_coefficient=(evaluation.coefficient.numerator, evaluation.coefficient.denominator)
             if census else None,
-            census_block=selection.census_block,
+            nested_word_tests=evaluation.nested_word_tests if census else None,
             common_step=selection.common,
             selected_base=None if base is None else base.reference,
         )
@@ -1966,9 +2054,10 @@ class _QPEMethod(Method):
         saved run state, and its width follows Granade and Wiebe,
         arXiv:2208.04526v1, Eq. (7b), without replaying observations.
         Without saved run state, the RWPE estimate is reported as missing.
-        Its stop reason is the one the run recorded when it ended.
+        Its stop reason is the one the run recorded when it ended. The
+        Result is checked against the Plan, selection included, when it is
+        attached.
         """
-        validate_selection(plan)
         samples = _samples(plan, data.observations, data.trace, receipts=data.receipts)
         state = None
         if self.estimator == "rwpe" and data.controller is not None:
@@ -1985,7 +2074,6 @@ class _QPEMethod(Method):
             gaussian=None if state is None else RWPEGaussian(mean=state.mean,
                 standard_deviation=numerical.rwpe_scale(self.prior_std, state.processed)),
             processed=0 if state is None else state.processed,
-            controller_work=0 if state is None else state.work,
             stop_reason=data.trace.termination_reason if self.estimator == "rwpe" else None,
         )
 

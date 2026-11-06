@@ -17,9 +17,9 @@ from nwqlib._validation import finite_real
 from nwqlib.core.records import Basis, ContentID, Float64, InputRef, Rational, Record, Scope, Source, Unit
 from nwqlib.evidence.error_model import ErrorFrame, FramedFact
 from nwqlib.evidence.records import Evidence, Fact, WorkProvenance
-from .access import Count, DEFAULT_INPUT_BYTES, InputManifest, _check_bytes, _check_products
+from .access import Count, InputManifest, _check_bytes, _check_products
 from ._fermion import fermion_table, mapping_requirements
-from .inputs import ORDER, OperatorInput, _array_input, _digest, _freeze_array
+from .inputs import ORDER, OperatorInput, _array_input, _digest, _freeze_numbers
 
 SOURCE = Source(name="supplied real DF conversion", version="1",
     domain="real binary64 factor polynomial; interleaved alpha/beta modes; q0 least significant",
@@ -267,7 +267,7 @@ class FactorizedHamiltonian:
     def __init__(self, *args, **kwargs):
         raise TypeError("factor Hamiltonians require ingest_df; independent field replacement is unsupported")
 
-    def to_pauli(self, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000) -> DFConversion:
+    def to_pauli(self, *, max_bytes=None, max_products=None) -> DFConversion:
         """Convert to a Pauli operator by normal ordering and the Jordan–Wigner mapping.
 
         Each square is normal-ordered with the anticommutator,
@@ -284,10 +284,10 @@ class FactorizedHamiltonian:
         numerical error of the conversion is reported as unknown.
 
         Args:
-            max_bytes (int): Byte limit. Default 10 GB (decimal,
-                `10_000_000_000`).
-            max_products (int): Limit on the scalar products of the
-                contractions. Default `1_000_000_000`.
+            max_bytes (int | None): Byte limit. Default `None`, the physical
+                memory of this computer.
+            max_products (int | None): Limit on the scalar products of the
+                contractions. Default `None`, no limit.
 
         Returns:
             conversion (DFConversion): The Pauli operator with its record and
@@ -337,7 +337,7 @@ class FactorizedHamiltonian:
 
 
 def ingest_df(shifted_one_body, factors, *, constant_energy, orbital_basis: Basis,
-              energy_unit: Unit, source: InputRef, max_bytes=DEFAULT_INPUT_BYTES) -> FactorizedHamiltonian:
+              energy_unit: Unit, source: InputRef, max_bytes=None) -> FactorizedHamiltonian:
     """Return a FactorizedHamiltonian for `E0 I + dΓ(T) + (1/2) sum_l dΓ(V_l diag(w_l) V_l^T)**2`.
 
     Here `dΓ(A) = sum_{p,q,σ} A[p,q] a†(p,σ) a(q,σ)`, and T is the one-body
@@ -365,8 +365,8 @@ def ingest_df(shifted_one_body, factors, *, constant_energy, orbital_basis: Basi
         energy_unit (Unit): A unit with dimension `"energy"`.
         source (InputRef): An [`InputRef`][nwqlib.core.records.InputRef]
             that declares where the factors came from.
-        max_bytes (int): Byte limit. Default 10 GB (decimal,
-            `10_000_000_000`).
+        max_bytes (int | None): Byte limit. Default `None`, the physical
+            memory of this computer.
 
     Returns:
         hamiltonian (FactorizedHamiltonian): The Hamiltonian in factorized
@@ -407,7 +407,11 @@ def ingest_df(shifted_one_body, factors, *, constant_energy, orbital_basis: Basi
     _check_bytes(10*size, max_bytes, "DF factor snapshot")
     if any(a.dtype.kind not in "iuf" for a in arrays):
         raise TypeError("DF arrays must contain real numerical data")
-    frozen = tuple(_freeze_array(_array_input(a, ndim=a.ndim, max_bytes=max_bytes)) for a in arrays)
+    # A -0.0 in a later array needs its copy beside the snapshots of the earlier ones.
+    frozen, held = [], 0
+    for array in arrays:
+        frozen.append(_freeze_numbers(_array_input(array, ndim=array.ndim, max_bytes=max_bytes), max_bytes, held))
+        held += frozen[-1].nbytes
     if not all(np.isfinite(a).all() for a in frozen):
         raise ValueError("DF arrays must contain finite values")
     if not np.array_equal(frozen[0], frozen[0].T):

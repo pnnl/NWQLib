@@ -8,7 +8,7 @@ import sympy as sp
 
 from nwqlib._validation import UNIT_ROUNDOFF as U
 from nwqlib.algorithms.qhd import (
-    QHD, CubicSchedule, QuadraticSchedule, ShiftedCubicSchedule, UniformState,
+    QHD, CubicSchedule, QuadraticSchedule, ShiftedCubicSchedule, UniformState, step_blocks,
 )
 from nwqlib.algorithms.qhd import method as owner
 from nwqlib.problems import Optimization
@@ -298,7 +298,8 @@ def test_integrated_product_applies_the_whole_step_integrals(schedule, order):
             expected_norms += ([area_b / 2 * v for v in table]
                                + [area_a / (4 * h**2), area_a / (2 * h**2), area_a / (4 * h**2)]
                                + [area_b / 2 * v for v in table])
-    norms = [abs(block.angle) for step in host.plan.reconstruction.steps for block in step]
+    norms = [abs(block.angle) for step in range(len(host.plan.reconstruction.step_weights))
+             for block in step_blocks(host.plan, step)]
     assert len(norms) == len(expected_norms)
     for norm, expected_norm in zip(norms, expected_norms, strict=True):
         assert abs(norm - expected_norm) <= 64 * U * expected_norm

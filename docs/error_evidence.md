@@ -19,9 +19,7 @@ Assessment against a relative tolerance, with an explicit reference and an absol
 
 ## Exact scalar arithmetic
 
-`ExactArithmetic` checks the bit lengths of the prospective numerator and denominator before each exact `Fraction` operation. Its default `max_integer_bits=4096` limits the size of the exact integer representation. It is not a CPU, process-memory or accumulated-work guarantee. It covers every individual finite binary64 input. Composed calculations may exceed it, and they are then rejected before the operation.
-
-The check conservatively counts unreduced cross products, so a rejected calculation may have a smaller reduced result. Raising the explicit limit enlarges the supported exact-arithmetic domain. It does not change or approximate the formula. Assessing scalar evidence requires no generic policy for items, metadata, phases or cumulative allocation.
+Certificates, outward bounds and exact checks compute with `fractions.Fraction`, converted from a finite `Rational`, `Float64`, float or int by `_work.py::exact`, so a value is compared with its threshold exactly. A rounded binary64 subtraction could fall on the threshold and turn a FAIL into a PASS. The integers grow with the binary64 exponents of the inputs and with the number of inputs, and a value saved in a record follows the record's representability rule ([engineering constants](ENGINEERING_CONSTANTS.md#exact-evidence-integer-representation)). Assessing scalar evidence requires no generic policy for items, metadata, phases or cumulative allocation.
 
 ## Covariance and binary inference
 
@@ -59,7 +57,7 @@ Exact trajectory readout, in which the simulator computes the expectations witho
 
 `nwqlib.evidence.resolve_scalar_bound(coefficient, tolerance, maximum=..., ...)` solves a supplied `c/n` or `c/sqrt(n)` bound for the smallest sufficient integer on a finite positive integer domain. With `fixed_error=1/8` and `tolerance=3/8`, `c=1` needs 4 or 16 units respectively. The default is `decay="inverse"`, and `decay="inverse_sqrt"` selects the second form. Changing the tolerance computes a new scalar answer. It does not select a Plan or change a method parameter. The caller uses the answer in a new method configuration, and only when the supplied bound describes that parameter.
 
-The result keeps premises, same-unit assumptions, a conservative rational covered bound and an optional declared linear work. Missing quantities stay unresolved, false premises make the result inapplicable and unknown premises make it conditional. No result is a total-accuracy `PASS`. Framed facts must agree in metric, unit, scope and conditioning, and plain numerical inputs declare that agreement. Exact integer and rational operations use the 4096-bit limit of [Exact scalar arithmetic](#exact-scalar-arithmetic). No registry, backend or general optimizer is used.
+The result keeps premises, same-unit assumptions, a conservative rational covered bound and an optional declared linear work. Missing quantities stay unresolved, false premises make the result inapplicable and unknown premises make it conditional. No result is a total-accuracy `PASS`. Framed facts must agree in metric, unit, scope and conditioning, and plain numerical inputs declare that agreement. Exact integer and rational operations follow [Exact scalar arithmetic](#exact-scalar-arithmetic). No registry, backend or general optimizer is used.
 
 ## Code map
 
@@ -73,5 +71,5 @@ Apart from the Hoeffding inequality in binary inference (Hoeffding 1963, doi:10.
 | `CheckSpec`, `CheckDomain` | Domain checks precede status. A roundoff window is explicit, and the raw value stays in the fact. | `error_model.py::_assemble_check` |
 | `Certificate.with_verification`, `assemble_check` | A verification fact answers only the options record and `CheckSpec` that produced it. | `error_model.py::Certificate`, `verification.py::_publish` |
 | `linear_variance` | One data identity is one random variable. A missing covariance is unknown, never zero. | `statistics.py::linear_variance` |
-| `ExactArithmetic` | Every exact rational operation is checked against the integer-bit limit before it runs. | `_work.py::ExactArithmetic` |
+| `exact` | Certificates, outward bounds and exact checks compare exact rationals with their thresholds. Nonfinite input is rejected. | `_work.py::exact` |
 | Binary inference | Sample size counts distinct counted sources. Fixed-time, time-uniform and Bayesian intervals keep distinct meanings. | `binary.py` |

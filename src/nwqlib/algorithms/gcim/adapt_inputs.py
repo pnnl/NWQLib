@@ -1,18 +1,18 @@
 """Finite ADAPT input processing and the choice of commutator terms."""
 
 from dataclasses import dataclass, field
-from functools import lru_cache
-import json
 from math import fsum
 import math
 from typing import Any
 import numpy as np
 from nwqlib._numerics import stable_complex_sum, stable_vector_norm
 from nwqlib.core.records import Complex128, FrozenArray
-from nwqlib.operators.inputs import OperatorInput, ingest_pauli, pauli_table, _matvec_requirements
+from nwqlib.operators.inputs import (
+    OperatorInput, ingest_pauli, pauli_table, _distinct_pauli_input, _matvec_requirements,
+)
 from nwqlib.operators.access import _check_bytes, _check_products
 from nwqlib.operators._fermion import mapping_requirements
-from nwqlib.operators._pauli import combine_terms
+from nwqlib.operators._pauli import PauliTerms, combine_terms
 from nwqlib.subroutines.fermionic_pool import (
     FermionicGenerator,
     enumerate_spin_adapted_gsd_pool,
@@ -25,8 +25,97 @@ from nwqlib.subroutines.fermionic_pool import (
     _reference_pool_size,
 )
 from .adapt_actions import build_action_tables
-from .adapt_records import AdaptPoolMember, AdaptSymmetry, PROCESSING_SOURCE
-from .fixed_basis import PauliArrays, PauliTerm
+from .adapt_records import AdaptPoolMember, AdaptSymmetry, PROCESSING_SOURCE, screen_labels
+from nwqlib.algorithms._eigen_inputs import _mean_diagonal
+from nwqlib.algorithms.protocol import ApplicabilityError
+from .fixed_basis import PauliArrays, PauliTerm, _offset_free_requirements
+
+# Default thresholds of ADAPT as multiples of the energy scale Omega (``energy_scale``). Heuristic choices
+# registered in docs/ENGINEERING_CONSTANTS.md. Through Omega each default has the energy unit of H.
+DEFAULT_PAULI_CUTOFF_PER_SCALE = 1e-14
+DEFAULT_GRADIENT_FLOOR_PER_SCALE = 1e-8
+DEFAULT_ENERGY_CHANGE_PER_SCALE = 1e-6
+
+
+def energy_scale(operator, *, max_bytes, max_products):
+    """Return ``Omega = ||H - c I||_F / sqrt(d)`` with ``c = tr(H)/d``, the scale of ADAPT's default thresholds.
+
+    ``operator`` is the Problem's Hermitian H on its original dimension d.
+    Omega is a defined scale for a default heuristic. It is neither an
+    energy-error certificate nor an optimal stopping tolerance.
+
+    On the full qubit space d = 2**q, Pauli words satisfy
+    ``tr(P^dagger Q) = d delta_PQ``, so a sum ``H = sum_P c_P P`` with duplicate
+    words combined has ``||H - c I||_F**2 = d sum_{P != I} |c_P|**2`` and
+    ``Omega = sqrt(sum_{P != I} |c_P|**2)``, an O(J) scan of its J coefficients.
+    With k stored diagonal entries, whose index set is D, a dense matrix
+    (k = d) or canonical CSR/CSC matrix has
+
+        d Omega**2 = sum_{i != j} |H_ij|**2 + sum_{i in D} |H_ii - c|**2 + (d - k) |c|**2,
+
+    an O(d**2) or O(d + nnz) scan: the formula is linear in the stored entries,
+    and the line pointers and the length-d array of ``_mean_diagonal`` add the
+    d. The last term is counted by its multiplicity, with no zeros added to
+    the sum and no identity formed. The parts are combined by scaled norms (BLAS NRM2 and ``hypot``), because ``tr(H**2)/d - c**2``
+    would cancel. No matrix is densified, and no Pauli decomposition, eig or
+    SVD is made. ``_mean_diagonal`` returns a constant diagonal itself, so H = cI
+    gives Omega = 0 exactly. Omega = 0 holds if and only if H = cI.
+
+    For ``H' = aH + bI`` with a > 0, ``c' = ac + b`` and ``Omega' = a Omega``.
+    The Pauli, dense and sparse forms of one operator have the same exact
+    Omega, up to rounding in each scan. Equal Omega does not give equal
+    processed Hamiltonians, because the Pauli path prunes and the classical
+    matrix path does not. With J nonidentity coefficients,
+    ``max|c_P| <= Omega <= sqrt(J) max|c_P|`` and ``Omega <= sum|c_P|``, so
+    Omega can grow with the size of the system: J equal orthogonal terms give
+    ``Omega = |c| sqrt(J)``.
+
+    Mean padding to dimension D > d (``eigen_operator``) keeps
+    ``||H_pad - c I||_F = ||H - c I||_F``, so the padded operator with D in
+    place of d would give a smaller value. This function reads the original
+    operator, and padded Pauli coefficients would need
+    ``Omega = sqrt((D/d) sum_{P != I} |c_P|**2)``. That relation is specific
+    to mean padding.
+
+    The known work and scratch are checked before the scan, which each
+    planning makes once. One work unit is one visited entry in one pass. The
+    Pauli scan tests the two mask words of each row and makes three passes over
+    the rows to combine the tests, select the coefficients and take their norm,
+    with three mask bytes and one 16-byte coefficient copy per row. The dense
+    scan reads d**2 entries and makes seven passes over length-d arrays, with
+    up to 32d bytes for row norms and diagonal arrays. The sparse scan makes
+    seven passes over its z stored entries and nine over the lines, with I
+    bytes of line index and two mask bytes per entry, an off-diagonal copy of up
+    to 16z and up to 48d bytes for diagonal arrays.
+    """
+    d = operator.basis.dimension
+    if "pauli_terms" in operator.manifest.access:
+        table = operator.pauli_terms()
+        _check_products(len(table) * (2 * table.x.shape[1] + 3), max_products)
+        _check_bytes(19 * len(table), max_bytes, "ADAPT energy scale")
+        return stable_vector_norm(table.coefficients[table.x.any(axis=1) | table.z.any(axis=1)])
+    if operator.reference.representation == "dense":
+        matrix = operator.dense_array()
+        _check_products(d * d + 7 * d, max_products)
+        _check_bytes(32 * d, max_bytes, "ADAPT energy scale")
+        # Row slices need no copy of H and no second array for H - cI.
+        off_diagonal = stable_vector_norm(np.fromiter(
+            (math.hypot(stable_vector_norm(matrix[i, :i]), stable_vector_norm(matrix[i, i + 1:])) for i in range(d)),
+            dtype=np.float64, count=d))
+        stored = matrix.diagonal().real
+    else:
+        data, indices, indptr = operator.sparse_entries(max_bytes=max_bytes)
+        _check_products(7 * len(data) + 9 * d, max_products)
+        _check_bytes((indices.dtype.itemsize + 18) * len(data) + 48 * d, max_bytes, "ADAPT energy scale")
+        lines = np.repeat(np.arange(d, dtype=indices.dtype), np.diff(indptr))
+        on_diagonal = indices == lines
+        # ponytail: this copy doubles the stored values for the length of the scan, as _shifted_sparse does.
+        # Scan tiles of lines if a sparse matrix near the memory limit needs this path.
+        off_diagonal = stable_vector_norm(data[~on_diagonal])
+        stored = data[on_diagonal].real
+    mean = _mean_diagonal(operator, max_bytes=max_bytes)
+    parts = (off_diagonal, stable_vector_norm(stored - mean), math.sqrt(d - len(stored)) * abs(mean))
+    return stable_vector_norm(np.array(parts)) / math.sqrt(d)
 
 
 def _symmetry_evidence(
@@ -120,7 +209,16 @@ def _project_terms(terms, *, antihermitian, tolerance, qubits):
     part. Terms that vanish after projection are dropped.
     """
     terms = combine_terms(terms)
-    original = np.array([c for _, c in terms], dtype=complex)
+    processed, evidence = _project_coefficients(
+        np.array([c for _, c in terms], dtype=complex), antihermitian=antihermitian, tolerance=tolerance,
+        qubits=qubits)
+    return tuple(
+        (p, complex(c)) for (p, _), c in zip(terms, processed, strict=True) if c != 0
+    ), evidence
+
+
+def _project_coefficients(original, *, antihermitian, tolerance, qubits):
+    """Return the projected coefficients of distinct Pauli words and the evidence of ``_project_terms``."""
     processed = 1j * original.imag if antihermitian else original.real.astype(complex)
     evidence = _symmetry_evidence(
         original,
@@ -130,9 +228,7 @@ def _project_terms(terms, *, antihermitian, tolerance, qubits):
         exact_symmetry=bool(np.array_equal(original, processed)),
         pauli_qubits=qubits,
     )
-    return tuple(
-        (p, complex(c)) for (p, _), c in zip(terms, processed, strict=True) if c != 0
-    ), evidence
+    return processed, evidence
 
 
 @dataclass(frozen=True)
@@ -179,225 +275,6 @@ class AdaptInputs:
         else:
             rows = ()
         object.__setattr__(self, "nonidentity", rows)
-
-
-def array_record_bytes(raw_lengths, header_bounds, *, fixed_json,
-                       index_entries=0, label_count=0, group_count=0,
-                       other_live=0):
-    """Check the bytes of the live arrays, their immutable copies, the group indices and the chosen content-hash encoding of the ADAPT reconstruction.
-
-    Each array contributes its dtype-dependent byte length and dtype/shape
-    header, including empty arrays. Fields stored as individual Pauli records
-    are counted separately and enter here as other live bytes.
-
-    Let ``R_j`` be the rows of array table j and ``b_j`` its raw bytes per
-    row, ``B_j = R_j*b_j`` and ``B = sum_j B_j``. With binary arrays encoded
-    as base64 strings (``FrozenArray``'s JSON form), at most one source or
-    working array and one immutable copy, and ordinary record serialization
-    holding the base64 strings, complete JSON text and UTF-8 bytes,
-
-        J = J_fixed + sum_j [4 ceil(B_j/3) + H_j] + J_indices,
-        B_record <= B_other_live + 2B + 4J + 16I,
-
-    where ``J_fixed`` includes the enclosing reconstruction's remaining
-    JSON fields and collection delimiters, including empty collections,
-    as well as each array-bearing table record's fixed fields.
-    ``H_j`` is an upper bound for the JSON of that array field's dtype, shape
-    and key, and ``J_indices <= I*(digits(max(U-1,0))+1)+2G+2``
-    for ``I`` nonnegative indices into ``U`` labels stored in ``G`` nested
-    tuples. Two raw copies contribute ``2B``. Three simultaneous
-    JSON/base64 text forms and one transient encoding form are covered by
-    ``4J``. The ``16I`` term covers two logical index sequences while
-    immutable tuples are formed. The bound does not include Python object
-    headers, so it is not a ``tracemalloc`` or RSS bound. Hashing canonical
-    bytes incrementally, transferring an already immutable array, or
-    streaming serialization can lower this peak, but only when the code that
-    does so establishes the smaller schedule. A hex codec
-    replaces the base64 length by ``2B_j``.
-    """
-    raw = sum(raw_lengths)
-    digits = len(str(max(label_count - 1, 0)))
-    indices_json = index_entries * (digits + 1) + 2 * group_count + 2
-    encoded = fixed_json + indices_json + sum(
-        4 * ((n + 2) // 3) + h
-        for n, h in zip(raw_lengths, header_bounds, strict=True)
-    )
-    return other_live + 2 * raw + 4 * encoded + 16 * index_entries
-
-
-def _array_header_bytes(key, dtype, shape):
-    """Return the JSON length of an array field's key, dtype and shape with empty data.
-
-    ``json.dumps`` writes the separators with spaces, so this is at least
-    the compact record form, whose data string adds exactly the base64 length.
-    """
-    return len(json.dumps({key: {"dtype": dtype, "shape": list(shape), "data": ""}}))
-
-
-@lru_cache(maxsize=None)
-def _commutator_record_fixed_json(num_qubits):
-    """Return the fixed JSON of one ``[H, A_i]`` table record beyond its two array headers.
-
-    This is one table's share of ``J_fixed`` in ``array_record_bytes``, the
-    fixed JSON as written, including empty tables. It holds the member's
-    ``commutator`` key and the ``PauliArrays`` record's own fields (schema
-    version, parent content hash and the sha256 content hash), measured on
-    the empty table with the same spaced ``json.dumps`` as
-    ``_array_header_bytes``. These fields do not depend on the row count. The
-    two array headers, which do, are ``_array_header_bytes`` at the shapes of
-    the table.
-    """
-    empty = PauliArrays.from_rows((), num_qubits)
-    return len(json.dumps({"commutator": empty.model_dump(mode="json")})) - (
-        _array_header_bytes("labels", "<i8", (0, num_qubits))
-        + _array_header_bytes("coefficients", "<f8", (0,))
-    )
-
-
-def _commutator_array_charges(tables, num_qubits):
-    """Return the raw lengths, header bounds and fixed JSON of ``[H, A_i]`` tables with the given row counts.
-
-    Each table is an int64 ``(rows, q)`` letter-code array and a float64
-    ``(rows,)`` coefficient array, ``8q + 8`` raw bytes per row
-    (``PauliArrays``), and its record adds
-    ``_commutator_record_fixed_json(q)``.
-    """
-    raw, headers = [], []
-    for rows in tables:
-        raw += [8 * rows * num_qubits, 8 * rows]
-        headers += [
-            _array_header_bytes("labels", "<i8", (rows, num_qubits)),
-            _array_header_bytes("coefficients", "<f8", (rows,)),
-        ]
-    return raw, headers, len(tables) * _commutator_record_fixed_json(num_qubits)
-
-
-def label_cache_bytes(q, row_counts, pool_size, energy_count, max_selections,
-                      *, sampled):
-    """Return the qualified object-memory allowance of one Plan's decoded ADAPT label cache.
-
-    The cache (``adapt_records.label_cache``) holds the rows decoded by
-    ``commutator_rows`` (new strings, floats, row tuples, member tuples and
-    an outer tuple), the sorted ``screen_labels`` and ``energy_labels``
-    tuples, which reference those strings, and the active-screen entries
-    (a ``frozenset(removed)`` key, a value pair, a sorted label tuple and a
-    label frozenset). It is never serialized, so no base64 or JSON
-    multiplier applies, and it is added once, as other live storage, to the
-    reconstruction's array and encoding bytes (``array_record_bytes``).
-    This is a qualified CPython object-memory allowance on the checked
-    64-bit CPython 3.12.14 build, not a bound on all Python heap allocations
-    or process RSS.
-
-    Dimensions: q Pauli characters, K = ``pool_size`` members, R and r_max
-    the sum and maximum of ``row_counts``, J = min(max_selections, K), and
-    L = ``energy_count`` nonidentity Hamiltonian labels. R bounds the
-    distinct commutator labels even when several rows share a label. The
-    active-cache capacity A is J + 1 for exact plans and K + 1 for sampled
-    plans: clearing before insertion only when the stored count exceeds
-    the limit permits limit + 1 entries.
-
-    The engineering allowances are ``T(n) = 64 + 8n`` for a tuple,
-    ``H(n) = 256 + 128n`` for a set, frozenset or active dictionary, and
-    ``I_K = 32 + 4 ceil(max(1, bit_length(K))/30)`` for a selected pool
-    index. A decoded row costs q + 168 bytes, including its label, float,
-    row tuple and its entry in the member tuple. The kept cache and construction
-    allowances are
-
-        B_kept = 4096 + T(K) + 64K + (q + 168)R + T(R) + T(L) + H(A)
-                 + A[T(R) + H(R) + H(J) + T(2) + J I_K],
-        X_decode = r_max(8q + 128) + 16q,
-        X_build = 320R + 32L + (160 + I_K)J + 128A,
-        B_cache = B_kept + 65536 + max(X_decode, X_build).
-
-    ``X_decode`` covers ``PauliArrays.rows()``'s member-sized ``tolist``
-    lists, builder capacity and a label join. ``X_build`` covers set
-    formation, sorting, tuple and frozenset construction, key construction
-    and dictionary growth. The 65,536 bytes cover fixed Python and NumPy
-    call and iterator bookkeeping. docs/ENGINEERING_CONSTANTS.md lists this
-    allowance and its revisit condition.
-    """
-    counts = tuple(row_counts)
-    K, R, rmax = pool_size, sum(counts), max(counts, default=0)
-    J = min(max_selections, K)
-    A = (K if sampled else J) + 1
-    if min(q, K, energy_count, max_selections, *counts) < 0 or q < 1 or len(counts) > K:
-        raise ValueError("invalid cache dimensions")
-    # CPython 3.12, 64-bit engineering envelopes, including variable headers.
-    integer = 32 + 4 * ((max(1, K.bit_length()) + 29) // 30)
-    tup = lambda n: 64 + 8 * n  # noqa: E731
-    hashed = lambda n: 256 + 128 * n  # noqa: E731
-    kept = (4096 + tup(K) + 64 * K + (q + 168) * R
-            + tup(R) + tup(energy_count) + hashed(A)
-            + A * (tup(R) + hashed(R) + hashed(J) + tup(2) + J * integer))
-    decode = rmax * (8 * q + 128) + 16 * q
-    build = 320 * R + 32 * energy_count + (160 + integer) * J + 128 * A
-    return kept + 65536 + max(decode, build)
-
-
-def restored_cache_reservation(rec, *, sampled):
-    """Return the count-based byte allowance that a restored quantum Plan checks before its first cache decode.
-
-    It is the commutator tables' array and encoding bytes
-    (``array_record_bytes`` with the table records' fixed JSON) plus the
-    decoded label cache (``label_cache_bytes``) as other live storage, and
-    the group-index bytes of a sampled Plan. It is reconstructed from the
-    stored commutator row shapes, members and group sizes of ``rec``, with
-    no rerun of commutators, chemistry or selection. The pool-member,
-    Pauli-row and reconstruction-metadata allowances that preparation also
-    counted are not reconstructed here.
-    """
-    q = rec.num_qubits
-    kept_rows = [len(member.commutator.coefficients.array) for member in rec.pool
-                 if member.commutator is not None]
-    raw, headers, tables = _commutator_array_charges(kept_rows, q)
-    cache = label_cache_bytes(
-        q, kept_rows, len(rec.pool), sum(t.label != "I" * q for t in rec.terms),
-        rec.max_selections, sampled=sampled,
-    )
-    total = array_record_bytes(raw, headers, fixed_json=tables, other_live=cache)
-    for grouped in (rec.groups, rec.energy_groups):
-        total += array_record_bytes(
-            (), (), fixed_json=0, index_entries=sum(map(len, grouped)),
-            label_count=sum(map(len, grouped)), group_count=len(grouped),
-        )
-    return total
-
-
-def _reconstruction_fixed_json(fields, *, pool_size, term_count):
-    """Bound the fresh reconstruction's JSON outside pool, term and group payloads.
-
-    ``fields`` contains its remaining constructor fields. Record
-    metadata is serialized once, including arbitrary supplied text. The
-    empty lists supply their keys and brackets. Spaced list separators and
-    the Record identity wrapper are added without visiting their payloads.
-    ASCII escaping bounds both the compact export and its UTF-8 encoding.
-    """
-    from .adapt_records import AdaptReconstruction
-
-    shell = {
-        **fields,
-        "schema_version": AdaptReconstruction.model_fields["schema_version"].default,
-        "parent_id": None,
-        "content_id": "sha256:" + "0" * 64,
-        "pool": [],
-        "terms": [],
-        "groups": [],
-        "energy_groups": [],
-    }
-    encoder = json.JSONEncoder(
-        ensure_ascii=True,
-        allow_nan=False,
-        default=lambda record: record.model_dump(mode="json"),
-    )
-    shell_chars = sum(len(part) for part in encoder.iterencode(shell))
-    wrapper = {
-        "identity_encoding": "nwqlib.record/1",
-        "type": f"{AdaptReconstruction.__module__}.{AdaptReconstruction.__qualname__}",
-        "fields": {},
-    }
-    wrapper_chars = sum(len(part) for part in encoder.iterencode(wrapper)) - 2
-    separators = 2 * (max(pool_size - 1, 0) + max(term_count - 1, 0))
-    return shell_chars + wrapper_chars + separators
 
 
 # Candidate Pauli pairs tested per commutator tile. An engineering choice of
@@ -485,7 +362,7 @@ def _packed_to_pauli_arrays(x, z, coefficients, q, *, tile=1024):
                        coefficients=FrozenArray(sorted_coefficients))
 
 
-def _commutator_arrays(h, a, *, cutoff, ledger, held, max_bytes, max_products, admit_rows):
+def _commutator_arrays(h, a, *, cutoff, ledger, held, max_bytes, max_products):
     """Return ``[H, A]`` as ``PauliArrays`` and the sum of its dropped coefficient magnitudes, from packed tables.
 
     For canonical Pauli strings ``P_a P_h = (-1)**s_ha P_h P_a``, hence
@@ -533,13 +410,11 @@ def _commutator_arrays(h, a, *, cutoff, ledger, held, max_bytes, max_products, a
     complex coefficients, their gathered and output copies, sort, inverse
     and first-position indices, head masks and group order. ``ledger`` is
     the one running work total shared by all pool members, a one-element
-    list. ``admit_rows(J)`` runs the caller's record check for the J output
-    rows before their conversion. Each pair tile is checked before it is
-    tested, the bytes of each tile's worst-case surviving products are set
-    aside before they are appended, and the sort and output stages are
-    checked once C is known. ``held`` is the byte count already in memory,
-    including earlier output tables ``8J_i(q+1)``. The packed surviving
-    products then convert to the output int64 code table
+    list. Each pair tile is checked before it is tested, the bytes of each
+    tile's worst-case surviving products are set aside before they are
+    appended, and the sort and output stages are checked once C is known.
+    ``held`` is the bytes of the earlier output tables ``8J_i(q+1)``. The
+    packed surviving products then convert to the output int64 code table
     (``pauli_array_conversion_requirements``), with the conversion peak
     ``B_conv`` added under the same maximum.
     """
@@ -613,16 +488,29 @@ def _commutator_arrays(h, a, *, cutoff, ledger, held, max_bytes, max_products, a
         starts = np.flatnonzero(heads)
     else:
         starts = np.zeros(0, dtype=np.intp)
-    ends = np.append(starts[1:], survivors)
-    values = [stable_complex_sum(c.real[s:e], c.imag[s:e]) for s, e in zip(starts.tolist(), ends.tolist())]
-    if any(value.imag != 0 for value in values):
+    # stable_complex_sum per key. A sum of one or two components is one
+    # correctly rounded addition, the value fsum returns (+0.0 for a zero
+    # sum), so only longer runs call fsum. Every overflow raises its error.
+    sizes = np.diff(np.append(starts, survivors))
+    real, imag = c.real[starts] + 0.0, c.imag[starts] + 0.0
+    pairs = sizes == 2
+    with np.errstate(over="ignore", invalid="ignore"):
+        real[pairs] = (c.real[starts[pairs]] + c.real[starts[pairs] + 1]) + 0.0
+        imag[pairs] = (c.imag[starts[pairs]] + c.imag[starts[pairs] + 1]) + 0.0
+    if not (np.isfinite(real).all() and np.isfinite(imag).all()):
+        raise ValueError("coefficient accumulation overflowed or is nonfinite; coefficients must be finite")
+    for index in np.flatnonzero(sizes > 2).tolist():
+        start, stop = int(starts[index]), int(starts[index] + sizes[index])
+        value = stable_complex_sum(c.real[start:stop], c.imag[start:stop])
+        real[index], imag[index] = value.real, value.imag
+    if np.any(imag != 0):
         raise ValueError("[H,A] must be Hermitian after coalescing its surviving pairs")
-    real = np.array([value.real for value in values], dtype=np.float64)
-    removed = fsum(abs(value) for value in real.tolist() if abs(value) <= cutoff)
-    kept = np.abs(real) > cutoff
+    magnitude = np.abs(real)
+    # fsum is correctly rounded, so the order of the removed magnitudes does not matter.
+    removed = fsum(magnitude[magnitude <= cutoff].tolist())
+    kept = magnitude > cutoff
     x, z, real = x[starts][kept], z[starts][kept], real[kept]
-    del c, starts, ends, values, kept
-    admit_rows(len(real))
+    del c, starts, sizes, pairs, imag, magnitude, kept
     work, peak, _ = pauli_array_conversion_requirements(len(real), q)
     charge(work)
     reserve(peak)
@@ -641,9 +529,9 @@ def _pool_enumeration_requirements(candidates, num_qubits):
     anti-Hermitian pair on one set has 8 Pauli rows.
 
     Bytes. The enumerated pool stays in memory while each member is checked,
-    so each candidate is counted with what ``_snapshot_generator`` counts for
-    the largest member, ``q + 64`` per Pauli row, ``48 + 48 * 4 = 240`` per
-    four-operator string, and 206 for the family name and index tuples
+    so each candidate is counted at the size of the largest member, ``q + 64``
+    per Pauli row, ``48 + 48 * 4 = 240`` per four-operator string, and 206
+    for the family name and index tuples
     (64 plus the at most 14 characters of a built-in family name, and 16
     per index of at most four spatial and four spin-orbital indices). The
     mapping arrays of the one member being built, the byte term of
@@ -665,31 +553,22 @@ def _pool_enumeration_requirements(candidates, num_qubits):
     return candidates * member_bytes + mapping_bytes, candidates * (mapping_work + 168)
 
 
-def _generator_record_bytes(generators):
-    """Return the generator-record term of the byte formula of the ADAPT reconstruction record.
-
-    Planning (``prepare_adapt_inputs``) and the classical archive reload
-    (``adapt_actions.restored_record_allowance``) both count this term.
-    """
-    return 3 * sum(2048 + 128 * len(generator.fermion_terms)
-                   + 16 * sum(len(ops) for _, ops in generator.fermion_terms)
-                   + 16 * (len(generator.spatial_indices) + len(generator.spin_orbital_indices or ()))
-                   for generator in generators)
-
-
-def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
-                         original_dimension, original_hamiltonian, reference_requirements):
+def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots, original_dimension, cutoff):
     """Check the finite generator pool and choose the Hamiltonian and commutator terms to measure.
 
     A named pool is enumerated only after its candidate count passes the byte
     and product limits. Every generator is projected onto its anti-Hermitian
     part within ``input_symmetry_tolerance`` and must agree with its stored
     fermion terms. A Hamiltonian with Pauli access, which every quantum plan
-    has, must have exactly real Pauli coefficients. Coefficients at or below
-    ``pauli_coefficient_cutoff`` are removed, and the sum of their absolute
-    values is recorded. Only a quantum plan of the default growth forms each
-    ``[H, A_i]``, whose labels its screening queries measure, and only a
-    quantum plan with ``shots`` forms the QWC measurement groups. A
+    has, must have exactly real Pauli coefficients. ``cutoff`` is the
+    effective ``pauli_coefficient_cutoff``, resolved once by ``ADAPT.plan``
+    from the original Problem. Nonidentity coefficients at or below it are
+    removed, and the sum of their absolute values is recorded. The identity
+    coefficient stays whole, because removing it when it crosses the cutoff
+    would break ``E(H + bI) = E(H) + b``. Only a quantum plan of the default
+    growth forms each ``[H, A_i]``, whose labels its screening queries measure
+    and whose coefficients the same ``cutoff`` prunes, and only a quantum plan
+    with ``shots`` forms the QWC measurement groups. A
     classical plan screens with generator actions on the state and forms
     neither, and ``BoundedRitzGrowth`` screens no gradient and forms no
     commutator. A classical plan with
@@ -703,6 +582,11 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
         The ``AdaptInputs`` bound to the Plan.
     """
     q = reference.basis.dimension.bit_length() - 1
+    # hamiltonian_action_work counts the full-state action, which reads each
+    # Pauli mask as one 64-bit word (operators.inputs._matvec_requirements).
+    if q > 64:
+        raise ApplicabilityError(f"ADAPT supports at most 64 qubits because its Hamiltonian action uses single-word "
+                                 f"Pauli masks, and this input has {q}. No ADAPT option changes this width")
     pool = method.pool
     growth = method.basis_growth
     # Bound built-in pool enumeration before expanding orbital-index combinations.
@@ -737,8 +621,6 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
         pool = families[pool](n if pool == "spin_adapted_sd" else reference._physical)
     if type(pool) is not tuple or not pool:
         raise ValueError("ADAPT needs a nonempty finite pool")
-    if len(pool) > method.max_pool_size:
-        raise ValueError(f"ADAPT pool has {len(pool)} members, more than max_pool_size={method.max_pool_size}")
     generators = []
     members = []
     qualifiers = []
@@ -750,24 +632,38 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
                 raise ValueError("custom generators must use the original Eigenproblem dimension")
             original = generator.reference
             if "pauli_terms" in generator.manifest.access:
-                rows = generator.pauli_terms().labels(max_bytes=method.max_bytes)
+                table = generator.pauli_terms()
+                x, z, values = table.x, table.z, table.coefficients
             else:
-                from nwqlib.operators._pauli import pauli_coefficients
-
                 from nwqlib.algorithms._eigen_inputs import dense_pauli_matrix
+                from nwqlib.operators._pauli import pauli_coefficient_masks
 
                 matrix = dense_pauli_matrix(
                     generator,
                     input_conversion=method.input_conversion,
-                    max_conversion_work=method.max_conversion_work,
                     max_bytes=method.max_bytes,
                 )
-                rows = pauli_coefficients(matrix)
+                x, z, values = pauli_coefficient_masks(matrix, max_bytes=method.max_bytes)
+                del matrix
+            # The words of a Pauli table or a block transform are distinct, so
+            # the projection reads the arrays and the processed operator takes
+            # the kept rows without coalescing. Labels are decoded once, for
+            # the kept words that the member and generator records store.
+            values, evidence = _project_coefficients(
+                values, antihermitian=True, tolerance=method.input_symmetry_tolerance, qubits=q)
+            kept = values != 0
+            x, z, values = x[kept], z[kept], values[kept]
+            # The kept rows, their zero-signed copy and the operator's copy.
+            _check_bytes(len(x) * (2 * (16 * x.shape[1] + 16) + 16), method.max_bytes,
+                         "ADAPT generator Pauli operator")
+            # i*Im(c) has a negative-zero real part for Im(c) < 0. Adding +0.0
+            # gives the positive zero that summing identical words produces,
+            # so the operator has the content hash of ingesting these rows.
+            processed = _distinct_pauli_input(q, x, z, values + 0.0)
+            rows = PauliTerms._snapshot(q, x, z, values).labels(max_bytes=method.max_bytes)
             family, spatial, spin, fermions = "custom", (), None, ()
         elif isinstance(generator, FermionicGenerator):
-            generator = _snapshot_generator(
-                generator, max_bytes=method.max_bytes, max_products=method.max_products
-            )
+            generator = _snapshot_generator(generator)
             if (
                 generator.num_qubits != q
                 or 1 << q != original_dimension
@@ -783,16 +679,17 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
                 generator.spin_orbital_indices,
                 generator.fermion_terms,
             )
-            original = _generator_reference(
-                generator, max_bytes=method.max_bytes, max_products=method.max_products
+            original = _generator_reference(generator)
+            rows, evidence = _project_terms(
+                rows, antihermitian=True, tolerance=method.input_symmetry_tolerance, qubits=q
             )
+            processed = ingest_pauli(rows, num_qubits=q, max_bytes=method.max_bytes)
         else:
             raise TypeError("pool entries must be Pauli OperatorInput or FermionicGenerator")
-        rows, evidence = _project_terms(
-            rows, antihermitian=True, tolerance=method.input_symmetry_tolerance, qubits=q
-        )
-        processed = ingest_pauli(rows, num_qubits=q, max_bytes=method.max_bytes)
-        if fermions:
+        # A named pool's members come from fermionic_pool._generator, whose
+        # Pauli terms are the Jordan-Wigner image of the same fermion terms,
+        # so only a supplied generator is mapped again.
+        if fermions and not isinstance(method.pool, str):
             expected = _ladder_expansion_terms(
                 fermions, q, mapping="jw", max_bytes=method.max_bytes
             )
@@ -827,55 +724,6 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
         qualifiers.append(
             f"pool {index}: symmetry correction applied={evidence['correction_applied']}"
         )
-    # The reconstruction records the Hamiltonian terms and every member's
-    # terms as Pauli rows. Each of these is charged the identity JSON share
-    # of operators/inputs.py::_pauli_identity_bytes in a running total,
-    # because Pauli ingestion admits one operator at a time. Each member's
-    # other fields are charged three copies of the sum of 2048 bytes for its
-    # input identities, symmetry evidence and processing note (at most about
-    # 1.5 KB of JSON with 24-character floats), 128 bytes per fermionic term
-    # and 16 per ladder entry or orbital index. The reconstruction's own
-    # fields are measured once for each route, with four JSON copies,
-    # including supplied preparation metadata. The pool is charged before the
-    # classical matrix route returns. A quantum plan's commutator tables and
-    # a sampled plan's group indices are arrays and index tuples, charged by
-    # array_record_bytes with these Pauli-row charges as its other live
-    # bytes and the reconstruction and table records' own fields as fixed JSON
-    # (_reconstruction_fixed_json and _commutator_record_fixed_json), each table before its
-    # record is built.
-    # The longest chain, which also bounds the active screening cache.
-    selections = min(method.max_iterations, len(generators)) if growth is None else growth.max_chain_length
-
-    def reconstruction_json(processed, term_count, work, dropped, notes, symmetry,
-                            *, shift=0.0, offset=(0, 0)):
-        return _reconstruction_fixed_json(
-            {
-                "reference": reference.preparation,
-                "original_hamiltonian": original_hamiltonian,
-                "processed_hamiltonian": processed.reference,
-                "pool_name": method.pool if isinstance(method.pool, str) else "explicit",
-                "max_selections": selections,
-                "num_qubits": q,
-                "hamiltonian_action_work": work,
-                "hamiltonian_dropped_l1": dropped,
-                "processing": notes,
-                "hamiltonian_symmetry": symmetry,
-                "processing_source": PROCESSING_SOURCE,
-                "reference_action_bytes": reference_requirements[0],
-                "reference_action_work": reference_requirements[1],
-                "host_identity_shift": shift,
-                "offset_free_action_bytes": offset[0],
-                "offset_free_action_work": offset[1],
-            },
-            pool_size=len(generators),
-            term_count=term_count,
-        )
-
-    from nwqlib.operators.inputs import _pauli_identity_bytes
-    share = _pauli_identity_bytes(q)
-    fixed = _generator_record_bytes(generators)
-    records = sum(len(generator.pauli_terms) for generator in generators)
-    _check_bytes(fixed + records * share, method.max_bytes, "ADAPT reconstruction records")
     # The classical matrix route can apply the original Hermitian operator
     # directly, without paying for or silently pruning a Pauli decomposition.
     if "pauli_terms" not in hamiltonian.manifest.access:
@@ -889,8 +737,6 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
         evidence = _symmetry_evidence(
             original, None, tolerance=0.0, target="Hermitian", exact_symmetry=True
         )
-        from .fixed_basis import _mean_diagonal, _offset_free_requirements
-
         shift = _mean_diagonal(hamiltonian, max_bytes=method.max_bytes)
         offset = _offset_free_requirements(hamiltonian, 1, shift)
         work = _matvec_requirements(hamiltonian)[2]
@@ -898,11 +744,6 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
         notes = tuple(qualifiers) + (
             "exact original Hermitian matrix; no Pauli decomposition or pruning",
         )
-        record_fixed = reconstruction_json(
-            hamiltonian, 0, work, 0.0, notes, symmetry, shift=shift, offset=offset,
-        )
-        _check_bytes(fixed + records * share + 4 * record_fixed, method.max_bytes,
-                     "ADAPT reconstruction records")
         inputs = AdaptInputs(
             hamiltonian,
             tuple(generators),
@@ -917,26 +758,18 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
             host_identity_shift=shift,
             offset_free_requirements=offset,
         )
-        build_action_tables(inputs, q, max_bytes=method.max_bytes, max_products=method.max_products,
-                            other_live=fixed + records * share + 4 * record_fixed)
+        build_action_tables(inputs, q, max_bytes=method.max_bytes, max_products=method.max_products)
         return inputs
     raw = hamiltonian.pauli_terms().labels(max_bytes=method.max_bytes)
     rows, evidence = _project_terms(raw, antihermitian=False, tolerance=0.0, qubits=q)
-    dropped = fsum(abs(c.real) for _, c in rows if abs(c.real) <= method.pauli_coefficient_cutoff)
-    rows = tuple((p, c.real) for p, c in rows if abs(c.real) > method.pauli_coefficient_cutoff)
+    identity = "I" * q
+    dropped = fsum(abs(c.real) for p, c in rows if p != identity and abs(c.real) <= cutoff)
+    rows = tuple((p, c.real) for p, c in rows if p == identity or abs(c.real) > cutoff)
     processed = ingest_pauli(rows, num_qubits=q, max_bytes=method.max_bytes)
     terms = tuple(PauliTerm(label=p, coefficient=c) for p, c in rows)
-    qualifiers.append(
-        f"Hamiltonian Pauli cutoff {method.pauli_coefficient_cutoff}; dropped L1 {dropped}"
-    )
-    records += len(terms)
+    qualifiers.append(f"Hamiltonian Pauli cutoff {cutoff}; dropped L1 {dropped}")
     work = _matvec_requirements(processed)[2]
     symmetry = AdaptSymmetry(**evidence)
-    record_fixed = reconstruction_json(
-        processed, len(terms), work, dropped, tuple(qualifiers), symmetry,
-    )
-    _check_bytes(fixed + records * share + 4 * record_fixed, method.max_bytes,
-                 "ADAPT reconstruction records")
     if execution != "quantum":
         inputs = AdaptInputs(
             processed,
@@ -950,34 +783,17 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
             work,
             symmetry,
         )
-        build_action_tables(inputs, q, max_bytes=method.max_bytes, max_products=method.max_products,
-                            other_live=fixed + records * share + 4 * record_fixed)
+        build_action_tables(inputs, q, max_bytes=method.max_bytes, max_products=method.max_products)
         return inputs
     # Form [H,A_i] from the selected Hamiltonian and record dropped coefficient
     # mass separately from the generator symmetry corrections.
     updated = []
     table = processed.pauli_terms()
-    kept_rows = []
+    # Bytes of the commutator tables built so far, 8J_i(q+1) each.
+    held = 0
     # One running work ledger covers the commutator construction of every
     # pool member (_commutator_arrays).
     ledger = [0]
-    # The decoded label cache (label_cache_bytes) is charged with the full
-    # pool size and selection count while tables are added, so each record
-    # check below reserves the cache the finished Plan can build.
-    energy_count = sum(t.label != "I" * q for t in terms)
-
-    def cache_bytes(rows):
-        return label_cache_bytes(q, rows, len(generators), energy_count, selections,
-                                 sampled=shots is not None)
-
-    def admit_tables(rows):
-        raw, headers, tables = _commutator_array_charges(rows, q)
-        _check_bytes(
-            array_record_bytes(raw, headers, fixed_json=tables + record_fixed,
-                               other_live=fixed + records * share + cache_bytes(rows)),
-            method.max_bytes,
-            "ADAPT reconstruction records and decoded label cache",
-        )
 
     if growth is None:
         for member, generator in zip(members, generators, strict=True):
@@ -985,12 +801,11 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
             # d/dtheta <exp(theta A)psi|H|exp(theta A)psi> at theta = 0 is
             # <psi|H A - A H|psi> = <[H,A]>, because A^dagger = -A.
             commutator, removed = _commutator_arrays(
-                table, a, cutoff=method.pauli_coefficient_cutoff, ledger=ledger,
-                held=fixed + records * share + sum(8 * rows * (q + 1) for rows in kept_rows),
+                table, a, cutoff=cutoff, ledger=ledger,
+                held=held,
                 max_bytes=method.max_bytes, max_products=method.max_products,
-                admit_rows=lambda rows: admit_tables([*kept_rows, rows]),
             )
-            kept_rows.append(len(commutator.coefficients.array))
+            held += 8 * len(commutator.coefficients.array) * (q + 1)
             updated.append(
                 member.revise(
                     commutator=commutator,
@@ -998,10 +813,6 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
                 )
             )
         members = tuple(updated)
-    else:
-        # Bounded growth screens no gradient, so the pool members keep no
-        # commutator, and only the records and the label cache are charged.
-        admit_tables(kept_rows)
     if shots is None:
         return AdaptInputs(
             processed,
@@ -1030,20 +841,12 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
         )
         return tuple(tuple(group) for group in grouped.groups)
 
-    screen = tuple(sorted({p for member in members if member.commutator is not None
-                           for p, _ in member.commutator.rows()}))
+    # The label index formed here serves the bound Plan's queries too.
+    decoded = {}
+    screen = screen_labels(members, decoded)
     energy = tuple(sorted(t.label for t in terms if t.label != "I" * q))
     screen_groups, energy_groups = groups(screen), groups(energy)
-    raw, headers, tables = _commutator_array_charges(kept_rows, q)
-    total = array_record_bytes(raw, headers, fixed_json=tables + record_fixed,
-                               other_live=fixed + records * share + cache_bytes(kept_rows))
-    for ordered, grouped in ((screen, screen_groups), (energy, energy_groups)):
-        total += array_record_bytes(
-            (), (), fixed_json=0, index_entries=sum(map(len, grouped)),
-            label_count=len(ordered), group_count=len(grouped),
-        )
-    _check_bytes(total, method.max_bytes, "ADAPT reconstruction records")
-    return AdaptInputs(
+    inputs = AdaptInputs(
         processed,
         tuple(generators),
         members,
@@ -1055,3 +858,5 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots,
         work,
         symmetry,
     )
+    inputs.cache.update(decoded)
+    return inputs

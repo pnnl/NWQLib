@@ -49,6 +49,19 @@ DEFAULT_POTENTIAL_GAIN = 8.0
 # docs/ENGINEERING_CONSTANTS.md ("Box refinement level initial state").
 DEFAULT_LEVEL_GAUSSIAN_WIDTH = 1 / 6
 
+# A level is numerically unresolved (RefinementLevel.numerically_unresolved)
+# when 4 u conditioning reaches this value, with u = 2**-53. At that scale
+# the documented estimate of the table rounding in the solved potential,
+# about 4 u kappa conditioning relative to the recorded objective, covers
+# the whole range [0, kappa] of a search-model potential, so the potential
+# can be entirely rounding. exp(2**-51 x) on four unit grid points has
+# conditioning about 2.25e15, 4 u conditioning about 1, and its solved
+# potential differs from the recorded objective by a quarter of kappa,
+# with a tie the objective does not have. A scale diagnostic, not an error
+# bound in either direction. Registered in docs/ENGINEERING_CONSTANTS.md
+# ("Box refinement numerically unresolved level").
+UNRESOLVED_ROUNDING_SCALE = 1
+
 
 class BoxRefinement(Record):
     """Options of a box refinement, the finite-grid search of Wu et al. arXiv:2605.12066v1, Sec. V.
@@ -335,7 +348,9 @@ class RefinementResources(Record):
             (restricted evolution and readout summary), zero for quantum execution.
         construction_work: Construction work that the level Runs counted, for a quantum
             circuit or for the setup of classical evolution.
-        synthesis_work: Exact dense synthesis work set aside by the level Runs.
+        synthesis_work: Work units of the exact dense syntheses that the level Runs' saved
+            preparations made, not measured operations or time. Those of controlled
+            transformed blocks are also part of `construction_work`.
         table_evaluations: Grid tuples evaluated for the unscaled level objective's
             support tables, the extra planning of the search model. Zero for the
             physical model.
@@ -350,9 +365,12 @@ class RefinementResources(Record):
         cx: Sum of the CX upper bounds of the circuits that the level Runs prepared, one
             circuit per level Run at most, not multiplied by shots. The Read and circuit
             counts note below says when a level counts 0 and when the value is unknown.
-        arbitrary_rotations: Sum of the arbitrary rotations of the same circuits, an
-            upper bound for the binary encoding, counted as `cx` is. For quantum
-            execution it equals `arbitrary_rotations` of
+        arbitrary_rotations: Sum of the recorded rotation counts of the same circuits,
+            counted as `cx` is. In both encodings each count is an upper bound on the
+            arbitrary rotations, because it includes every rotation gate before angle
+            classification, Clifford, exact T and zero angles too. The classified numbers
+            are in `circuit_resources`. For quantum execution it equals
+            `arbitrary_rotations` of
             [`run_resources`][nwqlib.algorithms.qhd.resources.run_resources], the body
             total that counts each compiled circuit once, not multiplied by shots.
         unavailable: `(field, reason)` for every count that is None.
@@ -742,6 +760,23 @@ class RefinementLevel(Record):
         """
         return self.table_magnitude / self.energy_scale
 
+    @property
+    def numerically_unresolved(self):
+        """Whether `4 u conditioning >= 1`, with `u = 2**-53`, compared exactly on the recorded fields.
+
+        At that scale the estimated table rounding of the solved potential, about
+        `4 u kappa conditioning` relative to the recorded objective, reaches the whole range
+        `[0, kappa]` of a search-model potential, so the potential can be entirely rounding. For
+        a physical level it reaches the objective's variation over the level grid. Rounding of
+        that size can create or remove ties. The flag is a scale diagnostic of the recorded
+        `conditioning`, not an error bound in either direction, and it neither stops the
+        refinement nor changes which level it selects.
+        """
+        from fractions import Fraction
+
+        # 4 u T/E >= 1 exactly is 4 T >= 2**53 E for the recorded T and E.
+        return 4 * Fraction(self.table_magnitude) >= UNRESOLVED_ROUNDING_SCALE * 2**53 * Fraction(self.energy_scale)
+
 
 Termination = Literal[
     "level_limit",
@@ -784,13 +819,15 @@ _RESOURCE_TEXT = {
     "data_bytes": "recorded Run data accounting, not the archive size or peak memory",
     "evolution_work": "reserved work units of the classical kernel's model, not measured operations or wall time",
     "construction_work": "reserved construction work units, not measured operations or wall time",
-    "synthesis_work": "reserved exact-synthesis work units, not measured operations or wall time",
+    "synthesis_work": ("work units of the exact syntheses of saved preparations, not measured operations or wall "
+                       "time, overlapping construction_work for controlled transforms"),
     "table_evaluations": "recorded grid tuples evaluated for the unscaled level objectives' tables",
     "support_evaluations": "recorded grid tuples evaluated for the solved level objectives' tables",
     "objective_evaluations": "recorded evaluations of the objective by the refinement itself",
     "joint_mass_reads": ("joint-observation read charge: decoded entries once, a kept dense grid once and one "
                          "kept-state length per streamed pass"),
     "cx": "upper bound summed over prepared circuit bodies, not multiplied by shots",
+    "arbitrary_rotations": "upper bound on arbitrary rotations, not multiplied by shots",
 }
 
 
@@ -1002,7 +1039,9 @@ class BoxRefinementResult(Record):
         """Summarize the refinement from its stored fields, without planning, evaluating or executing anything.
 
         The lines state the stop with its meaning and stored detail, the
-        selected point and how it was selected, each level's interval mass
+        selected point and how it was selected, the numerically unresolved
+        levels (``RefinementLevel.numerically_unresolved``) with the
+        qualification of a selected one, each level's interval mass
         with its readout kind, its chosen split-region mass and its readout
         mode status, and the CX and shot counts (``report`` gives the
         meaning of every count). Counts also give the default simultaneous
@@ -1037,6 +1076,14 @@ class BoxRefinementResult(Record):
             if options.scaling == "search_model":
                 lines.append("Search-model objective evaluation uses the stored unit point. The original-coordinate "
                              "point is a rounded display value.")
+            if best.numerically_unresolved:
+                lines.append(f"Level {best.level} is numerically unresolved: 4 u times its conditioning "
+                             f"{_number(best.conditioning)} is at least 1, so its solved potential can be entirely "
+                             "rounding of its tables, and the selected point and objective carry that qualification.")
+        unresolved = [level.level for level in self.levels if level.numerically_unresolved]
+        if unresolved and (best is None or unresolved != [best.level]):
+            lines.append(f"Numerically unresolved levels (4 u conditioning >= 1): "
+                         f"{', '.join(map(str, unresolved))}.")
         for level in self.levels:
             readout = "exact-readout" if level.returned_shots is None else "empirical"
             lines.append(f"Level {level.level} interval mass: {_number(level.joint_mass)} ({readout}). Marginal "
@@ -1044,7 +1091,11 @@ class BoxRefinementResult(Record):
             if level.split is not None:
                 lines.append(f"Level {level.level} chosen split-region {readout} mass: "
                              f"{_number(level.split.region_masses[level.split.chosen])}.")
-            lines.append(f"Level {level.level} readout mode status: {level.mode_status}.")
+            if level.returned_shots is not None and level.mode_status != "unavailable":
+                lines.append(f"Level {level.level} empirical mode status: {level.mode_status}. Counts give no "
+                             "proof of the population mode.")
+            else:
+                lines.append(f"Level {level.level} readout mode status: {level.mode_status}.")
         lines.extend(coverage_lines(confidence))
         resources, reasons = self.resources, dict(self.resources.unavailable)
         cx = resources.cx if resources.cx is not None else f"unavailable ({reasons['cx']})"
@@ -1089,6 +1140,11 @@ class BoxRefinementResult(Record):
                          "final box's mass, and a high mass does not imply that a global minimizer lies in the box.")
             lines.append("Each level's mode status is a diagnostic of the tie representative of its QHD Result, "
                          "whatever the point rule. It gives no proof about the marginal intervals or a split region.")
+            if any(level.numerically_unresolved for level in self.levels):
+                lines.append("A numerically unresolved level has 4 u conditioning >= 1 with u = 2**-53, the scale at "
+                             "which the estimated rounding of its tables, relative to its recorded objective, covers its "
+                             "whole potential. Rounding of that size can create or remove ties. The flag is a scale "
+                             "diagnostic, not an error bound, and it changes neither the stop nor the selection.")
         if any(level.split is not None for level in self.levels):
             lines.append("At a stall split every kept interval covers its axis, so that level's interval masses "
                          "describe the whole level box. The chosen region's stored mass is reported separately, "
@@ -1100,27 +1156,16 @@ class BoxRefinementResult(Record):
         return lines
 
     def _resource_report(self):
-        """Return each stored count with its unavailable reason and its meaning (``_RESOURCE_TEXT``).
-
-        A rotation count is the count of the planned blocks only for the
-        one-hot encoding with no positive stopped-level count, and an upper
-        bound otherwise.
-        """
-        stopped = self.stopped_resources
-        exact = self.qhd.encoding == "one_hot" and not (stopped is not None and stopped.arbitrary_rotations)
-        meaning = dict(_RESOURCE_TEXT, arbitrary_rotations=(
-            "arbitrary rotations of the selected one-hot blocks (resources.rotation_law), not multiplied by shots"
-            if exact else "upper bound on arbitrary rotations, not multiplied by shots"))
-
+        """Return each stored count with its unavailable reason and its meaning (``_RESOURCE_TEXT``)."""
         def counts(resources):
             if resources is None:
                 return None
             reasons = dict(resources.unavailable)
             return {name: dict(value=getattr(resources, name), unavailable=reasons.get(name), meaning=text)
-                    for name, text in meaning.items()}
+                    for name, text in _RESOURCE_TEXT.items()}
 
         return dict(
-            total=counts(self.resources), stopped=counts(stopped),
+            total=counts(self.resources), stopped=counts(self.stopped_resources),
             max_plannings=dict(value=self.max_plannings, meaning="configured upper bound on QHD plannings, not the "
                                "number that completed"),
             shots_per_level=dict(value=self.shots, meaning="requested raw shots per level, None for exact readout"),
@@ -1135,8 +1180,9 @@ class BoxRefinementResult(Record):
 
         It performs no planning, objective evaluation, measurement or loading, reconstructs
         no state and calls no resource estimate. `levels` gives each level's readout kind, counts, intervals,
-        masses and the event they describe, its chosen split-region mass and its readout
-        mode status. `resources` gives each count with its unavailable reason and its
+        masses and the event they describe, its chosen split-region mass, its readout
+        mode status, its `conditioning` and whether it is numerically unresolved
+        (`RefinementLevel.numerically_unresolved`). `resources` gives each count with its unavailable reason and its
         meaning. By default, `confidence` gives a lower bound on the mass of each
         selected region in the level's backend-sampled distribution conditioned on valid
         decoding, with simultaneous 95% confidence over the configured maximum
@@ -1177,7 +1223,8 @@ class BoxRefinementResult(Record):
                  joint_mass_bound=level.joint_mass_bound,
                  interval_event=("product of the kept intervals, the whole level box at a stall split"
                                  if level.split is not None else "product of the kept intervals"),
-                 split_region_mass=None if level.split is None else level.split.region_masses[level.split.chosen])
+                 split_region_mass=None if level.split is None else level.split.region_masses[level.split.chosen],
+                 conditioning=level.conditioning, numerically_unresolved=level.numerically_unresolved)
             for level in self.levels
         ]
         return dict(summary="\n".join(self._summary_lines(confidence)), statements=self._statements(confidence),

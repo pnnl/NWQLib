@@ -189,8 +189,8 @@ def decompose_matrix_to_pauli(
 ) -> PauliDecomposition:
     """Write a square matrix as a sum of Pauli strings, `A = sum_P c_P P` with `c_P = 2**-n Tr(P A)`.
 
-    LCHS uses this function for the Pauli terms of its compiled SELECT and
-    its product-formula steps. Matrix dimensions must be powers of two
+    LCHS uses this function for the Pauli terms of the block encodings of
+    its `qsp_block_encoding` backend and of its product-formula steps. Matrix dimensions must be powers of two
     unless explicit zero padding is requested. NWQLib's I/X/Y/Z block
     transform computes the coefficients with overflow-safe componentwise
     averages at each level and omits only computed exact-zero coefficients

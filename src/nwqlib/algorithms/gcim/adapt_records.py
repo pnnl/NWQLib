@@ -3,6 +3,7 @@
 from __future__ import annotations
 from math import fsum
 from typing import Annotated, Literal
+import numpy as np
 from pydantic import Field, model_validator
 from nwqlib.core.records import (
     Record,
@@ -20,6 +21,7 @@ from nwqlib.problems.inputs import StatePreparationSpec
 from nwqlib.ir.expressions import number
 from .fixed_basis import (
     GroupMoment,
+    OverlapNoiseEstimate,
     PairPreparation,
     PauliArrays,
     PauliTerm,
@@ -27,6 +29,7 @@ from .fixed_basis import (
     ResolvedAcquisition,
     SampledPairVariance,
     ShotAllocation,
+    overlap_noise_estimate,
 )
 
 PROCESSING_SOURCE = Source(
@@ -49,27 +52,47 @@ def label_cache(plan):
     return native["inputs"].cache if native else plan._cache.setdefault("adapt", {})
 
 
-def commutator_rows(pool, cache):
-    """Return each member's ``[H, A]`` rows ``((label, coefficient), ...)``, decoded once.
+def commutator_index(pool, cache):
+    """Return the sorted distinct commutator labels of the pool and, per member, the index of each row's label.
 
-    ``cache`` is the dictionary of ``label_cache`` or ``AdaptInputs.cache``.
-    A member without a commutator, as in a classical Plan, gives an empty
-    tuple.
+    ``cache`` is the dictionary of ``label_cache`` or ``AdaptInputs.cache``,
+    and the index is formed once per cache. Member i's ``[H, A_i]`` row r
+    has the label ``labels[indices[i][r]]`` and the coefficient
+    ``pool[i].commutator.coefficients.array[r]``. The label codes of every
+    row, I < X < Y < Z as in the label strings, are packed two bits per
+    letter into one integer for up to 32 qubits, or kept as code rows
+    beyond that, so one ``np.unique`` sorts and deduplicates them in label
+    order, and only the distinct labels become strings. A member without a
+    commutator, as in a classical Plan, has no rows.
     """
-    if "commutators" not in cache:
-        cache["commutators"] = tuple(
-            () if member.commutator is None else member.commutator.rows() for member in pool
-        )
-    return cache["commutators"]
+    if "commutator_index" not in cache:
+        tables = [() if member.commutator is None else member.commutator.labels.array for member in pool]
+        counts = [len(table) for table in tables]
+        if not sum(counts):
+            labels, inverse = (), np.zeros(0, dtype=np.intp)
+        else:
+            q = next(table.shape[1] for table in tables if len(table))
+            if q <= 32:
+                packed = []
+                for table in tables:
+                    key = np.zeros(len(table), dtype=np.uint64)
+                    for column in range(q if len(table) else 0):
+                        key = (key << np.uint64(2)) | table[:, column].astype(np.uint64)
+                    packed.append(key)
+                unique, inverse = np.unique(np.concatenate(packed), return_inverse=True)
+                codes = (unique[:, None] >> np.arange(2 * (q - 1), -1, -2, dtype=np.uint64)) & np.uint64(3)
+            else:
+                codes, inverse = np.unique(np.concatenate([t for t in tables if len(t)]), axis=0,
+                                           return_inverse=True)
+            letters = np.frombuffer(b"IXYZ", dtype=np.uint8)[codes.astype(np.intp)]
+            labels = tuple(word.decode("ascii") for word in np.ascontiguousarray(letters).view(f"S{q}").ravel())
+        cache["commutator_index"] = labels, tuple(np.split(inverse.reshape(-1), np.cumsum(counts)[:-1]))
+    return cache["commutator_index"]
 
 
 def screen_labels(pool, cache):
     """Return the sorted distinct commutator labels of the pool, which ``groups`` index."""
-    if "screen_labels" not in cache:
-        cache["screen_labels"] = tuple(
-            sorted({label for rows in commutator_rows(pool, cache) for label, _ in rows})
-        )
-    return cache["screen_labels"]
+    return commutator_index(pool, cache)[0]
 
 
 def energy_labels(labels, cache):
@@ -79,25 +102,23 @@ def energy_labels(labels, cache):
     return cache["energy_labels"]
 
 
-def active_screen_labels(pool, cache, removed, limit):
+def active_screen_labels(pool, cache, removed):
     """Return the sorted commutator labels of the members not in ``removed``, and their set.
 
     The union is formed once per selected chain, keyed by the removed pool
-    indices, so every query of a screening round and its reads share it. At
-    most ``limit + 1`` removed sets are kept. One run meets at most
-    ``max_selections + 1``. ``cache`` is not saved.
+    indices, so every query of a screening round and its reads share it.
+    Only the current chain's union is kept, because a run screens one chain
+    at a time. ``cache`` is not saved.
     """
-    store = cache.setdefault("active_screen_labels", {})
     key = frozenset(removed)
-    if key not in store:
-        if len(store) > limit:
-            store.clear()
-        rows = commutator_rows(pool, cache)
-        labels = tuple(
-            sorted({label for index, terms in enumerate(rows) if index not in key for label, _ in terms})
-        )
-        store[key] = (labels, frozenset(labels))
-    return store[key]
+    stored = cache.get("active_screen_labels")
+    if stored is None or stored[0] != key:
+        labels, indices = commutator_index(pool, cache)
+        kept = [rows for index, rows in enumerate(indices) if index not in key]
+        chosen = np.unique(np.concatenate(kept)) if kept else ()
+        active = tuple(labels[k] for k in np.asarray(chosen, dtype=np.intp).tolist())
+        stored = cache["active_screen_labels"] = key, active, frozenset(active)
+    return stored[1], stored[2]
 
 
 class AdaptPoolMember(Record):
@@ -294,8 +315,35 @@ class AdaptReconstruction(Record):
             bound on distinct flip masks, valid without inspecting the
             masks. The value is the one computed at planning under the
             archive format's work formula.
-        hamiltonian_dropped_l1: Sum of the absolute Hamiltonian coefficients
-            removed by ``pauli_coefficient_cutoff``, in the energy unit.
+        hamiltonian_dropped_l1: Sum ``delta_H`` of the absolute nonidentity
+            Hamiltonian coefficients removed by the effective
+            ``pauli_coefficient_cutoff``, in the energy unit. With the removed
+            operator ``dH = sum_P c_P P``, ``||dH||_2 <= delta_H`` because each
+            Pauli word has norm 1, so the energy of a fixed normalized state,
+            the lowest eigenvalue and the lowest Ritz value in one fixed trial
+            subspace each change by at most ``delta_H``. The gradient of
+            generator ``G_j`` on a fixed state changes by at most
+            ``2 delta_H ||G_j||_2``. ADAPT can choose another trial space
+            because of the removal, so ``delta_H`` does not bound the error of
+            the final adaptive energy, and small coefficients are not shown
+            to be rounding only. ``commutator_dropped_l1`` of each pool member
+            is a separate quantity and is not added to it.
+        energy_scale: ``Omega = ||H - cI||_F / sqrt(d)`` with ``c = tr(H)/d`` of
+            the original Hamiltonian on its original dimension d
+            (``adapt_inputs.energy_scale``), in the energy unit. It sets the
+            default thresholds and is not an error estimate. Zero means that
+            H is a multiple of the identity, and the run then ends with
+            ``constant_hamiltonian``.
+        pauli_coefficient_cutoff: The cutoff this Plan applied to Hamiltonian
+            and commutator coefficients, in the energy unit: the explicit
+            ``ADAPT.pauli_coefficient_cutoff``, or ``1e-14 Omega`` for its
+            default.
+        gradient_norm_floor: The floor the run compares the gradient norm
+            with, in the energy unit: the explicit
+            ``ADAPT.gradient_norm_floor``, or ``1e-8 Omega`` for its default.
+        energy_change_tolerance: The tolerance of the flat counter, in the
+            energy unit: the explicit ``ADAPT.energy_change_tolerance``, or
+            ``1e-6 Omega`` for its default, which is zero when Omega is zero.
         groups: QWC measurement groups for sampled screening. Each group is a
             tuple of indices into the sorted distinct commutator labels of the
             pool (``screen_labels``). Empty unless the Plan samples.
@@ -327,14 +375,17 @@ class AdaptReconstruction(Record):
             proof is exact for ``processed_hamiltonian``, the target that the
             cutoff recorded in ``processing`` and ``hamiltonian_dropped_l1``
             defines, and says nothing about the imaginary parts of matrix
-            elements of ``original_hamiltonian``. With a scalar processed
-            Hamiltonian, quantum planning resolves the choices for bounded
-            growth when ``max_basis_size>1``, because evaluating extensions
-            can need overlaps. Default growth and bounded growth with
-            ``max_basis_size=1`` measure nothing and resolve no choice.
+            elements of ``original_hamiltonian``. When an explicit cutoff
+            leaves a scalar processed Hamiltonian, quantum planning resolves
+            the choices for bounded growth when
+            ``BoundedRitzGrowth.max_basis_size>1``, because evaluating
+            extensions can need overlaps. Default growth, bounded growth with
+            ``max_basis_size=1`` and any growth with an original Hamiltonian
+            that is a multiple of the identity measure nothing and resolve
+            no choice.
     """
 
-    schema_version: Literal[5] = 5
+    schema_version: Literal[6] = 6
     reference: StatePreparationSpec
     original_hamiltonian: InputRef
     processed_hamiltonian: InputRef
@@ -345,6 +396,10 @@ class AdaptReconstruction(Record):
     num_qubits: PositiveInt
     hamiltonian_action_work: Count
     hamiltonian_dropped_l1: Annotated[Real, Field(ge=0)]
+    energy_scale: Annotated[Real, Field(ge=0)]
+    pauli_coefficient_cutoff: Annotated[Real, Field(ge=0)]
+    gradient_norm_floor: Annotated[Real, Field(ge=0)]
+    energy_change_tolerance: Annotated[Real, Field(ge=0)]
     groups: tuple[tuple[Count, ...], ...]
     energy_groups: tuple[tuple[Count, ...], ...]
     processing: tuple[Text, ...]
@@ -378,6 +433,11 @@ class AdaptReconstruction(Record):
     @property
     def nonidentity_coefficients(self):
         return tuple(t.coefficient for t in self.nonidentity_terms)
+
+    def _nonidentity_coefficient_array(self):
+        """Return the nonidentity coefficients in stored order as a float64 array."""
+        identity = "I" * self.num_qubits
+        return np.fromiter((t.coefficient for t in self.terms if t.label != identity), dtype=np.float64)
 
 
 def chain(values, side):
@@ -705,8 +765,9 @@ class ADAPTResult(Result):
     With [`BoundedRitzGrowth`][nwqlib.algorithms.gcim.adapt.BoundedRitzGrowth]
     the explicit chains `basis` and `value_basis` take their place, and
     `selected`, `theta`, `value_selected` and `value_theta` are empty.
-    `print(result)` shows the value, its scope and the stop reason. The
-    fields below are read-only. The fields of
+    `print(result)` shows the value, its scope, the stop reason and, when
+    `pauli_coefficient_cutoff` removed Hamiltonian terms, the sum of their
+    absolute coefficients. The fields below are read-only. The fields of
     [`Result`][nwqlib.core.analysis.Result] are present too.
 
     Attributes:
@@ -726,7 +787,10 @@ class ADAPTResult(Result):
             `pool_exhausted`, `max_iterations`,
             `optimization_evaluation_budget_exhausted`,
             `no_usable_overlap_subspace` and `invalid_sampled_evidence`.
-            With `BoundedRitzGrowth` the scientific stops are
+            Under either growth, `constant_hamiltonian` means that the
+            Problem's operator is a multiple of the identity, whose energy is
+            the same on every state, so the run ends after the reference.
+            With `BoundedRitzGrowth` the other scientific stops are
             `max_basis_size`, `max_iterations`, `flat_counter`,
             `basis_depth_limit`, `parent_window_exhausted`,
             `candidate_scans_exhausted`, `no_admissible_candidate`,
@@ -771,7 +835,8 @@ class ADAPTResult(Result):
             sample-mean variances and overlap–H0 covariance of each pair of
             the value basis
             ([`SampledPairVariance`][nwqlib.algorithms.gcim.fixed_basis.SampledPairVariance]).
-            Empty otherwise.
+            Empty otherwise. `overlap_noise` summarizes the overlap part as an
+            [`OverlapNoiseEstimate`][nwqlib.algorithms.gcim.fixed_basis.OverlapNoiseEstimate].
         pair_preparations: For a value basis whose pencil entries come from
             joint states, computed exactly by quantum execution without shots
             or measured with grouped shots, the construction of the joint
@@ -864,7 +929,41 @@ class ADAPTResult(Result):
             lines.append(f"Partial data: {len(self.pending)} pending queries")
         if self.pencil is not None:
             lines.extend(self.pencil._sampled_summary())
+        if self._plan is not None:
+            lines.extend(self.overlap_noise._summary())
+            if dropped := self._plan.reconstruction.hamiltonian_dropped_l1:
+                lines.append(f"Removed Hamiltonian terms: absolute coefficients sum to "
+                             f"{self._scalar_text(dropped)}{self._unit_text()}. This bounds the norm of the "
+                             f"removed operator, not the error of the adaptive energy.")
         return lines
+
+    @property
+    def overlap_noise(self):
+        """The empirical overlap noise of this Result's value basis, an [`OverlapNoiseEstimate`][nwqlib.algorithms.gcim.fixed_basis.OverlapNoiseEstimate].
+
+        It reads the saved moments and variances, so it measures nothing and does
+        not change with `analyze(overlap_cutoff=...)`. Its `population` is
+        `"main_after_pilot"` once `ADAPT.sampling` has measured the value basis
+        again and that analysis has completed. Otherwise the moments are those of
+        the measurements that also chose the basis, `"adaptive_reuse"`.
+        """
+        plan = self.plan
+        if plan.execution != "quantum" or plan.shots is None:
+            return OverlapNoiseEstimate(status="not_applicable", reason="exact readout or classical execution "
+                                                                        "samples no overlap")
+        if self.pencil is None:
+            return OverlapNoiseEstimate(status="unavailable", reason="no projected pencil was solved")
+        size = len(self.pencil.overlap)
+        if size > 1 and not self.group_moments:
+            return OverlapNoiseEstimate(status="unavailable", reason="this run has no grouped count records")
+        # A completed main analysis lists exactly its moments' chunks, none of
+        # which any round of the growth acquired (analyze_adapt).
+        chunks = {moment.contribution_id for moment in self.group_moments}
+        grown = {item for row in self.history for item in row.contribution_ids}
+        main = self.shot_allocation is not None and set(self.contribution_ids) == chunks and not chunks & grown
+        return overlap_noise_estimate(self.group_moments, self.sampled_pair_variances, basis_size=size,
+                                      population="main_after_pilot" if main else "adaptive_reuse",
+                                      quadratures=plan.reconstruction.acquisition.quadratures or "complex")
 
     def validate_plan(self, plan):
         """Associate the reported value and pencil with the exact parameter sequence that

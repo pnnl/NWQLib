@@ -731,7 +731,7 @@ def step_weights(schedule, rule, total_time, num_steps):
     time. The ``split_step`` module docstring separates these time-error
     terms, ``evolution_bounds.evolution_bound`` bounds them for a compiled
     product, ``method._error_model`` declares them, and
-    ``compiler.QHDCompiler.build_step_pauli_ir`` splits the exponent
+    ``onehot_schedule.OneHotSchedule.blocks`` splits the exponent
     ``-i dt (a_k K + b_k V)`` of step k, with the weights ``a_k`` and ``b_k``
     of its row, into product-formula factors. Under the integrated rule that
     exponent is ``Omega_1``. Adjacent steps share their binary64 endpoint

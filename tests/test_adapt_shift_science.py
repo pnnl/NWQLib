@@ -15,7 +15,10 @@ from _fermionic_references import generator_matrix
 def test_measured_product_jacobian_matches_independent_generator_derivative(
     monkeypatch, force_insertion
 ):
-    """Compare the optimizer Jacobian with 2 Re< H psi, A psi > and count every shift evaluation."""
+    """Compare the optimizer's scaled objective and Jacobian with direct expm values and count every shift evaluation.
+
+    BFGS receives (E - c)/Omega and (2 Re< H psi, A psi >)/Omega, here with c = .3 and Omega = 2.
+    """
     generator = enumerate_spin_adapted_gsd_pool(2)[1]
     reference = np.ones(1, complex)
     for qubit in reversed(range(4)):
@@ -25,16 +28,14 @@ def test_measured_product_jacobian_matches_independent_generator_derivative(
     a = generator_matrix(generator)
     state = expm(0.37 * a) @ reference
     expected = 2 * float(np.vdot(h @ state, a @ state).real)
-    rule = optimization._generator_shift_rule(
-        generator, max_bytes=100_000_000, max_products=10_000_000
-    )
+    rule = optimization._generator_shift_rule(generator)
     shots = optimization._generator_shift_rule(generator, execution_mode=ExecutionMode.SHOTS)
     assert shots["method"] == "pauli_insertion_shift" and shots["evaluations"] == 16
     assert shots["signed_weight_square_sum"] == pytest.approx(0.25, abs=1e-15, rel=0.0)
     assert shots["uniform_allocation_variance_cost_proxy"] == pytest.approx(
         4.0, abs=1e-14, rel=0.0
     )
-    assert rule["evaluations"] == 12
+    assert rule["evaluations"] == 12 and rule["method"] == "generalized_shift"
     if force_insertion:
         rule = optimization._generator_shift_rule(generator, execution_mode=ExecutionMode.SHOTS)
     calls = []
@@ -49,8 +50,10 @@ def test_measured_product_jacobian_matches_independent_generator_derivative(
         calls.append(role)
         return float(np.vdot(vector, h @ vector).real)
 
-    def inspect(fun, x, *, jac, **kwargs):
+    def inspect(fun, x, *, jac, options, **kwargs):
+        captured["objective"] = fun(x)
         captured["jacobian"] = jac(x)
+        captured["options"] = options
         return SimpleNamespace(message="independent derivative relation", success=True)
 
     monkeypatch.setattr(optimization.spo, "minimize", inspect)
@@ -67,9 +70,16 @@ def test_measured_product_jacobian_matches_independent_generator_derivative(
         evaluate=evaluate,
         completed_round=lambda: None,
         rules={generator.pool_index: rule},
+        identity_shift=.3,
+        scale=2.0,
     )
-    assert captured["jacobian"][0] == pytest.approx(expected, abs=2e-11, rel=0.0)
-    assert calls.count("objective") == 1 and calls.count("derivative") == rule["evaluations"]
+    energy = float(np.vdot(state, h @ state).real)
+    assert captured["objective"] == pytest.approx((energy - .3) / 2, abs=2e-11, rel=0.0)
+    assert captured["jacobian"][0] == pytest.approx(expected / 2, abs=2e-11, rel=0.0)
+    # One objective before BFGS starts and one in the inspection above.
+    assert calls.count("objective") == 2 and calls.count("derivative") == rule["evaluations"]
+    # The tolerance is stated here, not left to whatever default a later SciPy has.
+    assert captured["options"]["gtol"] == optimization.BFGS_NORMALIZED_GTOL
 
 
 # The gradient reference forms fixed-step Taylor matrices and their
@@ -199,3 +209,14 @@ def test_classical_adapt_energy_query_gradient_matches_exact_rational_reference(
     energy, gradient = exact_product_reference(18, angles, pool)
     assert scalars["energy"] == pytest.approx(energy, abs=GRAD_ATOL, rel=0)
     assert [scalars["gradient_0"], scalars["gradient_1"]] == pytest.approx(gradient, abs=GRAD_ATOL, rel=0)
+
+
+def test_shift_rule_of_a_generator_with_its_compiler_plan_equals_the_rule_without_one():
+    """The rule has no work limit of its own, and a generator with its own compiler plan gives the rule it has without one."""
+    from nwqlib.subroutines.fermionic_circuits import _plan_generator_circuit
+
+    pool = enumerate_spin_adapted_gsd_pool(2)
+    generator = pool[1]
+    plan = _plan_generator_circuit(generator)
+    assert optimization._generator_shift_rule(generator, compilation_plan=plan) == optimization._generator_shift_rule(
+        generator)

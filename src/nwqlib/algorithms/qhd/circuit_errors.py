@@ -44,8 +44,8 @@ import numpy as np
 
 # u = 2**-53 and the smallest positive subnormal 2**-1074, named _TAU here and
 # lambda in the docstrings and comments of ``preparation_error`` and
-# ``phase_allowance``. In ``block_errors``, lambda* and lambda^ are instead
-# the intended and stored hopping exponents. The tau of ``phase_allowance`` is a
+# ``phase_allowance``. In ``onehot_schedule.OneHotSchedule.summary``, lambda*
+# and lambda^ are instead the intended and stored hopping exponents. The tau of ``phase_allowance`` is a
 # different quantity, the binary64 2 pi (``math.tau``).
 _U = Fraction(1, 2**53)
 _TAU = Fraction(1, 2**1074)
@@ -119,99 +119,26 @@ def preparation_error(reconstruction, method, grid):
     return min(Fraction(2), min(_SQRT2_UP, direction) + chain + cutoff)
 
 
-def block_errors(reconstruction, method, grid):
-    """Return the exact block-angle entries of the quantum circuit and the counts that its phase allowance needs.
+def block_errors(reconstruction):
+    """Return the block-angle entries of a one-hot quantum circuit and the count that its phase allowance needs.
 
-    Formation (stage 1). An occurrence has the nominal duration ``t = r delta``,
-    an exact rational with r = 1/2 for a second-order potential factor and
-    for an odd-indexed link in the second-order kinetic layers, and r = 1
-    otherwise (``compiler.QHDCompiler``). Planning checks that ``delta/2`` is
-    a normal number, so the stored half duration is exact
-    (``schedules.step_weights``), and the nominal durations stay the
-    reference of this stage. A hopping occurrence on a link of variable j intends
-    the signed exponent ``lambda* = -t a^_k/(2 h_j**2)`` of
-    ``G = (XX + YY)/2``, whose restriction has norm 1, and the stored
-    ``angle`` is ``lambda^`` (``kinetic.KineticCompiler``), so it costs
-    ``min(2, |lambda^ - lambda*|)``. A projector on s qubits for table value v
-    intends ``zeta* = t b^_k v`` of the traceless ``P - I/2**s`` of norm
-    ``1 - 2**-s`` (the identity part belongs to the running phase total), so
-    it costs ``min(2, (1 - 2**-s) |zeta^ - zeta*|)``. Both discrepancies are
-    exact rationals, about ``3u |lambda*|`` and ``2u |zeta*|``, since planning
-    checks that every product lies in the normal range
-    (``validation._normal_range``).
-
-    Omitted blocks (stage 2). Every step intends each link for a total
-    duration delta (first order once, second order the odd links twice for
-    delta/2 and the even ones once) and each table entry for a total delta
-    (one or two potential factors), so the intended exponent weight of a step
-    is ``delta |a^_k| sum_j L_j/(2 h_j**2) + delta |b^_k| sum_S (1 - 2**-|S|) sum_v |v|``
-    for L_j links per variable. The kept blocks' ``|lambda*|`` and
-    ``(1 - 2**-s) |zeta*|`` at their nominal durations subtracted from it
-    leave the exact weight of the blocks the circuit omits, pruned or omitted
-    below the normal range (``potential.PotentialCompiler.select_occurrences``),
-    which bounds their removal at their intended exponents. It is
-    nonnegative because every kept block is one of the intended occurrences.
-
-    Hopping parameters (stage 3). The circuit gate is
-    ``XXPlusYYGate(theta^)`` with ``theta^ = 2 fl(2 t^ c)`` of the stored
-    duration t^ and coefficient (``pauli_evolution._hopping_parameter``),
-    whose restricted exponent is ``theta^/2``, so a kept block adds
-    ``min(2, |theta^/2 - lambda^|)``. The circuit construction doubles the
-    stored angle's own product, so this is zero whenever theta^ is finite.
+    Planning formed the three entries in its one pass over the steps, with
+    the arithmetic that the circuit applies, and recorded their upper values
+    (``QHDOneHotSchedule``). ``onehot_schedule.OneHotSchedule.summary``
+    derives them: the formation of the kept blocks' angles against their
+    intended exponents (stage 1), the exact intended action of the pruned
+    and range-omitted occurrences (stage 2) and the hopping gate parameters
+    against twice the stored angles (stage 3).
 
     Returns:
-        A dict with ``formation``, ``omitted`` and ``hopping`` (exact
-        rationals) and ``dense``, the kept projector blocks with the
-        phase-diagonal construction, both potential halves included.
-
-    Raises:
-        ValueError: A hopping gate parameter is not a finite binary64
-            number, so the circuit cannot be built.
+        A dict with ``formation``, ``omitted`` and ``hopping``, the recorded
+        upper values as exact rationals, and ``dense``, the kept projector
+        blocks with the phase-diagonal construction, both potential halves
+        included.
     """
-    from nwqlib.subroutines.hamiltonian_evolution.pauli_evolution import _hopping_parameter
-
-    k = grid.num_grid_points
-    inverse_squares = [1 / Fraction(grid.spacing(j)) ** 2 for j in range(grid.num_variables)]
-    tables = {table.support: table.values.array for table in reconstruction.support_values}
-    dt = Fraction(method.total_time / method.num_steps)
-    second = method.trotter_order == 2
-    # Nominal durations: delta/2 for a second-order potential factor and odd-indexed link, delta otherwise.
-    link_durations = {link: dt / 2 if second and index % 2 else dt for index, link in enumerate(grid.links())}
-    potential_duration = dt / 2 if second else dt
-    formation = hopping = kept = Fraction(0)
-    dense = 0
-    kinetic_weights = potential_weights = Fraction(0)
-    for group, (_time, a, b) in zip(reconstruction.steps, reconstruction.step_weights, strict=True):
-        a, b = Fraction(a), Fraction(b)
-        kinetic_weights += abs(a)
-        potential_weights += abs(b)
-        for block in group:
-            stored = Fraction(block.angle)
-            if block.kind == "kinetic":
-                duration = link_durations[(block.support[0] % k, block.support[1] % k)]
-                # lambda* = -t a^_k/(2 h_j**2)
-                intended = -duration * a * inverse_squares[block.support[0] // k] / 2
-                formation += min(2, abs(stored - intended))
-                kept += abs(intended)
-                # theta^ as the native builder forms it, and its exact half.
-                theta = _hopping_parameter(block.time_step, block.coefficient)
-                hopping += min(2, abs(Fraction(theta) / 2 - stored))
-                continue
-            variables = tuple(q // k for q in block.support)
-            position = 0
-            for q in block.support:
-                position = position * k + q % k
-            # zeta* = t b^_k v and the traceless norm 1 - 2**-s.
-            intended = potential_duration * b * Fraction(tables[variables][position])
-            norm = 1 - Fraction(1, 2 ** len(block.support))
-            formation += min(2, norm * abs(stored - intended))
-            kept += norm * abs(intended)
-            dense += block.provider == "diagonal_synthesis"
-    links = grid.num_links
-    intended = dt * kinetic_weights * links * sum(inverse_squares) / 2 + dt * potential_weights * sum(
-        (1 - Fraction(1, 2 ** len(support))) * sum(abs(Fraction(v)) for v in values)
-        for support, values in tables.items())
-    return dict(formation=formation, omitted=intended - kept, hopping=hopping, dense=dense)
+    schedule = reconstruction.onehot
+    return dict(formation=Fraction(schedule.angle_formation), omitted=Fraction(schedule.rotation_pruning),
+                hopping=Fraction(schedule.gate_parameters), dense=schedule.dense_blocks)
 
 
 def phase_allowance(reconstruction, method, grid, counts):
@@ -248,7 +175,7 @@ def phase_allowance(reconstruction, method, grid, counts):
     Planning establishes the stated relative-error assumptions for the
     contributions it keeps. Lower-range omissions are counted by their exact
     omitted identity action, separately from that arithmetic allowance
-    (``compiler.QHDCompiler``, ``validation._normal_range``). The formation
+    (``onehot_schedule`` module docstring, ``validation._normal_range``). The formation
     and accumulation allowances of the running phase total apply to the
     stored duration, weights and coefficients. The arithmetic of the
     circuit's phase assignments has its separate allowance, including

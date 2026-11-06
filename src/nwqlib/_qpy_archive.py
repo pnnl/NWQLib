@@ -1,4 +1,4 @@
-"""Compact storage of UCGate that works around a limitation of QPY's reconstruction of built-in gates.
+"""Compact storage of UCGate and of direct state preparations inside QPY.
 
 With Qiskit 2.6.0, QPY writes a ``UCGate`` but cannot load it. Its loader passes
 the gate's 2x2 matrices to the constructor as separate positional arguments,
@@ -8,6 +8,15 @@ the gate's nominal width whose first parameter is a JSON header (name, label,
 ``up_to_diagonal``, whether the table is already simplified, and the one-based
 active controls) followed by the stored matrices. Decoding rebuilds the gate
 directly, without simplifying the table again or synthesizing its matrix.
+
+The same container stores a ``DirectPreparationGate`` as an instruction of
+its width whose parameters are a JSON header and the state vector, without
+its definition. Decoding rebuilds the gate with its definition unbuilt. QPY
+would otherwise store the definition of this custom gate, its direct tree,
+and saving the definition cache of a Run would build a tree of about 1 KiB
+per amplitude that the execution never needed, whereas the state takes 16
+bytes per amplitude. A tree that a backend executed is saved with that
+backend's own translation.
 ``docs/development/execution.md`` (Circuit entries and Qiskit UCGate
 compatibility) describes this storage, including when it may change.
 
@@ -64,8 +73,12 @@ class QpyStream:
         return self.tell()
 
 
-def _graph(circuit, convert, *, writing):
-    """Visit the operation graph QPY serializes, preserving shared definitions."""
+def _graph(circuit, convert, *, writing, without_definition=frozenset()):
+    """Visit the operation graph QPY serializes, preserving shared definitions.
+
+    A converted operation keeps the definition of its original, unless its
+    ``id`` is in ``without_definition``.
+    """
     from qiskit import circuit as circuit_module
     from qiskit.circuit import AnnotatedOperation, ControlFlowOp, ControlledGate, library
     from qiskit.circuit import controlflow
@@ -110,7 +123,7 @@ def _graph(circuit, convert, *, writing):
         converted = convert(original)
         if converted is not original:
             definition = getattr(original, "_definition", None)
-            if definition is not None:
+            if definition is not None and id(converted) not in without_definition:
                 converted._definition = block(definition)
             return converted
         if isinstance(original, ControlFlowOp):
@@ -173,8 +186,9 @@ def encode_circuit(circuit):
     """Return a shallow storage view, or None when raw QPY already suffices."""
     from qiskit.circuit import Instruction
     from qiskit.circuit.library import UCGate
+    from nwqlib.subroutines.state_preparation.direct import DirectPreparationGate
 
-    encoded = []
+    encoded, states = [], set()
     marker = "nwqlib_stored_ucgate_v1"
 
     def convert(gate):
@@ -187,6 +201,14 @@ def encode_circuit(circuit):
         ``up_to_diagonal``, name and label. The storage instruction carries
         the nominal width.
         """
+        if type(gate) is DirectPreparationGate:
+            # Only the state is stored, so the tree is not built for it.
+            header = json.dumps(dict(kind="direct_state_preparation", name=gate.name, label=gate.label),
+                                separators=(",", ":"))
+            stored = Instruction(marker, gate.num_qubits, 0, [header, gate.state])
+            encoded.append(stored)
+            states.add(id(stored))
+            return stored
         if type(gate) is not UCGate:
             return gate
         simplified, controls = gate.simp_contr
@@ -197,7 +219,7 @@ def encode_circuit(circuit):
         encoded.append(stored)
         return stored
 
-    result, names = _graph(circuit, convert, writing=True)
+    result, names = _graph(circuit, convert, writing=True, without_definition=states)
     if not encoded:
         return None
     if marker in names:
@@ -207,24 +229,31 @@ def encode_circuit(circuit):
             marker += "_"
         del result
         encoded.clear()
-        result, _ = _graph(circuit, convert, writing=True)
+        states.clear()
+        result, _ = _graph(circuit, convert, writing=True, without_definition=states)
     result.metadata = dict(marker=marker, original_metadata=circuit.metadata)
     return result
 
 
 def decode_circuit(circuit):
     """Restore a circuit from a container that its file prefix identifies, without synthesis."""
+    import numpy as np
     from qiskit.circuit import Gate
     from qiskit.circuit.library import UCGate
+    from nwqlib.subroutines.state_preparation.direct import DirectPreparationGate
 
     metadata = circuit.metadata
     marker = metadata["marker"]
 
     def convert(stored):
-        """Rebuild one UCGate with its saved table and active controls."""
+        """Rebuild one UCGate with its saved table and active controls, or one direct preparation from its state."""
         if stored.name != marker:
             return stored
         header = json.loads(stored.params[0])
+        if header.get("kind") == "direct_state_preparation":
+            gate = DirectPreparationGate(np.asarray(stored.params[1]))
+            gate.name, gate.label = header["name"], header["label"]
+            return gate
         params, controls = stored.params[1:], header["controls"]
         # The public constructor would simplify the already simplified table
         # again and infer the wrong nominal width. Base initialization invokes

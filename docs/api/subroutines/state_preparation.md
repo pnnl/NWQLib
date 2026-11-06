@@ -61,7 +61,7 @@ MPS compression and layered circuits:
 - `build_mps_circuit_state_preparation` runs one TT-SVD sweep, or reuses a matching decomposition that NWQLib's planning passes to it. The core metadata includes the ranks, the content hash of the normalized input and the discarded singular-value weight. The full input and the economy SVDs still have their dimension-dependent storage and computation costs.
 - The layered-construction check of `build_mps_circuit_state_preparation` uses the [layered MPS construction formula](../../ENGINEERING_CONSTANTS.md#layered-mps-construction-law), which follows the sweeps that scikit_tt repeats after every extracted gate. Contraction of the cores has its separate scalar-product and byte limits.
 - The one-qubit gates of the MPS circuit include their global phase, so controlled preparations keep the relative phase as well as the state populations.
-- The `DEFAULT_MAX_SVD_WORK` paragraph of the [constants registry](../../ENGINEERING_CONSTANTS.md#state-preparation) gives the default of 100,000,000 and the measurements behind the cost formula of the layered construction.
+- `max_svd_work` defaults to `None`, which sets no limit. The `max_svd_work` paragraph of the [constants registry](../../ENGINEERING_CONSTANTS.md#state-preparation) gives the work that an explicit limit counts and the measurements behind the cost formula of the layered construction.
 
 ## Source map
 

@@ -1,157 +1,18 @@
-"""Representative Qiskit circuits of an existing LCHS Plan.
+"""Formula resource accounting of an existing LCHS Plan, without building a circuit.
 
-This samples the saved numerical data and the PREP children, without new
-phases, MPS decomposition or a Run. Weighted totals are estimates from the
-representatives. The full list of circuit operations comes from
-prepare(plan).circuits and the shared circuit inspection.
+`resource_breakdown` lists each measurement batch's selected blocks with
+their calls per shot and the per-call cost rules that their records
+declare, and `nwqlib.estimate` totals the same rules over the workload.
+`dense_representative_envelope` gives the structural gate bounds of one
+dense SELECT branch, and `sampled_pair_resources` counts the rows of a
+sampled-pair Plan.
 """
 
 from __future__ import annotations
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from math import prod
+
 import numpy as np
-from nwqlib._validation import integer
-from nwqlib.operators.access import _check_bytes
-
-
-def _native_envelope(limits, width, slots, *, dense=False):
-    """Count one representative against the cumulative gate/table size proxy.
-
-    The proxy makes no promise about SDK CPU time or workspace.
-
-    A representative with ``slots`` gates on ``width`` qubits counts
-    slots*(width+1) table entries, or 4**width entries for a dense
-    controlled matrix. The build work grows by the entries plus
-    slots*(width+1), and 64 bytes per entry and per gate are checked
-    against max_bytes.
-    """
-    if width>limits['max_qubits']:
-        raise ValueError('selected representative exceeds max_qubits')
-    entries = (1 << (2*width)) if dense else slots*(width+1)
-    work = entries+slots*(width+1)
-    limits['used_build_work'] += work
-    if limits['used_build_work']>limits['max_build_work']:
-        raise ValueError('selected representatives exceed max_build_work')
-    _check_bytes(64*entries+64*slots,limits['max_bytes'],'LCHS representative construction arrays')
-
-
-def _synthesis_envelope(limits, qubit_counts, controls=(), controlled_qubit_counts=()):
-    """Count the exact dense syntheses of one representative, and Qiskit's control of them, in the build work.
-
-    Each entry of ``qubit_counts`` is one call of
-    ``_dense_synthesis.dense_unitary_circuit``, and its work formula
-    (``dense_synthesis_size``) is added to the cumulative build work. Each
-    entry of ``controls`` is the ``(gates, instructions, heavy)`` triple of
-    one call of Qiskit's control of such a synthesis, sized by
-    ``gatewise_control_size``. Each entry of ``controlled_qubit_counts`` is
-    one whole-matrix synthesis on that many qubits, controls included
-    (``controlled_synthesis_size``). The calls run one at a time and the
-    representative keeps their circuits, so the largest working allowance
-    plus every kept allowance is checked against max_bytes.
-    """
-    from nwqlib.subroutines._dense_synthesis import (controlled_synthesis_size, dense_synthesis_size,
-                                                     gatewise_control_size)
-    sizes = [dense_synthesis_size(count) for count in qubit_counts]
-    sizes += [gatewise_control_size(*counts) for counts in controls if counts[0]]
-    sizes += [controlled_synthesis_size(count) for count in controlled_qubit_counts]
-    if not sizes:
-        return
-    limits['used_build_work'] += sum(size[0] for size in sizes)
-    if limits['used_build_work']>limits['max_build_work']:
-        raise ValueError('selected representatives exceed max_build_work')
-    _check_bytes(max(size[1] for size in sizes)+sum(size[2] for size in sizes),limits['max_bytes'],
-                 'LCHS representative dense synthesis')
-
-
-def _product_formula_occurrence_blocks(
-    select_data,
-    *,
-    num_system_qubits: int,
-    implementation: str,
-):
-    """Build one resolved Pauli-rotation block per occurrence label."""
-
-    from collections import Counter
-    from qiskit import QuantumCircuit, QuantumRegister
-    from qiskit.circuit import Parameter
-    from nwqlib.subroutines.qiskit_compat import controlled
-    from qiskit.circuit.library import PauliEvolutionGate
-    from qiskit.quantum_info import SparsePauliOp
-    from nwqlib.backends.resources import SampledBlock
-    from .select_synthesis import (_product_formula_branch_terms, _append_multiplexed_pauli_rotation,
-                                  _append_structured_pauli_rotation)
-    plan = select_data.plan
-    num_control_qubits = plan.padded_node_count.bit_length() - 1
-    if implementation == "branch_controlled":
-        occurrences: Counter[str] = Counter()
-        for branch, node in enumerate(plan.branch_to_node):
-            if node is None or plan.branch_step_counts[branch] == 0:
-                continue
-            labels = tuple(label for label, _ in _product_formula_branch_terms(plan, branch))
-            schedule = labels if plan.formula_order == 1 else (*labels[:-1], *labels[::-1])
-            for label in schedule:
-                occurrences[label] += plan.branch_step_counts[branch]
-        blocks = []
-        for label, multiplicity in occurrences.items():
-            # A symbolic angle represents the admitted nonzero rotation class.
-            # Zeros/support are counted before synthesis, and no physical branch is sampled.
-            step = PauliEvolutionGate(SparsePauliOp(label), time=Parameter(f"theta_{label}")).definition
-            step.name = f"pauli_rotation_{label}"
-            circuit = QuantumCircuit(num_control_qubits + num_system_qubits)
-            gate = controlled(step.to_gate(), num_control_qubits, ctrl_state=(1 << num_control_qubits) - 1)
-            circuit.append(gate, range(circuit.num_qubits))
-            blocks.append(
-                SampledBlock(
-                    name=f"select_controlled_pauli_{label}",
-                    circuit=circuit,
-                    multiplicity=multiplicity,
-                )
-            )
-        return blocks
-    representatives: dict[str, tuple[int, int]] = {}
-    for index, angles in enumerate(plan.occurrence_angle_tables.array):
-        label = plan.occurrence_schedule[index % len(plan.occurrence_schedule)]
-        repetitions = plan.occurrence_block_repetitions[index // len(plan.occurrence_schedule)]
-        if label in representatives:
-            first_index, multiplicity = representatives[label]
-            representatives[label] = (first_index, multiplicity + repetitions)
-        else:
-            representatives[label] = (index, repetitions)
-
-    blocks: list[SampledBlock] = []
-    affine_tables = (
-        tuple(plan.structured_generator_payload["occurrence_affine_tables"])
-        if implementation == "structured" and plan.structured_generator_payload
-        else ()
-    )
-    for label, (index, multiplicity) in representatives.items():
-        control = QuantumRegister(num_control_qubits, "lcu_control")
-        system = QuantumRegister(num_system_qubits, "system")
-        circuit = QuantumCircuit(control, system, name=f"select_occurrence_{label}")
-        if implementation == "structured":
-            _append_structured_pauli_rotation(
-                circuit,
-                system_qubits=list(system),
-                control_qubits=list(control),
-                label=label,
-                affine=affine_tables[index],
-            )
-        else:
-            _append_multiplexed_pauli_rotation(
-                circuit,
-                system_qubits=list(system),
-                control_qubits=list(control),
-                label=label,
-                angles=plan.occurrence_angle_tables.array[index],
-            )
-        blocks.append(
-            SampledBlock(
-                name=f"select_occurrence_{label}",
-                circuit=circuit,
-                multiplicity=multiplicity,
-            )
-        )
-    return blocks
 
 
 def dense_representative_envelope(q, a, route="gatewise"):
@@ -220,11 +81,9 @@ def dense_representative_envelope(q, a, route="gatewise"):
     elif resolved == "whole_matrix":
         census = controlled_synthesis_gate_census(q + a)
     else:
-        gates, instructions, heavy = gatewise_control_counts(q, a)
+        gates, instructions = gatewise_control_counts(q, a)
         result["synthesis_gate_upper_bounds"] = dense_synthesis_gate_census(q)
-        result["control_constructor_upper_bounds"] = dict(
-            gates=gates, instructions=instructions, heavy=heavy
-        )
+        result["control_constructor_upper_bounds"] = dict(gates=gates, instructions=instructions)
         return result
     result["synthesis_gate_upper_bounds"] = census
     # Direct translation of U/RZ/H/X to U, without routing or gate expansion.
@@ -234,286 +93,137 @@ def dense_representative_envelope(q, a, route="gatewise"):
     return result
 
 
-def _dense_select_bound(payload, data):
-    """Return the dense SELECT's structural upper-bound record for N physical branches.
+def resource_breakdown(plan, *, basis="cx"):
+    """Return each measurement batch of a quantum LCHS Plan with its blocks, calls per shot and per-call cost rules.
 
-    Every physical branch of a homogeneous dense Plan has the same width and
-    route, so one bound C per branch gives N*C for SELECT CX. No smallest,
-    median or largest |k| branch is built. The record keeps its basis and
-    route, and it is not added to the operation counts of the representatives.
-    """
-    bound = dense_representative_envelope(data.num_system_qubits, data.num_control_qubits,
-                                          payload.method.dense_control_route)
-    branches = len(payload.coefficient_plan.coefficients)
-    return dict(name="dense_select", multiplicity=branches, bound=bound,
-                basis_cx_upper_bound_total=branches*bound["basis_cx_upper_bound"])
+    The Program is read once and no block is constructed. A body may hold
+    sequences, block calls, repetitions with an integer count, and
+    allocations, releases, measurements and resets, which call no block.
+    Each batch gives its name, its ``settings`` count (its settings times
+    the points of its range axes, so a sampled-pair Plan counts its B rows),
+    its ``repetitions`` (the shots of each setting) and ``blocks``: for every selected block it
+    calls, the signature name, ``calls`` per execution of the body,
+    ``laws``, the record's `ResourceLaw` values in ``basis`` with the
+    record's control and adjoint flags, empty when it declares none there,
+    and ``decomposition``, the record's exact gate sequence or None, which
+    `estimate` counts where no law applies.
+    A vector or exact-reduction Plan has one entry for its root body, with
+    ``repetitions`` None. `nwqlib.estimate(plan,
+    context=ResourceContext(basis=basis))` gives the totals.
 
-
-def _pf_samples(payload, data, operation):
-    """Yield one product-formula occurrence block per Pauli label and the phase blocks.
-
-    Each label's block carries its saved repetition multiplicity. The phase
-    part is the combined coefficient and identity diagonal for multiplexed
-    or structured SELECT, or per-branch controlled phases and open-control X
-    gates for branch-controlled SELECT.
-    """
-    from qiskit import QuantumCircuit
-    from qiskit.circuit import Parameter
-    from nwqlib.subroutines.qiskit_compat import controlled
-    from .select_synthesis import _product_formula_branch_phase_count
-    from nwqlib.subroutines._multiplexors import append_control_diagonal_phases
-
-    selected=payload.select_data
-    plan=selected.plan
-    a,q=data.num_control_qubits,data.num_system_qubits
-    # The existing occurrence kernel groups branch-controlled nonzero classes
-    # or selects one stored table per label, keeping exact multiplicities.
-    labels=len(set(plan.occurrence_schedule))
-    tables=len(plan.occurrence_angle_tables)*plan.padded_node_count
-    _native_envelope(operation,a+q,max(1,labels)*(8*(1<<a)+8*q))
-    _native_envelope(operation,a+q,tables)
-    for block in _product_formula_occurrence_blocks(selected,num_system_qubits=q,implementation=payload.selected_select):
-        yield block.name,block.circuit,block.multiplicity
-    _native_envelope(operation,a+q,8*(1<<a))
-    if payload.selected_select=="branch_controlled":
-        phases=_product_formula_branch_phase_count(plan)
-        masks=sum(2*(a-branch.bit_count()) for branch,node in enumerate(plan.branch_to_node) if node is not None)
-        if phases:
-            phase=QuantumCircuit(q,name="selected_branch_phase")
-            phase.global_phase=Parameter("selected_branch_phase")
-            circuit=QuantumCircuit(a+q)
-            circuit.append(controlled(phase.to_gate(), a, ctrl_state=(1 << a) - 1),range(a+q))
-            yield "branch_phase",circuit,phases
-        if masks:
-            circuit=QuantumCircuit(1)
-            circuit.x(0)
-            yield "open_control_x",circuit,masks
-    else:
-        circuit=QuantumCircuit(a+q)
-        combined=tuple(coefficient+identity for coefficient,identity in
-                       zip(plan.coefficient_phases,plan.identity_phases,strict=True))
-        append_control_diagonal_phases(circuit,list(circuit.qubits[:a]),combined)
-        yield "control_diagonal",circuit,1
-
-
-def _qsp_samples(payload, data, operation):
-    """Yield one controlled joint-generator query and the QSP fixed blocks with their counts.
-
-    Multiplicities come from the saved structural formula (block-encoding
-    queries, projector phases, boundary gates and the reflections of
-    oblivious amplitude amplification), so the
-    degree-long QSP circuit is never built for this estimate.
-    """
-    from qiskit import QuantumCircuit
-    from nwqlib.subroutines.qiskit_compat import controlled
-    from nwqlib.subroutines.qsp import build_control_diagonal_generator_encoding
-    from nwqlib.subroutines._semantic import zero_reflection
-    from nwqlib.subroutines.qsp.evolution import _append_projector_phase
-    from .native import _build_compiled_qsp_part_encoding,_compiled_coefficient_phase_gate
-
-    selected=payload.qsp_plan
-    l_part,h_part,_=selected["part_plans"]
-    layout,law=selected["layout"],selected["structural_law"]
-    ancillas=layout["num_ancillas"]+3
-    width=ancillas+data.num_control_qubits+data.num_system_qubits
-    # This is one selected child/query template, never the degree-long QSP
-    # circuit. No call to prepare_qsp_evolution or phase solving occurs.
-    _native_envelope(operation,width,8*(1<<data.num_control_qubits)+8*(1<<data.num_system_qubits))
-    # Each active dense-dilation child is synthesized once, in its controlled
-    # generator branch or, for a single child, in the controlled query below,
-    # and Qiskit controls the synthesized gates there and in the query. On
-    # the whole-matrix route the generator branch synthesizes the child's
-    # controlled matrix instead (compiled_select_controlled_syntheses).
-    active=[child for child,scale in ((l_part,layout["l_diagonal_max_abs"]),(h_part,layout["h_diagonal_max_abs"]))
-            if scale>0.]
-    route=payload.method.dense_control_route
-    from .compiled_selection import compiled_select_controlled_syntheses, compiled_select_dense_controls
-    controlled_syntheses=compiled_select_controlled_syntheses(selected,route=route)
-    _synthesis_envelope(operation,() if controlled_syntheses else
-                        tuple(child.system_qubits+child.num_ancillas for child in active
-                              if child.implementation=="dense_dilation"),
-                        compiled_select_dense_controls(selected,route=route,queries=(1,)),controlled_syntheses)
-    encoding_l=_build_compiled_qsp_part_encoding(l_part)
-    encoding_h=None if h_part.implementation=="exact_zero" else _build_compiled_qsp_part_encoding(h_part)
-    generator=build_control_diagonal_generator_encoding(encoding_l,encoding_h,
-        l_diagonal=selected["l_diagonal"],h_diagonal=selected["h_diagonal"],dense_control_route=route)
-    query=QuantumCircuit(width)
-    query.append(controlled(generator.circuit.to_gate(),1),[0,*range(3,width)])
-    yield "controlled_joint_query",query,law["block_encoding_queries"]
-    _native_envelope(operation,width,8*width)
-    from nwqlib.subroutines.qsp.evolution import wx_phases_to_reflection
-    reflection_phases,global_phase=wx_phases_to_reflection(selected["prepared_evolution"].cos_solution.phases)
-    phase=QuantumCircuit(width-1,name="projector_phase")
-    _append_projector_phase(phase,phase.qubits[1],list(phase.qubits[2:ancillas-1]),
-                            float(reflection_phases[0]),pair_qubit=phase.qubits[0])
-    circuit=QuantumCircuit(width)
-    circuit.append(controlled(phase.to_gate(),1),range(width))
-    yield "controlled_projector_phase",circuit,law["projector_phase_count"]
-    coefficient=QuantumCircuit(width)
-    gate=_compiled_coefficient_phase_gate(np.asarray(data.original_coefficients),data.padded_term_count)
-    if gate is not None:
-        coefficient.append(gate,range(ancillas,ancillas+data.num_control_qubits))
-    yield "coefficient_phase",coefficient,1
-    for name,gate,qubits,key in (("pair_boundary","ch",2,"pair_boundary_h_count"),
-                               ("parity_boundary","h",1,"parity_boundary_h_count"),
-                               ("odd_pair_sign","cz",2,"odd_pair_sign_count")):
-        circuit=QuantumCircuit(qubits)
-        getattr(circuit,gate)(*range(qubits))
-        yield name,circuit,law[key]
-    circuit=QuantumCircuit(1)
-    circuit.p(float(global_phase),0)
-    yield "parity_scalar_phase",circuit,law["parity_scalar_phase_count"]
-    yield "ancilla_reflection",zero_reflection(ancillas),law["oaa_reflection_count"]
-
-
-def _representatives(plan,payload,operation,bounds):
-    """Yield the PREP, evolution and readout representatives with their multiplicities.
-
-    A dense exact SELECT builds no representative. Its structural upper-bound
-    record (_dense_select_bound) is appended to ``bounds`` instead.
-    """
-    from qiskit import QuantumCircuit,ClassicalRegister
-    from nwqlib.blocks.lowering import _local_method_context
-    from nwqlib.subroutines.lcu.core import prepare_lcu_gate_data
-    from .quantum import observed_bits
-    context = _local_method_context()
-    selected = {record.content_id:record for record in plan.construction.selections}
-    blocks = {block.record.signature.name:block for block in plan.blocks}
-    rec=plan.reconstruction
-    width=len(rec.success_bits)+len(rec.system_bits)
-    prepared = {}
-    for name in ('initial_prep','coefficient_prep','coefficient_inverse'):
-        block=blocks.get(name)
-        if block is None:
-            if name=='initial_prep' or rec.padded_branches>1:
-                raise ValueError('sampling requires actual selected PREP children')
-            continue
-        if selected.get(block.record.content_id)!=block.record:
-            raise ValueError('sampled PREP is not part of this construction')
-        _native_envelope(operation,width,max(1,block.record.construction_work or 0))
-        if name=='coefficient_inverse':
-            if block._base is not blocks['coefficient_prep'] or not block.record.adjoint or block.record.controlled:
-                raise ValueError('coefficient inverse does not match the actual selected PREP')
-            from nwqlib.subroutines.qiskit_compat import inverse_realized_gate
-            base=prepared['coefficient_prep']
-            circuit=QuantumCircuit(base.num_qubits)
-            circuit.append(inverse_realized_gate(base.to_gate()),circuit.qubits)
-        else:
-            circuit=block._constructor(block,(),context)
-            prepared[name]=circuit
-        yield name,circuit,1
-    data=prepare_lcu_gate_data(payload.coefficient_plan.coefficients,system_dimension=len(payload.initial),
-        max_bytes=payload.method.max_bytes,max_work=payload.method.max_select_work)
-    if payload.selected_select=='identity_evolution':
-        select=blocks['lchs_select']
-        _native_envelope(operation,width,1<<data.num_control_qubits)
-        yield 'identity_evolution',select._constructor(select,(),context),1
-    elif payload.method.hamiltonian_evolution_backend=='dense_exact':
-        bounds.append(_dense_select_bound(payload,data))
-    elif payload.select_data is not None:
-        yield from _pf_samples(payload,data,operation)
-    else:
-        yield from _qsp_samples(payload,data,operation)
-    # Include readout transformations and measurements in the sampled
-    # construction cost, not only the central evolution blocks.
-    for setting in rec.settings:
-        _native_envelope(operation,width,4*width)
-        circuit=QuantumCircuit(width)
-        for bit,axis in enumerate(reversed(setting.label)):
-            if plan.shots is None or axis not in 'XY':
-                continue
-            child=blocks.get(f'rotate_{axis.lower()}_{bit}')
-            if child is None or selected.get(child.record.content_id)!=child.record:
-                raise ValueError('sampled readout needs its exact selected group basis change')
-            circuit.compose(child._constructor(child,(),context),qubits=rec.system_bits,inplace=True)
-        if plan.shots is not None:
-            observed=observed_bits(rec)
-            register=ClassicalRegister(len(observed),'readout')
-            circuit.add_register(register)
-            circuit.measure(observed,register)
-        yield 'readout_'+setting.name,circuit,1
-
-
-# The default caps (13 qubits, 100,000,000 build-work units and 100,000
-# inspected operations) are untuned limits of this explicit inspection,
-# registered in ENGINEERING_CONSTANTS. Nothing is simulated. A dense exact
-# SELECT is reported by its structural upper-bound record
-# (dense_representative_envelope, _dense_select_bound), an integer evaluation
-# that forms no eigensystem, matrix or circuit and charges no build work.
-# A dense-dilation QSP child adds the synthesis of its unitary on q + 1
-# qubits and Qiskit's control of it (_dense_synthesis.dense_synthesis_size,
-# gatewise_control_size). Product-formula charges grow with the label count
-# times 2**a and with the stored angles (template occurrences times
-# repetition blocks times 2**a). QSP, PREP and readout charges grow with
-# 2**a, 2**q and the width. max_qubits=13 is a policy cap, not a
-# consequence of these laws.
-def sample_resources(plan, *, max_qubits=13, max_bytes=DEFAULT_MAX_BYTES,
-                     max_build_work=100_000_000,max_operations=100_000,transpile_options=None):
-    """Count the operations of representative circuits of the Plan and weight them by multiplicity.
-
-    Returns ``representatives`` (name, saved multiplicity and the operation
-    counts of each representative circuit) and ``weighted_totals`` for each
-    readout setting (a sampled group, a mass setting or the exact reduction):
-    every core representative's operation counts times its multiplicity,
-    plus that setting's readout representative (its group basis change and
-    measurements, none for the exact reduction). The weighted totals are
-    estimates of the planned construction's operation counts. They do not
-    model angle-specific cancellation, cross-block optimization or the
-    working memory of Qiskit. ``structural_bounds`` lists the records that no representative
-    circuit covers, which for a dense exact SELECT is its structural upper
-    bound for every physical branch (dense_representative_envelope) in the
-    named gate bases, never added to a weighted total. max_qubits bounds the
-    Plan width and the width of every representative circuit.
-    max_build_work bounds summed known gate/table size proxies.
-    max_operations bounds all inspected representative operations. No cap
-    bounds the runtime of Qiskit or process RSS. Transpilation occurs only when
-    explicitly requested.
+    Raises:
+        ValueError: For a Plan that is not a quantum LCHS Plan, or a body
+            node other than those above.
     """
     from nwqlib.core.planning import Plan
-    from nwqlib.backends.inspection import inspect_circuit_resources
+    from nwqlib.ir import Allocate, BlockCall, Measure, MeasurementBatch, Release, Repeat, Reset, Sequence
     from .method import LCHS
-    from .selected_grid import selected_payload
-    from .selection import LCHSData
-    if type(plan) is not Plan or type(plan.method) is not LCHS or plan.execution!='quantum':
-        raise ValueError('resource sampling requires the actual quantum LCHS Plan')
-    limits=dict(max_qubits=integer(max_qubits,'max_qubits',1),max_bytes=max_bytes,
-        max_build_work=integer(max_build_work,'max_build_work',1),used_build_work=0)
-    remaining=integer(max_operations,'max_operations',1)
-    payload=selected_payload(plan)
-    if type(payload) is not LCHSData or payload.source is not None:
-        raise ValueError('representative sampling supports homogeneous dense inputs; inspect actual prepared circuits for source/periodic work')
-    width=len(plan.reconstruction.success_bits)+len(plan.reconstruction.system_bits)
-    _native_envelope(limits,width,1)
-    representatives=[]
-    core={}
-    readout={}
-    bounds=[]
-    for name,circuit,multiplicity in _representatives(plan,payload,limits,bounds):
-        if remaining==0 and len(circuit.data)>0:
-            raise ValueError('selected representative inventory exceeds max_operations')
-        # The raw representatives are not in cx,u. That basis is only the
-        # default target of an explicitly requested transpilation.
-        inventory=inspect_circuit_resources(circuit,native_basis=('cx','u') if transpile_options else (),
-            label=f'LCHS {name} representative (SELECT={payload.selected_select})',
-            max_operations=max(1,remaining),max_bytes=max_bytes,
-            transpile_options=transpile_options,basis_label='selected_sample_raw')
-        remaining-=inventory['total_operations']
-        if remaining<0:
-            raise ValueError('selected representative inventory exceeds max_operations')
-        representatives.append(dict(name=name,multiplicity=multiplicity,inventory=inventory))
-        target=readout.setdefault(name.removeprefix('readout_'),{}) if name.startswith('readout_') else core
-        for operation,count in inventory['operations'].items():
-            target[operation]=target.get(operation,0)+multiplicity*count
-        # Fixed 8192-byte envelope per stored inventory dictionary, registered
-        # in ENGINEERING_CONSTANTS.
-        _check_bytes(8192*len(representatives),max_bytes,'representative inventories')
-    weighted_totals={}
-    for setting in plan.reconstruction.settings:
-        if setting.name not in readout:
-            raise ValueError(f'representative sampling built no readout inventory for setting {setting.name}')
-        totals=dict(core)
-        for operation,count in readout[setting.name].items():
-            totals[operation]=totals.get(operation,0)+count
-        weighted_totals[setting.name]=dict(operations=totals,total_operations=sum(totals.values()))
-    return dict(representatives=tuple(representatives),weighted_totals=weighted_totals,
-                structural_bounds=tuple(bounds))
+    if type(plan) is not Plan or type(plan.method) is not LCHS or plan.execution != "quantum":
+        raise ValueError("resource_breakdown requires a quantum LCHS Plan")
+    program = plan.construction.program
+    nodes = {item.id: item.node for item in program.definitions}
+    records = {record.signature.name: record for record in plan.construction.selections}
+
+    def count(name, counts, factor):
+        node = nodes[name]
+        if isinstance(node, BlockCall):
+            counts[node.signature] = counts.get(node.signature, 0) + factor
+        elif isinstance(node, Sequence):
+            for child in node.children:
+                count(child, counts, factor)
+        elif isinstance(node, Repeat) and type(node.count) is int:
+            count(node.body, counts, factor * node.count)
+        elif not isinstance(node, (Allocate, Release, Measure, Reset)):
+            raise ValueError(f"resource_breakdown does not read the {type(node).__name__} node {name!r}")
+        return counts
+
+    def blocks(body):
+        return tuple(dict(block=name, calls=calls, laws=tuple(
+            law for law in records[name].resource_laws if law.basis == basis
+            and law.controlled == records[name].controlled and law.adjoint == records[name].adjoint),
+            decomposition=records[name].decomposition) for name, calls in count(body, {}, 1).items())
+    batches = [(item.id, item.node) for item in program.definitions if isinstance(item.node, MeasurementBatch)]
+    if not batches:
+        return (dict(name=program.root, settings=1, repetitions=None, blocks=blocks(program.root)),)
+    # A setting runs once per point of the batch's range axes, counted from
+    # the axis bounds without enumerating the points.
+    return tuple(dict(name=name, settings=len(node.settings) * prod(len(range(axis.start, axis.stop, axis.step))
+                                                                    for axis in node.axes),
+                      repetitions=node.repetitions, blocks=blocks(node.body))
+                 for name, node in batches)
+
+
+def sampled_pair_resources(plan):
+    """Return the population, preparation and pair-SELECT CX counts of a sampled-pair Plan without building a circuit.
+
+    ``rows`` B, ``bindings`` (one ``row`` value per point of the row axis), circuit
+    ``preparations`` (one per row) and ``shots`` B*m are separate
+    counts, and ``templates`` is the number of selected block definitions.
+    ``pair_select_cx_per_row`` is the (smallest, largest) pair SELECT CX
+    count of one row before routing (`sampled_plan.row_select_cx`): the
+    multiplexed SELECT keeps its parity and multiplexor CX whatever its
+    angles, and the structured SELECT omits the two CX of every rotation
+    whose two angles are exactly equal in that row. ``fanout_cx`` adds
+    2*(r_c - 1) per row, and ``pair_select_cx_total`` sums SELECT and
+    fanout CX over every executed shot. For a Problem with a source, the
+    pair block prepares each row's inputs: ``input_preparations`` counts
+    the uncontrolled preparations of equal-kind rows and the controlled
+    pairs of mixed-kind rows, per circuit, and their elementary gate counts
+    are not derived (``input_preparation_cx`` is None). Without a source
+    the initial preparation is its own block, counted by `estimate` from
+    its cost law. Measurement, rotation counts and routing are not
+    included, and no circuit depth is given.
+
+    A product-formula recipe (``recipe`` names its version) is counted from
+    its saved choices: ``row_steps`` is each row's step divisor (the
+    Richardson level s or 2s, the MPF r run as r/2 double steps, the PTSC
+    segment count r), ``pair_select_cx_total`` also adds the PTSC
+    correction CX (``pair_correction_cx_per_row``, one CX per controlled
+    Pauli and 2w per low-order rotation of support w), and ``member_rows``
+    counts the rows of each Richardson or MPF member. For the multiplexed
+    SELECT of a member recipe, ``expected_select_cx_per_shot`` is
+    sum_j pi_j C_j over the member law, with C_j the member's SELECT CX; it
+    is None for the structured SELECT, whose counts depend on each row's
+    angles, and for PTSC, whose expected correction count is not derived.
+    A sampled QSP Plan returns `sampled_qsp.qsp_pair_resources` instead.
+    Nothing is drawn, selected, fitted or built.
+    """
+    from .sampled_plan import _row_words, row_correction_cx, row_select_cx
+    rec, payload = plan.reconstruction, plan._native.get("native_data")
+    rows, recipe = rec.pair_rows, rec.pair_recipe
+    if rows is None:
+        raise ValueError("pair resources need a sampled-pair LCHS Plan")
+    if rec.pair_qsp is not None:
+        from .sampled_qsp import qsp_pair_resources
+        return qsp_pair_resources(plan)
+    q, copies = payload.num_system_qubits, payload.control_copies
+    select = row_select_cx(payload, rec)
+    corrections = row_correction_cx(rec)
+    row_cx = select + corrections + 2 * (copies - 1)
+    preparations = None
+    if payload.prepares_inputs:
+        mixed = int(np.count_nonzero(rows.kind_x.array != rows.kind_y.array))
+        preparations = dict(uncontrolled=rows.clusters - mixed, controlled_pairs=mixed)
+    word = _row_words(payload, rec, corrections=False)
+    row_steps = np.array([word(row)[1] for row in range(rows.clusters)], dtype=np.int64)
+    member_rows = expected = None
+    if recipe is not None and recipe.recipe != "ptsc":
+        member_rows = tuple(int(np.count_nonzero(recipe.member.array == j)) for j in range(len(recipe.member_steps)))
+        if payload.implementation == "multiplexor":
+            # The multiplexed CX of one word is angle independent and equal
+            # for both members' words, so any row gives it.
+            one = int(select[0]) // word(0)[2]
+            expected = sum(count / 2**52 * repetitions * one
+                           for count, repetitions in zip(recipe.member_counts, recipe.member_repetitions))
+    return dict(rows=rows.clusters, repeats=rows.repeats, bindings=rows.clusters, preparations=rows.clusters,
+                shots=rows.clusters * rows.repeats, templates=len(plan.construction.selections),
+                qubits=q + copies, clbits=q + 1, implementation=payload.implementation, control_copies=copies,
+                fanout_cx=2 * (copies - 1), fanout_layers=2 * (copies - 1).bit_length(),
+                recipe=None if recipe is None else recipe.version,
+                row_steps=(int(row_steps.min()), int(row_steps.max())),
+                pair_select_cx_per_row=(int(select.min()), int(select.max())),
+                pair_correction_cx_per_row=None if recipe is None or recipe.recipe != "ptsc" else
+                (int(corrections.min()), int(corrections.max())),
+                member_rows=member_rows, expected_select_cx_per_shot=expected,
+                pair_select_cx_total=int(row_cx.sum()) * rows.repeats,
+                input_preparations=preparations, input_preparation_cx=None)

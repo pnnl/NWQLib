@@ -8,6 +8,7 @@ from nwqlib.blocks import (
     BlockSemantics, SelectedConstruction, SelectedDefinition, lower_qiskit,
     select_preparation, select_zero_reflection, transform_block,
 )
+from nwqlib.blocks.selection import select_pauli_group_basis
 from nwqlib.core import Basis, Float64, InputRef, Limit, Source, Unit
 from nwqlib.evidence import Evidence
 from nwqlib.ir import (
@@ -20,7 +21,6 @@ from nwqlib.resources import ResourceContext, ResourceLaw, WorkloadEstimate, Wor
 
 SOURCE = Source(name="hand inventory", version="1", domain="declared test recipe", reference="three serial T gates; no native binding")
 EVIDENCE = Evidence(kind="user_assertion", source=SOURCE)
-LOWERING = dict(max_operations=1000, max_qubits=4, max_clbits=4)
 
 
 def preparation(choice="native"):
@@ -97,6 +97,93 @@ def calls(record, *, parallel=False, same_wire=False, repeat=1):
                                 registers=regs, signatures=(record.signature,)), selections=(record,))
 
 
+def single_call(block, *, repetitions=None):
+    """One call of ``block``, each port on its own register, inside a one-setting counts batch when ``repetitions`` is given."""
+    ports = block.record.signature.quantum
+    body = (tuple(f"allocate_{port.name}" for port in ports) + ("call",)
+            + (() if repetitions is None else tuple(f"release_{port.name}" for port in ports)))
+    definitions = tuple(Definition(id=f"allocate_{port.name}", node=Allocate(wire=port.name)) for port in ports) + (
+        Definition(id="call", node=BlockCall(signature=block.record.signature.name,
+                                             ports=tuple(PortMap(port=port.name, wire=port.name) for port in ports))),
+        Definition(id="body", node=Sequence(children=body)),
+    )
+    if repetitions is None:
+        root = "body"
+    else:
+        metadata = MetadataRef(format=SOURCE, data=InputRef(identity="test:setting", representation="test", source=SOURCE))
+        root = "batch"
+        definitions += tuple(Definition(id=f"release_{port.name}", node=Release(wire=port.name)) for port in ports) + (
+            Definition(id="batch", node=MeasurementBatch(body="body", repetitions=repetitions, observation_kind="counts",
+                                                         settings=(Setting(label="one", metadata=metadata),))),)
+    return SelectedConstruction(program=Program(root=root, definitions=definitions,
+        registers=tuple(Register(name=port.name, width=port.width) for port in ports),
+        signatures=(block.record.signature,)), selections=(block.record,))
+
+
+def branch_call(block, *, repetitions=None):
+    """``single_call`` whose one call becomes one or two calls of ``block``, chosen by a classical bit in the same execution."""
+    construction = single_call(block, repetitions=repetitions)
+    program = construction.program
+    body = next(item.node for item in program.definitions if item.id == "body")
+    children = tuple(child for name in body.children for child in (("coin", "choose") if name == "call" else (name,)))
+    definitions = tuple(item for item in program.definitions if item.id != "body") + (
+        Definition(id="coin", node=ClassicalStage(implementation=SOURCE, outputs=("coin",))),
+        Definition(id="twice", node=Sequence(children=("call", "call"))),
+        Definition(id="choose", node=Branch(condition="coin", when_true="call", when_false="twice")),
+        Definition(id="body", node=Sequence(children=children)),
+    )
+    return construction.revise(program=program.revise(definitions=definitions,
+                                                      classical=(ClassicalValue(name="coin", dtype="bool"),)))
+
+
+def controlled_phase(name, amplitude):
+    """The controlled direct PREP of ``amplitude * |0>``, whose global phase becomes a phase on the control."""
+    import numpy as np
+    from nwqlib.problems import ingest_vector
+    return transform_block(f"controlled_{name}", select_preparation(name, ingest_vector(
+        np.array([amplitude, 0]), max_bytes=1024)), control=True)
+
+
+# The Ross-Selinger leading term at eps = 1e-10: ceil(3 log2(1e10)) = ceil(99.66) = 100 T per rotation.
+SYNTHESIS = dict(basis="clifford_t", precision=Float64(value=1e-10))
+
+
+def test_typical_rotation_synthesis_gives_t_only_for_single_qubit_phases():
+    """The selected leading-term synthesis gives each controlled arbitrary phase 100 T at eps = 1e-10, as an estimate.
+
+    It needs both the precision and TYPICAL_ROTATION_SYNTHESIS, keeps 0 and 1 T for exact Clifford and T
+    phases, and leaves T unknown when the block also has a controlled H, a Toffoli or a CCZ.
+    """
+    import numpy as np
+    from nwqlib.blocks.selection import select_pauli_parity
+    from nwqlib.problems import ingest_vector
+    from nwqlib.resources import TYPICAL_ROTATION_SYNTHESIS
+    from nwqlib.resources.fold import typical_rotation_t
+
+    assert [typical_rotation_t(eps) for eps in (1e-10, 1e-3, 0.5, 1.0, 2.0)] == [100, 30, 3, 0, 0]
+    rule = ResourceContext(**SYNTHESIS, synthesis=TYPICAL_ROTATION_SYNTHESIS)
+    near = single_call(controlled_phase("near", complex(-2**-52, 1)))
+    for context in (ResourceContext(basis="clifford_t"), rule.revise(precision=None), rule.revise(synthesis=None),
+                    rule.revise(synthesis=SOURCE)):
+        assert estimate(near, context=context).quantity("t").fact.availability == "unknown"
+    result = estimate(near, context=rule)
+    assert (scalar(result, "t"), result.quantity("t").interpretation, scalar(result, "arbitrary_rotations")) == (
+        100, "estimate", 1)
+    assert all(result.quantity(metric).fact.availability == "unknown"
+               for metric in ("t_depth", "operations", "clifford", "logical_depth"))
+    for amplitude, count in ((1j, 0), (1 + 1j, 1)):
+        named = estimate(single_call(controlled_phase(f"named_{count}", amplitude)), context=rule)
+        assert (scalar(named, "t"), named.quantity("t").interpretation) == (count, "exact")
+    phased_h = transform_block("controlled_h", select_preparation("h", ingest_vector(
+        np.exp(0.3j) * np.array([1, 1]) / np.sqrt(2), max_bytes=1024)), control=True)
+    toffoli = transform_block("controlled_zz", select_pauli_parity(
+        "zz", "ZZ", basis=Basis(identity="computational", dimension=4, ordering="q0 rightmost")), control=True)
+    ccz = transform_block("controlled_reflection", select_zero_reflection("reflection", 2), control=True)
+    for block in (phased_h, toffoli, ccz):
+        assert estimate(single_call(block), context=rule).quantity("t").fact.availability == "unknown"
+    assert scalar(estimate(single_call(phased_h), context=rule), "arbitrary_rotations") == 1
+
+
 def test_same_choice_small_lowered_inventory_and_trillion_repeat():
     for choice, recipe in (("native", ("x",)), ("hzh", ("h", "z", "h"))):
         construction, native = preparation(choice)
@@ -109,7 +196,7 @@ def test_same_choice_small_lowered_inventory_and_trillion_repeat():
         result = estimate(construction)
         # Independent event enumeration: two invocations of the specified recipe.
         events = Counter(gate for _ in range(2) for gate in recipe)
-        circuit = lower_qiskit(construction, blocks=native, **LOWERING).circuit.decompose()
+        circuit = lower_qiskit(construction, blocks=native).circuit.decompose()
         assert dict(circuit.count_ops()) == events
         assert scalar(result, "operations") == sum(events.values())
         assert scalar(result, "logical_depth") == sum(events.values())
@@ -146,6 +233,35 @@ def test_same_choice_small_lowered_inventory_and_trillion_repeat():
     assert literal.fact.evidence.kind == "proved_relation"
 
 
+def test_lowering_keeps_an_unknown_construction_work_unknown_and_skipped_calls_free():
+    """A legal selected definition with unknown construction work is built, and the circuit's work is then unknown.
+
+    The same X preparation is selected twice, once with its size rule and once with unknown work. A call of the
+    unknown one, before or after the known call, leaves the whole construction work unknown rather than the
+    known part. Inside a Repeat of count zero the unknown call is never visited or built, so the circuit keeps
+    the known integer of the known call alone.
+    """
+    from nwqlib.blocks import SelectedBlock
+    construction, (block,) = preparation()
+    known_only = lower_qiskit(construction, blocks=(block,)).construction_work
+    assert type(known_only) is int and known_only > 0
+    record = block.record.revise(signature=block.record.signature.revise(name="lazy"), construction_work=None)
+    lazy = SelectedBlock.bind(record, payload=block._payload, constructor=block._constructor)
+
+    def lowered(children, count=1):
+        program = construction.program
+        definitions = tuple(item for item in program.definitions if item.id != "root") + (
+            Definition(id="lazy_call", node=BlockCall(signature="lazy", ports=(PortMap(port="system", wire="system"),))),
+            Definition(id="repeat", node=Repeat(body="lazy_call", count=count)),
+            Definition(id="root", node=Sequence(children=("allocate", *children))))
+        selected = construction.revise(program=program.revise(definitions=definitions,
+                                                              signatures=(block.record.signature, record.signature)),
+                                       selections=(block.record, record))
+        return lower_qiskit(selected, blocks=(block, lazy)).construction_work
+    assert lowered(("call", "repeat")) is None and lowered(("repeat", "call")) is None
+    assert lowered(("call", "repeat"), count=0) == known_only
+
+
 def test_ft_serial_parallel_basis_precision_and_dependency():
     import json
 
@@ -161,7 +277,7 @@ def test_ft_serial_parallel_basis_precision_and_dependency():
     with pytest.raises(ValueError, match="share a wire"):
         calls(record, parallel=True, same_wire=True)
     with pytest.raises(ValueError, match="no exact persisted native binding|law-only"):
-        lower_qiskit(calls(record), blocks=(), **LOWERING)
+        lower_qiskit(calls(record), blocks=())
     missing = estimate(calls(record), context=context.revise(precision=Float64(value=1e-3)))
     assert missing.quantity("t").fact.availability == "unknown"
     # Portable resource data preserves missing inventory versus the declared
@@ -300,10 +416,33 @@ def test_per_location_reuse_and_simultaneous_workspace():
     context = ResourceContext(resident=(Workspace(location="gpu0", purpose="input", bytes=2, source=SOURCE),))
     branch = estimate(SelectedConstruction(program=p, selections=(small, large)), context=context)
     assert scalar(branch, "memory", "gpu0") == 9
-    assert branch.quantity("memory", location="gpu0").interpretation == "upper_bound"
+    assert branch.quantity("memory", location="gpu0").interpretation == "estimate"
     assert any("exclusive paths" in item for item in branch.quantity("memory", location="gpu0").fact.assumptions)
     assert scalar(branch, "input_bytes", "gpu0") == 2
-    assert branch.quantity("input_bytes", location="gpu0").interpretation == "exact"
+    assert branch.quantity("input_bytes", location="gpu0").interpretation == "estimate"
+    # The same resident bytes on both paths depend on neither.
+    assert not any("exclusive paths" in item for item in branch.quantity("input_bytes", location="gpu0").fact.assumptions)
+
+
+def test_a_program_depth_bounds_the_circuit_depth_from_above_and_gate_counts_stay_exact():
+    """Depth adds along the Program's order, so H on each of two qubits gives 2, while Qiskit counts
+    depth 1 in the lowered circuit. The gate counts do not depend on a schedule, and a zero depth
+    cannot be lowered by one."""
+    basis = Basis(identity="computational", dimension=4,
+                  ordering="coordinate index increasing; qubit 0 is rightmost tensor/bit position")
+    group = select_pauli_group_basis("g", "XX", basis=basis)
+    nodes = dict(s=Allocate(wire="s"), c=BlockCall(signature="g", ports=(PortMap(port="system", wire="s"),)),
+                 root=Sequence(children=("s", "c")))
+    program = Program(root="root", registers=(Register(name="s", width=2),), signatures=(group.record.signature,),
+                      definitions=tuple(Definition(id=key, node=node) for key, node in nodes.items()))
+    construction = SelectedConstruction(program=program, selections=(group.record,))
+    result = estimate(construction)
+    depth = result.quantity("logical_depth")
+    assert scalar(result, "logical_depth") == 2 and depth.interpretation == "upper_bound"
+    assert any("serial schedule" in item for item in depth.fact.assumptions)
+    assert lower_qiskit(construction, blocks=(group,)).circuit.decompose().depth() == 1
+    assert scalar(result, "single_qubit") == 2 and result.quantity("single_qubit").interpretation == "exact"
+    assert scalar(result, "t_depth") == 0 and result.quantity("t_depth").interpretation == "exact"
 
 
 def test_branch_adaptive_and_shot_populations_remain_conditional():
@@ -320,6 +459,9 @@ def test_branch_adaptive_and_shot_populations_remain_conditional():
     branch = estimate(c.revise(program=p), context=context)
     assert scalar(branch, "t") == 6
     assert branch.quantity("t").interpretation == "upper_bound"
+    # Counts that both arms leave at the same exact value stay exact.
+    assert all(branch.quantity(metric).interpretation == "exact" and scalar(branch, metric) == 0
+               for metric in ("settings", "shots", "exact_evaluations", "adaptive_rounds"))
     assert branch.quantity("expected_operations").fact.availability == "unknown"
     loop = AdaptiveLoop(body="a", max_rounds=5, policy=ClassicalStage(implementation=SOURCE), termination="external history")
     definitions = tuple(d.revise(node=loop) if d.id == "branch" else d for d in definitions)
@@ -375,14 +517,14 @@ def test_branch_adaptive_and_shot_populations_remain_conditional():
     memory = estimate(memory_batch, context=memory_context)
     assert scalar(memory, "memory", "gpu0") == 5
     peak = memory.quantity("memory", location="gpu0")
-    assert peak.interpretation == "conditional" and peak.required_schedule == "serial_acquisitions"
+    assert peak.interpretation == "estimate" and peak.required_schedule == "serial_acquisitions"
     assert "required schedule: serial_acquisitions" in str(peak)
     assert all(condition in str(peak) for condition in peak.fact.assumptions)
-    assert memory.quantity("input_bytes", location="host").interpretation == "exact"
+    assert memory.quantity("input_bytes", location="host").interpretation == "estimate"
     assert memory.quantity("input_bytes", location="host").required_schedule is None
     serial = estimate(memory_batch, context=memory_context.revise(batch_schedule="serial"))
     assert scalar(serial, "memory", "gpu0") == 5
-    assert serial.quantity("memory", location="gpu0").interpretation == "exact"
+    assert serial.quantity("memory", location="gpu0").interpretation == "estimate"
     assert WorkloadEstimate.model_validate_json(memory.model_dump_json()) == memory
 
     # Two terminal settings, two shots each; the outer batch repeats that whole
@@ -498,7 +640,7 @@ def test_native_bounds_product_and_control_phase_are_not_zero_or_exact(monkeypat
     assert ctrl.quantity("operations").fact.availability == "unknown"
     # The tiny selected native constructor supplies an independent CX inventory;
     # an envelope is compared by inequality, never forced to equal optimization.
-    native = lower_qiskit(one(controlled), blocks=(controlled,), **LOWERING).circuit.decompose(reps=8)
+    native = lower_qiskit(one(controlled), blocks=(controlled,)).circuit.decompose(reps=8)
     assert set(native.count_ops()) <= {"u", "cx"}
     assert native.count_ops().get("cx", 0) <= scalar(ctrl, "cx")
     reflection = select_zero_reflection("reflection", 1)
@@ -538,6 +680,54 @@ def test_native_bounds_product_and_control_phase_are_not_zero_or_exact(monkeypat
         estimate(calls(bad), context=ResourceContext(basis="cx"))
 
 
+def test_registered_cx_laws_refuse_only_counts_a_record_cannot_hold(monkeypatch):
+    """Two calls of a direct PREP on q qubits have 4(2**q - 2) CX, saved up to q = 14282 and refused from q = 14283.
+
+    2**14284 < 10**4300 < 2**14285, so q = 14282 is the last count a record holds. A zero multiplicity
+    or a Pauli readout without system qubits has zero CX at any exponent and never enters its law, a
+    law whose control does not match the call is not used, and a nonzero count at exponent 10**12 is
+    refused before its law is entered.
+    """
+    import nwqlib._preparation_laws as owner
+    from nwqlib.blocks import selection
+    from nwqlib.blocks.selection import _source
+
+    real, seen = owner.direct_preparation_cx_bound, []
+
+    def law(width, *args, **kwargs):
+        assert width < 20000, "unbounded law evaluated"
+        seen.append(width)
+        return real(width, *args, **kwargs)
+
+    monkeypatch.setattr(owner, "direct_preparation_cx_bound", law)
+    for name in ("signed_pauli_cx_bound", "pauli_readout_cx_bound"):
+        monkeypatch.setattr(selection, name, lambda *a, **k: pytest.fail("unbounded law evaluated"))
+    context = ResourceContext(basis="cx")
+
+    def native(law_name, implementation, exponent, factor, width=1):
+        names = ("num_qubits", "multiplicity") if law_name.startswith("direct") else ("index_qubits", "system_qubits")
+        record = selected(width=width, laws=(), bindings=(Binding(parameter=names[0], value=exponent),
+                                                          Binding(parameter=names[1], value=factor)))
+        return calls(record.revise(cost_law=_source(law_name), implementation=_source(implementation)))
+
+    for q in (2, 14282):
+        result = estimate(native("direct_preparation_cx_bound", "preparation.native", q, 1, width=q), context=context)
+        saved = type(result).model_validate_json(result.model_dump_json())
+        assert scalar(saved, "cx") == 4 * ((1 << q) - 2)
+    with pytest.raises(ValueError, match="integers a saved record can hold"):
+        estimate(native("direct_preparation_cx_bound", "preparation.native", 14283, 1, width=14283), context=context)
+    seen.clear()
+    assert scalar(estimate(native("direct_preparation_cx_bound", "preparation.native", 10**12, 0), context=context), "cx") == 0
+    assert scalar(estimate(native("pauli_readout_cx_bound", "pauli.readout_basis", 10**12, 0), context=context), "cx") == 0
+    mismatched = estimate(native("direct_preparation_controlled_cx_bound", "preparation.native", 10**12, 1), context=context)
+    assert mismatched.quantity("cx").fact.availability == "unknown"
+    for law_name, implementation in (("direct_preparation_cx_bound", "preparation.native"),
+                                     ("signed_pauli_cx_bound", "pauli.signed_select")):
+        with pytest.raises(ValueError, match="CX law integer growth"):
+            estimate(native(law_name, implementation, 10**12, 0 if law_name.startswith("signed") else 1), context=context)
+    assert seen == []
+
+
 def test_signed_pauli_native_cx_law_is_consumed_at_actual_fold_binding(monkeypatch):
     from test_semantic_blocks import one
     from nwqlib.blocks import select_pauli_readout, select_signed_pauli
@@ -575,44 +765,7 @@ def test_signed_pauli_native_cx_law_is_consumed_at_actual_fold_binding(monkeypat
     assert scalar(estimate(construction, context=context), "cx") == 20
 
 
-def test_fold_work_limit_is_proportional_to_program_admission_work(monkeypatch):
-    """A degree-103 QLS Program admits within the shared default max_steps, but its fold carries every
-    count metric through the traversal and needs more steps than that Program limit. Estimation stays within a
-    limit proportional to the Program's own admission work, and faster growth is still rejected.
-    """
-    import numpy as np
-    from nwqlib import LinearSystem, plan
-    from nwqlib.algorithms.qls import QLS
-    from nwqlib.ir.validation import _Admission
-    from nwqlib.ir import AdmissionLimits
-    from nwqlib.resources.fold import _Fold
-    from nwqlib.resources.records import FOLD_WORK_PER_ADMISSION_STEP
-
-    def chain(n):
-        return 2 * np.eye(n) - np.eye(n, k=1) - np.eye(n, k=-1)
-
-    # The Laplacian of an 8 x 4 interior grid selects a degree-103 inverse polynomial.
-    A = np.kron(chain(8), np.eye(4)) + np.kron(np.eye(8), chain(4))
-    b = np.zeros(32)
-    b[1] = 1.0
-    selected = plan(LinearSystem(A=A, b=b), method=QLS(max_admission_steps=AdmissionLimits().max_steps), seed=7)
-    admission = _Admission(selected.construction.program)
-    admission.check()
-    limit = selected.construction.program.limits.max_steps
-    assert admission.steps <= limit
-    workload = estimate(selected.construction, context=ResourceContext(basis="cx"))
-    assert limit < workload.work_units <= FOLD_WORK_PER_ADMISSION_STEP * admission.steps
-    assert workload.quantity("cx").fact.value.value > 0
-    with pytest.raises(ValueError, match="admission envelope"):
-        workload.revise(work_units=FOLD_WORK_PER_ADMISSION_STEP * limit + 1)
-
-    # Work that grows with the square of the traversal exceeds the proportional limit.
-    merge = _Fold.merge_cost
-
-    def quadratic_merge(self, left, right, **options):
-        self.admission.tick(self.admission.steps // 100)
-        return merge(self, left, right, **options)
-
-    monkeypatch.setattr(_Fold, "merge_cost", quadratic_merge)
-    with pytest.raises(ValueError, match="proportional to Program admission work"):
-        estimate(selected.construction, context=ResourceContext(basis="cx"))
+def test_a_saved_estimate_has_no_more_evaluated_contexts_than_work_units():
+    """Each evaluated context costs at least one work unit."""
+    workload = estimate(calls(selected()), context=ResourceContext())
+    assert 0 < workload.evaluated_contexts <= workload.work_units

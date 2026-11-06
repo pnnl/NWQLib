@@ -15,10 +15,10 @@ step instead of exact evolution.
 from typing import Annotated, ClassVar, Literal
 
 import numpy as np
-from pydantic import Field, StrictInt, model_validator
+from pydantic import Field, model_validator
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
-from nwqlib.algorithms._eigen_inputs import DEFAULT_CONVERSION_WORK, eigen_operator, eigen_state
+from nwqlib._limits import ResourceLimitError
+from nwqlib.algorithms._eigen_inputs import eigen_operator, eigen_state
 from nwqlib.algorithms._eigen_support import matched_chunks
 from nwqlib.algorithms.gcim.fixed_basis import (
     FixedGCIMReconstruction,
@@ -44,19 +44,17 @@ from nwqlib.algorithms.protocol import AlgorithmDescriptor, ApplicabilityError, 
 from nwqlib.blocks import SelectedConstruction, select_preparation
 from nwqlib.core.analysis import capture_analysis_origin
 from nwqlib.core.planning import Plan
-from nwqlib.core.records import FrozenArray, PositiveInt, Real, Source
+from nwqlib.core.records import StrictInteger, FrozenArray, PositiveInt, Real, Source
 from nwqlib.evidence.error_model import exact_readout_sampling
-from nwqlib.ir import ClassicalValue, Definition, MetadataRef, Register, Sequence
-from nwqlib.ir.validation import admitted_program
+from nwqlib.ir import ClassicalValue, Definition, MetadataRef, Program, Register, Sequence
 from nwqlib.operators.access import Count, _check_bytes
 from nwqlib.problems.records import OperatorData, StateData
 from .construction import (
-    EVOLUTION,
     evolution_block,
     fermionic_blocks,
     fermionic_step,
     generator_difference,
-    macro_uses,
+    pair_preparations,
     power_pair_recipes,
     step_factors,
 )
@@ -259,35 +257,23 @@ class QFD(Method):
         overlap_cutoff: Default `1e-12`, positive. Overlap eigenvectors with
             eigenvalues above it are kept for the solve.
         max_basis_size: Default `64`. Largest accepted number of powers.
-        max_experiments: Default `100_000`. Largest number of settings:
-            exact pair reductions, or sampled group settings.
-        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
-            the known bytes of conversion, the pair table, the grouped count
-            analysis and the projected solve, and on each exact pair
-            reduction's workspace.
-        max_analysis_work: Default `1_000_000_000`. Limit on the work of the
-            projected solve, of the comparisons that form qubit-wise
-            commuting groups and of each pass of the grouped count analysis,
-            checked at planning for one measurement per setting and again
-            before the stored counts are decoded.
-        max_classical_products: Default `100_000_000`. Limit on the summed
-            classical work of the exact pair reductions.
+        max_bytes: Default `None`, the physical memory of this computer.
+            Limit on the known bytes of conversion, the pair table, the
+            grouped count analysis and the projected solve, on each
+            exact pair reduction's workspace, and on a coarse estimate of a
+            circuit's memory, compared when the circuit is prepared and before
+            it is built. It does not bound the process memory.
+        max_analysis_work: Default `None`, no limit. Optional limit on the
+            work of the projected solve and of each pass of the grouped
+            count analysis, checked at planning for one measurement per
+            setting and again before the stored counts are decoded.
+        max_classical_products: Default `None`, no limit. Optional limit on
+            the summed classical work of the exact pair reductions.
         input_conversion: Default `"auto"`, which keeps Pauli input as it
             is and converts an explicit dense matrix of dimension at most 16
             to Pauli form. `"dense_pauli"` also permits the conversion of
             sparse matrices and of larger dense matrices, within
-            `max_conversion_work` and `max_bytes`.
-        max_conversion_work: Default `100_000_000`. Limit on the counted work
-            of operator-to-Pauli conversion.
-        max_admission_steps: Default `10_000_000`. Limit on the planning work
-            of checking each `Program` that the method builds
-            ([planning work limit](../../development/program_checks.md#planning-work-limit)),
-            on the number of uses of V in all its circuits, checked before
-            the circuits are described, and on the circuit instructions of
-            the distinct evolution blocks that the Plan uses (V, its adjoint
-            and their controlled forms), each r times the instructions of
-            one substep, checked at planning before any block is built. Each
-            of the three counts is compared with the limit separately.
+            `max_bytes`.
         acquisition: Default `PencilAcquisition()`. QFD measures grouped
             joint states, so `matrix_measurement` must be `"grouped"`, and
             `pair_preparation` is `"prefix"` or `"controlled"`. ADAPT's
@@ -380,23 +366,20 @@ class QFD(Method):
     schema_version: Literal[1] = 1
     initial_state: StateData
     time_step: Annotated[Real, Field(gt=0)]
-    powers: Annotated[tuple[StrictInt, ...], Field(min_length=1)]
+    powers: Annotated[tuple[StrictInteger, ...], Field(min_length=1)]
     steps_per_time_step: PositiveInt = 1
     formula_order: Literal[1, 2] = 2
     evolution: Literal["pauli_terms", "fermionic_blocks"] = "pauli_terms"
     evolution_terms: OperatorData | None = None
     evolution_diagnostics: QFDEvolutionDiagnostics | None = None
     overlap_cutoff: Annotated[Real, Field(gt=0)] = 1e-12
-    # The limits share FixedGCIM's untuned workload ceilings on derived
-    # counts, checked before expansion (docs/ENGINEERING_CONSTANTS.md).
+    # The limits follow FixedGCIM: an untuned basis ceiling, optional work
+    # and count limits, and max_bytes=None for the physical memory.
     max_basis_size: PositiveInt = 64
-    max_experiments: PositiveInt = 100_000
-    max_bytes: PositiveInt = DEFAULT_MAX_BYTES
-    max_analysis_work: PositiveInt = 1_000_000_000
-    max_classical_products: PositiveInt = 100_000_000
+    max_bytes: PositiveInt | None = None
+    max_analysis_work: PositiveInt | None = None
+    max_classical_products: PositiveInt | None = None
     input_conversion: Literal["auto", "dense_pauli"] = "auto"
-    max_conversion_work: PositiveInt = DEFAULT_CONVERSION_WORK
-    max_admission_steps: PositiveInt = 10_000_000
     acquisition: PencilAcquisition = PencilAcquisition()
     max_native_two_qubit_depth: Count | None = None
     sampling: PencilSampling | None = None
@@ -451,13 +434,12 @@ class QFD(Method):
         if 0 not in powers:
             raise ValueError(f"QFD powers {powers} must include 0, the reference state")
         if b > self.max_basis_size:
-            raise ValueError(f"QFD has {b} powers, more than QFD.max_basis_size={self.max_basis_size}, "
-                             "before pair expansion")
+            raise ResourceLimitError(f"QFD has {b} powers, more than QFD.max_basis_size={self.max_basis_size}, "
+                                     "before pair expansion")
         d = problem.dimension
         if d & (d - 1):
             raise ApplicabilityError(f"QFD evolves the qubit register of A, whose dimension {d} is not a power of two")
-        operator = eigen_operator(problem, output, max_bytes=self.max_bytes, input_conversion=self.input_conversion,
-                                  max_conversion_work=self.max_conversion_work)
+        operator = eigen_operator(problem, output, max_bytes=self.max_bytes, input_conversion=self.input_conversion)
         reference = eigen_state(self.initial_state, problem, max_bytes=self.max_bytes)
         q = operator.basis.dimension.bit_length() - 1
         from nwqlib.algorithms.gcim.adapt_inputs import _packed_to_pauli_arrays, pauli_array_conversion_requirements
@@ -470,7 +452,7 @@ class QFD(Method):
         rule = self.acquisition.pair_preparation
         positions = {sign: 1 + index for index, sign in enumerate(
             sign for sign in (1, -1) if any(sign * p > 0 for p in powers))}
-        pairs, uses = macro_uses(powers, rule) if nonidentity else ((), {})
+        pairs = pair_preparations(powers, rule) if nonidentity else ()
         acquisition = resolve_acquisition(
             self.acquisition, execution=execution, shots=shots, acquires=bool(nonidentity),
             real_reason=lambda: REAL_REASON, scope=f"recorded Hamiltonian Pauli terms and all {b} QFD basis states",
@@ -514,17 +496,6 @@ class QFD(Method):
         blocks, definitions, experiments, staged = [], [], [], {}
         registers, classical = (), ()
         if e:
-            # Each pair circuit calls V or its adjoint as often as
-            # macro_uses counts, each call a Program step, and its recipe
-            # holds one position per call, so the uses are checked before
-            # the pair recipes and circuits are built. A sampled pair has
-            # one circuit per group and quadrature, two quadratures off the
-            # diagonal.
-            calls = sum(count * ((1 if i == j else 2) * len(groups) if shots else 1)
-                        for (i, j), count in uses.items())
-            if calls > self.max_admission_steps:
-                raise ValueError(f"QFD circuits call V or its adjoint {calls} times in all, exceeding "
-                                 f"max_admission_steps={self.max_admission_steps}. Reduce the powers or the basis size.")
             recipes = power_pair_recipes(powers, rule, positions)
             prepared = [select_preparation("reference", reference)]
             controlled = {}
@@ -546,25 +517,12 @@ class QFD(Method):
             else:
                 blocks, definitions, experiments = _exact_pair_construction(
                     prepared, recipes, b, operator, q, metadata, controlled)
-            # Building a distinct evolution block that the experiments use
-            # appends r times the instructions of one substep, so the sum over
-            # these blocks is checked here, before any block circuit is built.
-            # It is a separate count from the uses of V and the Program steps.
-            work = sum({block.record.content_id: block.record.construction_work for block in blocks
-                        if block.record.implementation == EVOLUTION}.values())
-            if work > self.max_admission_steps:
-                raise ValueError(
-                    f"The QFD evolution blocks of {self.steps_per_time_step} substeps each take {work} circuit "
-                    f"instructions in all, exceeding QFD.max_admission_steps={self.max_admission_steps}. Raise "
-                    "max_admission_steps to build this V. Fewer steps_per_time_step define a different V.")
             registers = (
                 Register(name="ancilla", width=1, role="clean_ancilla"),
                 Register(name="system", width=q),
             )
         definitions.append(Definition(id="root", node=Sequence(children=tuple(exp.batch for exp in experiments))))
-        program = admitted_program(
-            "QFD.max_admission_steps",
-            self.max_admission_steps,
+        program = Program(
             root="root",
             definitions=tuple(definitions),
             registers=registers,
@@ -598,9 +556,11 @@ class QFD(Method):
             error_model=eigen_error_model(components, METHOD),
         )
         if e and not shots:
-            # The summed registered work of the pair reductions is recorded
-            # once in the Plan's cache and admitted at preparation.
-            _pair_work_total(plan)
+            # Under an explicit max_classical_products, the summed registered
+            # work of the pair reductions is recorded once in the Plan's cache
+            # and admitted at preparation.
+            if self.max_classical_products is not None:
+                _pair_work_total(plan)
             return plan._bind(blocks=blocks, operator=operator, reference=reference,
                               pair_table=_pair_table(operator))
         return plan._bind(blocks=blocks, operator=operator, reference=reference)
@@ -612,7 +572,7 @@ class QFD(Method):
         check_native_depth_cap(prepared, self.max_native_two_qubit_depth)
 
     def reduction_allowance(self, plan, point, *, observation, width, run):
-        """Check the summed pair work and a point's workspace, and return the remaining allowance (``pair_reduction_allowance``)."""
+        """Check a point's workspace and, under ``max_classical_products``, the summed pair work, and return the remaining allowance or None (``pair_reduction_allowance``)."""
         return pair_reduction_allowance(self, plan, observation, label="QFD")
 
     def prepare_all_refusal(self):
@@ -682,7 +642,7 @@ class QFD(Method):
             from nwqlib.algorithms.gcim.pencil_workflow import frozen_allocation, stage_chunks
 
             fields["shot_allocation"] = frozen_allocation(plan, data)
-        if not rec.nonidentity_coefficients:
+        if not rec._nonidentity_count():
             # A multiple of the identity has no acquisition, so its value is
             # the identity coefficient and no H or S is formed.
             tuple(matched_chunks(plan, data))

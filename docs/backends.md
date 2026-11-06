@@ -72,7 +72,7 @@ Classical execution calls the method's numerical routine. Statevector execution 
 
 ### Exact synthesis of dense matrices
 
-In the cases that the table under [Optimization level](#optimization-level) lists, a backend replaces each dense `UnitaryGate` by its exact synthesis before it translates the circuit to its gate set, because Qiskit's own synthesis of such a gate is not exact to rounding ([dense unitaries](development/dense_synthesis.md#controlled-dense-unitaries)). A run synthesizes each distinct matrix once and reuses the synthesized circuit in every circuit it prepares later. Before each new synthesis, the run counts the synthesis work against `ExecutionLimits.max_synthesis_work`, a limit on the total over all circuits that the run prepares. A reopened run synthesizes a matrix, and counts its work, again.
+In the cases that the table under [Optimization level](#optimization-level) lists, a backend replaces each dense `UnitaryGate` by its exact synthesis before it translates the circuit to its gate set, because Qiskit's own synthesis of such a gate is not exact to rounding ([dense unitaries](development/dense_synthesis.md#controlled-dense-unitaries)). A run synthesizes each distinct matrix once and reuses the synthesized circuit in every circuit it prepares later. The run checks the memory of each batch of new syntheses against the physical memory before it starts, and counts their work in `ExecutionTrace.synthesis_work`, a total over the preparations it saves. A reopened run synthesizes a matrix, and counts its work, again.
 
 ### Optimization level
 
@@ -97,14 +97,14 @@ Trajectory readout evaluates the declared points of one deterministic, noiseless
 
 ### Continue, cancel and recover {#provider-rules}
 
-A saved run continues with its original `Run.resume()` and `Run.wait()`, which read the original job. A failed retrieval keeps the reference to the provider's job and does not cause a replacement submission. `run.cancel()` stops new work in the run, and the next refresh requests cancellation of the remote job. IBM Runtime, IonQ, Nexus and Slurm runs warn once per run that the backend has been checked only offline. A run reopened after it has saved its state does not repeat the warning. A local NWQ-Sim run names its host and result directory before launch. Its simulator process continues after Python exits, so that computer or VM must keep running until the job finishes.
+A saved run continues with its original `Run.resume()` and `Run.wait()`, which read the original job. A failed retrieval keeps the reference to the provider's job and does not cause a replacement submission. `run.cancel()` stops new work in the run and requests cancellation of each pending remote job. IBM Runtime, IonQ, Nexus and Slurm runs warn once per run that the backend has been checked only offline. A run reopened after it has saved its state does not repeat the warning. A local NWQ-Sim run names its host and result directory before launch. Its simulator process continues after Python exits, so that computer or VM must keep running until the job finishes.
 
 Interrupted submissions follow these rules on every provider:
 
 - NWQLib sends each job request once and never resubmits it, also after an error or a lost acknowledgement. The IBM SDK's own safe retries of single HTTP requests are described on the [IBM Runtime](ibm.md#retries-and-cancellation) page.
 - If the provider's acknowledgement (the job ID) is lost, the submission stays uncertain and its circuits and shots stay counted against the run's limits. The next refresh looks for the job by the label written at submission, listed below. No match or several matches leave the submission uncertain.
 - A refresh reads the original job, saves each completed item once and keeps earlier items when a later item fails.
-- Cancellation is one request to the original job. Only later provider status confirms it, and the submitted work stays counted.
+- Cancellation is one request to the original job, followed by a read of that job. Only later provider status confirms it, and the submitted work stays counted. A request that fails does not stop the read, and it is sent again by a later call until the job is recorded as ended. One interrupted while being sent is not sent again ([Cancel, close and handle failures](prepared_execution.md#cancel-close-and-handle-failures)).
 
 | Backend | Label that identifies a submission |
 | --- | --- |
@@ -118,7 +118,7 @@ The rules that each backend connection implements are listed in [Backend adapter
 
 ## Estimate and inspect resources
 
-`nwqlib.estimate(plan, context=...)` adds up the resource formulas of the planned construction without building a circuit. `prepared.inspect_resources(max_operations=100000, max_bytes=10_000_000_000)` counts the operations of a circuit that is already prepared. Nonempty `transpile_options` request an additional compilation for that inspection. Formulas, representative samples and counts of prepared circuits describe different objects and are not interchangeable hardware costs. See [Resource estimates](resources.md).
+`nwqlib.estimate(plan, context=...)` adds up the resource formulas of the planned construction without building a circuit. `prepared.inspect_resources()` counts the operations of a circuit that is already prepared. Nonempty `transpile_options` request an additional compilation for that inspection. Formulas and counts of prepared circuits describe different objects and are not interchangeable hardware costs. See [Resource estimates](resources.md).
 
 ## Export circuits
 

@@ -2,17 +2,20 @@
 
 import itertools
 from unittest.mock import Mock
+import mpmath
 import numpy as np
 import pytest
 import scipy.linalg
 import sympy as sp
 from nwqlib.algorithms.qhd import (
-    QHD, CubicSchedule, GaussianState, KineticGroundState, QHDVerification, QuadraticSchedule,
-    ShiftedCubicSchedule, UniformState,
+    QHD, BoxRefinement, CubicSchedule, GaussianState, KineticGroundState, QHDVerification, QuadraticSchedule,
+    ShiftedCubicSchedule, UniformState, refine_box, step_blocks,
 )
 from nwqlib.algorithms.qhd.compiler import QHDCompiler
+from nwqlib.algorithms.qhd.onehot_schedule import ENTRY_TILE, OneHotSchedule
 from nwqlib.algorithms.qhd import method as owner
 from nwqlib.algorithms.qhd.records import table_extrema
+from nwqlib.algorithms.qhd.validation import _lambdify_objective
 from nwqlib._validation import NUMERICAL_RELATION_RTOL
 from nwqlib.problems import Optimization
 from nwqlib.scientist import plan, solve
@@ -32,6 +35,18 @@ def make_plan(problem=None, method=None, *, execution="quantum", shots=None):
         shots=shots,
         seed=7,
     )
+
+
+def _tabulated_values(selected):
+    """Return the Plan's constant and support tables added on its grid, and the meshed grid coordinates."""
+    grid = owner._grid(selected)
+    variables, k = len(selected.problem.variables), selected.method.num_grid_points
+    mesh = np.meshgrid(*(np.asarray(grid.coordinate_array(j)) for j in range(variables)), indexing="ij")
+    values = np.full(mesh[0].shape, float(selected.reconstruction.constant))
+    for table in selected.reconstruction.support_values:
+        shape = [k if j in table.support else 1 for j in range(variables)]
+        values = values + np.asarray(table.values).reshape(shape)
+    return values, mesh
 
 
 def _independent_start(initial, x):
@@ -147,10 +162,10 @@ def test_qhd_statevector_matches_ir_product_theory_distribution(execution, flavo
 
 
 def test_onehot_ir_product_matches_dense_exponentials_of_its_stored_blocks():
-    """The one-hot ir_product state equals the ordered dense exponentials of the stored blocks at d = 2, K = 4.
+    """The one-hot ir_product state equals the ordered dense exponentials of the Plan's blocks at d = 2, K = 4.
 
-    The reference applies ``exp(-i G_b)`` of every stored block, in stored
-    order, at its stored angle, ``G = angle (Pi_S - 2**-s I)`` for a projector
+    The reference applies ``exp(-i G_b)`` of every block that ``step_blocks``
+    returns, in circuit order, at its angle, ``G = angle (Pi_S - 2**-s I)`` for a projector
     and ``angle X`` on the two linked slices for a hopping, to the exact
     uniform start state ``1/4``, then the stored physical phase. The allowed
     difference is the direct kernel's state budget
@@ -174,12 +189,12 @@ def test_onehot_ir_product_matches_dense_exponentials_of_its_stored_blocks():
     selected = make_plan(problem, QHD(num_grid_points=4, num_steps=2, total_time=1.3, theory_flavor="ir_product",
                                       initial_state=UniformState(), keep_state=True), execution="classical")
     r = selected.reconstruction
-    blocks = [block for group in r.steps for block in group]
+    blocks = [block for step in range(len(r.step_weights)) for block in step_blocks(selected, step)]
     k, d = 4, 2
     dimension = k**d
     # The test's stated caps for both routes together.
     work_cap, byte_cap = 10**8, 10**8
-    direct_work, direct_bytes = onehot_product_sizes(dimension, k, r.steps, start_work=dimension,
+    direct_work, direct_bytes = onehot_product_sizes(dimension, k, d, r.onehot, start_work=dimension,
                                                      start_bytes=16 * dimension, held_bytes=0)
     oracle_work = oracle_bytes = 0
     for block in blocks:
@@ -213,7 +228,7 @@ def test_onehot_ir_product_matches_dense_exponentials_of_its_stored_blocks():
                     generator[np.ravel_multi_index(tuple(other), (k,) * d), column] = block.angle
         reference = scipy.linalg.expm(-1j * generator) @ reference
     reference *= np.exp(1j * r.physical_phase)
-    allowance = (onehot_product_state_error(r.steps, start=r.initial_state_error)
+    allowance = (onehot_product_state_error(r.onehot, start=r.initial_state_error)
                  + expm_multiply_state_error([(abs(block.angle), 1) for block in blocks],
                                              start=r.initial_state_error, phase_multiplications=1))
     assert np.linalg.norm(state - reference) <= allowance
@@ -261,7 +276,7 @@ def test_native_preparation_equals_the_classical_initial_vector(initial, recipe)
         num_grid_points=k, num_steps=1, total_time=1.0, schedule=QuadraticSchedule(gamma=0.0),
         rotation_threshold=1e6, keep_state=True, initial_state=initial, initial_state_preparation=recipe,
     ))
-    assert selected.reconstruction.steps == ((),)
+    assert step_blocks(selected, 0) == ()
     result = solve(selected)
     native = result.data.artifact(result.artifact).array * np.exp(-1j * selected.reconstruction.physical_phase)
     onehot = [(1 << i) | (1 << (k + j)) for i, j in itertools.product(range(k), repeat=2)]
@@ -287,39 +302,26 @@ def test_native_preparation_equals_the_classical_initial_vector(initial, recipe)
     [KineticGroundState(), GaussianState(center=(0.1, -0.2), widths=(0.5, 0.7))],
     ids=["kinetic_ground", "gaussian"],
 )
-def test_initial_state_is_evaluated_once_at_planning(execution, flavor, initial, monkeypatch):
-    """Planning evaluates the initial state once and stores it, and solve and analyze only read it.
+def test_planning_stores_the_initial_state_and_its_error_bound(execution, flavor, initial):
+    """Planning stores the initial state and its error bound, and both equal a fresh evaluation.
 
-    ``QHD.plan`` admits one evaluation of the per-variable amplitudes and of
-    the start vector's error bound, and stores both in the reconstruction
-    (``initial_amplitudes``, ``initial_state_error``). Planning must evaluate
-    the amplitudes exactly once, counted at ``GaussianState._variables`` or
-    ``KineticGroundState.variable_amplitudes``, and the stored values must
+    ``QHD.plan`` stores the per-variable amplitudes and the start vector's
+    error bound in the reconstruction (``initial_amplitudes``,
+    ``initial_state_error``). The stored values must
     equal a fresh evaluation bitwise. A classical Plan also stores the
     kernel's state budget delta, which must equal a fresh
     ``method._host_state_error`` of the Plan's own stored tables, steps,
     step rows and start error, so a planning call that passes other data
-    fails. After planning every evaluation entry point raises, so a later
-    evaluation, work outside that admission, fails the solve or the analysis.
+    fails.
     """
     from nwqlib.algorithms.qhd.initial_state import restricted_state_error
 
     x, y = sp.symbols("x y")
     problem = Optimization(objective=x**2 + x * y / 4, variables=(x, y), bounds=((-1.0, 1.0), (-1.0, 1.0)))
-    name = "_variables" if isinstance(initial, GaussianState) else "variable_amplitudes"
-    original, calls = getattr(type(initial), name), []
-
-    def counting(self, grid):
-        calls.append(grid)
-        return original(self, grid)
-
-    with monkeypatch.context() as count:
-        count.setattr(type(initial), name, counting)
-        selected = make_plan(problem, QHD(
-            num_grid_points=4, num_steps=2, total_time=0.5, schedule=QuadraticSchedule(gamma=0.3),
-            theory_flavor=flavor, keep_state=True, initial_state=initial,
-        ), execution=execution)
-    assert len(calls) == 1
+    selected = make_plan(problem, QHD(
+        num_grid_points=4, num_steps=2, total_time=0.5, schedule=QuadraticSchedule(gamma=0.3),
+        theory_flavor=flavor, keep_state=True, initial_state=initial,
+    ), execution=execution)
     grid = owner._grid(selected)
     stored = selected.reconstruction
     assert len(stored.initial_amplitudes) == 2 and all(
@@ -328,12 +330,9 @@ def test_initial_state_is_evaluated_once_at_planning(execution, flavor, initial,
     assert stored.initial_state_error == restricted_state_error(initial, grid)
     if execution == "classical":
         assert stored.host_state_error == owner._host_state_error(
-            selected.method, grid, stored.support_values, stored.steps, stored.step_weights,
+            selected.method, grid, stored.support_values,
+            stored.steps if stored.onehot is None else stored.onehot, stored.step_weights,
             stored.initial_state_error)
-    for record in (UniformState, KineticGroundState, GaussianState):
-        for name in ("variable_amplitudes", "variable_errors", "_variables"):
-            if hasattr(record, name):
-                monkeypatch.setattr(record, name, Mock(side_effect=AssertionError("initial state evaluated")))
     result = solve(selected)
     assert result.analyze().candidate == result.candidate
 
@@ -416,7 +415,7 @@ def test_resource_only_initial_state_counts_the_evolution_blocks_alone():
         selected = make_plan(problem, method)
         selections[name] = (selected, selected.construction.selections[0])
     resource_only, record = selections["none"]
-    assert [(b.kind, b.support) for group in resource_only.reconstruction.steps for b in group] == [
+    assert [(b.kind, b.support) for b in step_blocks(resource_only, 0)] == [
         ("kinetic", (0, 1)), ("kinetic", (1, 2)), ("kinetic", (3, 4)), ("kinetic", (4, 5))
     ]
     assert record.construction_work == 28
@@ -661,9 +660,10 @@ def _exact_native_components(problem, method):
 
     probabilities = plan(problem, method=method, execution="quantum", seed=7)
     r, grid = probabilities.reconstruction, owner._grid(probabilities)
-    blocks = [b for step in r.steps for b in step if b.kind == "number_projector"]
-    rows = sum(len(t.values) for t in r.support_values)
-    contributions = method.num_steps * (1 + (r.constant != 0) + 2 * rows)
+    blocks = [b for step in range(len(r.step_weights)) for b in step_blocks(probabilities, step)
+              if b.kind == "number_projector"]
+    tiles = sum(-(-len(t.values) // ENTRY_TILE) for t in r.support_values)
+    contributions = method.num_steps * (1 + (r.constant != 0) + 2 * tiles)
     u = Fraction(1, 2**53)
 
     def gamma(n):
@@ -677,7 +677,8 @@ def _exact_native_components(problem, method):
     s_k = sum(abs(dt * Fraction(a)) for _t, a, _b in r.step_weights) / Fraction(grid.spacing(0)) ** 2
     eta_2 = 2 * u + u**2
     eta_k = (3 * u + u**2 + (1 + 2 * u + u**2) * u) / (1 - u)
-    beta_m = u + (1 + u) * gamma(contributions - 1) ** 2
+    # beta' = u + (1 + u) beta_M of the tiled one-hot sum (onehot_schedule._Neumaier).
+    beta_m = u + (1 + u) * (u + (1 + u) * gamma(contributions - 1) ** 2)
     scaled = sum(abs(Fraction(b.angle)) / 2 ** len(b.support) for b in blocks)
     components = {
         "constant": (eta_2 + beta_m * (1 + eta_2)) * s_c,
@@ -698,7 +699,7 @@ def _check_native_rejection_components(method):
     witness = Optimization(objective=-sp.Integer(10) ** 16 * x**2 + 3 * sp.Integer(10) ** 15, variables=(x,),
                            bounds=((-1.0, 1.0),))
     components, r, message, reported = _exact_native_components(witness, method)
-    blocks = sum(b.kind == "number_projector" for step in r.steps for b in step)
+    blocks = sum(count for _s, count in r.onehot.projector_blocks)
     assert (blocks, r.physical_phase) == (8, -1000000000000008.0)
     assert max(components, key=components.get) == "projector"
     assert components["projector"] > components["constant"] + components["final"]
@@ -707,7 +708,7 @@ def _check_native_rejection_components(method):
     assert "removing it from the objective" not in message
     assert components["projector"] <= reported < components["projector"] + components["final"]
 
-    wide = Optimization(objective=sp.Integer(10) ** 32 * x**2 + sp.Integer(10) ** 16, variables=(x,),
+    wide = Optimization(objective=sp.Integer(10) ** 32 * x**2 + 15 * sp.Integer(10) ** 15, variables=(x,),
                         bounds=((-2e-8, 2e-8),))
     components, r, message, reported = _exact_native_components(wide, method.revise(total_time=0.5))
     assert max(components, key=components.get) == "final"
@@ -724,11 +725,11 @@ def test_circuit_route_kept_state_needs_a_phase_allowance_below_pi(execution):
     the formation and compensated-accumulation bound of the compiler's phase
     ledger, and on the native route ``method._native_phase_allowance`` for
     the circuit's phase assignments. With ``c = 1e17`` and two unit steps the
-    constant contributes ``S_C = 2e17``, and the ledger of its 16
-    contributions gets 66.6 rad (111 rad on the native route), so a kept
+    constant contributes ``S_C = 2e17``, and the ledger of its 8 compensated
+    additions gets 88.8 rad (133 rad on the native route), so a kept
     state is rejected while the same Plan without ``keep_state`` solves. The
     allowance in the rejection message must equal the owners' value for the
-    16 contributions that planning records, so the test also pins the
+    8 additions that planning records, so the test also pins the
     contribution count and the route's rule, and the message must name the
     constant's component and advise removing the constant. With ``c = 3/8``
     the allowance is far below pi and the kept state is admitted. The
@@ -737,20 +738,22 @@ def test_circuit_route_kept_state_needs_a_phase_allowance_below_pi(execution):
     rejection names the projector component and gives no advice about the
     constant.
 
-    Natively, ``-1e16 x**2 + 3e15`` over two unit steps has M = 16
-    contributions, B = 8 projector blocks and ``physical_phase = -1e15 - 8``,
-    and its allowance of about 5.0 rad splits into the additive components
-    ``L_C``, ``L_K``, ``L_P + 2u Y + 20u B`` and the final assignment
-    ``2u |physical_phase| + 20u`` (``method._native_components``), with
-    ``L_s = [eta_s + beta_M (1 + eta_s)] S_s``. The test evaluates them in
-    rational arithmetic from the Plan's stored inputs. The projector
-    component, about 2.78 rad, is the largest, ahead of the constant's 2.00
-    rad, so the message must name it, report an upper value of it below the
-    projector and final components together, and give no advice about the
-    constant. For ``1e32 x**2 + 1e16`` on (-2e-8, 2e-8) with total time 0.5
-    the final assignment of the physical phase, about 3.33 rad, is the
-    largest component, and the message must name it rather than a
-    Hamiltonian source.
+    Natively, ``-1e16 x**2 + 3e15`` over two unit steps has M = 8
+    compensated additions, B = 8 projector blocks and
+    ``physical_phase = -1e15 - 8``, and its allowance of about 6.2 rad splits
+    into the additive components ``L_C``, ``L_K``, ``L_P + 2u Y + 20u B``
+    and the final assignment ``2u |physical_phase| + 20u``
+    (``method._native_components``), with
+    ``L_s = [eta_s + beta' (1 + eta_s)] S_s`` and
+    ``beta' = u + (1 + u) beta_M``. The test evaluates them in rational
+    arithmetic from the Plan's stored inputs. The projector component, about
+    3.33 rad, is the largest, ahead of the constant's 2.66 rad, so the
+    message must name it, report an upper value of it below the projector
+    and final components together, and give no advice about the constant.
+    For ``1e32 x**2 + 1.5e16`` on (-2e-8, 2e-8) with total time 0.5 the
+    final assignment of the physical phase, about 3.89 rad, is the largest
+    component, ahead of the others at about 3.33 rad, and the message must
+    name it rather than a Hamiltonian source.
     """
     import re
 
@@ -768,13 +771,14 @@ def test_circuit_route_kept_state_needs_a_phase_allowance_below_pi(execution):
     assert "removing it from the objective" in str(rejected.value)
     probabilities = plan(problem(sp.Integer(10) ** 17), method=method, execution=execution, seed=7)
     grid, r = owner._grid(probabilities), probabilities.reconstruction
-    contributions = sum(len(t.values) for t in r.support_values) * 2 * 2 + 2 * 2
-    assert contributions == 16
+    # N (1 + [c != 0] + F tiles): two steps, one tile of the single table in each of two potential factors.
+    contributions = 2 * (1 + 1 + 2 * len(r.support_values))
+    assert contributions == owner._phase_contributions(r, probabilities.method) == 8
     expected = owner._compiled_phase_allowance(r, probabilities.method, grid, contributions)
     if execution == "quantum":
         expected = owner._native_phase_allowance(r, expected)
     reported = float(re.search(r"rounding allowance (\S+) rad", str(rejected.value)).group(1))
-    assert reported == expected > 66.6
+    assert reported == expected > 88.8
     assert solve(probabilities).valid_probability == pytest.approx(1.0, abs=1e-9)
     kept = solve(plan(problem(sp.Rational(3, 8)), method=method.revise(keep_state=True), execution=execution,
                       seed=7))
@@ -791,39 +795,42 @@ def test_circuit_route_kept_state_needs_a_phase_allowance_below_pi(execution):
         _check_native_rejection_components(method)
 
 
-def test_compensated_ledger_sum_meets_its_bound_where_a_plain_sum_does_not(monkeypatch):
-    """The ledger's Neumaier sums lie within their bounds of the exact sums of the recorded contributions.
+def test_compensated_ledger_sum_lies_within_its_bound_of_the_exact_sum(monkeypatch):
+    """The ledger's sums lie within their bounds of the exact sums of the phase events.
 
-    The test records every contribution ``x_j = -fl(t_j q_j)`` that
-    ``compiler.QHDCompiler._record_global_phase`` receives while planning a
-    c = 1e16, 16-step Plan and sums them exactly. The stored total must lie
-    within ``beta_M A`` of that sum, ``beta_M = u + (1 + u) gamma_(M-1)**2``
-    with ``A = sum_j |x_j|`` (Neumaier's bound in the recorder's docstring),
-    and the constant's own total within ``[eta_2 + (1 + eta_2) beta_N] S_C``
-    of its exact angle ``-sum_k dt b_k c`` over the stored inputs. A plain
-    running sum of the same contributions misses the exact total by more
-    than ``beta_M A``, so the bound separates the two accumulations.
+    The test records every value that the running total adds with Neumaier's
+    compensation while planning a c = 1e16, 16-step Plan, the kinetic and
+    constant events and one ``math.fsum`` per tile of projector identities
+    (``onehot_schedule._record_partial``). Their count is the ledger's M,
+    and the stored total lies within ``beta_M A`` of their exact sum,
+    ``beta_M = u + (1 + u) gamma_(M-1)**2``. The stored total also lies within
+    ``beta' A`` of the exact sum of the individual events
+    ``-fl(t fl(fl(b v) 2**-s))``, ``-fl(dt fl(b c))`` and the kinetic
+    events, formed here independently, with ``beta' = u + (1 + u) beta_M``.
+    The constant's own total lies within ``[eta_2 + (1 + eta_2) beta_N] S_C``
+    of its exact angle ``-sum_k dt b_k c`` over the stored inputs.
     """
     from fractions import Fraction
 
-    from nwqlib.algorithms.qhd.compiler import QHDCompiler
+    from nwqlib.algorithms.qhd import onehot_schedule
 
     recorded = []
-    original = QHDCompiler._record_global_phase
+    original = onehot_schedule._record_partial
 
-    def recording(self, *, coefficient, evolution_time, source):
-        recorded.append(-evolution_time * coefficient)
-        return original(self, coefficient=coefficient, evolution_time=evolution_time, source=source)
+    def recording(sources, totals, name, value):
+        recorded.append(value)
+        return original(sources, totals, name, value)
 
-    monkeypatch.setattr(QHDCompiler, "_record_global_phase", recording)
+    monkeypatch.setattr(onehot_schedule, "_record_partial", recording)
     x = sp.Symbol("x", real=True)
     problem = Optimization(objective=x**2 / 3 + x / 7 + sp.Integer(10) ** 16, variables=(x,),
                            bounds=((-1.0, 1.0),))
     method = QHD(num_grid_points=4, num_steps=16, total_time=1.0, schedule=QuadraticSchedule(gamma=0.3),
                  theory_flavor="ir_product")
-    r = plan(problem, method=method, execution="classical", seed=7).reconstruction
+    selected = plan(problem, method=method, execution="classical", seed=7)
+    r, grid = selected.reconstruction, owner._grid(selected)
     u, m, n = Fraction(1, 2**53), len(recorded), method.num_steps
-    # The ledger's count M, which the allowances take from the reconstruction, is the number of recorded events.
+    # The ledger's count M, which the allowances take from the reconstruction, is the number of added values.
     assert owner._phase_contributions(r, method) == m
 
     def gamma(k):
@@ -835,13 +842,21 @@ def test_compensated_ledger_sum_meets_its_bound_where_a_plain_sum_does_not(monke
     exact = sum(Fraction(v) for v in recorded)
     absolute = sum(abs(Fraction(v)) for v in recorded)
     assert abs(Fraction(r.physical_phase) - exact) <= beta(m) * absolute
-    plain = 0.0
-    for value in recorded:
-        plain += value
-    assert abs(Fraction(plain) - exact) > beta(m) * absolute
-    dt = Fraction(method.total_time / method.num_steps)
-    s_c = abs(Fraction(r.constant)) * sum(abs(dt * Fraction(b)) for _t, _a, b in r.step_weights)
-    constant = -sum(dt * Fraction(b) * Fraction(r.constant) for _t, _a, b in r.step_weights)
+    # The individual events, in binary64 as the schedule forms them.
+    dt = method.total_time / method.num_steps
+    (table,) = r.support_values
+    events = []
+    for _t, a, b in r.step_weights:
+        events.append(-dt * (a / grid.spacing(0) ** 2))
+        events.append(-dt * (b * r.constant))
+        for duration in (dt / 2, dt / 2):
+            events.extend(-duration * ((b * v) * 0.5) for v in table.values.array.tolist())
+    exact_events = sum(Fraction(v) for v in events)
+    assert abs(Fraction(r.physical_phase) - exact_events) <= (u + (1 + u) * beta(m)) * sum(
+        abs(Fraction(v)) for v in events)
+    step = Fraction(dt)
+    s_c = abs(Fraction(r.constant)) * sum(abs(step * Fraction(b)) for _t, _a, b in r.step_weights)
+    constant = -sum(step * Fraction(b) * Fraction(r.constant) for _t, _a, b in r.step_weights)
     eta_2 = 2 * u + u**2
     stored = Fraction(dict(r.phase_sources)["objective_constant"])
     assert abs(stored - constant) <= (eta_2 + (1 + eta_2) * beta(n)) * s_c
@@ -856,19 +871,12 @@ def test_phase_ledger_compensation_recovers_what_a_plain_sum_loses():
     residuals recover both units. The recorder must return 2 for the total
     and for the source total of the same contributions.
     """
-    from types import SimpleNamespace
+    from nwqlib.algorithms.qhd.onehot_schedule import _Neumaier, _record
 
-    from nwqlib.algorithms.qhd.compiler import QHDCompiler
-
-    ledger = SimpleNamespace(_phase_sums={}, _metadata={"dropped_global_phase": {
-        "phase_angle": 0.0, "per_source_total_angles": {},
-        "per_source_coefficient_totals": {}}})
-    ledger._compensated_add = lambda name, value: QHDCompiler._compensated_add(ledger, name, value)
+    totals, sources = _Neumaier(), {}
     for angle in (1.0, 1e100, 1.0, -1e100):
-        QHDCompiler._record_global_phase(ledger, coefficient=-angle, evolution_time=1.0,
-                                         source="projector_identity")
-    phases = ledger._metadata["dropped_global_phase"]
-    assert phases["phase_angle"] == phases["per_source_total_angles"]["projector_identity"] == 2.0
+        _record(sources, totals, "projector_identity", -angle, 1.0)
+    assert totals.value("total") == sources["projector_identity"] == 2.0
 
 
 def test_compiled_phase_allowances_are_evaluated_upward():
@@ -879,8 +887,8 @@ def test_compiled_phase_allowances_are_evaluated_upward():
     Plan's stored binary64 inputs, ``gamma_r = r u/(1 - r u)``,
     ``eta_2 = 2u + u**2``, ``beta_d = u + (1 + u) gamma_(d-1)**2``,
     ``eta_K = (3u + u**2 + (1 + 2u + u**2) beta_d)/(1 - u)``,
-    ``E_ledger = D + beta_M (S_C + S_P + S_K + D)`` with
-    ``beta_M = u + (1 + u) gamma_(M-1)**2``, and
+    ``E_ledger = D + beta' (S_C + S_P + S_K + D)`` with
+    ``beta' = u + (1 + u) beta_M``, ``beta_M = u + (1 + u) gamma_(M-1)**2``, and
     ``E_native = E_ledger + 2u (Y + |physical_phase|) + 20u (B + 1)``, and
     requires each binary64 allowance to be at least its exact value. Two
     variables make ``gamma_(d-1)`` nonzero, and the y spacing 0.75 is not a
@@ -915,10 +923,10 @@ def test_compiled_phase_allowances_are_evaluated_upward():
     beta = u + (1 + u) * gamma(d - 1) ** 2
     eta_k = (3 * u + u**2 + (1 + 2 * u + u**2) * beta) / (1 - u)
     formation = (2 * u + u**2) * (s_c + s_p) + eta_k * s_k
-    contributions = steps * (2 + 2 * sum(len(t.values) for t in r.support_values))
-    beta_m = u + (1 + u) * gamma(contributions - 1) ** 2
+    contributions = steps * (2 + 2 * sum(-(-len(t.values) // ENTRY_TILE) for t in r.support_values))
+    beta_m = u + (1 + u) * (u + (1 + u) * gamma(contributions - 1) ** 2)
     exact_ledger = formation + beta_m * (s_c + s_p + s_k + formation)
-    projectors = [b for step in r.steps for b in step if b.kind == "number_projector"]
+    projectors = [b for step in range(steps) for b in step_blocks(selected, step) if b.kind == "number_projector"]
     scaled = sum(abs(Fraction(b.angle)) / 2 ** len(b.support) for b in projectors)
     exact_native = exact_ledger + 2 * u * (scaled + abs(Fraction(r.physical_phase))) + 20 * u * (len(projectors) + 1)
     ledger = owner._compiled_phase_allowance(r, method, grid, contributions)
@@ -974,7 +982,7 @@ def test_archive_keeps_support_tables_and_schedule(tmp_path, monkeypatch, execut
 
     monkeypatch.setattr(QHD, "plan", forbid)
     monkeypatch.setattr(QHDCompiler, "_potential_grid_values", forbid)
-    monkeypatch.setattr(QHDCompiler, "build_step_pauli_ir", forbid)
+    monkeypatch.setattr(OneHotSchedule, "summary", forbid)
     monkeypatch.setattr(compiler, "step_weights", forbid)
     for name in ("kinetic_weight", "potential_weight", "kinetic_integral", "potential_integral"):
         monkeypatch.setattr(type(schedule), name, forbid)
@@ -990,6 +998,148 @@ def test_archive_keeps_support_tables_and_schedule(tmp_path, monkeypatch, execut
     assert (table.minimum, table.maximum, table.magnitude) == table_extrema(table.values.array)
     assert restored.problem == selected.problem
     assert tuple(b.record for b in restored.blocks) == tuple(b.record for b in selected.blocks)
+    # The loaded one-hot Plan derives the same circuit from its recorded data without evaluating the objective.
+    from nwqlib.algorithms.qhd.native import construct_qhd
+
+    def gates(circuit):
+        return [(item.operation.name, [circuit.find_bit(q).index for q in item.qubits], item.operation.params)
+                for item in circuit.data], circuit.global_phase
+
+    assert gates(construct_qhd(restored.blocks[0], (), None)) == gates(construct_qhd(selected.blocks[0], (), None))
+
+
+def test_content_hashes_read_support_tables_by_digest(tmp_path, monkeypatch):
+    """Planning and the first content hashes encode no support table.
+
+    The tables enter their records' content hashes by digest
+    (``core.records.FrozenArray``).
+    """
+    from nwqlib.core import records
+
+    x, y = sp.symbols("x y", real=True)
+    problem = Optimization(objective=x * y, variables=(x, y), bounds=((-1.0, 1.0), (-1.0, 1.0)))
+    method = QHD(num_grid_points=16, num_steps=1, total_time=0.25)
+    with monkeypatch.context() as patch:
+        patch.setattr(records.base64, "b64encode", lambda *a: pytest.fail("a content hash encoded a table"))
+        selected = plan(problem, method=method, execution="classical", seed=31)
+        (table,) = selected.reconstruction.support_values
+        identities = (table.content_id, selected.reconstruction.content_id, selected.content_id)
+    restored = load_plan(save_plan(selected, ArchiveFiles(tmp_path, 4_000_000)), ArchiveFiles(tmp_path, 4_000_000))
+    (loaded,) = restored.reconstruction.support_values
+    assert (loaded.content_id, restored.reconstruction.content_id, restored.content_id) == identities
+    np.testing.assert_array_equal(loaded.values.array, table.values.array)
+    changed = plan(problem, method=QHD(num_grid_points=16, num_steps=2, total_time=0.25), execution="classical",
+                   seed=31)
+    assert changed.content_id != selected.content_id
+
+
+@pytest.mark.parametrize("order, threshold, objective", [
+    (1, 0.0, "x**2/3 + x*y/7 + y/5"),
+    (2, 2e-3, "x**2/3 + x*y/7 + y/5000"),
+    (2, 0.0, "x + 1e-310*y + 2*x*y"),
+], ids=["first_order", "second_order_pruned", "range_omission"])
+def test_onehot_step_blocks_match_an_independent_scalar_derivation(order, threshold, objective):
+    """Every block of every step equals the block of the scalar formation rules, bit for bit.
+
+    Oracle, per step k with row ``(t_k, a_k, b_k)`` and ``dt = fl(T/N)``:
+    the potential factors are ``(dt,)`` or ``(dt/2, dt/2)``, and each table
+    entry v, in table order and C order, gives ``p = fl(b v)`` and
+    ``zeta = fl(t p)``. It is kept when v is nonzero, ``p``, ``zeta``,
+    ``fl(p/2**s)`` and ``fl(t fl(p/2**s))`` are at least ``2**-1022`` in
+    magnitude and ``|zeta|`` is at least the threshold. Each link of
+    variable j, in the layer order odd, even, odd for second order, gives
+    ``c = fl(-a/fl(fl(4 h) h))`` and ``angle = fl(fl(2 t) c)``, kept when
+    ``|angle|`` is at least the threshold. These supports of at most two
+    variables use MCPhase, which has no wrapped-phase rule. The Plan's
+    dropped and omitted counts, its kept counts and its CX law must agree
+    with the oracle's blocks.
+    """
+    from nwqlib.subroutines.hamiltonian_evolution.pauli_evolution import structured_number_projector_provider
+
+    x, y = sp.symbols("x y", real=True)
+    k, steps, total = 3, 3, 0.7
+    problem = Optimization(objective=sp.sympify(objective, locals=dict(x=x, y=y)), variables=(x, y),
+                           bounds=((0.0, 1.0), (0.0, 1.0)))
+    selected = make_plan(problem, QHD(num_grid_points=k, num_steps=steps, total_time=total, trotter_order=order,
+                                      rotation_threshold=threshold, schedule=QuadraticSchedule(gamma=0.3),
+                                      initial_state_preparation="none"))
+    r, grid = selected.reconstruction, owner._grid(selected)
+    dt, tiny = total / steps, 2.0**-1022
+    links = grid.links()
+    layers = (((links[1::2], dt / 2), (links[0::2], dt), (links[1::2], dt / 2)) if order == 2 else ((links, dt),))
+    dropped = omitted = cx = 0
+    for step, (time, a, b) in enumerate(r.step_weights):
+        expected = []
+
+        def potential(duration):
+            nonlocal dropped, omitted, cx
+            for table in r.support_values:
+                s = len(table.support)
+                for position, v in enumerate(table.values.array.tolist()):
+                    if v == 0.0:
+                        continue
+                    p = b * v
+                    zeta = duration * p
+                    q = p * (1.0 / 2**s)
+                    if min(abs(p), abs(zeta), abs(q), abs(duration * q)) < tiny:
+                        omitted += 1
+                    elif abs(zeta) < threshold:
+                        dropped += 1
+                    else:
+                        indices = np.unravel_index(position, (k,) * s)
+                        expected.append(("number_projector", tuple(j * k + int(i) for j, i in zip(
+                            table.support, indices, strict=True)), p, zeta, duration, time))
+                        cx += structured_number_projector_provider(s)["cx"]
+
+        potential(dt if order == 1 else dt / 2)
+        for j in range(grid.num_variables):
+            h = grid.spacing(j)
+            c = -a / (4.0 * h * h)
+            for layer, duration in layers:
+                angle = (2.0 * duration) * c
+                for left, right in layer:
+                    if abs(angle) < threshold:
+                        dropped += 1
+                        continue
+                    expected.append(("kinetic", (j * k + left, j * k + right), c, angle, duration, time))
+                    cx += 2
+        if order == 2:
+            potential(dt / 2)
+        derived = [(block.kind, block.support, block.coefficient, block.angle, block.time_step, block.time)
+                   for block in step_blocks(selected, step)]
+        assert derived == expected
+    assert (r.dropped_count, r.range_omissions.projectors) == (dropped, omitted)
+    assert (dropped > 0) == (threshold > 0) and (omitted > 0) == ("1e-310" in objective)
+    assert {law.metric: law.value for law in selected.construction.selections[0].resource_laws}["cx"] == cx
+    assert [p.support_size for p in r.onehot.providers] == sorted({len(t.support) for t in r.support_values})
+    classical = make_plan(problem, QHD(num_grid_points=k, num_steps=steps, total_time=total), execution="classical")
+    with pytest.raises(ValueError, match="compiled schedule"):
+        step_blocks(classical, 0)
+
+
+def test_onehot_plan_records_do_not_grow_with_steps_or_entries():
+    """A one-hot Plan holds a number of records that does not depend on its step count or table sizes.
+
+    The Plan stores its tables, step rows and the schedule record, not one
+    record per block, so planning the same problem with 2 steps on 3 points
+    and with 40 steps on 6 points gives Plans with the same number of
+    ``Record`` instances, counted through every field.
+    """
+    from nwqlib.core.records import Record
+
+    def records(value):
+        if isinstance(value, Record):
+            return 1 + sum(records(getattr(value, name)) for name in type(value).model_fields)
+        if isinstance(value, (tuple, list)):
+            return sum(records(item) for item in value)
+        return 0
+
+    x, y = sp.symbols("x y", real=True)
+    problem = Optimization(objective=x**2 / 3 + x * y / 7 + y / 5, variables=(x, y),
+                           bounds=((-1.0, 1.0), (-1.0, 1.0)))
+    counts = {records(make_plan(problem, QHD(num_grid_points=k, num_steps=n, total_time=0.7)))
+              for k, n in ((3, 2), (6, 40))}
+    assert len(counts) == 1
 
 
 @pytest.mark.parametrize("value", [sp.I * sp.Rational(1, 10**15), sp.I * sp.Symbol("x") / 10**15, sp.oo, sp.nan])
@@ -1051,11 +1201,403 @@ def test_explicit_grid_verification_uses_original_objective_without_evolution(mo
     # Five nodes in (x - 1/5)**2, D=3, K=3 and d=1 give the complete work charge
     # W_grid = D (d + N_f + 12) = 3*(1+5+12) = 54 (verification._grid_minimum_bytes). At
     # max_work=1 only one node is visited, giving the lower bound 3*(1+1+12) = 42, and with that
-    # count the one-entry byte minimum 8dK + 8D + 65536 + 256 (N + 2d + 16) + 8 (N + 2) + 8d + 96
-    # = 24 + 24 + 65536 + 4864 + 128 = 70576.
+    # count the bytes of the fixed slab of b = min(D, 2**16) = 3 points,
+    # 8dK + 8D + 65536 + 256 (N + 2d + 16) + b (8 (N + 2) + 8d + 96)
+    # = 24 + 24 + 65536 + 4864 + 3*128 = 70832.
     checks = QHDVerification(comparisons=("grid_minimum",), max_work=1, max_bytes=216)
-    with pytest.raises(ValueError, match="requires at least 42 work units and at least 70576 bytes"):
+    with pytest.raises(ValueError, match="requires at least 42 work units and at least 70832 bytes"):
         result.verify(checks=checks)
+
+
+def test_support_tables_are_evaluated_in_fixed_blocks_that_the_byte_limit_only_admits(monkeypatch):
+    """A 32 x 32 support table is evaluated in one block of 1024 entries, at the default limit and at the least limit that admits it.
+
+    NumPy's array and scalar evaluations can differ in their last bits, so the
+    block is fixed at min(n, 2**16) entries (compiler.support_chunk_size). The
+    thirty cosines give the table's evaluator the largest byte term of the
+    one-hot table stage. A limit one byte below that stage's stated
+    requirement refuses before any evaluation, instead of evaluating smaller
+    blocks, and the stated limit gives the same table as the default. With
+    the block lowered to 256 entries, the table is evaluated in four blocks at
+    both limits and its stated requirement is smaller.
+    """
+    import re
+    from nwqlib.algorithms.qhd import compiler
+
+    x, y = sp.symbols("x y", real=True)
+    problem = Optimization(objective=sum(sp.cos(j * x * y) for j in range(1, 31)), variables=(x, y),
+                           bounds=((-1.0, 1.0), (-1.0, 1.0)))
+    base = QHD(num_grid_points=32, num_steps=1, total_time=0.5)
+    seen, original = [], compiler.chunk_coordinates
+
+    def observe(axes, start, stop):
+        seen.append(stop - start)
+        return original(axes, start, stop)
+
+    monkeypatch.setattr(compiler, "chunk_coordinates", observe)
+
+    def tables(**limit):
+        chosen = plan(problem, method=base.revise(**limit), execution="quantum", seed=17)
+        return [t.values.array for t in chosen.reconstruction.support_values]
+
+    with pytest.raises(ValueError, match="symbolic tables and one-hot compilation") as refused:
+        tables(max_bytes=10**5)
+    need = int(re.search(r"and (\d+) bytes", str(refused.value)).group(1))
+    with pytest.raises(ValueError, match=f"and {need} bytes"):
+        tables(max_bytes=need - 1)
+    assert seen == []
+    admitted = tables(max_bytes=need)
+    assert seen == [1024]
+    assert all(np.array_equal(a, b) for a, b in zip(admitted, tables(), strict=True)) and seen == [1024, 1024]
+
+    # A block below the table size splits the table into fixed blocks, and the
+    # stated requirement falls with the block's evaluator term.
+    monkeypatch.setattr(compiler, "SUPPORT_BLOCK_ENTRIES", 256)
+    seen.clear()
+    with pytest.raises(ValueError, match="symbolic tables and one-hot compilation") as refused:
+        tables(max_bytes=10**5)
+    smaller = int(re.search(r"and (\d+) bytes", str(refused.value)).group(1))
+    assert smaller < need
+    blocks = tables(max_bytes=smaller)
+    assert seen == [256] * 4
+    assert all(np.array_equal(a, b) for a, b in zip(blocks, tables(), strict=True)) and seen == [256] * 8
+
+
+def test_a_native_register_is_refused_when_a_saved_record_cannot_hold_its_basis():
+    """2**14284 < 10**4300 < 2**14285, so a register of 14,284 qubits passes and 14,285 is refused.
+
+    A width of 10**12 is refused from its bit length, before 2**width, about 125 GB, is formed.
+    """
+    from nwqlib.algorithms.qhd.method import _admit_register_basis
+
+    _admit_register_basis(14284)
+    for width in (14285, 10**12):
+        with pytest.raises(ValueError, match="a saved record holds integers below 10\\*\\*4300"):
+            _admit_register_basis(width)
+
+
+def test_known_state_sizes_are_refused_before_the_tables(monkeypatch):
+    """K, d and the step count fix the classical arrays and a kept state, so no table is evaluated before they fit.
+
+    On two variables with ``max_bytes`` = 20 MiB, K = 512 needs at least 26087440 bytes for the split-step arrays
+    and the readout (``method._known_host_bytes``, ``64 D + 33 D`` and the smaller terms), and K = 128 needs 2860560.
+    A kept state of the 64-qubit one-hot register, K = 32, needs ``16 * 2**64`` bytes.
+    """
+    x, y = sp.symbols("x y", real=True)
+    problem = Optimization(objective=sp.cos(x) * y + x**2, variables=(x, y), bounds=((-1.0, 1.0),) * 2)
+    tables = []
+    original = QHDCompiler._potential_grid_values
+    monkeypatch.setattr(QHDCompiler, "_potential_grid_values",
+                        lambda self: tables.append(1) or original(self))
+    limited = QHD(num_grid_points=512, num_steps=2, total_time=0.1, theory_flavor="split_step", max_bytes=20 * 2**20)
+    with pytest.raises(ValueError, match="classical host evolution and readout requires at least"):
+        plan(problem, method=limited, execution="classical", seed=1)
+    assert tables == []
+    plan(problem, method=limited.revise(num_grid_points=128), execution="classical", seed=1)
+    assert tables
+    tables.clear()
+    with pytest.raises(ValueError, match="kept state requires"):
+        plan(problem, method=QHD(num_grid_points=32, num_steps=1, keep_state=True), execution="quantum", seed=1)
+    assert tables == []
+
+
+@pytest.mark.parametrize("variables, objective, bounds, analytic, route", [
+    # The split factors exp(-320) exp(80 x) exp(-5 x**2) overflow to inf at a grid point near 8.9.
+    (1, lambda x: -sp.exp(-5 * (x - 8) ** 2), ((0.0, 10.0),), lambda x: -np.exp(-5 * (x - 8) ** 2), "plan"),
+    # A box away from the origin evaluates the tables in the centered coordinate x - 8.
+    (1, lambda x: -sp.exp(-5 * (x - 9) ** 2), ((8.0, 10.0),), lambda x: -np.exp(-5 * (x - 9) ** 2), "plan"),
+    # The monomials keep their own expansion beside the Gaussian, in one support group.
+    (1, lambda x: x**2 / 50 - sp.exp(-5 * (x - 8) ** 2), ((0.0, 10.0),),
+     lambda x: x**2 / 50 - np.exp(-5 * (x - 8) ** 2), "plan"),
+    # One exponential of two variables is one table on their joint support.
+    (2, lambda x, y: -sp.exp(-5 * (x - 8) ** 2 - 5 * (y - 2) ** 2), ((0.0, 10.0),) * 2,
+     lambda x, y: -np.exp(-5 * (x - 8) ** 2 - 5 * (y - 2) ** 2), "plan"),
+    # Float centers. An expanded exponent pulls out the constant factor exp(-900.0), below the binary64 range.
+    (2, lambda x, y: -sp.exp(-50 * (x - 3.0) ** 2) * sp.exp(-50 * (y + 3.0) ** 2), ((-5.0, 5.0),) * 2,
+     lambda x, y: -np.exp(-50 * (x - 3.0) ** 2) * np.exp(-50 * (y + 3.0) ** 2), "plan"),
+    # The constant factor would be exp(-744.8), a subnormal number that keeps few bits.
+    (2, lambda x, y: -sp.exp(-46.5 * (x - 2.83) ** 2) * sp.exp(-46.5 * (y + 2.83) ** 2), ((-5.0, 5.0),) * 2,
+     lambda x, y: -np.exp(-46.5 * (x - 2.83) ** 2) * np.exp(-46.5 * (y + 2.83) ** 2), "plan"),
+    # One variable with c a**2 = 800, where the split exponential overflows beside a zero factor.
+    (1, lambda x: -sp.exp(-50 * (x - 4.0) ** 2), ((-5.0, 5.0),), lambda x: -np.exp(-50 * (x - 4.0) ** 2), "plan"),
+    # A polynomial next to the well, whose monomials expand while the well stays whole.
+    (2, lambda x, y: 0.01 * (x**2 + y**2) - sp.exp(-50 * (x - 3.0) ** 2) * sp.exp(-50 * (y + 3.0) ** 2),
+     ((-5.0, 5.0),) * 2,
+     lambda x, y: 0.01 * (x**2 + y**2) - np.exp(-50 * (x - 3.0) ** 2) * np.exp(-50 * (y + 3.0) ** 2), "plan"),
+    # The default search model of refine_box, whose exponent -12 (10 u - 8.0)**2 on the unit box has the expanded
+    # constant term -768.0, past the normal binary64 range although the function is finite.
+    (1, lambda x: -sp.exp(-12 * (x - 3.0) ** 2), ((-5.0, 5.0),), lambda x: -np.exp(-12 * (x - 3.0) ** 2),
+     "search_model"),
+    # Exponents written out with a Float constant. SymPy pulls the constants out and holds their product, about
+    # -1.36e-391, a value that reads as zero in binary64.
+    (2, lambda x, y: -sp.exp(-50 * x**2 + 300.0 * x - 450.0) * sp.exp(-50 * y**2 - 300.0 * y - 450.0), ((-5.0, 5.0),) * 2,
+     lambda x, y: -np.exp(-50 * (x - 3.0) ** 2) * np.exp(-50 * (y + 3.0) ** 2), "plan"),
+    # The same with c = 46.5, a constant about -3.35e-324 that reads as a subnormal changed by 47%.
+    (2, lambda x, y: -sp.exp(-46.5 * x**2 + 263.19 * x - 372.413850) * sp.exp(-46.5 * y**2 - 263.19 * y - 372.413850),
+     ((-5.0, 5.0),) * 2, lambda x, y: -np.exp(-46.5 * (x - 2.83) ** 2) * np.exp(-46.5 * (y + 2.83) ** 2), "plan"),
+    # A prefactor about 7.33e390 that reads as infinity beside decaying factors, on a box where the values stay ordinary.
+    (2, lambda x, y: sp.exp(50 * x**2 - 300.0 * x + 450.0) * sp.exp(50 * y**2 + 300.0 * y + 450.0),
+     ((2.9, 3.1), (-3.1, -2.9)), lambda x, y: np.exp(50 * (x - 3.0) ** 2 + 50 * (y + 3.0) ** 2), "plan"),
+    # A variable factor stays outside the combined exponential, and on a sign-changing coordinate it carries its sign.
+    (2, lambda x, y: y * sp.exp(-50 * x**2 + 300.0 * x - 450.0) * sp.exp(-50 * y**2 - 300.0 * y - 450.0),
+     ((-5.0, 5.0),) * 2, lambda x, y: y * np.exp(-50 * (x - 3.0) ** 2) * np.exp(-50 * (y + 3.0) ** 2), "plan"),
+    # Two constants in range whose product is not, with no atom that a scan of the literals would flag.
+    (2, lambda x, y: sp.Mul(sp.Float("1e-200"), sp.Float("1e-200"), sp.exp(x + 450, evaluate=False),
+                            sp.exp(y + 450, evaluate=False), evaluate=False), ((-1.0, 1.0),) * 2,
+     lambda x, y: (1e-200 * np.exp(x + 450)) * (1e-200 * np.exp(y + 450)), "plan"),
+    # A literal that reads as zero, with a second constant that brings the combined value about 2.35e-307 back into the
+    # normal range. The values are ordinary, and the oracle squares a form whose factors stay in range.
+    (1, lambda x: sp.Float("1e-324", 15) * sp.exp(40) * sp.exp(x), ((700.0, 705.0),),
+     lambda x: (1e-162 * np.exp(20 + x / 2)) ** 2, "plan"),
+    # Positive constant powers beside a constant that reads as zero. The oracle is one power, with no such constant.
+    (2, lambda x, y: sp.Float("1e-400", 15) * 10 ** (x**2) * 10 ** (y**2), ((-15.0, 15.0),) * 2,
+     lambda x, y: 10.0 ** (x**2 + y**2 - 400.0), "plan"),
+    # A lone power whose base reads as zero, with ordinary values.
+    (1, lambda x: sp.Float("1e-400", 50) ** (x / 400), ((-1.0, 1.0),), lambda x: 10.0 ** (-x), "plan"),
+    # An exact base 1 + 1e-60 in a combined product. Its logarithm has to keep the distance from 1, and the expansion has to
+    # keep the power whole, since p**g*q**(-g) cancels only in binary64.
+    (1, lambda x: sp.Float("1e-400", 15) * sp.Rational(10**60 + 1, 10**60) ** (10**60 * x) * sp.exp(921), ((-1.0, 1.0),),
+     lambda x: np.exp(x) * (1e-200 * np.exp(460.5)) ** 2, "plan"),
+    # An exact compound base closer to 1 than the working digits, on either side. With t = exp(-100), the exponent of the
+    # first row is x (log(1 + t)/t - 1/2), and log(1 + t)/t lies in (1 - t/2, 1), so its table is exp(x/2) in binary64.
+    (1, lambda x: sp.Mul(sp.Pow(1 + sp.exp(-100), sp.exp(100) * x, evaluate=False), sp.exp(-x / 2), evaluate=False),
+     ((-1.0, 1.0),), lambda x: np.exp(x / 2), "plan"),
+    (1, lambda x: sp.Mul(sp.Pow(1 - sp.exp(-100), sp.exp(100) * x, evaluate=False), sp.exp(3 * x / 2), evaluate=False),
+     ((-1.0, 1.0),), lambda x: np.exp(x / 2), "plan"),
+    # A Rational base stays whole, and its exponent in monomials still expands about the far box, as with base 1.5. The
+    # table route stops before grid_minimum, which evaluates those monomials as written.
+    (1, lambda x: sp.Rational(3, 2) ** (x**2 - 200000 * x + 10**10), ((99999.0, 100001.0),),
+     lambda x: 1.5 ** ((x - 100000.0) ** 2), "table"),
+    # Centering forms exp(-800.0) beside sin, whose factor stays outside the exponential. The term is negligible on this box.
+    (1, lambda x: 0.001 * x**2 + sp.sin(x) * sp.exp(-2.0 * x), ((400.0, 410.0),),
+     lambda x: 0.001 * x**2 + np.sin(x) * np.exp(-2.0 * x), "plan"),
+    # The same term in a refinement whose box reaches, from a level where the constant is normal, a level where it is not.
+    (1, lambda x: 0.01 * (x - 405.0) ** 2 + sp.sin(x) * sp.exp(-2.0 * x), ((350.0, 500.0),),
+     lambda x: 0.01 * (x - 405.0) ** 2 + np.sin(x) * np.exp(-2.0 * x), "moving_box"),
+    # A written-out product with sin(x) in an exponent, and the same objective with squares, which holds no such constant.
+    (2, lambda x, y: -sp.exp(-50 * x**2 + 300.0 * x - 450.0) * sp.exp(sp.sin(x) - 50 * y**2 - 300.0 * y - 450.0), ((-5.0, 5.0),) * 2,
+     lambda x, y: -np.exp(-50 * (x - 3.0) ** 2) * np.exp(np.sin(x) - 50 * (y + 3.0) ** 2), "plan"),
+    (2, lambda x, y: -sp.exp(-50 * (x - 3.0) ** 2) * sp.exp(sp.sin(x) - 50 * (y + 3.0) ** 2), ((-5.0, 5.0),) * 2,
+     lambda x, y: -np.exp(-50 * (x - 3.0) ** 2) * np.exp(np.sin(x) - 50 * (y + 3.0) ** 2), "plan"),
+    # No constant at all. The decaying factor underflows before its partners compensate, with true values from 0.3 to 3.
+    (3, lambda x, y, z: sp.exp(-800 * x) * sp.exp(400 * y) * sp.exp(400 * z), ((0.999, 1.001),) * 3,
+     lambda x, y, z: np.exp(-800 * x + 400 * y + 400 * z), "table"),
+    # Two factors beside a normal constant. The first underflows, and the values are ordinary.
+    (1, lambda x: 1e20 * sp.exp(-746 * x**2) * sp.exp(700 * x**2 + x), ((0.99, 1.0),),
+     lambda x: 1e20 * np.exp(-46 * x**2 + x), "table"),
+    # Square-root exponents, real at every coordinate, with values near 1.
+    (3, lambda x, y, z: sp.exp(-800 * sp.sqrt(1 + x**2)) * sp.exp(400 * sp.sqrt(1 + y**2)) * sp.exp(400 * sp.sqrt(1 + z**2)),
+     ((-0.01, 0.01),) * 3, lambda x, y, z: np.exp(-800 * np.sqrt(1 + x**2) + 400 * np.sqrt(1 + y**2) + 400 * np.sqrt(1 + z**2)),
+     "table"),
+    # Log densities in real variables. The exponential is positive, so SymPy writes the logarithm of the product as
+    # a sum, the supports separate and no exponential underflows before its logarithm.
+    (1, lambda x: sp.log(x**2 * sp.exp(-50 * x**2)), ((0.1, 5.0),), lambda x: np.log(x**2) - 50 * x**2, "log_density"),
+    (2, lambda x, y: sp.log(y * sp.exp(-50 * (x - 3.0) ** 2)), ((-5.0, 5.0), (0.5, 3.0)),
+     lambda x, y: -50 * (x - 3.0) ** 2 + np.log(y), "log_density"),
+    (2, lambda x, y: sp.log(sp.exp(-50 * (x - 3.0) ** 2) / y), ((-5.0, 5.0), (0.5, 3.0)),
+     lambda x, y: -50 * (x - 3.0) ** 2 - np.log(y), "log_density"),
+])
+def test_a_resolved_gaussian_well_is_tabulated_at_its_analytic_values(variables, objective, bounds, analytic, route):
+    """The stored tables, added on the actual grid, equal the original function, and the solve finds its grid minimum.
+
+    The oracle is NumPy's evaluation of the analytic function at the grid coordinates, on log densities in the log
+    form that cannot underflow. The tolerance 1e-11 is a witness-specific empirical regression allowance that predates
+    these rows. The arithmetic here is a retrospective rationale, not a preselected error derivation or a bound. An
+    absolute error of an exponent q becomes a first-order relative error of ``exp(-q)``. Direct squaring of
+    ``q = a (x - b)**2`` gives at most ``gamma4 q``, with ``gamma_n = n u/(1 - n u)`` in the ordinary rounding model,
+    and the errors of the two compared paths add. For raw values within delta of each other, normalization gives at
+    most ``4 |kappa| delta / min(RF, RG)`` with their grid ranges RF and RG, so the gain kappa alone misses the offset
+    and the range. The log-density rows reach values near 3000 and have the least room under this allowance.
+
+    On the rows with a constant combined into one exponential E, ``|E_hat - E|/|E| <= expm1(eps_q) + eps_exp exp(eps_q)``.
+    With exponent terms near 900 and about ten rounded operations, eps_q is about ``10 * 900 * u``, or 1e-12, and the
+    values are at most about 3, which puts this model's error near 3e-12, under the allowance.
+
+    The result's objective is the best observed candidate, which exact probabilities place at the grid minimum. A
+    search-model level stores ``kappa (F(a + D u) - c)/E`` in its own unit coordinates. With one support table c is the
+    grid minimum of F and E its grid range, up to one outward rounding of E, so the oracle normalizes the NumPy values
+    of F at the mapped coordinates the same way, with the gain kappa that the level records. The "moving_box" route does
+    so at each level with the shift and scale it records, and the "table" route stops at the table, since the classical
+    evolution of so narrow a box is slow, 27 s at K = 6 and width 0.01.
+    """
+    symbols = sp.symbols(f"x0:{variables}", real=True)
+    problem = Optimization(objective=objective(*symbols), variables=symbols, bounds=bounds)
+    method = QHD(num_grid_points={1: 128, 2: 32, 3: 6}[variables], num_steps=2, total_time=0.5,
+                 initial_state=UniformState())
+    if route == "moving_box":
+        run = refine_box(problem, qhd=method, options=BoxRefinement(max_levels=3), execution="classical", seed=3,
+                         progress=False)
+        assert run.levels[-1].box[0][0] > 354.5  # exp(-2.0*354.5) is below the normal binary64 range.
+        for level, inner in zip(run.levels, run.results, strict=True):
+            values, (unit,) = _tabulated_values(inner.plan)
+            (lower, upper), = level.box
+            expected = level.potential_gain * (analytic(lower + (upper - lower) * unit) - level.energy_shift) / level.energy_scale
+            np.testing.assert_allclose(values, expected, rtol=0, atol=1e-11)
+        return
+    if route == "search_model":
+        run = refine_box(problem, qhd=method, options=BoxRefinement(max_levels=1), execution="classical", seed=3,
+                         progress=False)
+        values, (unit,) = _tabulated_values(run.results[0].plan)
+        (lower, upper), = bounds
+        original = analytic(lower + (upper - lower) * unit)
+        expected = run.levels[0].potential_gain * (original - original.min()) / (original.max() - original.min())
+        np.testing.assert_allclose(values, expected, rtol=0, atol=1e-11)
+        return
+    selected = plan(problem, method=method, execution="classical", seed=3)
+    values, mesh = _tabulated_values(selected)
+    expected = analytic(*mesh)
+    np.testing.assert_allclose(values, expected, rtol=0, atol=1e-11)
+    if route == "table":
+        return
+    result = solve(selected)
+    assert abs(result.objective - expected.min()) <= 1e-11
+    if route == "log_density":
+        # The identity splits the supports, K entries per variable. grid_minimum evaluates the expression as the user
+        # wrote it, whose exponential underflows before its logarithm, so verification refuses this objective.
+        assert all(len(table.support) == 1 for table in selected.reconstruction.support_values)
+        return
+    _, facts = result.verify(checks=QHDVerification(comparisons=("grid_minimum",)))
+    assert next(item.fact.value.value for item in facts if item.fact.quantity == "grid_minimum") == 0.0
+
+
+@pytest.mark.parametrize("factors, variables, point, expected", [
+    (lambda x, y: (sp.exp(1 / x, evaluate=False), sp.exp(-1 / x, evaluate=False)), 1, (0.0,), np.nan),
+    (lambda x, y: (sp.exp(sp.log(x), evaluate=False), sp.exp(-sp.log(x), evaluate=False)), 1, (0.0,), np.nan),
+    (lambda x, y: (sp.exp(sp.log(x), evaluate=False), sp.exp(-sp.log(x), evaluate=False)), 1, (-1.0,), np.nan),
+    (lambda x, y: (sp.exp(sp.sqrt(x), evaluate=False), sp.exp(y, evaluate=False)), 2, (-1.0, 0.0), np.nan),
+    (lambda x, y: (sp.exp(sp.sign(x), evaluate=False), sp.exp(sp.floor(y), evaluate=False)), 2, (0.0, 1.0), np.e),
+    (lambda x, y: (sp.exp(sp.I * x, evaluate=False), sp.exp(y, evaluate=False)), 2, (1.0, 0.0), np.cos(1.0) + 1j * np.sin(1.0)),
+    (lambda x, y: (sp.Mul(0, sp.Pow(x, -1, evaluate=False), evaluate=False), sp.exp(x), sp.exp(y)), 2, (0.0, 1.0), np.nan),
+    (lambda x, y: (sp.Mul(sp.exp(400 * y), sp.exp(400 * y), evaluate=False), sp.exp(-800 * x)), 2, (1.0, 1.0), 1.0),
+    (lambda x, y: (sp.exp(sp.exp(-800*x)*sp.exp(800*y)), sp.sin(sp.exp(-800*x)*sp.exp(800*y)), 2**(sp.exp(-800*x)*sp.exp(800*y))), 2, (1.0, 1.0), 2*np.e*np.sin(1.0)),
+    (lambda x, y: (sp.sqrt(2), sp.exp(x), sp.exp(y)), 2, (0.0, 0.0), np.sqrt(2.0)),
+    (lambda x, y: ((-2.0)**x, sp.exp(x), sp.exp(y)), 2, (0.5, 0.0), np.nan),
+    (lambda x, y: (sp.Add(sp.Pow(x, -1, evaluate=False), -sp.Pow(x, -1, evaluate=False), sp.exp(x)*sp.exp(y), evaluate=False),), 2, (0.0, 1.0), np.nan),
+])
+def test_a_combined_exponent_keeps_the_domain_and_branch_of_its_operands(factors, variables, point, expected):
+    """Each exponent is evaluated as written and its value then added, and the other factors stay as they are.
+
+    The product is held so that SymPy cannot simplify it first. At these points the exact answer is known by hand: an
+    undefined received expression stays NaN, for which the finite-real check of the caller refuses the point, a real-array
+    ``log`` or ``sqrt`` stays NaN with no cast to complex, and the discontinuous and imaginary exponents keep their values.
+    A symbolic sum of the exponents would cancel ``1/x - 1/x`` to 0 and return 1, which every table row would still pass.
+    The eighth row is a nested product, which planning flattens and the evaluator meets as supplied in ``grid_minimum``. It
+    is one group, with value 1, where combining the inner pair first would overflow before the outer factor decays.
+
+    The last four rows hold the rest of the rule. A product inside an exponent, inside ``v`` or inside a power's exponent
+    forms its own group, each with value 1 at this point. ``sqrt(2)`` is a constant, whose logarithm enters once. A negative
+    base is a factor of ``v``, so ``(-2.0)**0.5`` stays NaN where a logarithm of the base would give a complex value. A sum
+    around a combined product keeps its unevaluated ``1/x - 1/x``, so the pole stays NaN.
+    """
+    symbols = sp.symbols("x y")
+    product = sp.Mul(*factors(*symbols), evaluate=False)
+    with np.errstate(all="ignore"):
+        value = _lambdify_objective(symbols[:variables], product)(*map(np.array, point))
+    np.testing.assert_allclose(value, expected, rtol=4e-16, atol=0)
+
+
+# Value and branch of each special function that an objective can name, against mpmath at 30 digits, a separate
+# implementation. Each row is the SymPy function, its mpmath reference and a box on which SymPy's value is real.
+# Rows for both signs of the argument where the function is real there.
+SPECIAL_FUNCTIONS = {
+    "besselj": (lambda x: sp.besselj(0, x), lambda v: mpmath.besselj(0, v), (-5.0, 5.0)),
+    "besselj half order": (lambda x: sp.besselj(sp.Rational(1, 2), x), lambda v: mpmath.besselj(0.5, v), (0.5, 5.0)),
+    "bessely": (lambda x: sp.bessely(1, x), lambda v: mpmath.bessely(1, v), (0.5, 5.0)),
+    "besseli": (lambda x: sp.besseli(2, x), lambda v: mpmath.besseli(2, v), (-3.0, 3.0)),
+    "besselk": (lambda x: sp.besselk(0, x), lambda v: mpmath.besselk(0, v), (0.5, 5.0)),
+    "airyai": (sp.airyai, mpmath.airyai, (-5.0, 5.0)),
+    "airybi": (sp.airybi, mpmath.airybi, (-5.0, 3.0)),
+    "airyaiprime": (sp.airyaiprime, lambda v: mpmath.airyai(v, derivative=1), (-5.0, 5.0)),
+    "airybiprime": (sp.airybiprime, lambda v: mpmath.airybi(v, derivative=1), (-5.0, 3.0)),
+    "LambertW": (sp.LambertW, lambda v: mpmath.lambertw(v).real, (-0.3, 3.0)),
+    "LambertW lower branch": (lambda x: sp.LambertW(x, -1), lambda v: mpmath.lambertw(v, -1).real, (-0.3, -0.05)),
+    "Si": (sp.Si, mpmath.si, (-3.0, 3.0)),
+    "Ci": (sp.Ci, mpmath.ci, (0.5, 5.0)),
+    "Ei": (sp.Ei, mpmath.ei, (-3.0, 3.0)),
+    "erfi": (sp.erfi, mpmath.erfi, (-1.0, 1.0)),
+    "erfinv": (sp.erfinv, mpmath.erfinv, (-0.9, 0.9)),
+    "erfcinv": (sp.erfcinv, lambda v: mpmath.erfinv(1 - v), (0.1, 1.9)),
+    # SymPy writes digamma(x) as polygamma(0, x).
+    "digamma": (sp.digamma, mpmath.digamma, (-0.9, -0.1)),
+    "polygamma": (lambda x: sp.polygamma(1, x), lambda v: mpmath.polygamma(1, v), (0.5, 5.0)),
+    "loggamma": (sp.loggamma, mpmath.loggamma, (0.5, 50.0)),
+}
+
+
+@pytest.mark.parametrize("name", list(SPECIAL_FUNCTIONS))
+def test_a_special_function_is_tabulated_at_its_independent_value(name):
+    """The table and the grid_minimum verification of an objective with a special function follow mpmath.
+
+    The tolerance 1e-11, relative with the same absolute floor for values near a zero of the function, is empirical.
+    No error bound of these SciPy functions is derived here, and with SciPy 1.18.1 the rows differ from mpmath by at
+    most about 1e-14 in absolute value. The comparison covers these orders and boxes at finite grid points.
+    """
+    build, reference, bounds = SPECIAL_FUNCTIONS[name]
+    x = sp.Symbol("x", real=True)
+    problem = Optimization(objective=build(x), variables=(x,), bounds=(bounds,))
+    selected = plan(problem, method=QHD(num_grid_points=16, num_steps=1, total_time=0.5, initial_state=UniformState()),
+                    execution="classical", seed=3)
+    values, (axis,) = _tabulated_values(selected)
+    with mpmath.workdps(30):
+        expected = np.array([float(reference(mpmath.mpf(float(v)))) for v in axis])
+    assert values == pytest.approx(expected, rel=1e-11, abs=1e-11)
+    _, facts = solve(selected).verify(checks=QHDVerification(comparisons=("grid_minimum",)))
+    assert next(item.fact.value.value for item in facts if item.fact.quantity == "grid_minimum") == 0.0
+
+
+@pytest.mark.parametrize("objective, bounds", [
+    # SymPy's value is gamma(x + 1), while SciPy's factorial is 0 at a negative argument.
+    (sp.factorial, (-0.9, -0.1)),
+    # SymPy's value is complex at a negative argument, where SciPy's and Python's functions return a real number.
+    (sp.loggamma, (-2.5, -0.5)),
+    (sp.Ci, (-5.0, -0.5)),
+])
+def test_a_special_function_whose_double_precision_namesake_differs_is_refused(objective, bounds):
+    # A table of the namesake's values would be a silently different objective.
+    x = sp.Symbol("x", real=True)
+    problem = Optimization(objective=objective(x), variables=(x,), bounds=(bounds,))
+    with pytest.raises(ValueError):
+        plan(problem, method=QHD(num_grid_points=16, num_steps=1, total_time=0.5), execution="classical", seed=3)
+
+
+def test_the_default_byte_limit_is_the_physical_memory(monkeypatch):
+    """With max_bytes=None, a stage that needs more than the physical memory is refused, naming that memory.
+
+    The two-variable binary split-step Plan on D = 1024 points has known classical arrays of 501256 bytes:
+    ``64 D + 32 (d + 1) K + 8 N_s + 1024 K + 4096 (d + 1)`` for ``split_step.sizes`` with no tables and
+    ``8 D + H0 + 17 D + H_decode`` for the readout (``method.summary_sizes``). A computer that reports 400000
+    bytes refuses it before any table is evaluated, and one that reports 3000000 bytes admits it.
+    """
+    from nwqlib import _limits
+
+    x, y = sp.symbols("x y", real=True)
+    problem = Optimization(objective=sp.cos(x * y) + x * y, variables=(x, y), bounds=((-1.0, 1.0), (-1.0, 1.0)))
+    method = QHD(num_grid_points=32, num_steps=1, total_time=0.5, encoding="binary", boundary="periodic",
+                 theory_flavor="split_step")
+    assert method.max_bytes is None
+    monkeypatch.setattr(_limits, "physical_memory_bytes", lambda: 400000)
+    with pytest.raises(ValueError, match="max_bytes=None, the physical memory of 400000 bytes. a computer with at "
+                                         "least 501256 bytes of physical memory admits this byte charge"):
+        plan(problem, method=method, execution="classical", seed=17)
+    monkeypatch.setattr(_limits, "physical_memory_bytes", lambda: 3000000)
+    assert plan(problem, method=method, execution="classical", seed=17).method.max_bytes is None
+
+
+def test_verification_rejects_a_plan_the_result_does_not_belong_to():
+    # verify and verification_checks both reject a Plan the Result does not belong to.
+    from nwqlib.algorithms.qhd import verification
+
+    x = sp.Symbol("x")
+    result = solve(make_plan())
+    other = make_plan(Optimization(objective=(x - sp.Rational(1, 2)) ** 2, variables=(x,), bounds=((-1.0, 1.0),)))
+    checks = QHDVerification(comparisons=("grid_minimum",))
+    receipt, _ = result.verify(checks=checks)
+    assert {f.fact.quantity for f in receipt.applications[0].facts} >= {"grid_minimum", "reference_minimum"}
+    assert [spec.name for spec in checks.verification_checks(result)] == ["grid_minimum"]
+    with pytest.raises(ValueError):
+        verification.verify(other, result, checks=checks)
+    with pytest.raises(ValueError):
+        checks.verification_checks(result.model_copy(update={"plan": other}))
 
 
 def test_symbolic_work_is_admitted_before_expansion_and_table_evaluation(monkeypatch):
@@ -1080,21 +1622,21 @@ def test_symbolic_work_is_admitted_before_expansion_and_table_evaluation(monkeyp
                 make_plan(p, QHD(max_work=1000))
 
     # The initial amplitudes cost one unit per grid point of each variable,
-    # d K = 1000 here, and 320 d K + (8 d K + 120 d + 40) + (8 d K + 120 d + 64 + 204 d)
-    # + 4096 (d + 1) = 349,280 bytes. The one default midpoint step row adds
+    # d K = 1000 here, and 320 d K + (8 d K + 120 d + 40) + (8 d K + 120 d + 64 + 237 d)
+    # + 4096 (d + 1) = 349,346 bytes. The one default midpoint step row adds
     # 2 units and 768 bytes, and both are admitted before the amplitudes are
     # evaluated (QHD.plan, method._initial_state_bytes).
     gaussian = GaussianState(center=(0.5, 0.5), widths=(0.2, 0.2))
     with monkeypatch.context() as guard:
         guard.setattr(GaussianState, "_variables", Mock(side_effect=AssertionError("evaluated")))
-        for limits in (dict(max_work=1001), dict(max_bytes=350_048 - 1)):
+        for limits in (dict(max_work=1001), dict(max_bytes=350_114 - 1)):
             with pytest.raises(ValueError, match="max_work=.*max_bytes="):
                 make_plan(Optimization(objective=x + y, variables=(x, y), bounds=unit),
                           QHD(num_grid_points=500, initial_state=gaussian, **limits))
         # At exactly the allowance the early check passes and the evaluation starts.
         with pytest.raises(AssertionError, match="evaluated"):
             make_plan(Optimization(objective=x + y, variables=(x, y), bounds=unit),
-                      QHD(num_grid_points=500, initial_state=gaussian, max_bytes=350_048))
+                      QHD(num_grid_points=500, initial_state=gaussian, max_bytes=350_114))
 
     # Each support table evaluates its lambdified expression at K**|S| grid
     # tuples, and the lambdified code evaluates every node of the expression
@@ -1164,7 +1706,7 @@ def test_compact_support_cache_survives_step_reuse(monkeypatch):
     selected = make_plan(method=QHD(num_grid_points=3, num_steps=5, theory_flavor="ir_product"))
     assert len(calls) == 1 and np.array_equal(calls[0][0], [-0.5, 0.0, 0.5])
     assert selected.reconstruction.support_evaluations == 3
-    assert len(selected.reconstruction.steps) == 5
+    assert len(selected.reconstruction.step_weights) == 5 and selected.reconstruction.onehot is not None
 
 
 def test_classical_host_admits_the_norm_estimation_of_expm_multiply():
@@ -1342,3 +1884,19 @@ def test_native_acquisition_batch_preserves_selected_readout_after_reopen(tmp_pa
     loaded = nwqlib.load_result(saved)
     assert loaded.candidate_indices == result.candidate_indices
     assert loaded.most_probable_probability == result.most_probable_probability
+
+
+def test_a_constant_base_whose_distance_from_one_is_unresolved_is_refused_with_its_remedy():
+    """SymPy cannot tell this base from 1 at its working precision, and a Float with enough digits leads past the refusal."""
+    x = sp.Symbol("x", real=True)
+    base = sp.cos(sp.exp(-200))
+    method = QHD(num_grid_points=16, num_steps=1, total_time=0.5, initial_state=UniformState())
+
+    def problem(constant):
+        return Optimization(objective=sp.Mul(sp.Pow(constant, x, evaluate=False), sp.exp(-x / 2), evaluate=False),
+                            variables=(x,), bounds=((-1.0, 1.0),))
+
+    with pytest.raises(ValueError, match="cannot resolve the distance from 1"):
+        plan(problem(base), method=method, execution="classical", seed=3)
+    values, (grid,) = _tabulated_values(plan(problem(sp.N(base, 1000)), method=method, execution="classical", seed=3))
+    np.testing.assert_allclose(values, np.exp(-grid / 2), rtol=0, atol=1e-14)

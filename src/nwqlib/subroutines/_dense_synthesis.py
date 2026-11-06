@@ -111,6 +111,8 @@ from typing import Any
 
 import numpy as np
 
+from nwqlib._limits import ResourceLimitError, exceeds
+
 from nwqlib.subroutines._multiplexors import gray_code_controls, gray_code_rotation_angles
 
 # Largest deviation that the synthesis treats as zero or as an exact special
@@ -1124,17 +1126,16 @@ def dense_synthesis_size(num_qubits: int) -> tuple[int, int, int]:
     return work, 320 * size**2 + 65536, 352 * size**2 + 16384
 
 
-def admit_dense_syntheses(qubit_counts, *, max_work: int, max_bytes: int, operation: str,
-                          controls=(), controlled_qubit_counts=()) -> None:
+def admit_dense_syntheses(qubit_counts, *, max_work: int | None, max_bytes: int | None, operation: str,
+                          controls=(), controlled_qubit_counts=()) -> tuple[int, int]:
     """Raise before any synthesis when the exact syntheses of dense unitaries on ``qubit_counts`` qubits, and Qiskit's control of them, would exceed ``max_work`` or ``max_bytes``.
 
     Each entry of ``qubit_counts`` stands for one call of
     :func:`dense_unitary_circuit`, sized by :func:`dense_synthesis_size`.
-    Each entry of ``controls`` is a triple ``(gates, instructions, heavy)``
-    for one call of Qiskit's ``control`` on a gate that holds such
-    syntheses, sized by :func:`gatewise_control_size`, and
-    :func:`gatewise_control_counts` gives the triple for one synthesis. A
-    triple without gates stands for a control call that holds no synthesis
+    Each entry of ``controls`` is a pair ``(gates, instructions)`` for one
+    call of Qiskit's ``control`` on a gate that holds such syntheses, sized
+    by :func:`gatewise_control_size`, and :func:`gatewise_control_counts`
+    gives the pair for one synthesis. A pair without gates stands for a control call that holds no synthesis
     and is skipped. Each entry of ``controlled_qubit_counts`` is the qubit
     count, controls included, of one call of
     :func:`controlled_unitary_circuit`, sized by
@@ -1142,7 +1143,8 @@ def admit_dense_syntheses(qubit_counts, *, max_work: int, max_bytes: int, operat
     (:func:`select_dense_control_route`). The calls run one at a time, and
     the circuits they return stay alive together, so the bytes are the
     largest working allowance plus every kept allowance. ``operation``
-    names the construction in the error message.
+    names the construction in the error message. Returns those
+    ``(bytes, work)``.
     """
     from nwqlib.operators.access import _check_bytes
 
@@ -1150,10 +1152,12 @@ def admit_dense_syntheses(qubit_counts, *, max_work: int, max_bytes: int, operat
     sizes += [gatewise_control_size(*counts) for counts in controls if counts[0]]
     sizes += [controlled_synthesis_size(count) for count in controlled_qubit_counts]
     if not sizes:
-        return
-    _check_bytes(max(size[1] for size in sizes) + sum(size[2] for size in sizes), max_bytes, operation)
-    if sum(size[0] for size in sizes) > max_work:
-        raise ValueError(f"{operation} exceeds max_work")
+        return 0, 0
+    data, work = max(size[1] for size in sizes) + sum(size[2] for size in sizes), sum(size[0] for size in sizes)
+    _check_bytes(data, max_bytes, operation)
+    if exceeds(work, max_work):
+        raise ResourceLimitError(f"{operation} exceeds max_work: it needs {work} work units, max_work={max_work}")
+    return data, work
 
 
 def dense_synthesis_gate_census(num_qubits: int) -> dict[str, int]:
@@ -1205,12 +1209,9 @@ def dense_synthesis_gate_census(num_qubits: int) -> dict[str, int]:
 # phi = lambda = 0, or phi = -pi/2 and lambda = pi/2) emits fewer. The other
 # gates of the synthesis emit a fixed number for every k: a CX one X with
 # k + 1 controls, an H seven (S, H, T, an X with k controls, Tdg, H and Sdg)
-# and the global phase of the controlled gate one P or MCPhase.
-# _controlled_heavy_instructions counts the emitted instructions that hold
-# more memory than a parameterless standard gate. The tests
-# test_gatewise_control_tables_match_installed_qiskit and
-# test_gatewise_heavy_counts_match_installed_qiskit recompute every entry.
-# Revisit when either fails after a Qiskit upgrade.
+# and the global phase of the controlled gate one P or MCPhase. The test
+# test_gatewise_control_tables_match_installed_qiskit recomputes every
+# entry. Revisit when it fails after a Qiskit upgrade.
 CONTROLLED_U_INSTRUCTIONS = (
     1, 21, 86, 193, 289, 385, 607, 829, 949, 1069, 1189, 1309, 1429, 1549, 1669, 1789,
     1909, 2029, 2149, 2269, 2389, 2509, 2629, 2749, 2869, 2989, 3109, 3229, 3349, 3469, 3589, 3709,
@@ -1223,29 +1224,6 @@ CONTROLLED_RZ_INSTRUCTIONS = (
     1276, 1316, 1356, 1396, 1436, 1476, 1516, 1556, 1596, 1636, 1676, 1716, 1756, 1796, 1836, 1876,
     1916, 1956, 1996, 2036, 2076, 2116, 2156, 2196, 2236, 2276, 2316, 2356, 2396, 2436, 2476, 2516,
 )
-
-
-def _controlled_heavy_instructions(kind: str, num_controls: int) -> int:
-    """Return how many of the instructions that Qiskit emits for one gate of ``kind`` with k controls hold angles or are Python objects.
-
-    A parameterless standard gate is stored in Rust. A standard gate with
-    angles also stores them, and an MCX gate with three or more controls and
-    an MCPhase gate are Python objects. An RZ gives one CRZ with one
-    control. With more, its multi-controlled RZ holds four RZ, and each of
-    its dirty-ancilla X blocks on three controls fifteen P gates, which
-    occur for k = 5, 6 and 7. A general U gives one CU with one control.
-    With more, it gives two such multi-controlled RZ, an MCRY and an
-    MCPhase, where the MCRY holds two RY for k = 2, seven CU for k = 3 and
-    the gates of the multi-controlled RZ from k = 4. A CX gives one MCX from
-    k = 2, an H one from k = 3, and the global phase one P or MCPhase.
-    """
-    k = num_controls
-    if kind in ("u", "rz"):
-        if k == 1:
-            return 1
-        rz = 4 + 30 * (((k + 1) // 2 == 3) + (k // 2 == 3))
-        return rz if kind == "rz" else 2 * rz + (2 if k == 2 else 7 if k == 3 else rz) + 1
-    return {"cx": int(k >= 2), "h": int(k >= 3), "phase": 1}[kind]
 
 
 def controlled_synthesis_gate_census(num_qubits: int) -> dict[str, int]:
@@ -1273,7 +1251,7 @@ def controlled_synthesis_gate_census(num_qubits: int) -> dict[str, int]:
 
 
 def census_control_counts(census: dict[str, int], num_controls: int) -> tuple[int, int, int]:
-    """Return (gates, instructions, heavy) of Qiskit's control of a circuit with the gate counts ``census``.
+    """Return (gates, instructions) of Qiskit's control of a circuit with the gate counts ``census``.
 
     ``census`` has the keys u, cx, rz and h of :func:`dense_synthesis_gate_census`
     and :func:`controlled_synthesis_gate_census`, and the circuit also has a
@@ -1285,13 +1263,11 @@ def census_control_counts(census: dict[str, int], num_controls: int) -> tuple[in
     gates = sum(census.values()) + 1
     instructions = (census["u"] * CONTROLLED_U_INSTRUCTIONS[num_controls - 1] + census["cx"]
                     + census["rz"] * CONTROLLED_RZ_INSTRUCTIONS[num_controls - 1] + 7 * census["h"] + 1)
-    heavy = (sum(count * _controlled_heavy_instructions(kind, num_controls) for kind, count in census.items())
-             + _controlled_heavy_instructions("phase", num_controls))
-    return gates, instructions, heavy
+    return gates, instructions
 
 
 def gatewise_control_counts(num_qubits: int, num_controls: int) -> tuple[int, int, int]:
-    """Return (gates, instructions, heavy) of Qiskit's control of one :func:`dense_unitary_circuit` on ``num_qubits`` qubits.
+    """Return (gates, instructions) of Qiskit's control of one :func:`dense_unitary_circuit` on ``num_qubits`` qubits.
 
     ``qiskit_compat.controlled`` replaces a dense ``UnitaryGate`` inside a
     composite gate by its exact synthesis and then calls Qiskit's
@@ -1301,21 +1277,19 @@ def gatewise_control_counts(num_qubits: int, num_controls: int) -> tuple[int, in
     :func:`dense_synthesis_gate_census` plus the global phase.
     ``instructions`` bounds the instructions it emits, each counted gate
     multiplied by ``CONTROLLED_U_INSTRUCTIONS``, ``CONTROLLED_RZ_INSTRUCTIONS``
-    or the fixed counts beside them, plus one for the phase. ``heavy``
-    counts those of them that hold angles or are Python objects
-    (:func:`_controlled_heavy_instructions`). A composite that holds several
-    syntheses, or one synthesis several times, adds the triples of its
-    occurrences. The global phase is counted for each, which only
+    or the fixed counts beside them, plus one for the phase. A composite that
+    holds several syntheses, or one synthesis several times, adds the pairs
+    of its occurrences. The global phase is counted for each, which only
     overestimates.
     """
     return census_control_counts(dense_synthesis_gate_census(num_qubits), num_controls)
 
 
-def gatewise_control_size(gates: int, instructions: int, heavy: int) -> tuple[int, int, int]:
+def gatewise_control_size(gates: int, instructions: int) -> tuple[int, int, int]:
     """Return (work, working bytes, kept bytes) of one call of Qiskit's ``control`` with the counts of :func:`gatewise_control_counts`.
 
     The call unrolls ``gates`` gates and emits ``instructions``
-    instructions, ``heavy`` of which hold angles or are Python objects.
+    instructions.
     Qiskit's control step does Python and Rust bookkeeping, no
     floating-point linear algebra, so its work has no count of
     multiply-adds. The formula sets its units by measured time instead. Per
@@ -1334,17 +1308,18 @@ def gatewise_control_size(gates: int, instructions: int, heavy: int) -> tuple[in
       one to eight controls the call took 4.4 to 35 ns per unit of this
       formula, and the synthesis itself 1.6 to 15 ns per unit of its own
       formula.
-    - Kept bytes ``96 instructions + 1024 heavy + 16384``. The
+    - Kept bytes ``320 instructions + 16384``. The
       ``ControlledGate`` keeps a deep copy of the emitted definition and of
       the base gate. The copy of the base holds the synthesized circuit,
       which replaces the circuit that :func:`dense_synthesis_size` keeps
       once ``controlled`` returns, so it is not counted again. In circuits
       of one instruction kind, a parameterless standard gate held 40 to 59
       bytes of resident memory, a standard gate with angles 123 to 177, an
-      MCX gate 355 and an MCPhase gate 733. The formula allows 96 bytes for
-      every instruction, 1024 more for each heavy one and 16384 bytes for
-      the gate and circuit objects.
-    - Working bytes ``1024 gates + 96 instructions + 1024 heavy + 65536``,
+      MCX gate 355 and an MCPhase gate 733. The formula is a coarse
+      allowance of 320 bytes for every instruction, above the 67 to 267
+      bytes per instruction that kept controlled gates held (below), and
+      16384 bytes for the gate and circuit objects.
+    - Working bytes ``1024 gates + 320 instructions + 65536``,
       alive during the call. Qiskit unrolls the definition through a DAG, a
       second circuit and the definition of the unrolled gate
       (``_unroll_gate``), and the ``ControlledGate`` constructor deep-copies
@@ -1355,14 +1330,10 @@ def gatewise_control_size(gates: int, instructions: int, heavy: int) -> tuple[in
 
     For m = 4 to 7 and one to eight controls, kept controlled gates with the
     copy of their base held 67 to 267 bytes of resident memory per emitted
-    instruction. The kept-byte formulas of the synthesis and of this step
-    together gave 1.7 to 7.7 times that memory, and the working and kept
-    bytes of this formula together were 2.1 to 11 times the peak increase of
-    resident memory
-    during the call, wherever that increase exceeded 0.1 MB.
+    instruction.
     """
-    return (2048 * gates + 16 * instructions, 1024 * gates + 96 * instructions + 1024 * heavy + 65536,
-            96 * instructions + 1024 * heavy + 16384)
+    return (2048 * gates + 16 * instructions, 1024 * gates + 320 * instructions + 65536,
+            320 * instructions + 16384)
 
 
 # Engineering constant K of the dense control route, registered in

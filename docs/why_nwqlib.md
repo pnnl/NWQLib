@@ -30,13 +30,13 @@ Within the packages checked, ADAPT-GCiM, QCELS, and the augmented-Lagrangian QHD
 
 | Notebook | CX gates, predicted | CX gates, compiled |
 | --- | --- | --- |
-| `qls_linear_system_intro` | 7,846, an estimate | 7,704 |
+| `qls_linear_system_intro` | 6,988, an estimate | 6,854 |
 | `qhd_optimization_intro` | 13,790, an upper bound | 13,790 |
 | `lchs_linear_dynamics_intro` | 79,712, an estimate | 79,648 |
 | `lchs_scientific` | 1,122,428, an upper bound | 554,288 |
 | `qls_scientific` | not predicted, because three blocks have no CX formula | 67,670 |
 | `qhd_scientific`, its 4-qubit binary circuit at optimization level 0 | 320, an upper bound | 320 |
-| `resource_estimation_at_scale`, QLS on 12 and 16 system qubits at optimization level 0 | 4,062 and 6,746, estimates | 4,062 and 6,746 |
+| `resource_estimation_at_scale`, QLS on 12 and 16 system qubits at optimization level 0 | 3,335 and 5,531, estimates | 3,335 and 5,531 |
 | `resource_estimation_at_scale`, LCHS on 12 and 16 system qubits at optimization level 0 | 50,658 and 61,146, upper bounds | 50,658 and 61,146 |
 | `resource_estimation_at_scale`, QCELS on the Ising chain of 4 and 8 spins, over all shots, at optimization level 0 | 15,040,512 and 41,680,896, exact counts | 15,040,512 and 41,680,896 |
 | `resource_estimation_at_scale`, QCELS on the Heisenberg chain of 4 and 8 spins, over all shots, at optimization level 0 | 38,535,168 and 103,415,808, exact counts | 38,535,168 and 103,415,808 |
@@ -78,7 +78,7 @@ QHDOPT offers unary, one-hot and Hamming-weight encodings, and its IonQ and QuTi
 
 **Chebyshev Lanczos and Krylov.** Qrisp's `lanczos_alg` and IBM's tutorial discard overlap directions below a threshold that you fix in advance. With finite shots, NWQLib's default threshold follows the measured shot noise of the moments, and NWQLib reports a bound on the sampling error of the overlap matrix separately.
 
-**Block encoding.** In PennyLane, Qrisp, CUDA-Q Algorithms and Qualtran, the construction follows the function you call or the type of your input. NWQLib's `plan` gives an exactly circulant matrix a banded encoding, otherwise chooses between the Pauli and dense encodings by their CX count per query, and records the choice with its normalization.
+**Block encoding.** In PennyLane, Qrisp, CUDA-Q Algorithms and Qualtran, the construction follows the function you call or the type of your input. NWQLib's `plan` gives a matrix that is circulant to within rounding a banded encoding, whose error bound includes that rounding difference, otherwise chooses between the Pauli and dense encodings by their CX count per query, and records the choice with its normalization.
 
 ## Packages checked
 

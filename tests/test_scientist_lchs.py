@@ -46,20 +46,22 @@ def test_source_phase_and_original_coordinates_reach_both_actual_consumers():
         assert row['recovery_scale'].value==1.  # Positive L needs no PSD shift.
 
 
-@pytest.mark.parametrize('backend,tolerance', [('qsp_block_encoding',2e-5)])
-def test_exact_zero_l_removes_k_quadrature_and_keeps_physical_phase(backend,tolerance):
+def test_exact_zero_l_removes_k_quadrature_and_keeps_physical_phase():
     from nwqlib import plan, solve
     from nwqlib.algorithms import LCHS
     problem = LinearDynamics(A=1j*np.diag([.2,.3]),initial_state=[1,1j],time=.1)
-    selected = plan(problem,method=LCHS(hamiltonian_evolution_backend=backend))
+    selected = plan(problem,method=LCHS(hamiltonian_evolution_backend='qsp_block_encoding'))
     assert selected.reconstruction.mode=='unitary'
     assert selected.reconstruction.physical_branches==1
     assert selected.reconstruction.kernel_approximation_bound==selected.reconstruction.quadrature_bound==0
     assert sum(w.width for w in selected.construction.program.registers)<=13
     result = solve(selected)
     expected = np.exp(-.1j*np.array([.2,.3]))*np.array([1,1j])
-    # The tolerance covers QSP's actual finite polynomial/phase approximation.
-    np.testing.assert_allclose(result.solution,expected,rtol=0,atol=tolerance)
+    # The kernel and k-quadrature stages are exact zeros here, so the
+    # deviation is the evolution's own approximation, bounded by the Plan's
+    # qsp_synthesis component, plus binary64 simulation rounding.
+    synthesis = next(item.fact.value.value for item in selected.facts if item.fact.quantity=="qsp_synthesis")
+    assert np.linalg.norm(result.solution-expected) <= synthesis+1e-12
 
 
 def test_periodic_selected_repeat_matches_independent_strang_matrix():
@@ -141,14 +143,14 @@ def test_dense_select_branches_match_exact_controlled_exponentials(num_qubits, t
     chosen = plan(LinearDynamics(A=matrix, initial_state=initial, time=time), method=LCHS(k_quadrature=grid))
     select = {block.record.signature.name: block for block in chosen.blocks}['lchs_select']
     data, elapsed = select._payload
-    assert data.method.hamiltonian_evolution_backend == 'dense_exact'
+    assert data.backend == chosen.reconstruction.selected_backend == 'dense_exact'
     circuit = select._constructor(select, (), _local_method_context())
     nodes = np.asarray(data.quadrature.k_nodes)
     coefficients = np.asarray(data.coefficient_plan.coefficients)
     address = circuit.num_qubits - num_qubits
     assert address == 3
     for branch in range(len(nodes)):
-        exact = expm(-1j * elapsed * (nodes[branch] * data.quadrature.l_part + data.quadrature.h_part))
+        exact = expm(-1j * elapsed * (nodes[branch] * data.dense.l_part + data.dense.h_part))
         expected = np.eye(1 << circuit.num_qubits, dtype=complex)
         selected = [(row << address) | branch for row in range(d)]
         expected[np.ix_(selected, selected)] = coefficients[branch] / abs(coefficients[branch]) * exact
@@ -170,17 +172,21 @@ def test_source_pf_padding_and_original_readout_follow_recorded_steps():
     chosen = plan(problem,method=method)
     data = chosen._native['native_data']
     layout,pf = data.source_layout,data.select_data.plan
-    assert layout.branch_count==16 and len(layout.coefficients)==32
+    assert layout.branch_count==16 and len(layout.phases)==32
     assert any(slot is None for slot in layout.branch_to_node)
     assert sum(register.width for register in chosen.construction.program.registers)==7
     expected = np.zeros(4,dtype=complex)
     for slot,node in enumerate(layout.branch_to_node):
         if node is None:
             continue
-        direction = data.initial_direction if layout.branch_kinds[node]=='initial' else data.source_direction
-        action = sorted_pauli_suzuki_2_reference(data.quadrature.l_part,data.quadrature.h_part,
+        direction = data.dense.initial_direction if layout.branch_kinds[node]=='initial' else data.dense.source_direction
+        action = sorted_pauli_suzuki_2_reference(data.dense.l_part,data.dense.h_part,
             k_value=layout.k_values[slot],final_time=layout.elapsed_times[slot],reps=pf.branch_step_counts[slot])
-        expected += layout.coefficients[slot]*(action@direction)
+        # Slot coefficient from the layout's coefficient state: magnitude
+        # gamma*amplitude**2 with gamma = coefficient_l1_norm*2**scale_exponent.
+        coefficient = (layout.coefficient_l1_norm*2.0**layout.scale_exponent*layout.amplitudes[slot]**2
+                       *np.exp(1j*layout.phases[slot]))
+        expected += coefficient*(action@direction)
     actual = solve(chosen)
     np.testing.assert_allclose(actual.solution,expected[:3],rtol=0,atol=3e-10)
     unit = solve(problem,method=method,output=StateVector(normalization='unit'))
@@ -196,5 +202,87 @@ def test_source_pf_padding_and_original_readout_follow_recorded_steps():
     # six standard deviations checks readout wiring rather than promising accuracy.
     p = mass/alpha**2
     assert abs(counts.value-mass)<6*alpha**2*np.sqrt(p*(1-p)/4096)
+    # The reported shot radius is Hoeffding's for the success indicator in
+    # [0, alpha**2] (M7.14), at the default failure probability .05; a
+    # QuadraticForm's one Z-type group has scores in [-alpha**2 A, alpha**2 A]
+    # with A the sum of the padded observable's Pauli coefficient magnitudes.
+    def sampling(result):
+        return next(item for item in result.facts if item.fact.quantity == "sampling")
+    radius = sampling(counts)
+    assert radius.failure_probability == .05
+    assert radius.fact.value.value == pytest.approx(alpha**2*np.sqrt(np.log(2/.05)/(2*4096)), rel=1e-12)
+    from qiskit.quantum_info import SparsePauliOp
+    from nwqlib import QuadraticForm
+    padded = np.diag([1., -2., .5, 0.])
+    form = solve(problem,method=method,output=QuadraticForm(observable=observable),shots=2048,seed=13)
+    A = np.sum(np.abs(SparsePauliOp.from_operator(padded).coeffs))
+    assert sampling(form).fact.value.value == pytest.approx(alpha**2*A*np.sqrt(2*np.log(2/.05)/2048), rel=1e-12)
     samples = solve(problem,method=method,output=Samples(),shots=128,seed=12)
     assert all(index<3 for index in samples.samples.indices.array)
+    # Sample arrays are Result data, stored in bytes objects whose memory cannot be made writable.
+    for array in (samples.samples.indices.array,samples.samples.counts.array):
+        while isinstance(array.base,np.ndarray):
+            array = array.base
+        with pytest.raises(ValueError):
+            array.setflags(write=True)
+
+
+def test_component_facts_cover_the_ideal_rule_and_native_floating_point_names_the_coefficient_table():
+    """Plans and Results scope the kernel, k-quadrature and Duhamel bounds to the ideal rule.
+
+    Those bounds are for exact nodes, weights and coefficients. The concrete component Facts of a default
+    LCHS Plan, with and without a constant source, of its classical Result and of the refined Duhamel bound
+    say so. The required native_floating_point term, which holds the binary64 construction of the
+    coefficient table and the execution, stays unknown with that reason, and the Result's assessment reports it.
+    """
+    from nwqlib import plan, solve
+    from nwqlib.algorithms import LCHS
+    from nwqlib.algorithms.lchs import LCHSRefinement
+    assumptions = ("ideal selected algorithm relation with exact nodes, weights and coefficients, evaluated numerically",
+                   "binary64 construction of the coefficient table and execution rounding are under native_floating_point")
+    reason = ("binary64 construction of the coefficient table (quadrature nodes and weights, kernel values, "
+              "Duhamel nodes and weights) and floating-point execution are not bounded")
+    A, initial = np.array([[.6, .1], [.1, .3]]), np.array([1., 0.])
+    for problem, method in ((LinearDynamics(A=A, initial_state=initial, time=1.), LCHS()),
+                            (LinearDynamics(A=A, initial_state=initial, source=[.2, -.1], time=1.), LCHS(duhamel_nodes=2))):
+        chosen = plan(problem, method=method, execution="classical")
+        planned = {item.fact.quantity: item.fact for item in chosen.facts}
+        for name in ("kernel_approximation", "k_quadrature"):
+            assert planned[name].availability == "concrete" and planned[name].assumptions == assumptions
+        native = next(term.fact.fact for term in chosen.error_model.terms if term.name == "native_floating_point")
+        assert native.availability == "unknown" and native.reason == reason
+        result = solve(chosen)
+        # sampling comes from the shared exact-readout model. Every concrete LCHS component carries the scope.
+        concrete = {item.fact.quantity: item.fact for item in result.facts if item.fact.availability == "concrete"}
+        assert {"kernel_approximation", "k_quadrature"} <= concrete.keys()
+        assert all(concrete[name].assumptions == assumptions for name in concrete.keys() - {"sampling"})
+        assert f"native_floating_point: {reason}" in result.assess(absolute_tolerance=.01).prerequisites
+    _, refined = result.verify(checks=LCHSRefinement(components=("duhamel",)))
+    duhamel = next(item.fact for item in refined if item.fact.quantity == "duhamel_quadrature")
+    assert duhamel.availability == "concrete" and duhamel.assumptions == assumptions
+
+
+def test_default_byte_limit_is_the_physical_memory_read_when_a_step_checks(monkeypatch):
+    """LCHS.max_bytes defaults to None, and each step then checks against the computer's physical memory.
+
+    For a 2x2 A, the first array check of planning, the encoded inputs and Cartesian parts, needs
+    64*d**2 + 128*d = 512 bytes. A physical memory of 511 bytes refuses it and names the physical memory, while
+    512 passes it and the next stage refuses. An explicit max_bytes has the same boundary and names itself, a
+    large physical memory plans, and the former explicit 10 GB value is still an ordinary explicit cap.
+    """
+    import nwqlib._limits as limits
+    from nwqlib import plan, solve
+    from nwqlib.algorithms import LCHS
+    problem = LinearDynamics(A=np.array([[.6, .1], [.1, .3]]), initial_state=[1., 0.], time=1.)
+    assert LCHS().max_bytes is None and LCHS(max_bytes=10_000_000_000).max_bytes == 10_000_000_000
+    first = "LCHS encoded inputs and Cartesian arrays needs about 512 bytes, exceeding "
+    for memory, refused in ((511, first + "the physical memory (511 bytes)"), (512, "LCHS quadrature arrays")):
+        monkeypatch.setattr(limits, "physical_memory_bytes", lambda memory=memory: memory)
+        with pytest.raises(ValueError, match=refused.replace("(", r"\(").replace(")", r"\)")):
+            plan(problem, method=LCHS(), execution="classical")
+    for cap, refused in ((511, first + "max_bytes=511"), (512, "LCHS quadrature arrays")):
+        with pytest.raises(ValueError, match=refused):
+            plan(problem, method=LCHS(max_bytes=cap), execution="classical")
+    monkeypatch.setattr(limits, "physical_memory_bytes", lambda: 2**40)
+    np.testing.assert_array_equal(solve(plan(problem, method=LCHS(), execution="classical")).solution,
+                                  solve(plan(problem, method=LCHS(max_bytes=10_000_000_000), execution="classical")).solution)

@@ -15,7 +15,7 @@ paper's Eqs. (6)-(9) complete each truncated tensor to a local unitary.
 
 from __future__ import annotations
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from nwqlib._limits import ResourceLimitError, exceeds, optional_limit
 
 from dataclasses import dataclass, replace
 from typing import Any
@@ -338,8 +338,8 @@ def build_mps_circuit_state_preparation(
     num_layers: int = 2,
     register_name: str = "system",
     _selected_decomposition: MPSDecomposition | None = None,
-    max_bytes: int = DEFAULT_MAX_BYTES,
-    max_svd_work: int = mps_module.DEFAULT_MAX_SVD_WORK,
+    max_bytes: int | None = None,
+    max_svd_work: int | None = None,
 ) -> MPSCircuitStatePreparation:
     """Build a layered MPS circuit that approximately prepares a state vector from `|0...0>`.
 
@@ -361,17 +361,19 @@ def build_mps_circuit_state_preparation(
             Decomposition that LCHS planning has already computed for the
             normalized `vector` and supplies, so that no TT-SVD runs again.
             A caller leaves it at its default.
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+        max_bytes (int | None): Default `None`, the physical memory of this computer.
             Limit on the known input and TT-SVD arrays. It does not measure
             process memory. The layered construction
             ([layered construction formula](../../ENGINEERING_CONSTANTS.md#layered-mps-construction-law))
             and the exact syntheses of the two-qubit unitaries are checked
             against it separately, before either starts.
-        max_svd_work (int): Default `100_000_000`. Limit on the whole-sweep
-            dense-SVD work. The layered construction's scikit_tt sweeps and
-            products and the at most `num_layers * (n - 1)` exact syntheses
-            of two-qubit unitaries are checked against it separately, before
-            either starts.
+        max_svd_work (int | None): Default `None`, no limit. Limit on the
+            work of the whole construction, compared once before the first
+            SVD: the TT-SVD sweep and the circuit that the largest bond
+            dimensions the sweep can keep select. That circuit is a global
+            phase for a scalar, one gate per qubit when every bond dimension
+            is one, and otherwise the layered construction with at most
+            `num_layers * (n - 1)` exact syntheses of two-qubit unitaries.
 
     Returns:
         preparation (MPSCircuitStatePreparation): The circuit with its
@@ -400,24 +402,26 @@ def build_mps_circuit_state_preparation(
 
     if num_layers < 1:
         raise ValueError("num_layers must be a positive integer")
+    max_svd_work = optional_limit(max_svd_work, "max_svd_work")
     if _selected_decomposition is None:
         target_state, input_norm = mps_module._input(vector, max_bytes)
+        # One admission of the whole construction before the first SVD.
+        mps_module.admit_mps_circuit(max(target_state.size - 1, 0).bit_length(), max_bond_dim=max_bond_dim,
+                                     num_layers=num_layers, max_svd_work=max_svd_work)
         decomposition = mps_module._decompose_normalized_state(
             target_state, max_bond_dim=max_bond_dim, threshold=threshold,
-            max_bytes=max_bytes, max_svd_work=max_svd_work, input_norm=input_norm)
+            max_bytes=max_bytes, max_svd_work=None, input_norm=input_norm)
     else:
         # The caller (algorithms/lchs/native.py) passes the normalized target and the cores it
         # already computed, so the TT-SVD and the full-state reconstruction are not repeated.
         target_state, input_norm, decomposition = vector, 1.0, _selected_decomposition
-        from nwqlib.operators.access import _check_bytes
-        from nwqlib.operators.inputs import _digest
         if not isinstance(target_state, np.ndarray) or target_state.ndim != 1:
             raise ValueError("selected MPS requires its actual normalized vector")
-        _check_bytes(target_state.nbytes + decomposition.core_bytes, max_bytes, "selected MPS input")
         if (decomposition.original_dimension != len(target_state) or decomposition.max_bond_dim != max_bond_dim
-                or decomposition.threshold != threshold
-                or decomposition.input_id != _digest("mps.normalized.C-order", (len(target_state),), (target_state,))):
+                or decomposition.threshold != threshold):
             raise ValueError("MPS construction differs from the selected core parameters")
+        # An immutable target that these cores were computed from or checked against is not hashed again.
+        mps_module._selected_target_id(target_state, decomposition)
     num_qubits = decomposition.num_qubits
     if num_qubits == 0:
         circuit = QuantumCircuit(name="mps_circuit_state_preparation")
@@ -433,12 +437,19 @@ def build_mps_circuit_state_preparation(
         # bond, and keeps their circuits.
         from nwqlib.subroutines._dense_synthesis import admit_dense_syntheses, dense_synthesis_size
         syntheses = num_layers * (num_qubits - 1)
-        if syntheses * dense_synthesis_size(2)[0] > max_svd_work:
-            raise ValueError(f"MPS circuit needs {syntheses} two-qubit syntheses, exceeding max_svd_work")
-        admit_dense_syntheses((2,) * syntheses, max_work=max_svd_work, max_bytes=max_bytes,
+        if _selected_decomposition is not None and max_svd_work is not None:
+            # Reused cores: their syntheses and layered construction, at the
+            # actual bonds, are the remaining work of this construction.
+            work = (syntheses * dense_synthesis_size(2)[0]
+                    + mps_module.layered_construction_size(decomposition.bond_dimensions, num_layers)[0])
+            if exceeds(work, max_svd_work):
+                raise ResourceLimitError(f"MPS circuit needs {work} work for its two-qubit syntheses and layered "
+                                         f"construction, exceeding max_svd_work={max_svd_work}")
+        # The work was admitted above, so these admissions check bytes.
+        admit_dense_syntheses((2,) * syntheses, max_work=None, max_bytes=max_bytes,
                               operation="MPS two-qubit synthesis")
         mps_module.admit_layered_construction(decomposition.bond_dimensions, num_layers,
-                                              max_svd_work=max_svd_work, max_bytes=max_bytes)
+                                              max_svd_work=None, max_bytes=max_bytes)
         _, TT = _require_scikit_tt()
         scikit_mps = _scikit_tt_mps_from_cores(
             decomposition.cores,

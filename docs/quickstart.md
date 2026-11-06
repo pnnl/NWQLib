@@ -36,7 +36,7 @@ python -m pip install "scikit_tt @ git+https://github.com/PGelss/scikit_tt.git"
 
 The stable test environment pins its `scikit_tt` commit in `docs/ENVIRONMENT_LOCK.txt`. To work on NWQLib itself, install an editable checkout as described in [Set up, test and build](development/setup.md).
 
-On Linux, Qiskit Aer 0.18.0 and PySCF 2.14.0 bundle different builds of the OpenMP runtime, and a Python process that uses the `aer` and `chemistry` extras together can fail when it loads the second. Starting the process with the OpenMP runtime of PySCF preloaded avoids this, and [Dependency issues](dependency_issues.md#openmp-runtime-with-pyscf-on-linux) gives the command.
+On Linux with Qiskit 2.6.0, a Python process that uses the `aer` and `chemistry` extras together can fail when it loads the OpenMP runtime that Qiskit Aer 0.18.0 or PySCF 2.14.0 bundles. [Dependency issues](dependency_issues.md#openmp-runtime-with-pyscf-on-linux) gives the command that preloads the runtime of PySCF and says when Qiskit 2.6.1 or later is needed instead.
 
 ## Solve linear dynamics
 
@@ -56,7 +56,7 @@ print(result.solution)
 ```
 
 ```text
-[ 0.96006038-1.54102084e-12j -0.00513885+3.61167323e-13j]
+[ 0.96006038-1.54057280e-12j -0.00513885+3.61491025e-13j]
 ```
 
 The result is the physical solution vector u(0.1), including its scale and phase. It is not normalized to unit length.
@@ -79,7 +79,7 @@ print(np.linalg.norm(result.solution - reference))
 
 ```text
 [ 0.96082565 -0.00484022]
-0.0008214720329548587
+0.0008214720329520691
 ```
 
 The printed absolute L2 discrepancy, about `.000821472`, is that of the default finite LCHS approximation in this example. LCHS assigns half of `LCHS.approximation_tolerance`, 0.01 by default, to the tail of the k integral that the cutoff drops and half to the k quadrature. Here the tail bound is `.005` and the quadrature bound is about `.00431140`. For this unit input without a shift, they equal the bounds recorded as `kernel_approximation` and `k_quadrature` in `result.plan.facts` ([LCHS frames](conventions.md#lchs-frames)). These two bounds cover only the cutoff and the quadrature. They do not bound the total error of the physical output, which also depends on the preparation, evolution and numerical approximations. The [LCHS guide](algorithms/lchs.md#selection-and-accuracy) describes these bounds, and [Check accuracy and verify a result](verification.md) describes NWQLib's own checks.
@@ -99,8 +99,8 @@ print(np.linalg.norm(refined.solution - reference))
 ```
 
 ```text
-[ 0.96084571+1.45318296e-17j -0.00488956-7.01766797e-19j]
-5.3260455987202175e-05
+[ 0.96084571+2.45133188e-17j -0.00488956+4.22510622e-18j]
+5.3260455987124986e-05
 ```
 
 For this input, the finer construction uses 396 nodes and has absolute L2 discrepancy about `.0000532605`, with its finite sum evaluated classically. As a circuit, the same dense construction needs 512 address slots and ten qubits in total, within the default limit `max_dense_select_slots=4096`. These two observations do not establish monotonic convergence for every input. Each branch of the dense SELECT is a classically computed matrix exponential. Larger systems need a supported structured construction with its own limit check.
@@ -142,7 +142,7 @@ print(restored.solution)
 ```
 
 ```text
-[ 0.96006038-1.54102084e-12j -0.00513885+3.61167323e-13j]
+[ 0.96006038-1.54057280e-12j -0.00513885+3.61491025e-13j]
 ```
 
 ## Next steps

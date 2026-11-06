@@ -10,7 +10,9 @@ import sys
 from inspect import signature
 from math import isfinite
 
-from nwqlib.operators.access import DEFAULT_INPUT_BYTES, _check_bytes
+from nwqlib._limits import byte_allowance, exceeds, memory_limit
+from nwqlib._validation import integer
+from nwqlib.operators.access import _check_bytes
 
 
 def _options_snapshot(value, *, max_bytes):
@@ -100,8 +102,8 @@ def inspect_circuit_resources(
     label,
     transpile_options=None,
     basis_label="native",
-    max_operations=100_000,
-    max_bytes=DEFAULT_INPUT_BYTES,
+    max_bytes=None,
+    initial_state=None,
 ):
     """Count one circuit's top-level operations by name, and compile only on request.
 
@@ -113,17 +115,23 @@ def inspect_circuit_resources(
     with simulator saves removed before compilation. The executable circuit is
     never copied for the count without compilation, mutated or run.
 
+    ``initial_state`` is the ``(state, qubits)`` of a preparation that the
+    circuit's first ``set_statevector`` sets directly
+    (``qiskit_aer._PreparedAerExecution.initial_state``), or None. ``state``
+    is the vector or a zero-argument callable that reads it. The compiled
+    copy holds a ``DirectPreparationGate`` of the vector on ``qubits`` in
+    its place, so the compiler counts the preparation's own circuit. Its
+    ``16 * 2**len(qubits)`` bytes join the copy's byte check, which comes
+    before the vector is read and the copy is made.
+
     Returns a mapping with ``circuit`` (what was counted), ``basis``,
     ``compiler`` (Qiskit version and resolved options, or ``None``),
     ``operations`` (name to count), ``total_operations``, ``num_qubits``,
     ``num_clbits`` and ``depth`` (Qiskit's default depth, which skips
-    directives such as barriers and simulator saves). ``max_operations`` covers the input and a
-    compiled copy. ``max_bytes`` covers the counted size of the options and of
-    the collections the inspection builds, not compiler expansion, SDK
+    directives such as barriers and simulator saves). ``max_bytes`` covers the counted size of
+    the options and of the collections the inspection builds, not compiler expansion, SDK
     workspace or process RSS.
     """
-    if type(max_operations) is not int or max_operations < 1:
-        raise ValueError("max_operations must be a positive integer")
     _check_bytes(0, max_bytes, "native inspection")
     from qiskit import QuantumCircuit, transpile, __version__ as qiskit_version
 
@@ -132,8 +140,6 @@ def inspect_circuit_resources(
     if any(type(text) is not str or not text for text in (label, basis_label)):
         raise ValueError("resource inspection requires labels for the circuit and its basis")
     size, width = len(circuit.data), circuit.num_qubits + circuit.num_clbits
-    if size > max_operations:
-        raise ValueError("native inspection input exceeds max_operations")
     # Registered inventory envelope: 64 bytes per operation and 16 per quantum
     # or classical wire. The compiled-copy check below uses 96 per operation.
     _check_bytes(64 * size + 16 * width, max_bytes, "native inspection collections")
@@ -187,7 +193,8 @@ def inspect_circuit_resources(
             standard = get_standard_gate_name_mapping()
             options["basis_gates"] = [name for name in native_basis if name in standard]
         options = _options_snapshot(options, max_bytes=max_bytes)
-        _check_bytes(96 * size + 16 * width, max_bytes, "auxiliary inspection copy")
+        amplitudes = 0 if initial_state is None else 1 << len(initial_state[1])
+        _check_bytes(96 * size + 16 * width + 16 * amplitudes, max_bytes, "auxiliary inspection copy")
         # Aer save instructions are simulator requests the transpiler cannot
         # lower, so the compiled copy omits them.
         save_module = sys.modules.get("qiskit_aer.library.save_instructions.save_data")
@@ -197,9 +204,16 @@ def inspect_circuit_resources(
         selected.data = [
             item for item in circuit.data if not isinstance(item.operation, save_types)
         ]
+        if initial_state is not None:
+            from nwqlib.subroutines.state_preparation.direct import DirectPreparationGate
+
+            state, qubits = initial_state
+            state = state() if callable(state) else state
+            index = next(position for position, item in enumerate(selected.data)
+                         if item.operation.name == "set_statevector")
+            selected.data[index] = selected.data[index].replace(
+                operation=DirectPreparationGate(state), qubits=[selected.qubits[qubit] for qubit in qubits])
         counted = transpile(selected, **options)
-        if len(counted.data) > max_operations:
-            raise ValueError("auxiliary compiler output exceeds max_operations")
         _check_bytes(
             64 * len(counted.data) + 16 * (counted.num_qubits + counted.num_clbits),
             max_bytes,
@@ -240,7 +254,7 @@ def inspect_circuit_resources(
     }
 
 
-def inspect_native_depth(circuit, target, *, max_operations=100_000, max_bytes=DEFAULT_INPUT_BYTES):
+def inspect_native_depth(circuit, target, *, max_bytes=None):
     """Compute the native two-qubit depth of one prepared circuit on its backend target, without changing or running it.
 
     The circuit must be the one that executes, already compiled for
@@ -270,7 +284,7 @@ def inspect_native_depth(circuit, target, *, max_operations=100_000, max_bytes=D
     a classical store, a delay whose duration is a classical expression,
     classical variables or stretches, and unbound parameters. Qiskit 2.6.0
     attaches a classical condition to an operation only through control flow,
-    so control flow covers condition-controlled operations. A circuit above `max_operations`, or whose inspection needs
+    so control flow covers condition-controlled operations. A circuit whose inspection needs
     more than `max_bytes` (64 bytes per operation and 16 per qubit or classical
     bit, the bound of `inspect_circuit_resources`), is not scanned and is also
     unqualified. Unqualified means unknown, never a depth of zero.
@@ -293,21 +307,20 @@ def inspect_native_depth(circuit, target, *, max_operations=100_000, max_bytes=D
     uses the same recurrence with weight 1 for every qualified gate,
     measurement, reset and delay and weight 0 for a barrier. The width is the
     circuit's `num_qubits`, idle qubit positions included and classical bits
-    excluded, and it is recorded also for an unqualified depth. Qiskit
-    2.6.0's `QuantumCircuit.depth(filter_function)` computes this recurrence,
-    writing back the largest depth also for an operation that the filter
-    excludes, so it is reused after the scan above has qualified every
-    operation.
+    excluded, and it is recorded also for an unqualified depth. One pass over
+    the circuit qualifies each operation and advances both recurrences. The
+    target's support of a gate on its qubits is decided once for each gate
+    name and qubit tuple when the target accepts every parameter value of
+    that gate, and for each operation otherwise, as for an RZZ gate with an
+    angle bound.
 
     Args:
         circuit (QuantumCircuit): The prepared circuit that executes.
         target (Target): The Qiskit `Target` of the backend that compiled it,
             whose qubit indices are the circuit's qubit positions.
-        max_operations (int): Default `100_000`. Largest number of operations
-            of the circuit that is scanned.
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000`). Largest
-            size of the known inspection data. It does not bound Qiskit's own
-            memory.
+        max_bytes (int | None): Default `None`, the physical memory of this
+            computer. Largest size of the known inspection data. It does not
+            bound Qiskit's own memory.
 
     Returns:
         depth (NativeDepth): The qualified depth, total depth, two-qubit gate
@@ -315,11 +328,9 @@ def inspect_native_depth(circuit, target, *, max_operations=100_000, max_bytes=D
 
     Raises:
         ValueError: If `circuit` is not a Qiskit circuit, `target` is not a
-            Qiskit `Target`, or `max_operations` or `max_bytes` is not a
-            positive integer.
+            Qiskit `Target`, or `max_bytes` is neither a positive integer nor
+            `None`.
     """
-    if type(max_operations) is not int or max_operations < 1:
-        raise ValueError("max_operations must be a positive integer")
     _check_bytes(0, max_bytes, "native depth inspection")
     from qiskit import QuantumCircuit
     from qiskit.circuit import Barrier, ControlFlowOp, Delay, Gate, Measure, Reset, Store
@@ -336,46 +347,74 @@ def inspect_native_depth(circuit, target, *, max_operations=100_000, max_bytes=D
         return NativeDepth(qualified=False, reason=reason, width=width)
 
     size = len(circuit.data)
-    if size > max_operations:
-        return unqualified(f"the circuit has {size} operations, more than max_operations={max_operations}")
     needed = 64 * size + 16 * (width + circuit.num_clbits)
-    if needed > max_bytes:
-        return unqualified(f"inspecting the circuit needs {needed} data bytes, more than max_bytes={max_bytes}")
+    if exceeds(needed, memory_limit(max_bytes)):
+        return unqualified(f"inspecting the circuit needs {needed} data bytes, more than {byte_allowance(max_bytes)}")
     if circuit.num_parameters:
         return unqualified("the circuit has unbound parameters")
     if circuit.num_vars or circuit.num_stretches:
         return unqualified("the circuit has classical variables or stretches")
+    from qiskit.circuit import ParameterExpression
+    from nwqlib.backends.resources import _standard_gate_classes
+    # A standard gate's class follows from its name, so its Python object is
+    # never built.
+    standard = _standard_gate_classes()
+    index = {bit: position for position, bit in enumerate(circuit.qubits)}
+    index.update((bit, width + position) for position, bit in enumerate(circuit.clbits))
+    # The depth of a path ending at the last operation on each qubit and
+    # classical bit, for the two-qubit and the total weights.
+    two_qubit, total = [0] * len(index), [0] * len(index)
+    expected, any_parameter, supported = {}, {}, {}
     two_qubit_gates = 0
     for item in circuit.data:
-        operation = item.operation
-        kind = getattr(operation, "base_class", None)
-        if kind is Barrier:
-            continue
-        if isinstance(operation, ControlFlowOp):
-            return unqualified(f"control flow ({operation.name}) has no static depth")
-        if isinstance(operation, Store):
-            return unqualified("a classical store has no native depth")
-        if isinstance(operation, Delay) and isinstance(operation.duration, Expr):
-            return unqualified("a delay whose duration is a classical expression has no static native depth")
-        arity = len(item.qubits)
-        if arity > 2:
-            return unqualified(f"{operation.name} acts on {arity} qubits")
-        qubits = tuple(circuit.find_bit(qubit).index for qubit in item.qubits)
-        native = target.operation_from_name(operation.name) if operation.name in target.operation_names else None
-        # A target lists an operation by an instance, or a variadic one by its class.
-        expected = native if isinstance(native, type) else getattr(native, "base_class", None)
-        allowed = (isinstance(operation, Gate) and arity in (1, 2)
-                   or isinstance(operation, (Measure, Reset, Delay)) and arity == 1)
-        if (not allowed or kind is None or kind is not expected
-                or not target.instruction_supported(operation_name=operation.name, qargs=qubits,
-                                                    parameters=list(operation.params))):
-            return unqualified(f"{operation.name} on qubits {qubits} is not a native operation of the target")
-        two_qubit_gates += int(arity == 2)
-    # Every remaining two-qubit operation other than a barrier is a native gate.
-    two_qubit_depth = circuit.depth(lambda item: len(item.qubits) == 2 and item.operation.base_class is not Barrier)
-    total_depth = circuit.depth(lambda item: item.operation.base_class is not Barrier)
-    return NativeDepth(qualified=True, native_two_qubit_depth=two_qubit_depth, total_native_depth=total_depth,
-                       native_two_qubit_gates=two_qubit_gates, width=width)
+        name = item.name
+        operation = None if item.is_standard_gate() and name in standard else item.operation
+        kind = standard[name] if operation is None else getattr(operation, "base_class", None)
+        wires = [index[bit] for bit in item.qubits] + [index[bit] for bit in item.clbits]
+        if kind is not Barrier:
+            if operation is not None:
+                if isinstance(operation, ControlFlowOp):
+                    return unqualified(f"control flow ({name}) has no static depth")
+                if isinstance(operation, Store):
+                    return unqualified("a classical store has no native depth")
+                if isinstance(operation, Delay) and isinstance(operation.duration, Expr):
+                    return unqualified("a delay whose duration is a classical expression has no static native depth")
+            arity = len(item.qubits)
+            if arity > 2:
+                return unqualified(f"{name} acts on {arity} qubits")
+            qubits = tuple(wires[:arity])
+            if name not in expected:
+                native = target.operation_from_name(name) if name in target.operation_names else None
+                # A target lists an operation by an instance, or a variadic one by its class.
+                expected[name] = native if isinstance(native, type) else getattr(native, "base_class", None)
+                any_parameter[name] = (native is not None and not isinstance(native, type)
+                                       and all(isinstance(value, ParameterExpression) for value in native.params)
+                                       and not target.gate_has_angle_bounds(name))
+            allowed = (arity in (1, 2) if operation is None else
+                       isinstance(operation, Gate) and arity in (1, 2)
+                       or isinstance(operation, (Measure, Reset, Delay)) and arity == 1)
+            params = item.params if operation is None else operation.params
+            if any_parameter[name]:
+                key = (name, qubits)
+                if key not in supported:
+                    supported[key] = target.instruction_supported(operation_name=name, qargs=qubits,
+                                                                  parameters=list(params))
+                native_here = supported[key]
+            else:
+                native_here = target.instruction_supported(operation_name=name, qargs=qubits,
+                                                           parameters=list(params))
+            if not allowed or kind is None or kind is not expected[name] or not native_here:
+                return unqualified(f"{name} on qubits {qubits} is not a native operation of the target")
+            two_qubit_gates += int(arity == 2)
+        two_qubit_level = max((two_qubit[wire] for wire in wires), default=0)
+        total_level = max((total[wire] for wire in wires), default=0)
+        if kind is not Barrier:
+            two_qubit_level += len(item.qubits) == 2
+            total_level += 1
+        for wire in wires:
+            two_qubit[wire], total[wire] = two_qubit_level, total_level
+    return NativeDepth(qualified=True, native_two_qubit_depth=max(two_qubit, default=0),
+                       total_native_depth=max(total, default=0), native_two_qubit_gates=two_qubit_gates, width=width)
 
 
 class NativeDepthCapRefusal(ValueError):
@@ -494,8 +533,7 @@ def check_native_depth_cap(prepared, cap):
     """
     if cap is None:
         return
-    if type(cap) is not int or cap < 0:
-        raise ValueError("a native two-qubit depth limit must be a nonnegative integer or None")
+    cap = integer(cap, "native two-qubit depth limit", 0)
     from importlib.metadata import version
     for handle in prepared:
         record = handle.record

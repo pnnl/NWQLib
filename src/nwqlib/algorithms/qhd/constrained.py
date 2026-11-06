@@ -68,6 +68,7 @@ from typing import Any, Callable
 
 import sympy as sp
 
+from nwqlib._limits import exceeds, memory_limit, optional_limit
 from nwqlib.problems.records import ConstrainedOptimization
 from ._coverage import DEFAULT_FAILURE_PROBABILITY, coverage, coverage_lines, validate_alpha
 from .constrained_records import (
@@ -81,8 +82,6 @@ from .constrained_records import (
     ConstraintPreprocessing,
     DEFAULT_INEQUALITY_FEASIBILITY_TOLERANCE,
     FormTrial,
-    GRID_MINIMUM_MAX_BYTES,
-    GRID_MINIMUM_MAX_WORK,
     InnerRepresentation,
     grid_convention,
     SlackAxis,
@@ -600,7 +599,8 @@ def _setup(problem, qhd, options, refinement=None, stored=None):
         for expression in decomposer.support_expressions.values():
             width = sum(1 for v in variables if v in expression.free_symbols)
             tuples = k**width
-            limit = max(0, qhd.max_work - options.max_iterations * round_work - check_work) // tuples
+            limit = (None if qhd.max_work is None
+                     else max(0, qhd.max_work - options.max_iterations * round_work - check_work) // tuples)
             check_work += tuples * (node_count(expression, limit) + width)
             check_evaluations += tuples
             _admit_layer_work(qhd, options, check_work, round_work, lower_bound=True)
@@ -705,15 +705,16 @@ def _support_tables(term, decomposer, grid, qhd):
     evaluates them in the chunk sizes fixed by that check
     (``_evaluation_chunks``). For a support of s variables,
     ``E = K**s`` entries and N expression nodes, the evaluation of a chunk of
-    b entries counts ``B_scan(b) = W_eval(b) + (8s + 64) b + H`` bytes
-    (``compiler.support_chunk_size``), with the engineering allowance
+    b = min(E, 2**16) entries (``compiler.support_chunk_size``) counts
+    ``B_scan(b) = W_eval(b) + (8s + 64) b + H`` bytes
+    (``compiler.slab_bytes``), with the engineering allowance
     ``W_eval(b) = 8 b (N + 2)`` (``compiler.support_workspace``), not a
     derived bound, whose assumption is that the printer's evaluation holds at
     most one slab-sized temporary per expression node, plus the output and
     one broadcast input. Beside it the check sets aside bytes for the term's
     tables ``8 sum E``, the centered coordinates ``8 d K``, their metadata
-    ``H0`` and the largest current table copy ``8 max E``, and b is the
-    largest chunk that then fits within ``QHD.max_bytes``. Only one table
+    ``H0`` and the largest current table copy ``8 max E``, and the total
+    must fit within ``QHD.max_bytes``. Only one table
     and the extrema are kept at a time, so the bytes set aside for the
     tables are an overestimate.
     """
@@ -890,15 +891,16 @@ def _domain_check(term, variables, grid, qhd):
     units against the work limit before scanning. The layer counts each
     original-expression scan's coordinate block and evaluator workspace
     against the QHD byte limit before the scan's batch runs
-    (``_admit_layer_work``, ``_evaluation_chunks``). A chunk of b entries on
-    s support variables counts ``B_scan(b) = W_eval(b) + (8s + 64) b + H``
-    bytes (``compiler.support_chunk_size``) with the engineering allowance
+    (``_admit_layer_work``, ``_evaluation_chunks``). A chunk of
+    b = min(n, 2**16) entries (``compiler.support_chunk_size``) on s support
+    variables counts ``B_scan(b) = W_eval(b) + (8s + 64) b + H`` bytes
+    (``compiler.slab_bytes``) with the engineering allowance
     ``W_eval(b) = 8 b (N + 2)`` for N expression nodes
     (``compiler.support_workspace``), not a derived bound, whose assumption
     is that the printer's evaluation holds at most one slab-sized temporary
     per expression node, plus the output and one broadcast input. The
     grid's coordinate vectors ``8 d K`` and their metadata H0 are held, and
-    b is the largest chunk that then fits within ``QHD.max_bytes``.
+    the total must fit within ``QHD.max_bytes``.
     """
     import numpy as np
 
@@ -967,45 +969,46 @@ def _evaluation_chunks(term, grid, qhd, decomposer=None):
 
     With ``decomposer`` there is one chunk per support table of the term's
     expansion (``_support_tables``), and without it, one chunk for the scan of
-    ``term``'s supplied expression on its support (``_domain_check``). Each
-    chunk of b entries on s support variables counts
+    ``term``'s supplied expression on its support (``_domain_check``). A
+    chunk is the fixed block ``b = min(n, 2**16)`` of a table or scan of n
+    entries (``compiler.support_chunk_size``), so the evaluated values do not
+    depend on ``QHD.max_bytes``. A block on s support variables counts
     ``B_scan(b) = W_eval(b) + (8s + 64) b + H`` bytes
-    (``compiler.support_chunk_size``) with the engineering allowance
+    (``compiler.slab_bytes``) with the engineering allowance
     ``W_eval(b) = 8 b (N + 2)`` for N expression nodes
     (``compiler.support_workspace``), beside the bytes held throughout. For
     the tables these are the term's tables ``8 sum E``, the centered
     coordinates ``8 d K``, their metadata H0 and the largest table copy
     ``8 max E``, and for a scan the grid's coordinate vectors ``8 d K`` and
-    H0. b is the largest chunk that then fits within ``QHD.max_bytes``.
+    H0.
 
     Raises:
-        ValueError: one entry does not fit ``QHD.max_bytes``, naming the
-            smallest sufficient limit.
+        ValueError: a block and the bytes held do not fit ``QHD.max_bytes``,
+            naming the smallest sufficient limit.
     """
-    from .compiler import H0, support_chunk_size, support_workspace
+    from .binary import _require_bytes
+    from .compiler import H0, slab_bytes, support_chunk_size, support_workspace
 
     k = grid.num_grid_points
     if decomposer is None:
         support = term.support
         per_entry, fixed = support_workspace(term.nodes)
-        held = 8 * grid.num_variables * k + H0
-        smallest = held + fixed + H0 + per_entry + 8 * len(support) + 64
-        if smallest > qhd.max_bytes:
-            raise ValueError(f"scanning {term.name} on the grid requires at least {smallest} bytes for one entry, "
-                             f"with QHD(max_bytes={qhd.max_bytes}); use QHD(max_bytes>={smallest})")
-        return (support_chunk_size(k ** len(support), len(support), qhd.max_bytes - held, per_entry, fixed, H0),)
+        chunk = support_chunk_size(k ** len(support))
+        _require_bytes(qhd.max_bytes, held=8 * grid.num_variables * k + H0,
+                       local=slab_bytes(chunk, len(support), per_entry, fixed),
+                       stage=f"scan of {term.name} on the grid in blocks of {chunk} entries")
+        return (chunk,)
     supports = decomposer.support_expressions
     sizes = [k ** len(support) for support in supports]
     held = 8 * sum(sizes) + 8 * grid.num_variables * k + H0 + 8 * max(sizes, default=0)
     chunks = []
     for (support, expression), entries in zip(supports.items(), sizes, strict=True):
         per_entry, fixed = support_workspace(node_count(expression, qhd.max_work))
-        smallest = held + fixed + H0 + per_entry + 8 * len(support) + 64
-        if smallest > qhd.max_bytes:
-            raise ValueError(f"checking {term.name} by its support tables requires at least {smallest} bytes for "
-                             f"one entry of the table on support {support}, with QHD(max_bytes={qhd.max_bytes}); "
-                             f"use QHD(max_bytes>={smallest})")
-        chunks.append(support_chunk_size(entries, len(support), qhd.max_bytes - held, per_entry, fixed, H0))
+        chunk = support_chunk_size(entries)
+        _require_bytes(qhd.max_bytes, held=held, local=slab_bytes(chunk, len(support), per_entry, fixed),
+                       stage=f"check of {term.name} by its support table on support {support} in blocks of "
+                             f"{chunk} entries")
+        chunks.append(chunk)
     return tuple(chunks)
 
 
@@ -1104,7 +1107,7 @@ def _admit_layer_work(qhd, options, check_work, round_work, *, lower_bound=False
     ``scans`` holds ``(term, decomposer)`` pairs on ``grid``: the support
     tables of a term's expansion about the box centers with its decomposer,
     or with None the scan of a supplied expression. Each one's chunked array
-    evaluation must fit at least one entry within ``qhd.max_bytes``
+    evaluation, with its fixed blocks, must fit within ``qhd.max_bytes``
     (``_evaluation_chunks``). ``_setup`` passes the support tables of every
     term and the scans that the structure requests before any term is
     evaluated, and each later scan with the work check of its batch.
@@ -1112,7 +1115,7 @@ def _admit_layer_work(qhd, options, check_work, round_work, *, lower_bound=False
     against the whole byte limit.
     """
     total = check_work + options.max_iterations * round_work
-    if total > qhd.max_work:
+    if exceeds(total, qhd.max_work):
         amount = f"at least {total}" if lower_bound else str(total)
         raise ValueError(f"the augmented-Lagrangian layer's own work needs {amount} work units, above "
                          f"qhd.max_work={qhd.max_work}: {check_work} to check f, h and g on the grid by their "
@@ -1123,7 +1126,7 @@ def _admit_layer_work(qhd, options, check_work, round_work, *, lower_bound=False
 
 
 def _admitted_bounds(qhd, options, refinement, execution, kept):
-    """Return ``(work, bytes)``, the sums of the nominal category limits fixed before the first round.
+    """Return ``(work, bytes)``, the sums of the nominal category limits fixed before the first round, with work None when ``qhd.max_work`` is None.
 
     QHD planning checks its work in categories, each at most W =
     ``qhd.max_work`` units and B = ``qhd.max_bytes`` bytes. An ordinary Plan
@@ -1134,7 +1137,9 @@ def _admitted_bounds(qhd, options, refinement, execution, kept):
     same function and ``QHD.plan``), the optional kept state with 16 bytes
     per amplitude (``QHD.plan``), and the classical evolution or the Qiskit
     circuit construction (``QHD._host_construction``,
-    ``QHD._select_native``). "Four" counts categories, not calls of
+    ``QHD._select_native``), whose work planning checks and whose bytes
+    ``native.construct_qhd`` checks before it allocates the circuit, so a
+    representation that is not kept never charges them. "Four" counts categories, not calls of
     ``QHD._admit``. The recursive term checks and the checks of successive
     running totals call it many times, and their intermediate arguments are
     not separate work categories. The initial-state check that ``QHD.plan``
@@ -1161,18 +1166,24 @@ def _admitted_bounds(qhd, options, refinement, execution, kept):
     without a ``GaussianState`` plans, in each round, the current
     representation and at most one trial per kept inequality
     (``_round_problem``). Each of these at most ``m + 1`` representations,
-    with m kept inequalities, calls ``QHD._admit_symbolic_work`` once for
-    its symbolic and table work, two categories, and plans once, four
-    categories (``_planned_costs``). Without refinement the round's Plan is
-    the Plan of the representation kept, or its rejection, so its four
-    categories are among these, and the trials add ``t = 6 (m + 1) - 4``
-    categories per round. With refinement the levels plan separately and
-    ``t = 6 (m + 1)``. The other policies make no trial, t = 0. With
-    M = ``options.max_iterations`` rounds,
+    with m kept inequalities, opens its symbolic and running-total
+    categories in ``QHD._admit_symbolic_work``, and its compact quantum Plan
+    reuses that admission through ``method._ADMITTED_SYMBOLIC``
+    (``_planned_costs``). It therefore opens at most four work categories,
+    symbolic, running total, kept state and construction, and three byte
+    categories, since the construction's bytes are checked only when a kept
+    Plan's circuit is built. Without refinement the round's Plan is the Plan
+    of the representation kept, or its rejection, whose categories a already
+    counts, so the trials add ``t_W = 4 m`` work and ``t_B = 3 m`` byte
+    categories per round. With refinement the levels plan separately, and
+    ``t_W = 4 (m + 1)`` and ``t_B = 3 (m + 1)``. The other policies make no
+    trial, ``t_W = t_B = 0``. With M = ``options.max_iterations`` rounds,
 
-        work <= (a M L + t M + 1) W,    bytes <= (a M L + t M) B,
+        work <= (a M L + t_W M + 1) W,    bytes <= (a M L + t_B M) B,
 
-    sums of the nominal category limits over attempts, not a general
+    the nominal sums of the category limits over attempts that the record
+    reports. Each category is checked against W or B when it runs, and that
+    check, not these sums, refuses a run. The sums are not a general
     preprocessing-work or peak-memory bound. The symbolic category has the
     polynomial term-count scope of ``objective.expansion_term_charge``.
     Nothing else in a level is counted against W or B. Refinement geometry,
@@ -1189,11 +1200,15 @@ def _admitted_bounds(qhd, options, refinement, execution, kept):
 
     levels = 1 if refinement is None else refinement.max_levels
     admissions = 6 if refinement is not None and refinement.scaling == "search_model" else 4
-    operations = admissions * levels * options.max_iterations
+    work = data = admissions * levels * options.max_iterations
     if (options.inequality_form == "auto" and execution == "quantum"
             and not isinstance(qhd.initial_state, GaussianState)):
-        operations += (6 * (kept + 1) - (4 if refinement is None else 0)) * options.max_iterations
-    return (operations + 1) * qhd.max_work, operations * qhd.max_bytes
+        # Four work and three byte categories per representation. Without refinement the round's Plan is one of them.
+        reused = refinement is None
+        work += (4 * (kept + 1) - (4 if reused else 0)) * options.max_iterations
+        data += (3 * (kept + 1) - (3 if reused else 0)) * options.max_iterations
+    return ((None if qhd.max_work is None else (work + 1) * qhd.max_work),
+            None if qhd.max_bytes is None else data * qhd.max_bytes)
 
 
 def _derivatives(named, supports, variables, requested):
@@ -1506,27 +1521,33 @@ def _planned_costs(problem, qhd, shots, child):
     ``evaluated`` counts the objective-table grid tuples that the attempt
     evaluated: the Plan's ``support_evaluations``, zero when the table
     check rejected the Plan, since that check precedes every table
-    evaluation, and None when the planning raised after it, since the
-    tables that it evaluated before raising are unknown.
+    evaluation, the same complete count when the planning raised after it
+    had formed every table, such as a refusal of the construction's work,
+    and None when the planning raised before its tables were complete,
+    since the tables that it evaluated before raising are unknown.
     """
     import numpy as np
 
     streams = np.random.SeedSequence(child.entropy, spawn_key=child.spawn_key, pool_size=child.pool_size,
                                      n_children_spawned=child.n_children_spawned)
-    from .method import _ADMITTED_SYMBOLIC
+    from .method import _ADMITTED_SYMBOLIC, _TABLE_EVALUATIONS
 
     try:
         admitted = qhd._admit_symbolic_work(problem, True)
     except Exception as error:
         return None, None, error, 0
     symbolic = admitted[2]
-    # The candidate's planning reuses this admission and its decomposer (QHD._admit_symbolic_work).
+    # The candidate's planning reuses this admission and its decomposer (QHD._admit_symbolic_work), and
+    # reports its table count once every table is formed.
     token = _ADMITTED_SYMBOLIC.set(((qhd.content_id, problem.content_id, True), admitted))
+    formed = [None]
+    counted = _TABLE_EVALUATIONS.set(formed)
     try:
         plan = plan_round(problem, qhd, "quantum", shots, streams)
     except Exception as error:
-        return None, None, error, None
+        return None, None, error, formed[0]
     finally:
+        _TABLE_EVALUATIONS.reset(counted)
         _ADMITTED_SYMBOLIC.reset(token)
     work = symbolic + sum(selection.construction_work for selection in plan.construction.selections)
     return work, law_count(plan, "cx", 1)[0], plan, plan.reconstruction.support_evaluations
@@ -1672,8 +1693,8 @@ def _round_problem(setup, problem, qhd, execution, shots, child, lambda_bar, mu_
         # Every candidate planned once, the current representation first (ALResources.table_evaluations).
         tables = None if None in counts else sum(counts)
         unavailable = None if tables is not None else (
-            "the planning of an automatic-selection candidate raised after its table admission, so the tables "
-            "that it evaluated are unknown")
+            "the planning of an automatic-selection candidate raised after its table admission and before its "
+            "tables were complete, so the tables that it evaluated are unknown")
     slacks = tuple(axes[t] for t in sorted(axes))
     inner, identity = _inner_problem(setup, problem, forms, slacks, lambda_bar, mu_bar, penalty)
     error = _directed(sum((Fraction(axis.error_bound) for axis in slacks), Fraction(0)), True)
@@ -2305,9 +2326,10 @@ def solve_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), r
             Numerical errors can remain.
         seed (int | None): Nonnegative root seed of the run.
         limits (ExecutionLimits | None): Cumulative limits of the whole run, the
-            defaults when None. Each round's Run, or each level's Run with refinement,
-            gets the remaining circuits, shots, data bytes and synthesis work and the
-            per-Run caps unchanged.
+            defaults when None. On a backend that may charge, unset circuit and
+            shot budgets become 512 and 1,000,000 for the whole run. Each round's
+            Run, or each level's Run with refinement, gets the remaining circuits,
+            shots and data bytes and the per-Run caps unchanged.
         progress (object | None): Passed to every round's Run, as in `nwqlib.solve`.
         directory (str | Path | None): A new directory for a saved run that
             `resume_augmented_lagrangian` can continue, or None to keep every inner Run
@@ -2458,7 +2480,7 @@ def solve_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), r
         raise ValueError(f"refinement.point_rule={refinement.point_rule!r} differs from options.inner_point="
                          f"{options.inner_point!r}. With refinement one rule reads every level, so set both "
                          "to the same rule")
-    execution, limits = check_arguments(qhd, execution, shots, seed, limits)
+    execution, limits = check_arguments(qhd, execution, shots, seed, limits, backend=backend)
     if refinement is not None:
         check_refinement_options(refinement, qhd, execution)
     if directory is not None:
@@ -3209,7 +3231,9 @@ class ConstrainedQHDResult:
         lines.append(f"Acquisition: {counts['circuit_attempts']} circuit attempts, {counts['shots']} shots, "
                      f"{counts['data_bytes']} data bytes. Host work: {counts['table_evaluations']} table "
                      f"evaluations, {counts['evolution_work']} evolution units, {counts['layer_work']} layer units; "
-                     f"the configuration admits at most {record.admitted_work_bound} nominal counted work units over the run")
+                     + ("the configuration sets no limit on nominal counted work" if record.admitted_work_bound is None
+                        else f"the configuration admits at most {record.admitted_work_bound} nominal counted work units "
+                        "over the run"))
         lines += self._statements()
         lines.extend(coverage_lines(confidence))
         return lines
@@ -3314,9 +3338,7 @@ class ConstrainedQHDResult:
             path (Path): The written directory.
         """
         from nwqlib._choice_archive import ArchiveFiles
-        from nwqlib._limits import DEFAULT_MAX_BYTES
-
-        files = ArchiveFiles(Path(path), DEFAULT_MAX_BYTES)
+        files = ArchiveFiles(Path(path), None)
         files.path.mkdir()
         try:
             problem = self.problem
@@ -3458,9 +3480,12 @@ def resume_augmented_lagrangian(directory, *, backend, progress=None, end_at_unf
     whose Run exists continues that Run with `load_run(...).wait()`, and none gets a
     second Run, so completed work is read from the records and a continued Run is
     counted once, by its own run log. When that Run cannot finish without new work,
-    because the interruption stopped a local preparation, measurement or classical
+    because the interruption stopped a local measurement or classical
     evolution whose outcome nothing can retrieve, its error propagates with a note, and
-    the outer record keeps its saved rounds and levels unchanged. With
+    the outer record keeps its saved rounds and levels unchanged. An interrupted local
+    preparation stops resume in the same way, because resume makes no new preparation.
+    To prepare it again, open the Run of that round or level under the directory with
+    `load_run`, call `run.resume(rebuild_preparations=True)` and resume again. With
     `end_at_unfinishable=True` the run instead ends there with `inner_failed`, keeps its
     completed rounds and records the Run's error as the failure. This option handles an
     unfinishable continuation after a Run has reopened. A Run folder without a saved
@@ -3476,7 +3501,9 @@ def resume_augmented_lagrangian(directory, *, backend, progress=None, end_at_unf
     apart from the fields that differ between any two saved executions, namely the
     identifiers of the Runs and Results, which every Run draws anew, the byte counts of
     the saved data, whose text of wall times and measured timings varies in length from run
-    to run, and the content hashes that include these fields. Those byte counts enter
+    to run, and the content hashes that include these fields. A preparation rebuilt through
+    `load_run` stays counted, so on a quantum run `circuit_preparations` of that round and
+    of the total is one higher than in an uninterrupted run. Those byte counts enter
     the remainder of `max_data_bytes`, so a run whose data limit is almost spent can
     stop at another round, as two uninterrupted saved runs can.
 
@@ -3541,7 +3568,7 @@ def resume_augmented_lagrangian(directory, *, backend, progress=None, end_at_unf
                        pending=(levels, level_results, blocked), representation=form)
 
 
-def constrained_grid_minimum(result, *, max_work=GRID_MINIMUM_MAX_WORK, max_bytes=GRID_MINIMUM_MAX_BYTES):
+def constrained_grid_minimum(result, *, max_work=None, max_bytes=None):
     """Find the least evaluated feasible objective on the run's grid and its gap to the best point.
 
     `constrained_grid_minimum(result)` evaluates f, h and g in binary64 at every point
@@ -3596,17 +3623,18 @@ def constrained_grid_minimum(result, *, max_work=GRID_MINIMUM_MAX_WORK, max_byte
     of the points the run compared, and the gap would mix points of different grids.
 
     Before the first evaluation, the reference checks its work and the bytes of one slab,
-    the block of grid points it evaluates at a time in C order, against `max_work` and
-    `max_bytes` by the counting rules in
+    the block of at most 2**16 grid points it evaluates at a time in C order, against
+    `max_work` and `max_bytes` by the counting rules in
     [Engineering constants](../../ENGINEERING_CONSTANTS.md#qhd-augmented-lagrangian-defaults).
     It keeps no reference table of all `K**d` grid points.
 
     Args:
         result (ConstrainedQHDResult): A run from ``solve_augmented_lagrangian`` or
             ``load_augmented_lagrangian``.
-        max_work (int): Work limit of this reference. Default `1_000_000_000`.
-        max_bytes (int): Byte limit of this reference. Default 10 GB (decimal,
-            `10_000_000_000` bytes).
+        max_work (int | None): Work limit of this reference. Default `None`, no
+            limit.
+        max_bytes (int | None): Byte limit of this reference. Default `None`, the physical
+            memory of this computer.
 
     Returns:
         reference (ConstrainedGridMinimum): The least evaluated feasible value in
@@ -3614,15 +3642,17 @@ def constrained_grid_minimum(result, *, max_work=GRID_MINIMUM_MAX_WORK, max_byte
 
 
     Raises:
-        ValueError: If the run used box refinement, if the work or the bytes of a
-            one-point slab exceed `max_work` or `max_bytes`, or if the original binary64
+        ValueError: If `max_work` is neither a positive integer nor `None`, if
+            the run used box refinement, if the work or the bytes of a slab
+            exceed `max_work` or `max_bytes`, or if the original binary64
             evaluation fails at a grid point.
     """
     import numpy as np
 
-    from .compiler import H0, evaluate_chunk
+    from .compiler import H0, evaluate_chunk, support_chunk_size
     from .validation import _lambdify_objective
 
+    max_work = optional_limit(max_work, "max_work")
     record, problem = result.record, result.problem
     if record.refinement is not None:
         raise ValueError("constrained_grid_minimum is the reference of the preprocessed box's grid, and a run with "
@@ -3636,7 +3666,7 @@ def constrained_grid_minimum(result, *, max_work=GRID_MINIMUM_MAX_WORK, max_byte
     named += [(f"inequalities[{j}]", problem.inequalities[j], s)
               for j, s in zip(record.preprocessing.inequalities, record.inequality_scales, strict=True)]
     nodes = [node_count(expression, max_work) for _, expression, _ in named]
-    work_is_lower_bound = any(n > max_work for n in nodes)
+    work_is_lower_bound = any(exceeds(n, max_work) for n in nodes)
     points = k**d
     # With M = max_work and complete tree sizes N_i, node_count returns
     # n_i = min(N_i, M+1). n_i <= M proves completion. Otherwise D*n_i > M
@@ -3645,13 +3675,18 @@ def constrained_grid_minimum(result, *, max_work=GRID_MINIMUM_MAX_WORK, max_byte
     # its byte allowance includes expression intermediates, coordinate arrays and
     # masked-reduction buffers.
     work = points * (d + sum(nodes) + 8 * (len(named) - 1) + 12)
-    fixed = 8 * d * k + H0
-    rate = max(8 * (n + 2) for n in nodes) + 8 * d + 96
-    if work > max_work or fixed + rate > max_bytes:
+    # A fixed slab keeps the evaluated values, and so the minimum and its point,
+    # independent of max_bytes (compiler.support_chunk_size).
+    slab = support_chunk_size(points)
+    needed = 8 * d * k + H0 + (max(8 * (n + 2) for n in nodes) + 8 * d + 96) * slab
+    limit = memory_limit(max_bytes)
+    if exceeds(work, max_work) or exceeds(needed, limit):
         work_requirement = f"at least {work}" if work_is_lower_bound else str(work)
+        byte_limit = (f"max_bytes={max_bytes}" if max_bytes is not None
+                      else f"the physical memory of this computer ({limit} bytes)")
         message = (
-            f"constrained_grid_minimum needs {work_requirement} work units and at least {fixed + rate} bytes "
-            f"for a one-point slab, above max_work={max_work} or max_bytes={max_bytes}"
+            f"constrained_grid_minimum needs {work_requirement} work units and {needed} bytes "
+            f"for its slabs of {slab} points, above max_work={max_work} or {byte_limit}"
         )
         if work_is_lower_bound:
             message += (
@@ -3661,7 +3696,6 @@ def constrained_grid_minimum(result, *, max_work=GRID_MINIMUM_MAX_WORK, max_byte
                 "counting further can increase the required work"
             )
         raise ValueError(message)
-    slab = min(points, (max_bytes - fixed) // rate)
     terms = [_Term(name, expression, scale, _lambdify_objective(problem.variables, expression), (), n, None)
              for (name, expression, scale), n in zip(named, nodes, strict=True)]
     count = len(record.equality_scales)

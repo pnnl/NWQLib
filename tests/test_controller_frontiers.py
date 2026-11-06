@@ -205,3 +205,33 @@ def test_lost_submission_ack_keeps_uncertainty_without_replay(tmp_path, transpor
         assert run.checkpoint_state == checkpoint and run.result is None
         assert run.trace.events[0].status == "uncertain"
         assert len(transport.launches) == len(transport.preparations) == 1 and not transport.refreshes
+
+
+def test_adapt_admits_a_growth_query_only_while_the_final_stage_shots_still_fit(tmp_path, transport):
+    """H2 ADAPT under PencilSampling(total_shots=2048) spends those shots once its growth stops.
+
+    A Run capped at 2047 shots therefore refuses before its first growth query, with nothing prepared or
+    launched. Raising the cap on the same reopened Run to the stated need starts that query.
+    """
+    import re
+    pytest.importorskip("pyscf")
+    pytest.importorskip("openfermion")
+    from nwqlib.algorithms import PencilAcquisition
+    from nwqlib.algorithms.gcim import PencilSampling, build_gcim_chemistry_problem
+    from nwqlib.execution import ExecutionLimits
+
+    h2 = build_gcim_chemistry_problem("H 0 0 0; H 0 0 0.74", basis="sto-3g")
+    method = h2.adapt_method(max_iterations=1, acquisition=PencilAcquisition(),
+                             sampling=PencilSampling(total_shots=2048, pilot_fraction=.25))
+    plan = nwqlib.plan(h2.eigenproblem(), method=method, execution="quantum", shots=4, seed=157)
+    folder = tmp_path / "h2"
+    with pytest.raises(ValueError, match=r"max_total_shots=2047 .* include the 2048 total_shots") as refused:
+        nwqlib.prepare(plan, backend=transport.backend, directory=folder,
+                       limits=ExecutionLimits(max_total_shots=2047), progress=False)
+    assert transport.preparations == [] and transport.launches == []
+    need = int(re.search(r"at least ([0-9]+) needed", str(refused.value)).group(1))
+    assert need > 2048
+    with nwqlib.load_run(folder, backend=transport.backend) as run:
+        run.extend_limits(max_total_shots=need)
+        run.resume()
+        assert len(transport.preparations) >= 1 and len(transport.launches) == 1

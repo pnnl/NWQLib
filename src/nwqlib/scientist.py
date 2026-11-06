@@ -2,8 +2,9 @@
 
 from dataclasses import dataclass
 
+from nwqlib._limits import ResourceLimitError
 from nwqlib.algorithms.protocol import ApplicabilityError, Method
-from nwqlib.core.planning import Plan, RandomStreams
+from nwqlib.core.planning import Plan, RandomStreams, planning_call
 
 
 @dataclass(frozen=True)
@@ -15,16 +16,18 @@ class ComparisonRow:
     [`solve`][nwqlib.scientist.solve] or [`prepare`][nwqlib.scientist.prepare]
     to run its Plan, together with its device forecast and Allocation when it
     has them. A Method that cannot handle the Problem gives a row with a
-    `reason` and no Plan, and running that row raises `ApplicabilityError`.
-    The fields below are read-only. Reading a row evaluates no model and
-    builds no circuit.
+    `reason` and no Plan, and running that row raises `ApplicabilityError`. A
+    Method whose planning needs more memory or work than a limit allows gives
+    a row with a `reason`, no Plan and `resource_limited=True`, and running
+    that row raises `ResourceLimitError`, a `ValueError`. The fields below are
+    read-only. Reading a row evaluates no model and builds no circuit.
 
     Attributes:
         method: The configured Method. The row's Plan was made by this Method.
         plan: The Method's Plan, or `None` when the Method cannot handle the
-            Problem.
-        reason: Why the Method cannot handle the Problem, or `None` for a row
-            with a Plan.
+            Problem or its planning exceeded a limit.
+        reason: Why the row has no Plan, or `None` for a row with a Plan. For
+            a limit, it states what the planning step needs.
         estimate: The resource estimate of this Plan: a `WorkloadEstimate`,
             or a `PlanEstimate` when a device profile or Allocation was given,
             with device predictions when a profile was given. `None` for a
@@ -39,6 +42,10 @@ class ComparisonRow:
         prior_work: Records (`Fact`) of work done earlier, as supplied in
             `Candidate.prior_work` to `scan`, or `()` for a row from
             `compare`. They are kept apart from the work of a later run.
+        resource_limited: `True` when planning stopped at a memory or work
+            limit, so this Method may plan the Problem under a higher limit.
+            Default `False`, for a row with a Plan and for a Method that
+            cannot handle the Problem.
     """
 
     method: Method
@@ -49,10 +56,11 @@ class ComparisonRow:
     facts: tuple = ()
     reference: object = None
     prior_work: tuple = ()
+    resource_limited: bool = False
 
     def __post_init__(self):
         """Check that the row holds its Method's own Plan, estimate, Allocation and
-        evidence, or the reason why the Method cannot handle the Problem.
+        evidence, or the reason why it has no Plan.
         """
         from nwqlib.backends.assessment import PlanEstimate
         from nwqlib.backends.profiles import Allocation
@@ -73,6 +81,7 @@ class ComparisonRow:
             not isinstance(self.plan, Plan)
             or self.plan.method.content_id != self.method.content_id
             or self.reason is not None
+            or self.resource_limited
         ):
             raise ValueError("comparison row must preserve its selected Method/Plan association")
         if self.allocation is not None and not isinstance(self.allocation, Allocation):
@@ -143,7 +152,8 @@ class Comparison:
         """Return the row at `index`, unchanged.
 
         Any row can be selected, including one without a Plan. Running a row
-        without a Plan raises `ApplicabilityError` with the row's `reason`.
+        without a Plan raises `ApplicabilityError` with the row's `reason`, or
+        `ResourceLimitError` when the row has `resource_limited=True`.
 
         Args:
             index (int): Row position, from 0 to `len(rows) - 1`.
@@ -154,7 +164,13 @@ class Comparison:
         Raises:
             IndexError: If `index` is not an integer in that range.
         """
-        if type(index) is not int or not 0 <= index < len(self.rows):
+        from nwqlib._validation import integer
+
+        try:
+            index = integer(index, "index", 0)
+        except ValueError as error:
+            raise IndexError("comparison selection requires a nonnegative row index") from error
+        if index >= len(self.rows):
             raise IndexError("comparison selection requires an original nonnegative row index")
         return self.rows[index]
 
@@ -246,35 +262,38 @@ def _plan_with_streams(problem, method, output, execution, shots, streams, *, ac
     must hold the same Problem, Method and output objects, the state of the
     random streams after the planning draws and the accuracy criterion that
     chose its shots. A Plan that substituted any of them would attach later data
-    to a question the caller did not ask.
+    to a question the caller did not ask. Both calls run inside one
+    `core.planning.planning_call`, so the Method can compute a choice
+    they share once (`planning_memo`).
     """
-    if accuracy is not None:
-        connector = getattr(method, "sampling_shots", None)
-        if not callable(connector):
-            raise ApplicabilityError(
-                f"{type(method).__name__} has no selected accuracy connector; "
-                "use its explicit scientific controls. Method authors can supply "
-                "sampling_shots(self, problem, *, output, accuracy, execution, shots); "
-                "see docs/algorithm_protocol.md"
+    with planning_call():
+        if accuracy is not None:
+            connector = getattr(method, "sampling_shots", None)
+            if not callable(connector):
+                raise ApplicabilityError(
+                    f"{type(method).__name__} has no selected accuracy connector; "
+                    "use its explicit scientific controls. Method authors can supply "
+                    "sampling_shots(self, problem, *, output, accuracy, execution, shots); "
+                    "see docs/algorithm_protocol.md"
+                )
+            shots = connector(
+                problem, output=output, accuracy=accuracy, execution=execution, shots=shots
             )
-        shots = connector(
-            problem, output=output, accuracy=accuracy, execution=execution, shots=shots
+        # An output unit that conflicts with the Problem's unit would relabel an
+        # unconverted value. Reject it before the Method selects anything. The
+        # check belongs to the library's OutputRecord kinds. An output record that
+        # a Method defines under the algorithm protocol states its own frame.
+        from nwqlib.problems.records import OutputRecord
+        if isinstance(output, OutputRecord):
+            output.frame(problem)
+        selected = method.plan(
+            problem,
+            output=output,
+            execution=execution,
+            shots=shots,
+            rng=streams,
+            **({"accuracy": accuracy} if accuracy is not None else {}),
         )
-    # An output unit that conflicts with the Problem's unit would relabel an
-    # unconverted value. Reject it before the Method selects anything. The
-    # check belongs to the library's OutputRecord kinds. An output record that
-    # a Method defines under the algorithm protocol states its own frame.
-    from nwqlib.problems.records import OutputRecord
-    if isinstance(output, OutputRecord):
-        output.frame(problem)
-    selected = method.plan(
-        problem,
-        output=output,
-        execution=execution,
-        shots=shots,
-        rng=streams,
-        **({"accuracy": accuracy} if accuracy is not None else {}),
-    )
     if not isinstance(selected, Plan):
         raise TypeError("Method.plan must return its selected Plan")
     if (
@@ -328,7 +347,8 @@ def prepare(plan, *, backend=None, limits=None, progress=None, directory=None, s
             setting that the Method submits first, which is the first experiment when the
             experiments are fixed, and `submit` prepares each later one when
             it reaches it. `"all"` prepares every setting of fixed
-            experiments now, in Plan order, so that `Prepared.circuits`,
+            experiments now, in Plan order, with one setting for each point
+            of an experiment's range axes, so that `Prepared.circuits`,
             `Prepared.setting_names`, inspection and compilation by index
             cover the whole Plan. Each setting is prepared and counted once,
             a Run with a folder saves it, and `submit` uses these
@@ -354,8 +374,10 @@ def prepare(plan, *, backend=None, limits=None, progress=None, directory=None, s
         ValueError: If `settings` is neither `"first"` nor `"all"`, or if
             `"all"` is requested on another backend or for a Method that
             rejects it.
-        ApplicabilityError: If `plan` is a row without a Plan, or the Plan
-            lists unmet requirements.
+        ApplicabilityError: If `plan` is a row without a Plan whose Method
+            cannot handle the Problem, or the Plan lists unmet requirements.
+        ResourceLimitError: If `plan` is a row with `resource_limited=True`.
+            It is a `ValueError` and carries the row's `reason`.
 
     Examples:
         See [`submit`][nwqlib.scientist.submit].
@@ -375,7 +397,7 @@ def prepare(plan, *, backend=None, limits=None, progress=None, directory=None, s
                 "backends a preparation can be a remote compilation with a provider charge. The "
                 "selected construction is the same on every backend, so for counts or exact "
                 "readout, prepare(plan, settings='all') with the default Aer backend shows every "
-                "circuit within ExecutionLimits.max_simulation_qubits for inspection or "
+                "circuit that fits the local simulator memory for inspection or "
                 "compilation. Only the backend's own compilation differs"
             )
     forecast = allocation = None
@@ -383,7 +405,7 @@ def prepare(plan, *, backend=None, limits=None, progress=None, directory=None, s
         # ComparisonRow construction already bound its Method, Plan and estimate.
         row = plan
         if row.plan is None:
-            raise ApplicabilityError(row.reason)
+            raise (ResourceLimitError if row.resource_limited else ApplicabilityError)(row.reason)
         plan, allocation = row.plan, row.allocation
         forecast = row.estimate if isinstance(row.estimate, PlanEstimate) else None
     return _prepare_plan(
@@ -463,6 +485,8 @@ def submit(prepared):
 
     Raises:
         TypeError: If `prepared` is not the return value of `prepare`.
+        ValueError: If a circuit that `Run.release_native` released would
+            exceed the Method's memory limit when read back. Nothing is charged.
         RunFailed: If the run fails or an attempt's outcome cannot be
             recovered.
 
@@ -587,6 +611,9 @@ def solve(
             output of this Problem or `accuracy` is given to a Method without
             `sampling_shots`, and as for `prepare`, if a row without a Plan
             is given or the Plan lists unmet requirements.
+        ResourceLimitError: As for `prepare`, if a row with
+            `resource_limited=True` is given. Planning a Problem that exceeds
+            a limit raises it too. It is a `ValueError`.
         RunFailed: As for `Run.wait`, if the run fails or the outcome of an
             attempt cannot be recovered.
 
@@ -639,7 +666,7 @@ def solve(
 
 
 def estimate(plan, *, context=None, profile=None, allocation=None, assessed_at=None,
-             facts=(), reference=None, max_assessments=4096):
+             facts=(), reference=None):
     """Estimate the resources of a Plan, and optionally its run time on a device, without running it.
 
     Without a device profile or Allocation, `estimate` adds up the counting
@@ -681,11 +708,6 @@ def estimate(plan, *, context=None, profile=None, allocation=None, assessed_at=N
             accuracy request in the Plan (`plan(..., accuracy=...)`).
         reference (TargetReference | None): Target reference to assess with
             the forecast, with the same requirements as `facts`.
-        max_assessments (int): Default `4096`. Largest number of forecast
-            rows, one assessment per planned execution and one prediction
-            per device model for each, checked before the first model
-            evaluation. Adding up the construction's counts is not limited
-            by it.
 
     Returns:
         estimate (WorkloadEstimate | PlanEstimate): `WorkloadEstimate`
@@ -697,9 +719,8 @@ def estimate(plan, *, context=None, profile=None, allocation=None, assessed_at=N
         ValueError: If `assessed_at`, `facts` or `reference` is given without
             a profile or Allocation, if `facts` or `reference` is given
             without the profile, error model and accuracy request it needs,
-            if a profile is given without an Allocation, if `assessed_at` has
-            no time zone, or if the forecast needs more than
-            `max_assessments` rows.
+            if a profile is given without an Allocation, or if `assessed_at`
+            has no time zone.
 
     Examples:
         The Plan requests 64 shots of a one-qubit circuit:
@@ -731,8 +752,7 @@ def estimate(plan, *, context=None, profile=None, allocation=None, assessed_at=N
     from nwqlib.backends.assessment import estimate_plan
 
     return estimate_plan(plan, context=context, profile=profile, allocation=allocation,
-                         assessed_at=assessed_at, facts=facts, reference=reference,
-                         max_assessments=max_assessments)
+                         assessed_at=assessed_at, facts=facts, reference=reference)
 
 
 def compare(
@@ -750,7 +770,6 @@ def compare(
     assessed_at=None,
     facts=(),
     reference=None,
-    max_assessments=4096,
 ):
     """Plan one Problem with several Methods and estimate the resources of each Plan.
 
@@ -758,13 +777,24 @@ def compare(
     row per Method, in the order given. Each row holds the Method's Plan and
     its resource estimate, as [`estimate`][nwqlib.scientist.estimate] gives
     it. A Method that cannot handle the Problem gives a row with a `reason`
-    and no Plan instead of an error. Nothing is measured, no reference value
-    is computed and the rows are not ranked. Pass a row to
+    and no Plan instead of an error. A Method whose planning stops at a memory
+    or work limit, default or explicit, gives a row with the refusal in
+    `reason`, no Plan and `resource_limited=True`, so a limit decides whether
+    that row has a Plan and never which Methods are compared or what the other
+    rows hold. Such a row does not show that more capacity would plan it or that
+    every remaining premise of the Method holds. An invalid input or option
+    raises from `compare`, and so does a numerical or accuracy failure in
+    planning, which is neither a limit nor a false premise. Nothing is
+    measured, no reference value is computed and the rows are not ranked.
+    Pass a row to
     [`solve`][nwqlib.scientist.solve] or [`prepare`][nwqlib.scientist.prepare]
     to run it, or rank the rows with [`scan`][nwqlib.search.scan]. Each Method
     plans with its own child of one `numpy.random.SeedSequence(seed)`, so no
     Method's planning draws shift another's, and with an integer `seed` every
-    row is reproducible. The [Plan, compare and solve](../scientist.md) guide
+    row is reproducible. A child belongs to a position in `methods`, so a row
+    without a Plan leaves the Plans of the other rows unchanged, and reordering
+    the Methods can change a Method's Plan. The
+    [Plan, compare and solve](../scientist.md) guide
     shows a comparison.
 
     Args:
@@ -794,9 +824,6 @@ def compare(
             `accuracy`, and each Plan needs an error model.
         reference (TargetReference | None): Target reference, with the same
             use and requirements as `facts`.
-        max_assessments (int): Default `4096`. Largest number of forecast
-            rows, as for `estimate`, summed over the rows of the comparison
-            and checked before the first model evaluation.
 
     Returns:
         comparison (Comparison): One row per Method, in the order given.
@@ -805,9 +832,8 @@ def compare(
         TypeError: If `methods` is not a nonempty list or tuple, or `facts`
             is not a tuple.
         ValueError: If `facts`, `reference` or `assessed_at` is given without
-            what it needs, if a profile is given without an Allocation, if
-            `shots` or `seed` is invalid, or if the forecast needs more than
-            `max_assessments` rows.
+            what it needs, if a profile is given without an Allocation, or if
+            `shots` or `seed` is invalid.
 
     Examples:
         For `Z + I`, Lanczos from the state `|+>` with one Krylov vector
@@ -852,16 +878,15 @@ def compare(
             )
         if allocation is not None and not isinstance(allocation, Allocation):
             raise TypeError("allocation must be a supplied Allocation")
-        from nwqlib.backends.assessment import _assessment_time, _forecast_rows
+        from nwqlib.backends.assessment import _assessment_time
 
         at = _assessment_time(assessed_at)
-        if profile is not None:
-            _forecast_rows(0, profile, max_assessments)  # Validate the cap before candidate planning.
     import numpy as np
 
     _check_shots(shots)
-    if seed is not None and (type(seed) is not int or seed < 0):
-        raise ValueError("seed must be a nonnegative integer or None")
+    if seed is not None:
+        from nwqlib._validation import integer
+        seed = integer(seed, "seed", 0)
     children = np.random.SeedSequence(seed).spawn(len(methods))
     rows = []
     for method, child in zip(methods, children, strict=True):
@@ -877,22 +902,18 @@ def compare(
             )
         except ApplicabilityError as error:
             rows.append(ComparisonRow(method, None, str(error), allocation=allocation))
+        except ResourceLimitError as error:
+            rows.append(ComparisonRow(method, None, str(error), allocation=allocation, resource_limited=True))
         else:
             rows.append(ComparisonRow(method, selected, allocation=allocation,
                                       facts=facts, reference=reference))
     if profile is not None or allocation is not None:
         from dataclasses import replace
-        from nwqlib.backends.assessment import (
-            _forecast_rows,
-            _profile_points,
-            estimate_plan,
-        )
+        from nwqlib.backends.assessment import _profile_points, estimate_plan
 
         # Each row's points are enumerated once and passed to estimate_plan.
-        evaluated = [None if profile is None or row.plan is None else _profile_points(row.plan) for row in rows]
-        if profile is not None:
-            points = sum(len(pair[0]) for pair in evaluated if pair is not None)
-            _forecast_rows(points, profile, max_assessments)
+        evaluated = [None if profile is None or row.plan is None
+                     else _profile_points(row.plan) for row in rows]
         rows = [
             row
             if row.plan is None
@@ -907,7 +928,6 @@ def compare(
                     accuracy=accuracy,
                     facts=row.facts,
                     reference=row.reference,
-                    max_assessments=max_assessments,
                     profile_points=pair,
                 ),
             )
@@ -1046,7 +1066,7 @@ def methods():
     Examples:
         >>> from nwqlib import methods
         >>> print([entry.source.name for entry in methods()])
-        ['adapt_gcim', 'chebyshev_lanczos', 'finite_pauli_expectation', 'fixed_gcim', 'lchs', 'qcels', 'qhd', 'qls', 'rfe', 'rwpe', 'spe']
+        ['adapt_gcim', 'chebyshev_lanczos', 'finite_pauli_expectation', 'fixed_gcim', 'lchs', 'qcels', 'qfd', 'qhd', 'qls', 'rfe', 'rwpe', 'spe']
     """
     from nwqlib.algorithms.registry import builtin_registrations
 

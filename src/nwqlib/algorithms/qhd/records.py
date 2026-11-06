@@ -1,15 +1,15 @@
 """Immutable QHD numerical data fixed by planning, and observed finite-box results.
 
 ``QHDReconstruction`` holds everything that planning fixed once, the objective
-support tables, the initial amplitudes, the compiled step blocks
-(``QHDBlock`` for one-hot, ``QHDBinaryBlock`` for binary), the running phase
-total and the approximation error bounds, with the lower-range omissions
+support tables, the initial amplitudes, the compiled schedule (the
+providers and totals of ``QHDOneHotSchedule`` for one-hot, whose
+``QHDBlock`` records ``onehot_schedule.step_blocks`` derives one step at a
+time, and ``QHDBinaryBlock`` records for binary), the running phase total
+and the approximation error bounds, with the lower-range omissions
 (``QHDRangeOmissions``). Execution, analysis and loading read it instead of
 evaluating the objective again. ``QHDAnalysis`` is the analyzed readout, the
 best observed candidate and the most probable point with its tie window.
 """
-
-from nwqlib._limits import DEFAULT_MAX_BYTES
 
 from hashlib import sha256
 from typing import Annotated, Literal
@@ -145,23 +145,34 @@ class QHDWalshPhase(Record):
 
 
 class QHDBlock(Record):
-    """One compiled step block, either a fused XX+YY hopping or a number-projector phase.
+    """One block of a one-hot QHD step, the XX+YY hopping on one grid link or the phase of one table entry.
 
-    A projector is recorded by its qubits, not expanded into the ``2**s``
-    Pauli-Z strings of ``prod n``.
+    [`step_blocks`][nwqlib.algorithms.qhd.onehot_schedule.step_blocks]
+    returns these records for one step, with the angles of the gates that
+    the circuit applies. Grid point i of variable j is qubit ``j K + i``. A
+    number projector on s qubits is the product ``prod n`` of their number
+    operators ``n = (I - Z)/2``, one for each variable of its support table.
 
     Attributes:
-        kind: ``kinetic`` for one XX+YY hopping link or ``number_projector``
-            for one product of number operators.
-        time_step: Duration of this block.
-        time: Midpoint schedule time of the step that contains the block.
-        support: Two linked qubits, or the projector's qubits.
-        coefficient: Pauli coefficient of each of XX and YY, or the weighted
-            objective value of the projector.
-        angle: Duration times the one-hot matrix element. The hopping
-            circuit is ``exp(-i time_step * coefficient * (XX + YY))`` and
-            the projector circuit is ``exp(-i angle (prod n - I/2**s))``.
-        provider: Qiskit circuit construction that planning chose.
+        kind: ``"kinetic"`` for the hopping on one link of a variable's
+            grid, ``"number_projector"`` for the phase of one support-table
+            entry.
+        time_step: Duration of the block, the step length dt, or dt/2 for a
+            second-order potential half and for an odd-indexed link layer of
+            a second-order step.
+        time: Midpoint ``(k + 1/2) dt`` of the step k that contains the
+            block.
+        support: The two qubits of the link, or the s qubits of the
+            projector.
+        coefficient: Coefficient c of each of XX and YY, or the table entry
+            times the step's potential weight.
+        angle: The block's rotation angle. The hopping applies
+            ``exp(-i time_step c (XX + YY))``, which rotates the two one-hot
+            states of the link by ``angle = 2 time_step c``, and the
+            projector applies ``exp(-i angle (prod n - I/2**s))``.
+        provider: Qiskit construction of the block, ``"XXPlusYYGate"`` for a
+            hopping and ``"mcphase"`` or ``"diagonal_synthesis"`` for a
+            projector.
         cx: CX count of that construction before routing.
     """
 
@@ -171,8 +182,82 @@ class QHDBlock(Record):
     support: tuple[Count, ...]
     coefficient: Real
     angle: Real
-    provider: Text | None = None
-    cx: Count = 0
+    provider: Text
+    cx: Count
+
+
+class QHDProjectorProvider(Record):
+    """The circuit construction of every number projector on ``support_size`` qubits.
+
+    Attributes:
+        support_size: Qubits of the projector, the size of its support.
+        provider: Qiskit circuit construction that planning chose
+            (``pauli_evolution.structured_number_projector_provider``).
+        cx: CX count of that construction before routing.
+    """
+
+    support_size: PositiveInt
+    provider: Text
+    cx: Count
+
+
+class QHDOneHotSchedule(Record):
+    """The projector constructions and planning totals of a one-hot Plan with a compiled schedule.
+
+    The blocks are not stored. ``onehot_schedule.OneHotSchedule`` derives
+    the blocks of each step from the Plan's support tables and step rows,
+    the Method's ``total_time``, ``num_steps``, ``trotter_order`` and
+    ``rotation_threshold``, the grid and these providers, so the
+    reconstruction's content hash, with the Method's in ``method_id``,
+    covers every input of the emitted circuit. Planning forms the totals
+    below in one pass over the steps with the circuit's arithmetic
+    (``OneHotSchedule.summary``). The counts include both second-order
+    potential halves and the odd-indexed links of both second-order half
+    layers.
+
+    Attributes:
+        providers: One per support size of the Plan's tables, in
+            increasing size.
+        hopping_blocks: Kept XX+YY hopping blocks.
+        projector_blocks: ``(s, count)`` of the kept number-projector
+            blocks on s qubits, one pair per support size of the Plan's
+            tables, in increasing s.
+        dense_blocks: Kept projector blocks with the phase-diagonal provider.
+        phase_assignments: Upper value of ``Y = sum_b |zeta_b| 2**-s_b`` over
+            the kept projector blocks (``method._native_phase_allowance``),
+            or None when that upper value exceeds the binary64 range.
+        angle_formation: Upper value of the stored angles' formation error
+            against their intended exponents, the ``angle_formation`` entry
+            of the error sources (``resources.circuit_resources``).
+        rotation_pruning: Upper value of the exact intended action of the
+            occurrences that ``rotation_threshold`` or the lower range
+            omitted, the ``rotation_pruning`` entry.
+        gate_parameters: Upper value of the hopping gate parameters'
+            difference from twice the stored angles, the ``gate_parameters``
+            entry.
+
+    The last three are operator-norm distances between unitaries, each at
+    most 2.
+    """
+
+    providers: tuple[QHDProjectorProvider, ...]
+    hopping_blocks: Count
+    projector_blocks: tuple[tuple[PositiveInt, Count], ...]
+    dense_blocks: Count
+    phase_assignments: Nonnegative | None
+    angle_formation: Annotated[Real, Field(ge=0, le=2)]
+    rotation_pruning: Annotated[Real, Field(ge=0, le=2)]
+    gate_parameters: Annotated[Real, Field(ge=0, le=2)]
+
+    @model_validator(mode="after")
+    def _one_provider_per_size(self):
+        """Require increasing provider sizes and kept counts only for sizes that have a provider."""
+        sizes = [p.support_size for p in self.providers]
+        kept = [s for s, _count in self.projector_blocks]
+        if sizes != sorted(set(sizes)) or kept != sorted(set(kept)) or not set(kept) <= set(sizes):
+            raise ValueError("a one-hot schedule needs one provider per support size and projector counts in "
+                             "increasing size, each with a provider")
+        return self
 
 
 class QHDBinaryBlock(Record):
@@ -295,7 +380,7 @@ class QHDRangeOmissions(Record):
         tables: One record per support table, in ``support_values`` order.
         projectors: One-hot number-projector occurrences omitted together
             with their identity events, both second-order potential halves
-            counted (``potential.PotentialCompiler.select_occurrences``).
+            counted (``onehot_schedule`` module docstring).
         projector_charge: The sum of ``(1 - 2**-s) |t b v|`` over them,
             already part of the ``rotation_pruning`` entry and of
             ``pruning_error_bound``.
@@ -380,10 +465,12 @@ class QHDReconstruction(Record):
             vector in units of u (``initial_state.restricted_state_error``),
             the start term of the classical state budget. It is 2 for the
             direct uniform fill.
-        steps: Ordered blocks of every step, ``QHDBlock`` records for the
-            one-hot encoding and ``QHDBinaryBlock`` records for the binary
-            encoding. Empty when neither quantum execution nor
-            ``theory_flavor="ir_product"`` needs them.
+        steps: Ordered ``QHDBinaryBlock`` records of every step of a binary
+            Plan with a compiled schedule, empty otherwise.
+        onehot: The providers and totals of a one-hot Plan with a compiled
+            schedule (``QHDOneHotSchedule``), None otherwise. A schedule is
+            compiled when quantum execution or ``theory_flavor="ir_product"``
+            needs it (``compact_schedule_selected``).
         step_weights: ``(t, kinetic_weight, potential_weight)`` per step,
             with t the midpoint ``fl((k + 1/2) dt)`` of step k and
             ``dt = fl(total_time/num_steps)``. Under the Method's
@@ -397,10 +484,11 @@ class QHDReconstruction(Record):
             rounding is monotone. Planning places each midpoint strictly
             between its binary64 step ends ``fl(k dt)`` and ``fl((k + 1) dt)``
             only under the midpoint rule, which the record does not keep, and
-            it compares no midpoint with total_time. At the default limits the
-            midpoints are also strictly increasing and below total_time T,
-            because ``max_bytes = 10**10`` and ``_STEP_BYTES`` of 768 bytes
-            per step allow at most about 1.3e7 steps, and with a normal dt and
+            it compares no midpoint with total_time. Within a byte limit below
+            2**60 bytes, such as the physical memory, the midpoints are also
+            strictly increasing and below total_time T, because
+            ``_STEP_BYTES`` of 768 bytes per step allow fewer than 2**51
+            steps, and with a normal dt and
             the exact ``k + 1/2`` the relative rounding bound gives the last
             midpoint at most ``T (1 - 1/(2 N)) (1 + u)**2 < T`` and keeps
             consecutive midpoints distinct for ``N < 2**51``. ``max_work``
@@ -412,10 +500,11 @@ class QHDReconstruction(Record):
             construction of the rows, although they cannot practically be
             built. The record therefore requires neither strictly increasing
             midpoints nor an upper bound.
-        compact_schedule_selected: Whether ``steps`` were compiled.
+        compact_schedule_selected: Whether the schedule was compiled.
         physical_phase: Total omitted identity phase in radians, accumulated
-            with Neumaier's compensation on the one-hot encoding
-            (``compiler.QHDCompiler._record_global_phase``) and with
+            on the one-hot encoding from correctly rounded tile sums and
+            single events with Neumaier's compensation
+            (``onehot_schedule.OneHotSchedule.summary``) and with
             ``math.fsum`` on the binary encoding
             (``binary.compile_binary_steps``).
             ``method._compiled_phase_allowance`` bounds its rounding against
@@ -425,7 +514,8 @@ class QHDReconstruction(Record):
             objective for binary, whose diagonal blocks keep their own
             identity phases).
         dropped_angle_sum: Sum of absolute angles removed by the threshold:
-            one-hot block angles, or binary ``Rz`` angles.
+            one-hot block angles, or binary ``Rz`` angles. None when the
+            sum exceeds the binary64 range.
         dropped_count: Number of nonzero rotations removed by the threshold.
         pruning_error_bound: Bound on ``||U - U_0||_2`` for the built
             product U and the product ``U_0`` with every removed rotation
@@ -441,9 +531,11 @@ class QHDReconstruction(Record):
             the sum of the dropped angles. A binary ``Rz(theta)`` differs from
             I by ``2 |sin(theta/4)| <= |theta|/2``, so the bound is half of
             it. The dropped binary64 angles are summed exactly, the binary sum
-            is halved exactly, the range errors are added exactly, and the
-            result is rounded upward once, so the recorded value is never
-            below the exact bound and is 0.0 exactly when nothing is removed.
+            is halved exactly, the range errors are added exactly, the total
+            is capped at 2, the largest distance between two unitaries, and
+            the result is rounded upward once, so the recorded value is never
+            below the capped exact bound and is 0.0 exactly when nothing is
+            removed.
         aqft_error_bound: Bound on ``||U - U_0||_2`` for the built product U
             and the product ``U_0`` with exact QFTs,
             ``min(2, 2 N_s d e_F)`` with ``e_F = binary.qft_error_bound`` per
@@ -484,14 +576,15 @@ class QHDReconstruction(Record):
     constant: Real
     initial_amplitudes: tuple[FrozenArray, ...]
     initial_state_error: Nonnegative
-    steps: tuple[tuple[Annotated[QHDBlock | QHDBinaryBlock, Field(discriminator="kind")], ...], ...]
+    steps: tuple[tuple[QHDBinaryBlock, ...], ...]
+    onehot: QHDOneHotSchedule | None = None
     step_weights: tuple[tuple[Nonnegative, Nonnegative, Nonnegative], ...]
     compact_schedule_selected: StrictBool
     physical_phase: Real
     phase_sources: tuple[tuple[Text, Real], ...]
-    dropped_angle_sum: Nonnegative
+    dropped_angle_sum: Nonnegative | None
     dropped_count: Count
-    pruning_error_bound: Nonnegative
+    pruning_error_bound: Annotated[Real, Field(ge=0, le=2)]
     aqft_error_bound: Annotated[Real, Field(ge=0, le=2)]
     range_omissions: QHDRangeOmissions
     walsh_phase: QHDWalshPhase | None = None
@@ -520,6 +613,21 @@ class QHDReconstruction(Record):
             for v in self.initial_amplitudes
         ):
             raise ValueError("QHD initial amplitudes need one nonnegative float64 vector of K entries per variable")
+        return self
+
+    @model_validator(mode="after")
+    def _one_compiled_schedule(self):
+        """Require at most one form of compiled schedule, and one only for a compiled Plan.
+
+        A one-hot Plan records ``onehot`` and a binary Plan ``steps``, and
+        a providers record must cover the support sizes of the tables.
+        """
+        onehot, binary = self.onehot is not None, len(self.steps) > 0
+        sizes = {len(t.support) for t in self.support_values}
+        if (onehot and binary or (onehot or binary) != self.compact_schedule_selected
+                or onehot and {p.support_size for p in self.onehot.providers} != sizes):
+            raise ValueError("a QHD reconstruction holds one-hot schedule totals or binary blocks, only with a "
+                             "compiled schedule, and one projector provider per table support size")
         return self
 
     @model_validator(mode="after")
@@ -1196,14 +1304,14 @@ class QHDVerification(Record):
             objective value that `minimum_success_mass` uses. Zero counts ties in the
             evaluated table. It counts exactly the mathematical minimizers when the
             evaluations are exact and this tolerance is zero.
-        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Positive limit on
-            the byte allowances counted for this check, separate from the QHD
-            Method's limits. For observed counts or probabilities without a kept
+        max_bytes: Default `None`, the physical memory of this computer. Positive
+            limit on the byte allowances counted for this check, separate from the
+            QHD Method's limits. For observed counts or probabilities without a kept
             state, the bytes counted for `grid_minimum` omit histogram construction or
             loading, decoding and passing-weight storage at every readout width.
             This limit therefore does not bound the `minimum_success_mass` step.
-        max_work: Default `1_000_000_000`. Positive limit on the known work of this
-            check, separate from the QHD Method's limits.
+        max_work: Default `None`, no limit. Optional positive limit on the known work
+            of this check, separate from the QHD Method's limits.
 
     Raises:
         ValueError: If `comparisons` is empty or repeats a choice.
@@ -1221,8 +1329,8 @@ class QHDVerification(Record):
     schrodinger_infidelity_tolerance: Annotated[Real, Field(ge=0, le=1)] = 0.1
     ir_product_infidelity_tolerance: Annotated[Real, Field(ge=0, le=1)] = 1e-9
     minimum_tolerance: Nonnegative = 0.0
-    max_bytes: PositiveInt = DEFAULT_MAX_BYTES
-    max_work: PositiveInt = 1_000_000_000
+    max_bytes: PositiveInt | None = None
+    max_work: PositiveInt | None = None
 
     @model_validator(mode="after")
     def _choices(self):

@@ -120,9 +120,9 @@ def test_projected_generalized_eigensolver_rejects_invalid_hermitian_pencil() ->
             _solve_projected_pencil(invalid_shape, invalid_shape, symmetrize_matrices=False)
     with pytest.raises(ValueError, match="square matrices with the same shape"):
         _solve_projected_pencil(np.eye(3), legal_overlap, symmetrize_matrices=False)
-    # Positive overlap, finite H: whitening alone overflows (1e308 / 1e-4).
+    # Positive overlap, finite H: whitening alone overflows (1e300 / 1e-10).
     with np.errstate(over="ignore", invalid="ignore"):
-        rejected, _, reason, _ = _solve_projected_pencil([[1.0e308]], [[1.0e-4]])
+        rejected, _, reason, _ = _solve_projected_pencil([[1.0e300]], [[1.0e-10]])
     assert rejected is None and reason == "nonfinite_effective_hamiltonian"
     legal = _solve_projected_pencil(hamiltonian, legal_overlap, symmetrize_matrices=False)[0]
     assert legal.eigenvalues[0] == pytest.approx(-2.0, rel=0.0, abs=2.0e-14)

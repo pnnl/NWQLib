@@ -18,6 +18,46 @@ def forbid(*a, **k):
     raise AssertionError("unselected numerical or native work")
 
 
+def test_rwpe_estimate_counts_the_experiments_that_a_run_emits():
+    """The estimate sums every RWPE step, and the independent reference is the circuits that a Run actually emits.
+
+    Its powers and shots are fixed while its feedback angles depend on the data, so the CX, shot and setting totals
+    are exact sums (``method._quantum_program``), and T and depth stay unavailable. With ``max_steps=0`` the Run
+    measures nothing, and so does the estimate.
+    """
+    from qiskit import transpile
+
+    from nwqlib import Eigenproblem, plan
+    from nwqlib._prepared_execution import Run
+    from nwqlib.algorithms import RWPE
+
+    problem = Eigenproblem(A=ingest_pauli((("XI", .7), ("ZX", .4), ("YZ", .3), ("ZZ", .2)), num_qubits=2))
+    method = RWPE(initial_state=[1, 0, 0, 0], max_steps=14, controlled_power_backend="trotter_error_budgeted",
+                  controlled_power_error_budget=.01)
+    selected = plan(problem, method=method, seed=7)
+    context = ResourceContext(basis="cx", batch_schedule="serial")
+    folded = estimate(selected.construction, context=context)
+    with Run(selected) as run:
+        run.wait()
+        circuits = [handle.inspect_circuit() for handle in run._state["handles"].values()
+                    if handle.record.execution == "quantum_circuit"]
+        shots = sum(event.shots or 0 for event in run.trace.events)
+    emitted = sum(transpile(circuit, basis_gates=["cx", "u"], optimization_level=0).count_ops().get("cx", 0)
+                  for circuit in circuits)
+    assert len(circuits) == 14 and shots == 14
+    for metric, expected in (("cx", emitted), ("shots", shots), ("settings", len(circuits))):
+        quantity = folded.quantity(metric)
+        assert (quantity.fact.value.numerator, quantity.interpretation) == (expected, "exact")
+    for metric in ("t", "logical_depth", "arbitrary_rotations"):
+        assert folded.quantity(metric).interpretation == "unavailable"
+    empty = plan(problem, method=method.revise(max_steps=0), seed=7)
+    folded = estimate(empty.construction, context=context)
+    assert [folded.quantity(metric).fact.value.numerator for metric in ("cx", "shots", "settings")] == [0, 0, 0]
+    with Run(empty) as run:
+        run.wait()
+        assert not run.trace.events
+
+
 @pytest.mark.parametrize("signed_time", [0.14, -0.14])
 def test_suzuki_angles_match_independent_two_level_product(signed_time):
     terms = (("Z", 0.3), ("X", 0.4))
@@ -60,6 +100,48 @@ def test_pruning_and_signed_power_time_owned_once(monkeypatch, removed):
     validate_selection(selected)
     estimate(selected.construction)
     assert count.call_count == 1
+
+
+def test_dense_product_formula_input_keeps_the_record_of_its_pauli_terms(monkeypatch):
+    """A dense Hamiltonian converts through packed masks to the record of its labelled block transform.
+
+    The 2-qubit matrix has an identity term, a Y term and a term below the
+    pruning cutoff. The expected record splits the labels of
+    ``pauli_coefficients`` term by term. Only the two kept words are
+    decoded to labels, for the dense input as for the same Pauli input.
+    """
+    from math import fsum
+
+    from nwqlib.operators import ingest_dense
+    from nwqlib.operators._pauli import PauliTerms, pauli_coefficients
+    from nwqlib.subroutines.trotterization.error_budget import upper_dropped_mass
+
+    terms = (("II", 0.2), ("ZI", 0.3), ("XY", -0.4), ("IZ", 1e-5))
+    pauli = ingest_pauli(terms, num_qubits=2)
+    letters = dict(I=np.eye(2), X=np.array([[0, 1], [1, 0]]), Y=np.array([[0, -1j], [1j, 0]]), Z=np.diag([1, -1]))
+    matrix = sum(c * np.kron(letters[label[0]], letters[label[1]]) for label, c in terms).astype(complex)
+    rows = pauli_coefficients(matrix)
+    cutoff = 1e-3 * max(abs(c) for _, c in rows)
+    kept = [(label, c.real) for label, c in rows if label != "II" and abs(c) > cutoff]
+    decoded = []
+    original = PauliTerms.labels
+
+    def labels(table, **kwargs):
+        decoded.append(len(table))
+        return original(table, **kwargs)
+
+    for target in (pauli, ingest_dense(matrix)):
+        monkeypatch.setattr(PauliTerms, "labels", labels)
+        record = make_plan(estimator="rfe", target=target, execution="quantum", initial=[1, 0, 0, 0],
+                           controlled_power_backend="trotter_error_budgeted", pauli_pruning_rtol=1e-3,
+                           controlled_power_error_budget=0.002).reconstruction
+        monkeypatch.undo()
+    assert decoded == [2, 2]
+    assert record.pauli_labels == tuple(label for label, _ in kept) == ("XY", "ZI")
+    assert record.pauli_coefficients.array.tolist() == [c for _, c in kept]
+    assert record.identity_coefficient == fsum(c.real for label, c in rows if label == "II")
+    assert record.pruned_mass == upper_dropped_mass(
+        c.real for label, c in rows if label != "II" and abs(c) <= cutoff) >= 9e-6
 
 
 def test_qpe_compact_repeat_and_shot_multiplicity():
@@ -155,7 +237,7 @@ def test_controlled_global_phase_is_a_real_ancilla_signal(sign):
 # The common-grid checker below recomputes, in exact rational arithmetic from
 # the stored counts, step, allowances and emitted parameters, the common integer
 # and every complete prefix bound, independently of
-# error_budget.select_common_step. The resource notebook uses the same checker.
+# error_budget.select_common_step.
 def _upward(value):
     from fractions import Fraction as Q
     from math import inf, nextafter
@@ -185,7 +267,7 @@ def _common_integer(W, loss, tau, allowances):
 
 
 def _check_common_selection(selection, *, W_used, W_exact, delta_W, coefficients, identity, loss,
-                            actual_angles, actual_increments):
+                            actual_angles, actual_increments, first_count=True):
     from fractions import Fraction as Q
     from math import inf, isfinite, nextafter
     tau = selection.common_tau
@@ -197,8 +279,14 @@ def _check_common_selection(selection, *, W_used, W_exact, delta_W, coefficients
     g, m = _common_integer(W_used, loss, tau, allowances)
     _, m_lo = _common_integer(W_exact, loss, tau, allowances)
     _, m_hi = _common_integer(Q(W_exact)*(1+delta_W), loss, tau, allowances)
-    assert (g, m) == (selection.common_g, selection.common_m)
+    assert g == selection.common_g
     assert m_lo <= m <= m_hi
+    if first_count:
+        assert m == selection.common_m
+    else:
+        # A corrected count stays on the grid, and the prefix checks below apply to it unchanged.
+        assert m < selection.common_m
+        m = selection.common_m
     h = selection.common_step_time
     assert h == float(g*Q(tau)/m)
     assert len(actual_angles) == len(coefficients)
@@ -248,29 +336,16 @@ def _check_common_selection(selection, *, W_used, W_exact, delta_W, coefficients
     return windows
 
 
-def test_common_grid_powers_record_the_checked_emitted_prefix_bounds():
-    """Static product-formula powers share one step on the gcd grid, checked prefix by prefix.
+def _check_planned_common_step(selected, *, first_count=True):
+    """Apply the common-grid checker to a Plan's stored records and the parameters its circuit uses.
 
-    Powers {2, 4, 8} have g = 2. The independent checker recomputes the
-    integer m, every cumulative count r(p) = (p/g)*m, the stored step
-    g*val(tau)/m, and every complete prefix subtotal (Trotter, pruning, time
-    displacement, identity phase and leaf angles) from the stored inputs and
-    the emitted parameters; the recorded coefficient is the census's W_up,
-    so its window is collapsed here (W_exact = W_used). A Plan whose emitted
-    identity phase or leaf angles exceed a tiny allowance is refused, naming
-    the power.
+    The recorded coefficient is the census's W_up, so its window is collapsed
+    here (W_exact = W_used).
     """
     from fractions import Fraction
     from types import SimpleNamespace
-    from nwqlib import Eigenproblem, plan
-    from nwqlib.algorithms.qpe import RFE
-    from nwqlib.subroutines.trotterization.error_budget import upper_combined_error
 
-    target = ingest_pauli((("II", .1), ("ZI", .3), ("XX", .2), ("IY", -.25)), num_qubits=2)
-    selected = plan(Eigenproblem(A=target), method=RFE(initial_state=[1, 0, 0, 0], num_frequencies=9,
-                                                       num_samples=3, tau=0.3), seed=2)
     rec, budget = selected.reconstruction, selected.method.controlled_power_error_budget
-    assert sorted(p.power for p in rec.powers if p.power) == [2, 4, 8]
     common = rec.common_step
     step = next(b for b in selected.blocks if b.record.signature.name == "common_step")
     labels_and_coefficients, step_time = step._payload
@@ -290,21 +365,167 @@ def test_common_grid_powers_record_the_checked_emitted_prefix_bounds():
         common_prefix_bounds=tuple((p.power, p.total_error) for p in rec.powers))
     W = Fraction(*rec.bound_coefficient)
     coefficients = rec.pauli_coefficients.array.tolist()
-    windows = _check_common_selection(
+    return _check_common_selection(
         selection, W_used=W, W_exact=W, delta_W=0, coefficients=coefficients,
         identity=rec.identity_coefficient, loss=rec.pruned_mass,
         actual_angles=tuple(angle for _, angle in powers.rotation_schedule(labels_and_coefficients,
                                                                            step_time)[:len(coefficients)]),
-        actual_increments=increments)
-    assert len(windows) == len(rec.powers) and common.g == 2
+        actual_increments=increments, first_count=first_count)
+
+
+def test_common_grid_powers_record_the_checked_emitted_prefix_bounds():
+    """Static product-formula powers share one step on the gcd grid, checked prefix by prefix.
+
+    Powers {2, 4, 8} have g = 2. The independent checker recomputes the
+    integer m, every cumulative count r(p) = (p/g)*m, the stored step
+    g*val(tau)/m, and every complete prefix subtotal (Trotter, pruning, time
+    displacement, identity phase and leaf angles) from the stored inputs and
+    the emitted parameters. A Plan whose first count passes keeps it. A Plan
+    whose emitted identity phase or leaf angles exceed a tiny allowance is
+    refused, naming the power.
+    """
+    from fractions import Fraction
+    from nwqlib import Eigenproblem, plan
+    from nwqlib.algorithms.qpe import RFE
+    from nwqlib.subroutines.trotterization.error_budget import upper_combined_error
+
+    target = ingest_pauli((("II", .1), ("ZI", .3), ("XX", .2), ("IY", -.25)), num_qubits=2)
+    selected = plan(Eigenproblem(A=target), method=RFE(initial_state=[1, 0, 0, 0], num_frequencies=9,
+                                                       num_samples=3, tau=0.3), seed=2)
+    rec = selected.reconstruction
+    assert sorted(p.power for p in rec.powers if p.power) == [2, 4, 8]
+    windows = _check_planned_common_step(selected)
+    assert len(windows) == len(rec.powers) and rec.common_step.g == 2
     for power in rec.powers:
         assert power.evolution_time == float(power.power * Fraction(rec.tau))
         assert (max(power.pruning_error, power.evolution_error) <= power.total_error
                 <= upper_combined_error(power.pruning_error, power.evolution_error))
     tiny = ingest_pauli((("I", .1), ("Z", .3)), num_qubits=1)
-    with pytest.raises(ValueError, match="at power 1"):
+    with pytest.raises(ValueError, match=r"at power 1\b"):
         plan(Eigenproblem(A=tiny), method=QCELS(initial_state=[1, 0], tau=0.3, num_times=3,
                                                 controlled_power_error_budget=1e-300), seed=7)
+
+
+def _rounding_bound_counts(rec, budget):
+    """Return m_lo and m_hi of a Plan's schedule at ``budget``, or None when some Q_p <= 0.
+
+    This evaluates (T4) and (T5) of ``error_budget._common_envelope_count`` from
+    their definitions, in exact rationals with an integer-square ceiling, for a
+    kept generator with at least one term. The literals u = 2**-53 and eta =
+    2**-1074 are the binary64 unit roundoff and smallest subnormal.
+    """
+    from fractions import Fraction as Q
+    from functools import reduce
+    from math import gcd, isqrt
+
+    W, tau, identity = Q(*rec.bound_coefficient), Q(rec.tau), Q(rec.identity_coefficient)
+    coefficients = [Q(value) for value in rec.pauli_coefficients.array.tolist()]
+    M, J = sum(map(abs, coefficients), Q(0)), len(coefficients)
+    u, eta = Q(1, 2**53), Q(1, 2**1074)
+    schedule = [row.power for row in rec.powers]
+    g = reduce(gcd, schedule)
+    lows, highs, phase, previous = [1], [], Q(0), 0
+    for p in schedule:
+        phase += Q(-(p-previous)*rec.tau*rec.identity_coefficient)
+        previous = p
+        if p:
+            n, t = p//g, p*tau
+            room = Q(budget)-(Q(rec.pruned_mass)*t+abs(phase+t*identity)+u*(2+u)*M*t)
+            if room <= 0:
+                return None
+            square = 2*W*n*(1+u)**3*(g*tau)**3/room
+            low = isqrt(square.numerator//square.denominator)
+            lows.append(low if low*low >= square else low+1)
+            highs.append(room//(2*n*J*eta))
+    return max(lows), min(highs)
+
+
+def _two_qubit_plan(budget, **options):
+    """Plan the default exact QCELS trajectory of a two-qubit Hamiltonian at the given budget."""
+    from nwqlib import Eigenproblem, plan
+    from nwqlib.problems import ingest_occupation
+
+    target = ingest_pauli((("ZI", .34), ("IZ", -.11), ("ZZ", .57), ("XX", .09), ("YY", .09)), num_qubits=2)
+    return plan(Eigenproblem(A=target), seed=1, method=QCELS(
+        initial_state=ingest_occupation("10", num_qubits=2), controlled_power_error_budget=budget, **options))
+
+
+def _gap_two_plan(budget):
+    """Plan an exact RFE trajectory on powers {2, 4, 8}, so g = 2, with a nonzero identity term."""
+    from nwqlib import Eigenproblem, plan
+    from nwqlib.algorithms.qpe import RFE
+
+    target = ingest_pauli((("II", .1), ("ZI", .3), ("XX", .2), ("IY", -.25)), num_qubits=2)
+    return plan(Eigenproblem(A=target), seed=2, method=RFE(
+        initial_state=[1, 0, 0, 0], num_frequencies=9, num_samples=3, tau=0.3, controlled_power_error_budget=budget))
+
+
+@pytest.mark.parametrize("make, budget, count, bound_count", [
+    # Counts evaluated independently of this code in exact rationals, with this Plan's tau and W: 1e-10 passes
+    # at the next count 119600 and its (T5) count is 169144, and 1e-11 fails at 378204 and 378205 and passes at
+    # its (T5) count 535030.
+    (_two_qubit_plan, 1e-10, 119600, 169144),
+    (_two_qubit_plan, 1e-11, 535030, 535030),
+    # g = 2 with identity phases has no such table. It is the first budget decade at which this Plan needs (T5).
+    (_gap_two_plan, 1e-12, None, None),
+])
+def test_a_tight_budget_trajectory_corrects_its_common_count_and_every_emitted_subtotal_fits(
+        make, budget, count, bound_count):
+    """A first count whose complete subtotal misses the budget by rounding gets a larger count on the same grid.
+
+    The first count inverts only the product-formula term, so at these budgets
+    the time and angle rounding exceed the margin it leaves. The independent
+    checker confirms (T1) and every (T2) subtotal at or below the budget from
+    the emitted step, angles and phases. (T5) is evaluated here for the count
+    that the next count's failure leads to. No circuit is built.
+    """
+    selected = make(budget)
+    rec = selected.reconstruction
+    _check_planned_common_step(selected, first_count=False)
+    assert all(row.total_error <= budget for row in rec.powers)
+    m_lo, m_hi = _rounding_bound_counts(rec, budget)
+    assert m_lo <= m_hi
+    if bound_count is not None:
+        assert m_lo == bound_count
+    assert rec.common_step.m == (m_lo if count is None else count)
+
+
+def test_a_zero_allowance_at_power_zero_leaves_the_common_step_correction_available():
+    """Only positive powers enter (T5), because power 0 has zero count and subtotal and may have a zero allowance.
+
+    With W = 1, tau = .21, c_I = .37 and powers 0, 2, 6 and 10, an independent exact-rational evaluation of (T5)
+    gives m_lo = 272200 at the allowance 1e-11, and the first count and the next one miss that allowance.
+    """
+    from nwqlib.subroutines.trotterization.error_budget import _BoundCoefficientEvaluation, select_common_step
+
+    evaluation = _BoundCoefficientEvaluation(coefficient=Fraction(1), pauli_term_count=5, pair_commutation_checks=0,
+                                             nested_commutation_checks=0, bound_variant="exact_census")
+    selection = select_common_step(evaluation, coefficients=(.34, -.11, .57, .09, .09), identity=.37, tau=.21,
+                                   allowances={0: 0., 2: 1e-11, 6: 1e-11, 10: 1e-11}, dropped_mass=0, max_steps=None)
+    assert selection.common_m == 272200
+
+
+@pytest.mark.parametrize("budget", [1e-10, 1e-11])
+def test_a_corrected_common_count_stays_within_an_explicit_step_limit(budget):
+    """An explicit ``max_trotter_steps`` limits the corrected count, also when the first count fits the limit.
+
+    The budget 1e-10 corrects to the next count and 1e-11 to the (T5) count, so each row tests the limit on one of them.
+    """
+    common = _two_qubit_plan(budget).reconstruction.common_step
+    assert _two_qubit_plan(budget, max_trotter_steps=common.step_count).reconstruction.common_step == common
+    with pytest.raises(ValueError, match="max_trotter_steps"):
+        _two_qubit_plan(budget, max_trotter_steps=common.step_count - 1)
+
+
+def test_a_budget_below_the_step_independent_rounding_bound_refuses_and_names_that_budget():
+    """Q_p <= 0 in (T4), evaluated here, leaves the correction no count to propose, and planning refuses.
+
+    The budget 1e-15 lies below u (2+u) M t_p of this Hamiltonian at its last
+    power. Planning at 1e-3 only supplies the same schedule, W and tau.
+    """
+    assert _rounding_bound_counts(_two_qubit_plan(1e-3).reconstruction, 1e-15) is None
+    with pytest.raises(ValueError, match="controlled_power_error_budget"):
+        _two_qubit_plan(1e-15)
 
 
 def _pauli_sum(num_qubits, count, seed):
@@ -318,18 +539,17 @@ def _pauli_sum(num_qubits, count, seed):
     return [(label, float(c)) for label, c in zip(sorted(labels), rng.normal(0, 0.1, count))]
 
 
-def test_default_static_plans_admit_their_common_step_at_a_tenth_of_the_default_work_limit():
+def test_static_plans_preserve_their_common_step_under_an_explicit_work_cap():
     """Default QCELS on 184 terms plans at max_work = 1e8.
 
-    The common-step admission (``powers._common_recheck_law``) prices the
-    actual input exponents, so this Plan fits a tenth of the default
-    together with its census charge. The default changes no selected record.
+    The commutator count of the 184 terms fits the explicit 1e8 cap, and
+    the limit changes no selected record.
     """
     from nwqlib import Eigenproblem, plan
 
     problem = Eigenproblem(A=ingest_pauli(_pauli_sum(8, 184, 11), num_qubits=8))
     method = QCELS(initial_state=np.eye(256)[3])
-    assert method.max_work == 1_000_000_000
+    assert method.max_work is None
     selected = plan(problem, method=method.revise(max_work=10**8), seed=17)
     reference = plan(problem, method=method, seed=17)
     rec, ref = selected.reconstruction, reference.reconstruction
@@ -341,16 +561,22 @@ def _rwpe_parts(record, step, tau, identity, dropped, W):
     """Recompute an RWPE power's five contributions from its emitted parameters.
 
     With t = val(p)*val(tau), represented step h, r steps, emitted leaves
-    a_j = 0.5*h*c_j and phase phi = -p*tau*c_I, the pruning part is
-    abs(t)*d_up and the evolution part r*W*abs(h)**3 + r*A +
-    M*abs(r*h - t) + abs(val(phi) + t*c_I), A = 2*sum abs(val(a_j) - h*c_j/2)
-    (``powers._independent_powers``). Returns (pruning, evolution, step bound).
+    a_j = fl(fl(0.5*h)*c_j) and phase phi = -p*tau*c_I, the pruning part is
+    abs(t)*d_up and the evolution part r*W*abs(h)**3 + r*A_up +
+    M*abs(r*h - t) + abs(val(phi) + t*c_I). A_up = 2u|fl(0.5*h)|M +
+    2**-1074*(L + M) bounds A = 2*sum abs(val(a_j) - h*c_j/2), which is
+    checked exactly here (``powers._independent_powers``). Returns
+    (pruning, evolution, step bound).
     """
     t = Fraction(record.power) * Fraction(tau)
     terms, h_hat = step._payload if step is not None else ((), 0.0)
     h, c = Fraction(h_hat), [Fraction(value) for _, value in terms]
     A = 2 * sum((abs(Fraction(0.5 * h_hat * value) - h * v / 2)
                  for (_, value), v in zip(terms, c)), Fraction(0))
+    M = sum(map(abs, c), Fraction(0))
+    A_up = 2 * Fraction(1, 2**53) * abs(Fraction(0.5 * h_hat)) * M + Fraction(len(c)) / 2**1074 + M / 2**1074
+    assert A <= A_up
+    A = A_up
     phase = Fraction(-record.power * tau * identity)
     evolution = (W * record.steps * abs(h) ** 3 + record.steps * A
                  + sum(map(abs, c), Fraction(0)) * abs(record.steps * h - t)
@@ -407,26 +633,104 @@ def _six_qubit_ring():
                    for j in range(6)]
 
 
-def test_census_reserves_the_common_step_before_choosing_its_variant(monkeypatch):
-    """The census variant includes reserved common-step work before its masks are built."""
-    from nwqlib import Eigenproblem, plan
-    from nwqlib.algorithms.qpe import RFE, RWPE
+def test_census_limits_refuse_the_counted_expression(monkeypatch):
+    """The expression comes from the structural count. Work and bytes only refuse it.
+
+    The pair scan is checked before any mask exists. After the scan, one unit
+    below the chosen expression's work or bytes, where the relaxation would fit, refuses it with the
+    needed value instead of switching to the relaxation, which the count chooses only above
+    EXACT_CENSUS_WORD_TESTS.
+    """
+    from nwqlib.algorithms.qpe import RWPE
     from nwqlib.subroutines.trotterization import error_budget
 
-    problem = Eigenproblem(A=ingest_pauli(_six_qubit_ring(), num_qubits=6))
-    method = RFE(initial_state=np.eye(64)[5], num_samples=4)
-    rec = plan(problem, method=method.revise(max_work=64_002), seed=7).reconstruction
-    assert rec.bound_variant == "exact_census" and rec.common_step is not None
-    assert plan(problem, method=method.revise(max_work=64_002, max_bytes=125_872),
-                seed=7).reconstruction.bound_variant == "exact_census"
-    monkeypatch.setattr(error_budget, "pack_labels", forbid)
-    with pytest.raises(ValueError, match="QPE census and common-step admission.*max_work"):
-        plan(problem, method=method.revise(max_work=64_001), seed=7)
-    with pytest.raises(ValueError, match="QPE census and common-step admission.*max_bytes"):
-        plan(problem, method=method.revise(max_work=64_002, max_bytes=125_871), seed=7)
-    with pytest.raises(ValueError, match="QPE census and common-step admission"):
-        plan(problem, method=method.revise(max_work=64_001, max_bytes=125_871), seed=7)
     labels, coefficients = zip(*_six_qubit_ring())
-    with pytest.raises(ValueError, match="^QPE census admission"):
-        powers._census(labels, coefficients, 6, RWPE(initial_state=np.eye(64)[5], tau=0.1, max_work=1),
-                       reservation=(0, 0))
+    p, q = len(labels), 6
+    census = error_budget.census_structure(list(labels), q, 2)
+    assert census.variant == "exact_census"
+    scan = 2 * p * q + p * (p - 1) // 2
+    need = 2 * p * q + error_budget.census_work(
+        p, q, order=2, variant="exact_census", pairs=census.pairs, nested=census.nested_tests)
+    size = error_budget.census_bytes(p, q, census.pairs, order=2, variant="exact_census",
+                                     tile=census.nested_tile)
+
+    def census_with(**limits):
+        config = RWPE(initial_state=np.eye(64)[5], tau=0.1, **limits)
+        return powers._census(labels, coefficients, q, config)
+
+    evaluation = census_with(max_work=need, max_bytes=size)
+    assert (evaluation.bound_variant, evaluation.nested_word_tests) == ("exact_census", census.word_tests)
+    assert evaluation.coefficient == census_with().coefficient
+    with pytest.raises(ValueError, match=f"RWPE.max_work to at least {need}"):
+        census_with(max_work=need - 1)
+    with pytest.raises(ValueError, match=f"RWPE.max_bytes to at least {size}"):
+        census_with(max_bytes=size - 1)
+    monkeypatch.setattr(error_budget, "EXACT_CENSUS_WORD_TESTS", census.word_tests - 1)
+    assert census_with(max_work=need - 1).bound_variant == "relaxed_prefix"
+    monkeypatch.setattr(error_budget, "pack_labels", forbid)
+    with pytest.raises(ValueError, match=f"RWPE.max_work to at least {scan}"):
+        census_with(max_work=scan // 2)
+
+
+def test_public_qcels_witness_selects_the_exact_census_under_either_memory_setting():
+    """The 400-term, 12-qubit QCELS witness makes 7,286,537 nested word tests, below the threshold.
+
+    Its labels and coefficients are those of the review reproducer (seed 3). The former memory
+    selector chose the relaxation under max_bytes=50,000,000 and gave 870 common steps instead of 630.
+    """
+    from nwqlib import Eigenproblem, plan
+    from qiskit.quantum_info import SparsePauliOp
+
+    rng = np.random.default_rng(3)
+    labels = set()
+    while len(labels) < 400:
+        sites = rng.choice(12, rng.integers(2, 5), replace=False)
+        label = ["I"] * 12
+        for site in sites:
+            label[site] = "XYZ"[rng.integers(3)]
+        labels.add("".join(label))
+    labels = sorted(labels)
+    operator = SparsePauliOp(labels, rng.normal(size=400) / 400)
+    state = np.zeros(2**12)
+    state[0] = 1
+    for limits in ({}, {"max_bytes": 50_000_000}):
+        rec = plan(Eigenproblem(A=operator), method=QCELS(initial_state=state, **limits), seed=1).reconstruction
+        assert (rec.bound_variant, rec.nested_word_tests) == ("exact_census", 7_286_537)
+        assert rec.nested_commutation_checks == 7_286_537 and rec.common_step.step_count == 630
+
+
+
+@pytest.mark.parametrize("defect, accepted, entrywise", [
+    (np.zeros((2, 2)), True, False),
+    (0.8e-8 * np.ones((2, 2)), True, True),
+    (np.diag([1.5e-8, 0.0]), False, True),
+    (1.2e-8 * np.ones((2, 2)), False, False),
+])
+def test_unitary_input_is_checked_by_the_singular_values_of_its_one_polar_svd(monkeypatch, defect, accepted, entrywise):
+    """The one SVD that forms the polar base decides the entrywise unitarity window where it can.
+
+    A = sqrt(I + E) has A^dagger A - I = E, with ||E||_2 = max |sigma**2 - 1|
+    and max |E_ij| <= ||E||_2 <= 2 max |E_ij| for D = 2. ||E||_2 <= 1e-8
+    accepts and ||E||_2 > 2e-8 refuses without forming A^dagger A. In
+    between, the entrywise test decides: 0.8e-8 * ones has ||E||_2 = 1.6e-8
+    and entries 0.8e-8 and is accepted, diag(1.5e-8, 0) has an entry above
+    1e-8 and is refused. The input is decomposed once.
+    """
+    from nwqlib.subroutines import _matrix_checks
+
+    values, vectors = np.linalg.eigh(np.eye(2) + defect)
+    matrix = (vectors * np.sqrt(values)) @ vectors.T
+    svd, entrywise_calls = np.linalg.svd, []
+    decompositions = []
+    monkeypatch.setattr(np.linalg, "svd", lambda a, *args, **kwargs: decompositions.append(
+        np.array_equal(a, matrix)) or svd(a, *args, **kwargs))
+    check = _matrix_checks.is_unitary
+    monkeypatch.setattr(_matrix_checks, "is_unitary", lambda a, **kwargs: entrywise_calls.append(1) or check(a, **kwargs))
+    if accepted:
+        selected = make_plan(phase=True, target=matrix)
+        assert selected.reconstruction.target_kind == "unitary"
+    else:
+        with pytest.raises(ValueError, match="violates numerical unitarity"):
+            make_plan(phase=True, target=matrix)
+    assert decompositions.count(True) == 1
+    assert len(entrywise_calls) == entrywise

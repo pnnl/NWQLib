@@ -67,14 +67,6 @@ def description(backend, method, **changes):
     return SimpleNamespace(stdout=json.dumps(fields))
 
 
-def _phase_factor_reply(argv, factor, queries):
-    """Stub runner: the supplied output phase factor for --phase-factor, the CPU/SV description otherwise."""
-    if argv[1] == "--phase-factor":
-        queries.append(argv[2])
-        return SimpleNamespace(stdout=json.dumps(dict(format="nwqlib.nwqsim/3", phase_factor=list(factor))))
-    return description("CPU", "SV", roundoff_base_revision=REVISION, roundoff_sources_identical=True)
-
-
 @pytest.mark.parametrize("backend,method", [("CPU", "SV"), ("MPI", "SV")])
 def test_selected_target_public_detached_resume_keeps_one_job_and_shot_population(
     tmp_path, monkeypatch, backend, method
@@ -198,6 +190,35 @@ def test_buffer_admission_uses_actual_method_and_rank_populations(
     config.revise(max_buffer_bytes=state + samples).prepare(circuit, **kwargs)
 
 
+@pytest.mark.parametrize("observation,needed", [
+    (ObservationSpec(kind="counts", shots=1000), 4 * (2 + 36)),
+    (ObservationSpec(kind="pauli_expectation", labels=("ZIIZ",)), 4 + 36),
+    (ObservationSpec(kind="probabilities", qubits=(0, 1)), 8 * 4),
+])
+def test_result_values_and_side_files_beyond_max_output_bytes_refuse_at_preparation(
+        tmp_path, monkeypatch, observation, needed):
+    """A readout whose result values and side files alone exceed max_output_bytes is refused before any job.
+
+    Counts on two measured qubits keep at most 4 of the 1000 shots' outcomes, at 2 key bits plus 36 bytes
+    each, a Pauli value its 4-letter label plus 36 bytes and a two-qubit marginal a 32-byte side file
+    (``nwqsim._output_bytes``). The runner, which also counts its JSON header, would refuse these only
+    after the job was launched or queued.
+    """
+    from qiskit import QuantumCircuit
+
+    monkeypatch.setattr(nwqsim.subprocess, "run", lambda *args, **kwargs: description("CPU", "SV"))
+    counts = observation.kind == "counts"
+    circuit = QuantumCircuit(4, 2 if counts else 0)
+    circuit.x(0)
+    if counts:
+        circuit.measure([0, 3], [0, 1])
+    kwargs = dict(observation=observation, runtime=RuntimeOptions(seed=23), position=len(circuit.data),
+                  source_definitions=(), snapshot="arrays", run=IO())
+    with pytest.raises(ValueError, match=f"more than {needed} bytes .* max_output_bytes={needed - 1}"):
+        configured(tmp_path, max_output_bytes=needed - 1).prepare(circuit, **kwargs)
+    configured(tmp_path, max_output_bytes=needed).prepare(circuit, **kwargs)
+
+
 @pytest.mark.parametrize(
     "history,identical",
     [("descendant", "1"), ("changed_kernel", "0")],
@@ -250,7 +271,13 @@ def test_build_compiles_the_roundoff_derivation_rule_into_the_runner(tmp_path, m
 
 
 def test_local_process_without_result_stays_uncertain_and_is_not_relaunched(tmp_path, monkeypatch):
-    """Injected process state: an absent process without output is uncertain."""
+    """Injected process state: an absent process without output is uncertain, and waiting stops.
+
+    The job's end without a result survives a reopened Run, so a later wait does not poll it, and the output
+    can still arrive: a result is not ruled out, only no longer waited for.
+    """
+    from nwqlib.execution import RunFailed
+
     selected, config = selection(), configured(tmp_path)
     launches, signals = [], []
     process = SimpleNamespace(pid=987654, poll=lambda: None)
@@ -265,9 +292,11 @@ def test_local_process_without_result_stays_uncertain_and_is_not_relaunched(tmp_
 
     def outcome(run):
         run.resume()
-        with pytest.raises(TimeoutError):
-            run.wait(timeout=0)
+        with pytest.raises(RunFailed) as stopped:
+            run.wait(timeout=1, poll_interval=.01)
+        assert (stopped.value.stage, stopped.value.status) == ("recovery", "uncertain")
         (submission,) = run._state["submissions"].values()
+        assert submission.terminal_without_result and stopped.value.locator == submission.locator
         return submission.status, submission.failure, [event.status for event in run.trace.events]
 
     journal = tmp_path / "run"
@@ -279,6 +308,33 @@ def test_local_process_without_result_stays_uncertain_and_is_not_relaunched(tmp_
     assert observed == (
         "uncertain", "native process is absent and no terminal result is available", ["uncertain"])
     assert len(launches) == 1 and all(number == 0 for _, number in signals)
+    with load_run(journal, backend=config) as run:
+        (submission,) = run._state["submissions"].values()
+        assert submission.terminal_without_result and len(launches) == 1
+
+
+def test_a_request_beyond_the_data_limit_counts_nothing_and_continues_after_extend_limits(tmp_path, monkeypatch):
+    """The request's bytes are known before anything leaves the process, so nothing can be uncertain.
+
+    A refused submission leaves no submission, attempt or exposure, and starts no process. Following the
+    refusal's remedy, the same Run submits the same preparation once.
+    """
+    from nwqlib.execution import ExecutionLimits
+
+    selected, launches = selection(), []
+    config = configured(tmp_path, max_output_bytes=1 << 30)
+    monkeypatch.setattr(nwqsim.subprocess, "run", lambda *args, **kwargs: description("CPU", "SV"))
+    monkeypatch.setattr(nwqsim.subprocess, "Popen",
+                        lambda argv, **kwargs: launches.append(argv) or SimpleNamespace(pid=987654, poll=lambda: None))
+    with Run(selected, backend=config, directory=tmp_path / "run", limits=ExecutionLimits(max_data_bytes=1 << 22)) as run:
+        with pytest.raises(ValueError, match=r"max_data_bytes=4194304.*run\.extend_limits\(max_data_bytes="):
+            run.resume()
+        assert run.trace.submissions == () and run.trace.events == () and run.trace.jobs == 0
+        assert run.trace.preparations == 1 and launches == [] and not (tmp_path / "spool").exists()
+        run.extend_limits(max_data_bytes=1 << 32)
+        run.resume()
+        assert len(launches) == 1 and run.trace.preparations == 1 and run.trace.jobs == 1
+        assert run.trace.submissions[0].status == "acknowledged"
 
 
 def test_local_lost_acknowledgement_binds_only_the_original_output_without_relaunch(tmp_path, monkeypatch):
@@ -339,8 +395,10 @@ def test_every_mpi_rank_input_read_is_admitted_before_launch(tmp_path, monkeypat
     )
     run = IO()
     run.check_data = lambda size: recorded.append(size)
-    config.launch((native,), submission_id=str(uuid4()), run=run)
+    config.admit_submission((native,), run=run)
     assert recorded == [5 * len(payload) + config.max_output_bytes]
+    assert launches == []
+    config.launch((native,), submission_id=str(uuid4()), run=run)
     assert len(launches) == 1
     profile = SlurmProfile(
         cluster="site",
@@ -429,35 +487,29 @@ def test_prepare_lowers_dense_unitaries_exactly(tmp_path, monkeypatch):
     assert prepared.transformation.startswith("exact dense-unitary synthesis")
 
 
-def test_prepare_admits_dense_synthesis_against_the_run_limit(tmp_path, monkeypatch):
-    # U/CX lowering synthesizes the three-qubit unitary exactly. One work
-    # unit below its law, the Run's max_synthesis_work refuses the
-    # preparation before the synthesis starts.
-    import numpy as np
+def test_prepare_counts_the_dense_synthesis_it_makes(tmp_path, monkeypatch):
+    # U/CX lowering synthesizes the three-qubit unitary exactly, and the Run
+    # counts its work by its law once the synthesis is made.
     from qiskit import QuantumCircuit
     from qiskit.circuit.library import UnitaryGate
     from qiskit.quantum_info import random_unitary
-    from nwqlib.execution import ExecutionLimits
-    from nwqlib.subroutines import _dense_synthesis
+    from test_dense_synthesis import _counted_syntheses, _dense_synthesis_work
 
     monkeypatch.setattr(nwqsim.subprocess, "run", lambda *args, **kwargs: description("CPU", "SV"))
     circuit = QuantumCircuit(3, 3)
     circuit.append(UnitaryGate(random_unitary(8, seed=37).data), [0, 1, 2])
     circuit.measure([0, 1, 2], [0, 1, 2])
-    from test_dense_synthesis import _dense_synthesis_work
-    need = _dense_synthesis_work(3)
-    started = []
-    monkeypatch.setattr(_dense_synthesis, "dense_unitary_circuit",
-                        lambda matrix: started.append(np.shape(matrix)) or pytest.fail("synthesis started"))
+    calls = _counted_syntheses(monkeypatch)
+    recorded = []
 
-    class Limited(IO):
-        limits = ExecutionLimits(max_data_bytes=1_000_000, max_synthesis_work=need - 1)
+    class Recorded(IO):
+        def _record_synthesis(self, work):
+            recorded.append((work, list(calls)))
 
-    with pytest.raises(ValueError, match="max_synthesis_work"):
-        configured(tmp_path).prepare(
-            circuit, observation=ObservationSpec(kind="counts", shots=4), runtime=RuntimeOptions(seed=23),
-            position=len(circuit.data), source_definitions=(), snapshot="dense", run=Limited())
-    assert started == []
+    configured(tmp_path).prepare(
+        circuit, observation=ObservationSpec(kind="counts", shots=4), runtime=RuntimeOptions(seed=23),
+        position=len(circuit.data), source_definitions=(), snapshot="dense", run=Recorded())
+    assert recorded == [(_dense_synthesis_work(3), [3])] and calls == [3]
 
 
 def exact_selection():
@@ -608,18 +660,20 @@ def test_trajectory_boundaries_survive_the_selected_optimization_level(tmp_path,
     assert receipt.state_error()[0] is None
 
 
-def test_amplitude_endpoint_request_carries_and_charges_the_runner_phase_factor(tmp_path, monkeypatch):
-    # An amplitude endpoint is multiplied by the output phase factor that the
-    # runner reports during preparation. The request carries that pair and
-    # the receipt's statevector_roundoff is its envelope
+def test_amplitude_endpoint_request_carries_and_charges_its_phase_factor(tmp_path, monkeypatch):
+    # An amplitude endpoint is multiplied by exp(i*global_phase), which
+    # preparation forms without running the runner again. The request carries
+    # that pair and the receipt's statevector_roundoff is its envelope
     # (_phase_product.phase_product_envelope).
+    import cmath
     from qiskit import QuantumCircuit
     from nwqlib._phase_product import phase_product_envelope
     from test_amplitude_masses import readout
 
-    factor = (0.7443505388340905, 0.6677890949524401)
-    queries = []
-    monkeypatch.setattr(nwqsim.subprocess, "run", lambda argv, **kwargs: _phase_factor_reply(argv, factor, queries))
+    factor = cmath.rect(1.0, 0.25)
+    calls = []
+    monkeypatch.setattr(nwqsim.subprocess, "run", lambda argv, **kwargs: calls.append(argv[1:]) or description(
+        "CPU", "SV", roundoff_base_revision=REVISION, roundoff_sources_identical=True))
     circuit = QuantumCircuit(2, global_phase=0.25)
     circuit.h(0)
     prepared = configured(tmp_path).prepare(
@@ -629,5 +683,54 @@ def test_amplitude_endpoint_request_carries_and_charges_the_runner_phase_factor(
         runtime=RuntimeOptions(seed=23), position=len(circuit.data), source_definitions=(), snapshot="amplitudes",
         run=IO())
     request = json.loads(prepared.native.payload)
-    assert len(queries) == 1 and request["phase_factor"] == list(factor)
-    assert prepared.statevector_roundoff == phase_product_envelope(complex(*factor), 4)
+    assert calls == [["--describe"]] and request["phase_factor"] == [factor.real, factor.imag]
+    assert prepared.statevector_roundoff == phase_product_envelope(factor, 4)
+
+
+@pytest.mark.parametrize("kind", ["pauli_expectation", "trajectory"])
+@pytest.mark.parametrize("stop, need", [(0, None), (1, None), (2, 2 * 9_728)])
+def test_nwqsim_counts_only_the_direct_preparations_of_its_executed_prefix(tmp_path, monkeypatch, kind, stop, need):
+    """The local runner translates the body only up to a Pauli readout or the last trajectory point.
+
+    Of three calls of one 3-qubit PREP, whose tree takes 256*(4*2**3 + 2*3) = 9,728 bytes, it builds
+    ``stop`` trees. The circuit's three instructions take 768 bytes more, so with 10,497 bytes of
+    physical memory stops 0 and 1 prepare, writing 13 gates per call, and stop 2 is refused before its
+    charge. Preparation runs only the stubbed ``--describe``.
+    """
+    import numpy as np
+    import nwqlib
+    from nwqlib import _limits
+    from nwqlib.algorithms.expectation import ExpectationMethod
+    from nwqlib.core.planning import Experiment, ObservationPoint
+    from nwqlib.ir import Definition, Sequence
+    from nwqlib.operators import ingest_pauli
+    from nwqlib.subroutines.state_preparation.direct import DirectPreparationGate
+
+    calls = []
+    monkeypatch.setattr(nwqsim.subprocess, "run",
+                        lambda command, *args, **kwargs: calls.append(command[1:]) or description("CPU", "SV"))
+    amplitudes = np.arange(1., 9.)
+    base = nwqlib.plan(nwqlib.Expectation(state=amplitudes / np.linalg.norm(amplitudes),
+                                          observable=ingest_pauli((("ZZZ", 1.),), num_qubits=3)),
+                       method=ExpectationMethod(), seed=36)
+    program = base.construction.program
+    program = program.revise(definitions=tuple(item for item in program.definitions if item.id != "root") + (
+        Definition(id="root", node=Sequence(children=("allocate", "prepare", "prepare", "prepare"))),))
+    observation = (ObservationSpec(kind="trajectory", positions=tuple(
+        ObservationPoint(id=f"at{boundary}", kind="pauli_expectation", labels=("ZZZ",), position=boundary)
+        for boundary in sorted({0, stop}))) if kind == "trajectory"
+        else ObservationSpec(kind="pauli_expectation", labels=("ZZZ",), position=stop))
+    selected = base.revise(construction=base.construction.revise(program=program), experiments=(
+        Experiment(name="prefix", setting="prefix", observation=observation),))._bind(blocks=base.blocks)
+    original, built = DirectPreparationGate._define, []
+    monkeypatch.setattr(DirectPreparationGate, "_define", lambda gate: built.append(gate) or original(gate))
+    with Run(selected, backend=configured(tmp_path)) as run:
+        monkeypatch.setattr(_limits, "physical_memory_bytes", lambda: 10_497)
+        if need is None:
+            handle = prepare(selected.resolve("prefix"), run=run)
+            assert len(json.loads(handle._native.payload)["gates"]) == 13 * stop
+        else:
+            with pytest.raises(ValueError, match=f"direct state preparations of this circuit needs about {need} bytes"):
+                prepare(selected.resolve("prefix"), run=run)
+        assert len(built) == (stop if need is None else 0) and run.trace.preparations == int(need is None)
+        assert run.trace.jobs == 0 and all(command == ["--describe"] for command in calls)

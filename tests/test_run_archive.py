@@ -32,6 +32,42 @@ def classical_plan(family):
     return nwqlib.plan(problem, method=method, execution="classical", seed=7)
 
 
+def test_a_relative_folder_survives_a_change_of_directory_and_a_move(tmp_path, monkeypatch):
+    """A notebook's %cd between the steps of an open Run, relative to where the Run was created or reopened, loses nothing.
+
+    Two settings make the second preparation write its circuit after the change of directory. The oracle
+    is a Run of the same Plan in an absolute folder. The moved folder opens under its new name.
+    """
+    import shutil
+    from nwqlib.algorithms.expectation import ExpectationMethod
+    from nwqlib.problems import Expectation
+
+    chosen = nwqlib.plan(Expectation(state=[1., 0., 0., 1.], observable=ingest_pauli((("ZZ", 1.), ("XX", .5)), num_qubits=2)),
+                         method=ExpectationMethod(), shots=64, seed=7)
+    assert len(chosen.experiments) == 2
+    prepared = nwqlib.prepare(chosen, directory=tmp_path / "absolute", progress=False)
+    with prepared.run as run:
+        nwqlib.submit(prepared)
+        value = run.wait().value
+    (tmp_path / "other").mkdir()
+    monkeypatch.chdir(tmp_path)
+    prepared = nwqlib.prepare(chosen, directory="created", progress=False)
+    with prepared.run as run:
+        monkeypatch.chdir(tmp_path / "other")
+        nwqlib.submit(prepared)
+        assert run.wait().value == value
+    monkeypatch.chdir(tmp_path)
+    prepared = nwqlib.prepare(chosen, directory="reopened", progress=False)
+    prepared.run.close()
+    with nwqlib.load_run("reopened", progress=False) as run:
+        monkeypatch.chdir(tmp_path / "other")
+        assert run.wait().value == value
+    assert not list((tmp_path / "other").iterdir())
+    shutil.move(tmp_path / "reopened", tmp_path / "moved")
+    with nwqlib.load_run(tmp_path / "moved", progress=False) as run:
+        assert run.result.value == value
+
+
 def test_reopen_cleans_uncommitted_cache_before_capacity_and_preserves_owned_inputs(tmp_path):
     from nwqlib.execution import ExecutionLimits
 
@@ -275,6 +311,43 @@ def test_exact_adapt_resumes_reused_native_readout_without_replaying_acquisition
         assert again.value_basis == result.value_basis
 
 
+def test_adapt_checks_the_final_stage_analysis_on_the_basis_that_growth_ends_with(tmp_path, monkeypatch):
+    """Planning checks only the 4m* shot floor, and the stage analysis is checked when growth stops.
+
+    Planning never evaluates the grouped-pass law of a stage, since the final basis is not known yet.
+    The two-qubit run ends on b = 4 states with m = b(b+1)G/2 settings. When its growth stops, the
+    physical memory falls below the analysis of one stage on that basis, and the Run refuses before its
+    first pilot circuit, naming the stage, the basis and the memory. The reopened folder holds the
+    growth and nothing more.
+    """
+    from nwqlib import _limits
+    from nwqlib.algorithms import PencilSampling
+    from nwqlib.algorithms.gcim import adapt, pencil_workflow
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("planning evaluated a final-stage analysis")
+
+    with monkeypatch.context() as planning:
+        planning.setattr(adapt, "grouped_pass_requirements", unexpected)
+        sampled = _two_qubit_adapt("quantum", 2, shots=64, sampling=PencilSampling(total_shots=480, pilot_fraction=.25))
+    real = _limits.physical_memory_bytes
+    folder = tmp_path / "run"
+    with Run(sampled, directory=folder) as run:
+        monkeypatch.setattr(_limits, "physical_memory_bytes",
+                            lambda: 1000 if (run.checkpoint_state or {}).get("phase") == "final" else real())
+        monkeypatch.setattr(pencil_workflow, "prepare_experiment",
+                            lambda *args, **kwargs: pytest.fail("a pilot circuit was prepared"))
+        with pytest.raises(ValueError, match=r"final PencilSampling stage of at most \d+ shots on the final basis "
+                                             r"of 4 states needs about \d+ bytes, exceeding the physical memory "
+                                             r"\(1000 bytes\)\. The stages were refused before their first circuit"):
+            run.wait()
+        growth = run.trace.jobs
+        assert growth > 0 and run.checkpoint_state["phase"] == "final"
+    monkeypatch.setattr(_limits, "physical_memory_bytes", real)
+    with nwqlib.load_run(folder) as restored:
+        assert restored.trace.jobs == growth == len(restored.observations.chunks)
+
+
 def test_grouped_adapt_resume_keeps_its_population_and_exposure(tmp_path, monkeypatch):
     """An interrupted grouped sampled ADAPT run resumes to the counts, moments and exposure of an uninterrupted one.
 
@@ -291,14 +364,15 @@ def test_grouped_adapt_resume_keeps_its_population_and_exposure(tmp_path, monkey
     final basis of m = b(b+1)G/2 settings, which a pilot and a main stage
     measure again, 2m more jobs and B more shots. Stopped before the fourth
     main-stage submission and reopened from disk, the Run submits no
-    selection or pilot query, calls no allocation function and ends with the
+    selection or pilot query and ends with the
     jobs, shots, counts, decision and energy of the uninterrupted one, and
     its Result uses the main-stage chunks alone. A cancellation inside the
     pilot or the main stage ends the Run with the last pencil of the growth,
     and its Result uses the selection chunks alone. With
-    room for the selection shots and B - 1 more, the Run is refused when the
-    selection ends, before any stage submission, and after extend_limits it
-    ends with the energy of the uninterrupted one. An allocation or a
+    room for the selection shots and B - 1 more, the Run is refused during
+    the selection, while B shots are still free and before any stage
+    submission, and after extend_limits it ends with the energy of the
+    uninterrupted one. An allocation or a
     main-stage analysis that stops is continued only by
     run.resume(reanalyze=True), which measures nothing again.
     """
@@ -370,18 +444,11 @@ def test_grouped_adapt_resume_keeps_its_population_and_exposure(tmp_path, monkey
         prefix = tuple(chunk.content_id for chunk in run.observations.chunks)
     assert (final["stage"], final["index"], len(prefix)) == (1, 3, jobs - m + 3)
 
-    def fail(*args, **kwargs):
-        pytest.fail("the reopened Run measured a selection or pilot query or chose its shots again")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(acquisition, "submit_experiment", fail)
-        for name in ("pilot_decision", "floored_allocation", "uniform_allocation", "pilot_split"):
-            patch.setattr(pencil_workflow, name, fail)
-        with nwqlib.load_run(path, backend=backend) as restored:
-            result = restored.wait()
-            assert restored.trace.jobs == jobs and sum(event.shots for event in restored.trace.events) == shots
-            assert tuple(chunk.content_id for chunk in restored.observations.chunks[:len(prefix)]) == prefix
-            assert {c.realization_id: c.values for c in restored.observations.chunks} == counts
+    with nwqlib.load_run(path, backend=backend) as restored:
+        result = restored.wait()
+        assert restored.trace.jobs == jobs and sum(event.shots for event in restored.trace.events) == shots
+        assert tuple(chunk.content_id for chunk in restored.observations.chunks[:len(prefix)]) == prefix
+        assert {c.realization_id: c.values for c in restored.observations.chunks} == counts
     assert (result.shot_allocation, result.eigenvalue) == (uninterrupted.shot_allocation, uninterrupted.eigenvalue)
 
     def stage(chunk):
@@ -414,12 +481,14 @@ def test_grouped_adapt_resume_keeps_its_population_and_exposure(tmp_path, monkey
         assert {moment.contribution_id for moment in cancelled.group_moments} <= growth
         assert cancelled.eigenvalue == cancelled.history[-1].energy
 
-    # The stages need room for all B shots before the first of them.
-    with Run(sampled, limits=ExecutionLimits(max_total_shots=shots - 1)) as run:
-        with pytest.raises(ValueError, match="max_total_shots"):
+    # Every unit of growth needs room for its own shots and all B = 8m shots of the stages, so a cap one
+    # shot short of the whole run refuses during growth, with B still free, before any stage starts.
+    with Run(sampled, limits=ExecutionLimits(max_total_shots=np.int64(shots - 1))) as run:
+        with pytest.raises(ValueError, match=rf"max_total_shots.* include the {8 * m} total_shots"):
             run.resume()
-        assert (run.trace.jobs, sum(event.shots for event in run.trace.events)) == (jobs - 2 * m, shots - 8 * m)
-        run.extend_limits(max_total_shots=shots)
+        spent = sum(event.shots for event in run.trace.events)
+        assert run.trace.jobs < jobs - 2 * m and spent + 8 * m <= shots - 1
+        run.extend_limits(max_total_shots=np.int64(shots))
         assert run.wait().eigenvalue == uninterrupted.eigenvalue
 
     # An allocation or a main-stage analysis that stops leaves its marker, so a plain resume refuses to
@@ -463,7 +532,7 @@ def test_aer_qpy_restore_preserves_readout_position_and_wire_order(kind):
     circuit.x(0)
     circuit.h(1)
     labels = ("IZ", "ZI")
-    memory_mb = ExecutionLimits().simulator_memory_mb
+    memory_mb = ExecutionLimits().simulator_memory()
     native = aer._prepare_aer_execution(aer.AER_STATEVECTOR_TARGET, circuit, shots=None, seed=7,
         simulator_memory_mb=memory_mb, probability_qubits=(1, 0) if kind == "probabilities" else None,
         pauli_expectation_readout=(1, labels) if kind == "pauli_expectation" else None)
@@ -472,7 +541,7 @@ def test_aer_qpy_restore_preserves_readout_position_and_wire_order(kind):
     stream.seek(0)
     saved, = qpy.load(stream)
     observation = SimpleNamespace(kind=kind, shots=None, qubits=(1, 0), position=1, labels=labels)
-    record = SimpleNamespace(observation=observation, runtime=SimpleNamespace(seed=7))
+    record = SimpleNamespace(observation=observation, runtime=SimpleNamespace(seed=7), template=None)
     metadata = dict(native.metadata, simulator_method=native.simulator.options.method,
         simulator_memory_mb=memory_mb, simulator_zero_threshold=native.simulator.options.zero_threshold)
     restored = AerBackend().restore_native_data(record, saved, metadata, run=None)

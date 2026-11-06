@@ -1,13 +1,13 @@
 """Original-coordinate inputs shared by Hermitian eigenvalue methods."""
 
-from math import fsum, isfinite
+from math import frexp, fsum, isfinite
 
 import numpy as np
 
 from nwqlib.algorithms.protocol import ApplicabilityError
-from nwqlib.operators.access import DEFAULT_INPUT_BYTES, _check_bytes
-from nwqlib.operators.inputs import ingest_pauli
-from nwqlib.operators._pauli import pauli_coefficients
+from nwqlib.operators.access import _check_bytes
+from nwqlib.operators.inputs import _distinct_pauli_input
+from nwqlib.operators._pauli import pauli_coefficient_masks
 from nwqlib.problems.inputs import ingest_vector, ingest_product, state_input
 from nwqlib.problems.records import Eigenproblem, Eigenvalue
 
@@ -16,7 +16,6 @@ from nwqlib.problems.records import Eigenproblem, Eigenvalue
 # conversion request. ENGINEERING_CONSTANTS.md, "Eigen input conversion and
 # classical preparation", lists the methods that share it.
 AUTO_DENSE_PAULI_DIMENSION = 16
-DEFAULT_CONVERSION_WORK = 100_000_000  # q*D² block-transform traffic, not a time estimate.
 
 # Qiskit standard gates whose statevector action is a fixed dense k-qubit
 # matrix, so preparation_requirements can count d*2**k products per gate. A
@@ -30,16 +29,19 @@ _STANDARD_GATE_NAMES = frozenset((
 ))
 
 
-def conversion_requirements(operator, *, input_conversion, max_conversion_work, max_bytes):
-    """Check one dense-to-Pauli conversion against the limits and return (q, D, work) before allocation.
+def conversion_requirements(operator, *, input_conversion, max_bytes):
+    """Check one dense-to-Pauli conversion against max_bytes and return (q, D) before allocation.
 
     q=max(1, ceil(log2 d)) qubits embed the original dimension d in D=2**q.
-    The block transform of operators._pauli.pauli_coefficients makes q passes
-    over D*D entries, so work=q*D*D. ADAPT sums this work over every matrix
-    it converts. Raises ApplicabilityError for input other than dense, CSR
-    or CSC and when automatic conversion does not apply. Raises ValueError
-    for an unknown input_conversion, for work above max_conversion_work and
-    for bytes above max_bytes.
+    The bytes checked here are those of the block transform of
+    operators._pauli.pauli_coefficient_masks, 64*D*D: the padded complex128
+    matrix, the two active transform levels and the componentwise
+    temporaries of one level. The number R of nonzero words is known only
+    after the transform, so pauli_coefficient_masks checks the packed masks,
+    and a caller that forms labels checks them with its label decoding.
+    Raises ApplicabilityError for input other than dense, CSR or CSC and
+    when automatic conversion does not apply. Raises ValueError for an
+    unknown input_conversion and for bytes above max_bytes.
     """
     d = operator.basis.dimension
     representation = operator.reference.representation
@@ -50,23 +52,49 @@ def conversion_requirements(operator, *, input_conversion, max_conversion_work, 
     if input_conversion == "auto" and (representation != "dense" or d > AUTO_DENSE_PAULI_DIMENSION):
         raise ApplicabilityError(
             f"automatic Pauli conversion requires explicit dense dimension <={AUTO_DENSE_PAULI_DIMENSION}; "
-            "choose input_conversion='dense_pauli' with max_conversion_work, "
+            "choose input_conversion='dense_pauli', "
             "or classical execution for original matvec access"
         )
     width = max(1, (d - 1).bit_length())
     dimension = 1 << width
-    if width * dimension * dimension > max_conversion_work:
-        raise ValueError("eigenvalue Pauli conversion exceeds max_conversion_work")
-    # 64*D*D: four complex128 D-by-D buffers (the padded matrix and the two
-    # active transform levels with a temporary). q*D*D: one byte per qubit of
-    # each of the D*D potential Pauli labels.
-    _check_bytes((64 + width) * dimension * dimension, max_bytes, "eigenvalue Pauli conversion")
-    return width, dimension, width * dimension * dimension
+    # The padded matrix, the two active transform levels and the
+    # componentwise temporaries: four complex128 D-by-D arrays.
+    _check_bytes(64 * dimension * dimension, max_bytes, "eigenvalue Pauli conversion")
+    return width, dimension
 
 
-def dense_pauli_matrix(
-    operator, *, input_conversion, max_conversion_work, max_bytes, padding="zero"
-):
+def _mean_diagonal(operator, *, max_bytes):
+    """Return ``c = trace(A)/d``, the value of mean padding and the identity component a classical projection removes.
+
+    For Pauli input this is the identity coefficient, exactly the identity
+    component of the Pauli expansion. For dense and CSR/CSC input it is the
+    mean of the diagonal. Other representations give zero and keep their
+    action. Any c gives the same Ritz values in exact arithmetic, since the
+    solve adds it back. The mean diagonal is the mean eigenvalue, so it lies in
+    [lambda_min, lambda_max] and ``||A - cI||_2 <= lambda_max - lambda_min``,
+    a bound that an identity offset of A does not change.
+
+    An exactly constant diagonal is its own mean. The rounded sum of d
+    quotients can miss it by a unit in the last place (c = .9, d = 3), and then
+    the padded or shifted form of H = cI has a nonzero nonidentity part made of
+    rounding. Each a_ii is otherwise divided by d before the fsum, because
+    fsum(diag/d) and fsum(diag)/d do not generally round identically and the
+    latter can overflow before division. fsum of one entry returns it exactly,
+    apart from -0.0, which becomes the 0.0 that the sum of quotients gives.
+    """
+    representation = operator.reference.representation
+    d = operator.basis.dimension
+    if representation == "pauli":
+        identity = "I" * (d.bit_length() - 1)
+        return fsum(c.real for label, c in operator.pauli_terms().labels(max_bytes=max_bytes)
+                    if label == identity)
+    if representation in ("dense", "csr", "csc"):
+        diagonal = operator._data.diagonal().real
+        return fsum(diagonal[:1] if diagonal.min() == diagonal.max() else diagonal / d)
+    return 0.0
+
+
+def dense_pauli_matrix(operator, *, input_conversion, max_bytes, padding="zero"):
     """Return A embedded in a complex128 D-by-D matrix, D=2**max(1, ceil(log2 d)).
 
     The conversion is checked against the limits before the matrix is allocated. Dense input is
@@ -74,12 +102,7 @@ def dense_pauli_matrix(
     padding="zero" leaves the dummy diagonal at zero. padding="mean" writes
     trace(A)/d there, the choice eigen_operator explains.
     """
-    _, dimension, _ = conversion_requirements(
-        operator,
-        input_conversion=input_conversion,
-        max_conversion_work=max_conversion_work,
-        max_bytes=max_bytes,
-    )
+    _, dimension = conversion_requirements(operator, input_conversion=input_conversion, max_bytes=max_bytes)
     d = operator.basis.dimension
     representation = operator.reference.representation
     matrix = np.zeros((dimension, dimension), dtype=complex)
@@ -93,8 +116,7 @@ def dense_pauli_matrix(
             else:
                 matrix[indices[indptr[i] : indptr[i + 1]], i] = data[indptr[i] : indptr[i + 1]]
     if dimension != d and padding == "mean":
-        mean = fsum(float(matrix[i, i].real) / d for i in range(d))
-        matrix[np.arange(d, dimension), np.arange(d, dimension)] = mean
+        matrix[np.arange(d, dimension), np.arange(d, dimension)] = _mean_diagonal(operator, max_bytes=max_bytes)
     return matrix
 
 
@@ -102,10 +124,9 @@ def eigen_operator(
     problem,
     output,
     *,
-    max_bytes=DEFAULT_INPUT_BYTES,
+    max_bytes=None,
     as_pauli=True,
     input_conversion="auto",
-    max_conversion_work=DEFAULT_CONVERSION_WORK,
     pad_classical=False,
 ):
     """Choose Pauli access.
@@ -130,6 +151,9 @@ def eigen_operator(
         raise ApplicabilityError("this method requires Eigenproblem and Eigenvalue")
     operator = problem.A
     if not as_pauli:
+        if operator.reference.representation not in ("pauli", "dense", "csr", "csc"):
+            raise ApplicabilityError("classical execution of this Method needs dense, CSR, CSC or Pauli input, "
+                                     f"and this input is {operator.reference.representation}")
         d = problem.dimension
         dimension = 1 << max(1, (d - 1).bit_length())
         if pad_classical and dimension != d:
@@ -146,13 +170,8 @@ def eigen_operator(
                     max_bytes,
                     "classical ADAPT sparse embedding",
                 )
-                matrix = operator._data
-                # Each a_ii is divided by d before the fsum: fsum(diag/d) and
-                # fsum(diag)/d do not generally round identically, and the
-                # latter can overflow before division.
-                mean = fsum(matrix.diagonal().real / d)
                 padded = block_diag(
-                    (matrix, diags(np.full(dimension - d, mean))),
+                    (operator._data, diags(np.full(dimension - d, _mean_diagonal(operator, max_bytes=max_bytes)))),
                     format=operator.reference.representation,
                 )
                 return ingest_sparse(padded, max_bytes=max_bytes)
@@ -161,8 +180,7 @@ def eigen_operator(
             _check_bytes(64 * dimension * dimension, max_bytes, "classical ADAPT embedding")
             matrix = np.zeros((dimension, dimension), dtype=complex)
             matrix[:d, :d] = operator.dense_array()
-            mean = fsum(matrix.diagonal()[:d].real / d)
-            matrix[np.arange(d, dimension), np.arange(d, dimension)] = mean
+            matrix[np.arange(d, dimension), np.arange(d, dimension)] = _mean_diagonal(operator, max_bytes=max_bytes)
             return ingest_dense(matrix, max_bytes=max_bytes)
         return operator
     if "pauli_terms" in operator.manifest.access:
@@ -172,19 +190,25 @@ def eigen_operator(
     matrix = dense_pauli_matrix(
         operator,
         input_conversion=input_conversion,
-        max_conversion_work=max_conversion_work,
         max_bytes=max_bytes,
         padding="mean",
     )
-    terms = pauli_coefficients(matrix)
-    if any(coefficient.imag != 0 for _, coefficient in terms):
+    # The words go to the operator as packed masks, never as one Python
+    # label and coefficient per word. The transform's words are distinct
+    # and nonzero, so they need no coalescing.
+    x, z, coefficients = pauli_coefficient_masks(matrix, max_bytes=max_bytes)
+    del matrix
+    if np.any(coefficients.imag != 0):
         raise ValueError("Hermitian Pauli transform produced nonreal coefficients")
-    return ingest_pauli(
-        ((label, c.real) for label, c in terms), num_qubits=width, max_bytes=max_bytes
-    )
+    # The masks and the real coefficients, then the operator's copy of both.
+    # The records that later hold kept terms check their own bytes.
+    _check_bytes(len(x) * 2 * (16 * x.shape[1] + 16), max_bytes, "eigenvalue Pauli operator")
+    values = coefficients.real.astype(np.complex128)
+    del coefficients
+    return _distinct_pauli_input(width, x, z, values)
 
 
-def eigen_state(value, problem, *, rng=None, max_bytes=DEFAULT_INPUT_BYTES, pad=True):
+def eigen_state(value, problem, *, rng=None, max_bytes=None, pad=True):
     """Resolve initialization in original coordinates, then zero-pad if necessary.
 
     Without a supplied state, the method RNG draws a random product state
@@ -359,18 +383,64 @@ def classical_constant_matrix(a, *, compressed):
     return float(diagonal[0].real) if np.all(diagonal == diagonal[0]) else None
 
 
-def gershgorin_frame(operator, *, max_bytes):
-    """Return a scaled Hermitian Gershgorin frame without an eigensolve.
+# Below this largest row extent max_i(|a_ii| + r_i), the absolute term
+# tiny = 2**-1022 of the Gershgorin margin exceeds 2**-53 times the extent,
+# so gershgorin_frame scales the entries up by a power of two first.
+_SMALL_FRAME_EXTENT = 2.0**-969
 
-    Magnitudes are computed from scaled real and imaginary components,
-    diagonal magnitudes are zeroed before reduction, and empty compressed
-    rows or columns have zero radius. The outward allowance uses
-    ``(8*n+16)*eps``, where n counts stored off-diagonal entries and eps is
-    2**-52. It covers sequential or pairwise positive summation under
-    round-to-nearest binary64 arithmetic, gradual underflow and a one-ulp
-    hypot assumption. This is a conditional numerical enclosure, not a
-    directed-rounding certificate. Scalar operators return their exact
-    scalar value and zero half-width.
+
+def _gershgorin_rows(a, d, compressed, exponent):
+    """Return (radius, center, off_count) of a dense, CSR or CSC Hermitian matrix with entries scaled by 2**exponent.
+
+    radius holds the off-diagonal magnitude sums of the rows (the columns
+    for CSC), center the real diagonal and off_count the stored
+    off-diagonal entries per row as int64. ``exponent`` is 0 or positive.
+    Multiplying a binary64 component by a positive power of two is exact as
+    long as the result does not overflow, so the scaled entries carry the
+    stored bits of the matrix.
+    """
+    values = a.data if compressed else a
+    if exponent:
+        if np.iscomplexobj(values):
+            magnitude = np.ldexp(values.real, exponent)
+            np.hypot(magnitude, np.ldexp(values.imag, exponent), out=magnitude)
+        else:
+            magnitude = np.abs(np.ldexp(values, exponent))
+        center = np.ldexp(a.diagonal().real, exponent)
+    else:
+        magnitude = np.abs(values)
+        center = a.diagonal().real
+    if compressed:
+        counts = np.diff(a.indptr).astype(np.int64)
+        major = np.repeat(np.arange(d, dtype=np.intp), counts)
+        is_diagonal = a.indices == major
+        diag_positions = np.flatnonzero(is_diagonal)
+        off_count = counts.copy()
+        off_count[major[diag_positions]] -= 1
+        magnitude[diag_positions] = 0.0
+        del major, is_diagonal, diag_positions
+        nonempty = np.flatnonzero(counts)
+        radius = np.zeros(d)
+        if nonempty.size:
+            radius[nonempty] = np.add.reduceat(magnitude, a.indptr[nonempty])
+    else:
+        np.fill_diagonal(magnitude, 0.0)
+        radius = magnitude.sum(axis=1)
+        off_count = np.full(d, max(0, d - 1), dtype=np.int64)
+    return radius, center, off_count
+
+
+def gershgorin_frame(operator, *, max_bytes):
+    """Return a Hermitian Gershgorin frame without an eigensolve.
+
+    Magnitudes |a_ij| are computed directly, diagonal magnitudes are zeroed
+    before reduction, and empty compressed rows or columns have zero radius.
+    The outward allowance uses ``(8*n+16)*eps``, where n counts stored
+    off-diagonal entries and eps is 2**-52. It covers sequential or pairwise
+    positive summation under round-to-nearest binary64 arithmetic, gradual
+    underflow and a one-ulp hypot assumption. This is a conditional
+    numerical enclosure, not a directed-rounding certificate. Scalar
+    operators return their exact scalar value and zero half-width.
 
     Assumptions. The stored matrix is Hermitian with a real diagonal, finite
     entries and canonical CSR/CSC coordinates when compressed. IEEE binary64
@@ -381,43 +451,63 @@ def gershgorin_frame(operator, *, max_bytes):
     ``r_i = sum_{j != i} |a_ij|``. For a Hermitian matrix the column radii
     are equal, so CSC reduces columns without conversion.
 
-    Steps. The scale is the largest absolute real or imaginary component,
-    computed without forming a possibly overflowing complex modulus. A zero
-    scale returns the exact zero frame. With n_i
-    stored off-diagonal entries in row i, including explicit zeros, the
-    diagonal positions of the magnitude workspace are zeroed before the
-    reduction, so every nonzero magnitude has at most n_i effective addition
-    roundings under either sequential or pairwise summation, and
+    Steps. With n_i stored off-diagonal entries in row i, including explicit
+    zeros, the diagonal positions of the magnitude workspace are zeroed
+    before the reduction, so every nonzero magnitude has at most n_i
+    effective addition roundings under either sequential or pairwise
+    summation, and no diagonal magnitude is subtracted from a row sum. With
 
         q_i = (8 n_i + 16) eps,  eps = 2**-52,  q_i < 1,
-        M_i = q_i / (1 - q_i) (|c_i| + r_i) + tiny,
+        M_i = q_i / (1 - q_i) (|c_i| + r_i) + tiny,  tiny = 2**-1022,
 
-    with c_i = fl(a_ii/scale), r_i the computed scaled radius and
-    tiny = 2**-1022, widens row i to [c_i - r_i - M_i, c_i + r_i + M_i],
-    rounded outward. Row counts are int64 before 8*n_i+16 is evaluated,
-    since int32 arithmetic can wrap. For CSR/CSC only nonempty segments are
-    reduced and every empty segment's sum is zero, because duplicate
-    ``indptr`` starts do not denote empty sums to ``reduceat`` and a start
-    equal to ``len(data)`` raises. Sparse input is never densified. The endpoints are
-    unscaled and rounded outward, and the final alpha covers both already
-    outward-rounded physical endpoints around the computed center, which
-    protects the affine frame after midpoint rounding. It can enlarge alpha
-    beyond the half-width (upper - lower)/2 * scale by a last bit.
+    c_i the diagonal entry and r_i the computed radius, row i widens to
+    [c_i - r_i - M_i, c_i + r_i + M_i], rounded outward. tiny covers the
+    absolute rounding of results below the normal range. Row counts are
+    int64 before 8*n_i+16 is evaluated, since int32 arithmetic can wrap.
+    For CSR/CSC only nonempty segments are reduced and every empty segment's
+    sum is zero, because duplicate ``indptr`` starts do not denote empty
+    sums to ``reduceat`` and a start equal to ``len(data)`` raises. Sparse
+    input is never densified. The final alpha covers both outward-rounded
+    endpoints around the computed center, which protects the affine frame
+    after midpoint rounding. It can enlarge alpha beyond the half-width
+    (high - low)/2 by a last bit.
 
-    Workspace: O(nnz+D) for compressed and O(D²) for dense storage. The scale
-    expression peaks at three float arrays per stored value, and the sparse
-    major-coordinate and mask arrays are released before the row endpoints
-    are assembled. Gershgorin frame construction counts 32*N+256*D
-    additional array-data bytes and a 65,536-byte fixed bookkeeping
-    allowance. Here N includes every stored entry for CSR/CSC, including
-    explicit zeros, and equals D squared for dense storage. The input matrix
-    is excluded. The array formula covers the simultaneous magnitude,
-    coordinate, reduction and endpoint arrays. The fixed allowance is
-    qualified for the declared software stack and is separate from process RSS
-    and external library workspace. Derivation. The live array schedule has
-    the peaks 24N for the maximum/scale expression, 17N+40D for
-    compressed diagonal/index handling, 8N+56D for segmented reduction and
-    8N+80D for final endpoints, each at most 32N+256D
+    Small matrices. When the largest row extent max_i(|c_i| + r_i) is below
+    2**-969, tiny exceeds 2**-53 times that extent and would widen the
+    frame beyond the matrix's own scale, which shrinks the normalized
+    spectrum and can change a later rank decision. The entries are then
+    multiplied by the power of two 2**k that brings the extent into
+    [1/2, 1), which is exact because no scaled value overflows, and the rows
+    and margin are formed in those coordinates, where tiny is negligible.
+    The endpoints are multiplied back by 2**-k. That product rounds when it
+    falls below the normal range, so each endpoint is rounded outward once
+    more. Every other matrix takes the direct path alone.
+
+    A frame whose endpoints, center or half-width are not finite is refused.
+    The padded endpoint of row i has magnitude |c_i| + r_i + M_i, and M_i
+    exceeds the rounding error of the computed radius, so an overflowing
+    radius or margin means that the padded endpoint exceeds the binary64
+    maximum in exact arithmetic. Magnitudes formed from scaled components
+    would then give no finite frame either. The exact Gershgorin endpoint,
+    or the spectrum itself, can still be representable, and such a matrix
+    is refused. For example the eigenvalues of [[1e308, 1e308], [1e308,
+    -1e308]] are about +/-1.414e308, and its Gershgorin endpoints are
+    +/-2e308.
+
+    Workspace: O(nnz+D) for compressed and O(D²) for dense storage. The
+    magnitudes are one float array per stored value, two while a scaled
+    complex input forms them, and the sparse major-coordinate and mask
+    arrays are released before the row endpoints are assembled. Gershgorin
+    frame construction counts 32*N+256*D additional array-data bytes and a
+    65,536-byte fixed bookkeeping allowance. Here N includes every stored
+    entry for CSR/CSC, including explicit zeros, and equals D squared for
+    dense storage. The input matrix is excluded. The array formula covers
+    the simultaneous magnitude, coordinate, reduction and endpoint arrays.
+    The fixed allowance is qualified for the declared software stack and is
+    separate from process RSS and external library workspace. Derivation.
+    The live array schedule has the peaks 16N for the scaled components,
+    17N+40D for compressed diagonal/index handling, 8N+56D for segmented
+    reduction and 8N+80D for final endpoints, each at most 32N+256D
     (ENGINEERING_CONSTANTS.md, "Eigen input conversion and classical
     preparation").
 
@@ -431,49 +521,33 @@ def gershgorin_frame(operator, *, max_bytes):
     compressed = operator.reference.representation in ("csr", "csc")
     a = operator._data
     values = a.data if compressed else a
-    stored_values = values.size
-    _check_bytes(32*stored_values + 256*d + 65536, max_bytes, "Gershgorin frame workspace")
+    _check_bytes(32*values.size + 256*d + 65536, max_bytes, "Gershgorin frame workspace")
     scalar = classical_constant_matrix(a, compressed=compressed)
     if scalar is not None:
         return scalar, scalar, scalar, 0.0
-    scale = float(np.max(np.maximum(np.abs(values.real), np.abs(values.imag)), initial=0.0))
-    re, im = values.real / scale, values.imag / scale
-    np.hypot(re, im, out=re)
-    del im
-    if compressed:
-        counts = np.diff(a.indptr).astype(np.int64)
-        major = np.repeat(np.arange(d, dtype=np.intp), counts)
-        is_diagonal = a.indices == major
-        diag_positions = np.flatnonzero(is_diagonal)
-        off_count = counts.copy()
-        off_count[major[diag_positions]] -= 1
-        re[diag_positions] = 0.0
-        del major, is_diagonal, diag_positions
-        nonempty = np.flatnonzero(counts)
-        radius = np.zeros(d)
-        if nonempty.size:
-            radius[nonempty] = np.add.reduceat(re, a.indptr[nonempty])
-    else:
-        np.fill_diagonal(re, 0.0)
-        radius = re.sum(axis=1)
-        off_count = np.full(d, max(0, d - 1), dtype=np.int64)
-    center = a.diagonal().real / scale
-    k_eps = (8 * off_count + 16) * np.finfo(float).eps
-    if np.any(k_eps >= 1):
-        raise ValueError("Gershgorin roundoff allowance is unresolved at this dimension")
-    margin = k_eps / (1 - k_eps) * (np.abs(center) + radius) + np.finfo(float).tiny
-    lower = float(np.min(np.nextafter(center - radius - margin, -np.inf)))
-    upper = float(np.max(np.nextafter(center + radius + margin, np.inf)))
-    low = float(np.nextafter(lower * scale, -np.inf))
-    high = float(np.nextafter(upper * scale, np.inf))
-    midpoint = (lower / 2 + upper / 2) * scale
-    alpha = float(np.nextafter(max(midpoint - low, high - midpoint), np.inf))
+    with np.errstate(over="ignore", invalid="ignore"):
+        radius, center, off_count = _gershgorin_rows(a, d, compressed, 0)
+        extent = float(np.max(np.abs(center) + radius))
+        exponent = -frexp(extent)[1] if 0 < extent < _SMALL_FRAME_EXTENT else 0
+        if exponent:
+            radius, center, off_count = _gershgorin_rows(a, d, compressed, exponent)
+        k_eps = (8 * off_count + 16) * np.finfo(float).eps
+        if np.any(k_eps >= 1):
+            raise ValueError("Gershgorin roundoff allowance is unresolved at this dimension")
+        margin = k_eps / (1 - k_eps) * (np.abs(center) + radius) + np.finfo(float).tiny
+        low = float(np.min(np.nextafter(center - radius - margin, -np.inf)))
+        high = float(np.max(np.nextafter(center + radius + margin, np.inf)))
+        if exponent:
+            low = float(np.nextafter(np.ldexp(low, -exponent), -np.inf))
+            high = float(np.nextafter(np.ldexp(high, -exponent), np.inf))
+        midpoint = low / 2 + high / 2
+        alpha = float(np.nextafter(max(midpoint - low, high - midpoint), np.inf))
     if not all(isfinite(v) for v in (low, high, midpoint, alpha)) or alpha <= 0:
         raise ValueError("finite Gershgorin affine frame is outside binary64 range")
     return low, high, midpoint, alpha
 
 
-def state_direction(state, *, max_bytes=DEFAULT_INPUT_BYTES):
+def state_direction(state, *, max_bytes=None):
     """Return the normalized complex length-d vector of a state for classical execution.
 
     Only explicit classical execution calls this. A product state is expanded

@@ -357,8 +357,7 @@ class Result(Record):
                 `TargetReference` that supplies the target's scale for a
                 relative tolerance, `absolute_fallback` gives a positive
                 absolute tolerance used when that scale is unavailable or
-                zero, and `max_integer_bits`, default `4096`, limits the
-                integers of the exact arithmetic.
+                zero.
 
         Returns:
             assessment (ClaimAssessment): The
@@ -621,7 +620,6 @@ class Result(Record):
         can then recompute it with other settings without new measurements.
         Saving checks that the Result, Plan and data belong together before
         it writes any file. If saving fails, the new directory is removed.
-        The saved files may total at most 10 GB (decimal).
 
         Args:
             path (str | os.PathLike): Directory to create. Its parent must

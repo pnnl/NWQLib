@@ -124,7 +124,7 @@ def test_classical_pencil_uses_original_access_without_pauli_conversion(monkeypa
 
     monkeypatch.setattr(
         eigen_inputs,
-        "pauli_coefficients",
+        "pauli_coefficient_masks",
         lambda *a, **k: pytest.fail("classical projection decomposed A"),
     )
     result = Run(plan_for(execution="classical")).wait(timeout=5, poll_interval=0)
@@ -249,6 +249,69 @@ def test_sampled_pencil_enclosure_keeps_raw_estimate_and_solver_scope(tmp_path, 
     assert loaded.eigenvalue == result.eigenvalue and loaded.pencil == p
     with pytest.raises(ValueError, match='actual Ritz'):
         result.revise(pencil=p.revise(sampled_enclosure_violation=0.)).validate_plan(result.plan)
+
+
+def test_processed_enclosure_matches_the_termwise_outward_sum_bit_for_bit():
+    """The array enclosure equals the termwise outward sum on FixedGCIM and ADAPT tables, empty and nonfinite cases included.
+
+    The reference is the termwise evaluation, fsum of nextafter(|c|, inf)
+    over the nonidentity coefficients, one more step up, and outward center
+    plus or minus radius, with None for a nonfinite endpoint. The tables hold
+    an identity row with a subnormal, a negative zero and 1e300, no identity
+    row, only the identity, no rows, a radius that overflows, a center plus
+    radius that overflows, and 15 random coefficients of every magnitude.
+    The identity row and nonidentity count agree with a scan of every row.
+    """
+    from math import fsum, isfinite
+    from nwqlib import plan
+    from nwqlib.algorithms import ADAPT
+    from nwqlib.algorithms.gcim.fixed_basis import PauliArrays, PauliTerm, processed_pauli_enclosure
+    from nwqlib.operators import ingest_pauli
+    from nwqlib.problems import ingest_occupation
+
+    def termwise(coefficients, center):
+        try:
+            with np.errstate(over="ignore"):
+                radius = fsum(float(np.nextafter(abs(c), np.inf)) for c in coefficients)
+                if radius:
+                    radius = float(np.nextafter(radius, np.inf))
+                bounds = (float(np.nextafter(center - radius, -np.inf)), float(np.nextafter(center + radius, np.inf)))
+        except OverflowError:
+            return None
+        return bounds if all(map(isfinite, bounds)) else None
+
+    labels = [a + b for a in "IXYZ" for b in "IXYZ"]
+    rng = np.random.default_rng(11)
+    tables = [
+        [("II", .75), ("IX", -.3), ("XY", 5e-324), ("YZ", -0.), ("ZZ", 1e300)],
+        [("IX", .1), ("ZZ", -2.5)],
+        [("II", -1.25)],
+        [],
+        [("IX", 1.7e308), ("ZZ", 1.7e308)],
+        [("II", 1.7e308), ("ZZ", 1.7e308)],
+        list(zip(labels, rng.normal(size=16) * 10.0 ** rng.integers(-300, 300, size=16))),
+    ]
+    fixed = plan(Eigenproblem(A=np.diag([1., -1., .5, .2])), method=FixedGCIM(basis=([1, 0, 0, 0], [0, 1, 0, 0])),
+                 execution="quantum").reconstruction
+    adapt = plan(Eigenproblem(A=ingest_pauli((("ZZ", .5), ("XI", .2)), num_qubits=2)),
+                 method=ADAPT(initial_state=ingest_occupation((0, 0), num_qubits=2),
+                              pool=(ingest_pauli((("YI", 1j),), num_qubits=2),), max_iterations=1),
+                 execution="classical").reconstruction
+    results = []
+    for rows in tables:
+        arrays = PauliArrays.from_rows(rows, 2)
+        rec = fixed.model_copy(update={"terms": arrays})
+        scanned = np.flatnonzero(~arrays.labels.array.any(axis=1))
+        assert rec._identity_row() == (int(scanned[0]) if scanned.size else None)
+        assert rec._nonidentity_count() == len(rec.nonidentity_terms) == len(rows) - scanned.size
+        other = adapt.model_copy(update={"terms": tuple(PauliTerm(label=p, coefficient=c) for p, c in rows[::-1])})
+        for r in (rec, other):
+            got, want = processed_pauli_enclosure(r), termwise(r.nonidentity_coefficients, r.identity_shift)
+            assert (got is None) == (want is None)
+            assert got is None or [x.hex() for x in got] == [x.hex() for x in want]
+        results.append(processed_pauli_enclosure(rec))
+    assert results[2] == (float(np.nextafter(-1.25, -np.inf)), float(np.nextafter(-1.25, np.inf)))
+    assert results[3] == (-5e-324, 5e-324) and results[4] is None and results[5] is None
 
 
 @pytest.mark.parametrize("execution", ["classical", "quantum"])
@@ -447,7 +510,7 @@ def test_pair_reductions_are_admitted_against_their_work_and_workspace(monkeypat
     """Preparation admits the summed pair-reduction work, and each point's workspace, before native work.
 
     Planning records the summed ``pair_work`` of the pair reductions without
-    refusing it. With ``max_classical_products`` one unit below that sum,
+    refusing it. With ``max_classical_products`` half that sum,
     preparation refuses with the cap and the registered work before any
     native lowering; at exactly the sum it prepares. The Method hook refuses
     a point whose ``pair_bytes`` exceeds ``max_bytes`` and otherwise returns
@@ -472,8 +535,8 @@ def test_pair_reductions_are_admitted_against_their_work_and_workspace(monkeypat
         return original(*args, **kwargs)
 
     monkeypatch.setattr(lowering, "_lower_qiskit", counted)
-    short = Run(plan_for(max_classical_products=total - 1, **settings))
-    with pytest.raises(ValueError, match=rf"registered work {total}, max_classical_products={total - 1}\. "
+    short = Run(plan_for(max_classical_products=total // 2, **settings))
+    with pytest.raises(ValueError, match=rf"registered work {total}, max_classical_products={total // 2}\. "
                                          rf"Raise FixedGCIM\.max_classical_products to at least {total}\."):
         short.plan.method.prepare(short.plan, run=short)
     assert lowered[0] == 0 and short._state["preparations"] == 0
@@ -483,12 +546,81 @@ def test_pair_reductions_are_admitted_against_their_work_and_workspace(monkeypat
     point = points[1]
     observation = plan.experiments[1].readout
     own = pair_work(json.loads(point.parameters))
-    allowance = plan.method.reduction_allowance(plan, None, observation=observation, width=3, run=None)
-    assert type(allowance) is int and allowance == plan.method.max_classical_products - (total - own)
+    allowance = exact.plan.method.reduction_allowance(exact.plan, None, observation=observation, width=3, run=None)
+    assert type(allowance) is int and allowance == exact.plan.method.max_classical_products - (total - own)
     needed = pair_bytes(json.loads(point.parameters))
-    small = plan.method.revise(max_bytes=needed - 1)
+    small = plan.method.revise(max_bytes=needed // 2)
     with pytest.raises(ValueError, match="GCIM pair reduction workspace"):
         small.reduction_allowance(plan, None, observation=observation, width=3, run=None)
+
+
+def test_pair_reduction_peak_fits_its_byte_law():
+    """The traced peak of one off-diagonal pair reduction stays within ``pair_bytes``.
+
+    tracemalloc follows NumPy's allocations and Python's containers. On 12
+    qubits, row j of 1000 has the letters of ``j*2654435761`` in base 4, so
+    about 900 flip groups form and ``apply_terms`` keeps a member list for
+    each. The peak above the entry, with the joint state already saved,
+    measured 323,064 bytes after a warm-up call and 325,160 bytes in a fresh
+    CPython 3.12 process, both more than the 273,480 that counting the
+    containers as ``24L + 16F + 8`` bytes with F = 1000 allows.
+    """
+    import math
+    import tracemalloc
+    from nwqlib.algorithms.gcim import pair_reducer
+    from nwqlib.operators.inputs import pauli_table
+
+    q, rows = 12, 1000
+    terms = tuple(("".join("IXYZ"[(j * 2654435761 >> (2 * k)) & 3] for k in reversed(range(q))), (-1.) ** j / (j + 1))
+                  for j in range(1, rows + 1))
+    table = pauli_table(terms, num_qubits=q)
+    holder = pair_reducer.bind_table("pair peak test", lambda: table)
+    parameters = pair_reducer.pair_parameters(left=0, right=1, qubits=q, identity=holder.identity, terms=rows,
+                                              flips=rows, c1=float.hex(1.0))
+    state = np.ones(2 << q, dtype=np.complex128) / math.sqrt(2 << q)
+    tracemalloc.start()
+    try:
+        entry = tracemalloc.get_traced_memory()[0]
+        pair_reducer._pair_execute(state, parameters, ())
+        peak = tracemalloc.get_traced_memory()[1] - entry
+    finally:
+        tracemalloc.stop()
+    assert peak <= pair_reducer.pair_bytes(parameters)
+
+
+def test_pair_reductions_run_without_a_limit_and_are_refused_beyond_an_explicit_one():
+    """Without max_classical_products or max_products the pair hooks return None.
+
+    FixedGCIM, QFD and ADAPT then plan, prepare and run their exact pair reductions on Aer. With an explicit
+    limit, QFD refuses half the summed pair work and runs at it, and ADAPT returns its ``max_products`` as
+    each point's allowance.
+    """
+    import json
+    from types import SimpleNamespace
+    import nwqlib
+    import nwqlib.algorithms.gcim.pair_reducer as pair_reducer
+
+    work = pair_reducer.pair_work
+    for problem, method in ((Eigenproblem(A=np.diag([1., -1.])), FixedGCIM(basis=([1, 1], [1, 1j]))),
+                            _smallest_exact_qfd(), _smallest_exact_adapt()):
+        chosen = nwqlib.plan(problem, method=method, execution="quantum", seed=7)
+        assert any(chunk.point is not None for chunk in nwqlib.solve(chosen, progress=False).data.observations.chunks)
+    observation = SimpleNamespace(positions=())
+    assert chosen.method.reduction_allowance(chosen, None, observation=observation, width=1, run=None) is None
+    limited = chosen.method.revise(max_products=12345)
+    assert limited.reduction_allowance(chosen, None, observation=observation, width=1, run=None) == 12345
+
+    problem, method = _smallest_exact_qfd()
+    chosen = nwqlib.plan(problem, method=method, execution="quantum", seed=7)
+    total = sum(work(json.loads(point.parameters)) for experiment in chosen.experiments
+                if experiment.readout is not None for point in experiment.readout.positions
+                if point.kind == "reduction")
+    with pytest.raises(ValueError, match=rf"QFD pair reductions exceed max_classical_products: "
+                                         rf"registered work {total}, max_classical_products={total // 2}\."):
+        nwqlib.solve(nwqlib.plan(problem, method=method.revise(max_classical_products=total // 2),
+                                 execution="quantum", seed=7), progress=False)
+    nwqlib.solve(nwqlib.plan(problem, method=method.revise(max_classical_products=total), execution="quantum",
+                             seed=7), progress=False)
 
 
 def _smallest_exact_adapt():
@@ -949,6 +1081,126 @@ def test_joint_readout_imaginary_part_has_the_positive_sign():
     assert abs(s[0, 1].real) <= radius and abs(h[0, 1].real) <= radius
 
 
+def _overlap_noise_from_counts(chunks):
+    """Return ``sqrt(2 sum_q V)`` and the ``V`` of the off-diagonal overlap settings from raw counts.
+
+    A sampled setting named ``group_i_j_part_g`` with i != j and g = 0 measures the ancilla at classical bit 0, so
+    its mean is ``m = sum_a n_a (-1)**(a & 1)/N`` and the sample-mean variance is ``(1 - m**2)/(N - 1)``. This reads
+    the observations directly and does not use ``GroupMoment`` or ``pooled_statistics``.
+    """
+    from fractions import Fraction as F
+
+    variances = []
+    for chunk in chunks:
+        _, left, right, _, group = chunk.experiment.split("_")
+        if left != right and group == "0":
+            total = sum(item.count for item in chunk.values)
+            mean = F(sum(item.count * (-1) ** (int(item.bits, 2) & 1) for item in chunk.values), total)
+            variances.append((1 - mean**2) / (total - 1))
+    return float(sum(variances, F(0)) * 2) ** .5, variances
+
+
+def test_overlap_noise_counts_measured_quadratures_and_keeps_missing_evidence_unavailable(tmp_path, monkeypatch):
+    """The diagnostic of ``fixed_basis.OverlapNoiseEstimate`` against raw counts, in each state it can report.
+
+    Two computational basis states have overlap 0. Complex measurement with N = 2 at this seed gives mean 0 in both
+    quadratures, so V = 1 each and the value is sqrt(2 (1 + 1)) = 2. A measured mean of 0 therefore still counts. A
+    real-only Plan measures one quadrature and the other is a structural zero. The basis |0>, i|0> has imaginary
+    overlap exactly 1, whose observed variance 0 is reported as observed and adds nothing. One shot per setting has
+    no variance estimate, and the value is unavailable rather than 0.
+
+    A Run stopped part way has no pooled entries, so its value stays unavailable, and the counts follow the Plan's
+    resolved quadratures and the measured settings. The eight complex settings run in the order 00, 01 real, 01 imag,
+    11, two groups each. After four, the imaginary part of 01 is pending, not structural, and after six its observed
+    variance 0 is known from the measurement alone. A real-only Plan stopped after 01 keeps its one structural zero.
+    """
+    import nwqlib
+    import nwqlib._prepared_execution as prepared_execution
+    from nwqlib.algorithms import PencilAcquisition
+    from nwqlib.operators import ingest_pauli
+    from nwqlib.problems.inputs import ingest_vector
+
+    problem = Eigenproblem(A=ingest_pauli((("Z", 1.0), ("X", 0.2)), num_qubits=1))
+    basis = (ingest_vector([1.0, 0.0]), ingest_vector([0.0, 1.0]))
+
+    def sampled(states=basis, quadratures="complex", shots=2, seed=1):
+        method = FixedGCIM(basis=states, acquisition=PencilAcquisition(quadratures=quadratures))
+        return nwqlib.solve(nwqlib.plan(problem, method=method, execution="quantum", shots=shots, seed=seed),
+                            progress=False)
+
+    result = sampled()
+    noise = result.overlap_noise
+    value, variances = _overlap_noise_from_counts(result.data.observations.chunks)
+    assert variances == [1, 1] and value == 2
+    assert (noise.status, noise.population) == ("available", "fixed_design")
+    assert noise.frobenius_rms == pytest.approx(value, rel=1e-14, abs=0)
+    assert (noise.measured_quadratures, noise.structural_zero_quadratures, noise.observed_zero_quadratures) == (2, 0, 0)
+    assert (noise.minimum_shots, noise.maximum_shots) == (2, 2)
+    assert "diagnostic" in str(result)
+
+    real = sampled(quadratures="real", shots=64, seed=3)
+    value, variances = _overlap_noise_from_counts(real.data.observations.chunks)
+    assert len(variances) == 1
+    assert real.overlap_noise.frobenius_rms == pytest.approx(value, rel=1e-14, abs=0)
+    assert (real.overlap_noise.measured_quadratures, real.overlap_noise.structural_zero_quadratures) == (1, 1)
+
+    same = sampled(states=(ingest_vector([1.0, 0.0]), ingest_vector([1j, 0.0])), shots=64, seed=3)
+    value, variances = _overlap_noise_from_counts(same.data.observations.chunks)
+    assert sorted(map(bool, variances)) == [False, True] and same.overlap_noise.observed_zero_quadratures == 1
+    assert same.overlap_noise.frobenius_rms == pytest.approx(value, rel=1e-14, abs=0)
+
+    one = sampled(shots=1).overlap_noise
+    assert (one.status, one.frobenius_rms) == ("unavailable", None) and "more than one shot" in one.reason
+
+    single = sampled(states=basis[:1], shots=8).overlap_noise
+    assert (single.status, single.frobenius_rms) == ("algebraic", 0.0)
+    for execution, shots in (("quantum", None), ("classical", None)):
+        exact = nwqlib.solve(nwqlib.plan(problem, method=FixedGCIM(basis=basis), execution=execution, shots=shots,
+                                         seed=1), progress=False)
+        assert (exact.overlap_noise.status, exact.overlap_noise.frobenius_rms) == ("not_applicable", None)
+
+    # The saved records give the same value after loading and at another cutoff, with no measurement.
+    loaded = nwqlib.load_result(result.save(tmp_path / "noise"))
+    count = len(loaded.data.observations.chunks)
+    assert loaded.overlap_noise == noise and loaded.analyze(overlap_cutoff=.5).overlap_noise == noise
+    assert len(loaded.data.observations.chunks) == count
+
+    same_basis = same.plan.method.basis
+    for name, states, quadratures, stop, expected in (("pending", same_basis, "complex", 4, (1, 0, 0)),
+                                                      ("observed", same_basis, "complex", 6, (2, 0, 1)),
+                                                      ("real", basis, "real", 4, (1, 1, 0))):
+        chosen = nwqlib.plan(problem, method=FixedGCIM(basis=states, acquisition=PencilAcquisition(quadratures=quadratures)),
+                             execution="quantum", shots=64, seed=3)
+        prepare_item, prepared = prepared_execution._prepare_static_item, []
+
+        def limited(*args, prepare_item=prepare_item, prepared=prepared, stop=stop, **kwargs):
+            prepared.append(1)
+            if len(prepared) > stop:
+                raise RuntimeError("stopped part way")
+            return prepare_item(*args, **kwargs)
+
+        with monkeypatch.context() as patch, Run(chosen, progress=False) as run:
+            patch.setattr(prepared_execution, "_prepare_static_item", limited)
+            with pytest.raises(RuntimeError, match="stopped part way"):
+                run.resume()
+            partial = chosen.method.analyze(chosen, run.data, settings={})
+        noise = partial.overlap_noise
+        _, variances = _overlap_noise_from_counts(partial.data.observations.chunks)
+        assert partial.pencil is None and partial.sampled_pair_variances == ()
+        assert (noise.status, noise.frobenius_rms, noise.population) == ("unavailable", None, "fixed_design")
+        assert noise.reason == f"{len(chosen.experiments) - stop} planned settings have no data"
+        assert (noise.measured_quadratures, noise.structural_zero_quadratures, noise.observed_zero_quadratures) == expected
+        assert sum(value == 0 for value in variances) == expected[2] and len(variances) == expected[0]
+        assert (noise.minimum_shots, noise.maximum_shots) == (64, 64)
+        # The text points at the field that holds these values, one for each measured contribution.
+        kept = [row.overlap_variance for row in partial.group_moments if row.overlap_variance is not None]
+        assert kept == pytest.approx([float(value) for value in variances], rel=1e-14, abs=0)
+        assert "group_moments" in str(partial)
+        loaded = nwqlib.load_result(partial.save(tmp_path / name))
+        assert loaded.overlap_noise == noise and loaded.analyze(overlap_cutoff=.5).overlap_noise == noise
+        assert "group_moments" in str(loaded)
+
+
 def _count_chunk(width, counts, returned=None):
     """A duck-typed count chunk over packed keys ``{index: count}`` for the group reducer."""
     from types import SimpleNamespace
@@ -1336,6 +1588,31 @@ def test_reopened_pencil_sampling_run_measures_each_remaining_main_setting_once(
     assert result.shot_allocation == ShotAllocation.model_validate(state["decision"])
 
 
+def test_recorded_groups_must_be_qubit_wise_commuting_with_their_rows_basis():
+    """The partition check of a sampled reconstruction compares every group with its Pauli rows."""
+    import numpy as np
+    import pytest
+    import nwqlib
+    from nwqlib.algorithms.gcim import FixedGCIM
+    from nwqlib.algorithms.gcim.fixed_basis import SampledGroup
+    from nwqlib.operators import ingest_pauli
+
+    rng = np.random.default_rng(31)
+    basis = tuple(rng.normal(size=8) + 1j * rng.normal(size=8) for _ in range(3))
+    rows = (("III", .7), ("ZII", .5), ("IZI", -.3), ("ZZI", .2), ("XII", .4), ("IYI", -.25), ("XYI", .1))
+    rec = nwqlib.plan(nwqlib.Eigenproblem(A=ingest_pauli(rows, num_qubits=3)), method=FixedGCIM(basis=basis),
+                      execution="quantum", shots=64, seed=104).reconstruction
+    assert sorted(group.basis for group in rec.groups) == ["XYI", "ZZI"]
+    assert rec._sampled_partition() is rec
+    first, second = rec.groups
+    changed = SampledGroup(basis=first.basis[:-2] + "X" + first.basis[-1:], indices=first.indices)
+    with pytest.raises(ValueError, match="differs from its Pauli rows"):
+        rec.model_copy(update={"groups": (changed, second)})._sampled_partition()
+    merged = SampledGroup(basis=first.basis, indices=tuple(sorted(first.indices + second.indices)))
+    with pytest.raises(ValueError, match="not qubit-wise commuting"):
+        rec.model_copy(update={"groups": (merged,)})._sampled_partition()
+
+
 def test_grouped_analysis_is_admitted_before_setting_construction(monkeypatch):
     import numpy as np
     import pytest
@@ -1357,15 +1634,12 @@ def test_grouped_analysis_is_admitted_before_setting_construction(monkeypatch):
         raise AssertionError("grouped settings constructed before analysis admission")
 
     # Two groups of three terms, 18 settings on 6 pairs, at most 16 bins on
-    # four bits. The last two terms are the pooling and pair assembly.
-    work = 18 * (16 * (4 + 44 + 8 * 3) + 3 * 4) + 6 * 4 + 32 * 9 + 16 * 27 + 23 * 18 + 22 * 6
-    assert work == 22242
+    # four bits, and the 3-state projected solve.
+    work = 18 * (16 * (4 + 44 + 8 * 3) + 3 * 4) + 6 * 4 + 32 * 9 + 16 * 27
     # The floor that FixedGCIM.plan checks before grouping charges one group
     # of all six terms to each of the K = 9 settings. It is the planned work
-    # less K(G - 1)[m(c + 44) + 23] = 9 * (16 * 48 + 23) for G = 2, m = 16 and
-    # c = 4.
-    floor = 9 * (16 * (4 + 44 + 8 * 6) + 6 * 4) + 6 * 4 + 32 * 9 + 16 * 27 + 23 * 9 + 22 * 6
-    assert floor == work - 9 * (16 * 48 + 23) == 15123
+    # less K(G - 1)m(c + 44) = 9 * 16 * 48 for G = 2, m = 16 and c = 4.
+    floor = 9 * (16 * (4 + 44 + 8 * 6) + 6 * 4) + 6 * 4 + 32 * 9 + 16 * 27
     with monkeypatch.context() as guarded:
         guarded.setattr(fixed_basis, "_sampled_construction", unexpected_construction)
         # The one-group floor rejects 5000 and the actual grouped work
@@ -1378,23 +1652,28 @@ def test_grouped_analysis_is_admitted_before_setting_construction(monkeypatch):
     selected = select(work)
     assert len(selected.experiments) == 18
     assert selected.shots == 64
-    # The same planned population in compact form: one (L_g, 16) descriptor
-    # per group, repeated for the K = 9 settings of each group.
-    assert fixed_basis.grouped_pass_requirements(
-        3, [(len(group.indices), 16) for group in selected.reconstruction.groups], 6, 3, settings=18, pairs=6,
-        oriented=False, copies=9) == (13882 + 256 * 18 + 296 * 6, work)
+    # The QWC grouping compares Pauli words, a unit of its own, so only its arrays are checked, against max_bytes.
+    # Without max_analysis_work, the default, no work limit applies.
+    from nwqlib.operators._pauli import PauliTerms
+
+    calls, group = [], PauliTerms.group
+    with monkeypatch.context() as spied:
+        spied.setattr(PauliTerms, "group", lambda self, *args, **kwargs: calls.append(kwargs) or group(
+            self, *args, **kwargs))
+        default = nwqlib.plan(problem, method=FixedGCIM(basis=basis), execution="quantum", shots=64, seed=104)
+    assert calls and all(set(kwargs) <= {"strategy", "max_bytes"} for kwargs in calls)
+    assert default.experiments == selected.experiments
 
     # The byte bound refuses first on a wider register: -Z^10 - 0.7 X^10 has
     # G = 2 groups of one term, b = 2, n = 10, c = 11, w = 1 and
     # m = min(4096, 2**11) = 2048 bins, so the planned bytes B_plan are
-    # 8*2*4*2*2048 + 112*2048 + 8*1 + 8*4*(2+16*2) + 26*2 + 512*4, plus
-    # 256*8 + 296*3 for pooling the K*G = 8 settings on P = 3 pairs.
+    # 8*2*4*2*2048 + 112*2048 + 8*1 + 8*8 + 26*2 + 512*4 for the K*G = 8
+    # settings of one term each.
     n = 10
     wide = nwqlib.Eigenproblem(A=ingest_pauli((("Z" * n, -1.0), ("X" * n, -.7)), num_qubits=n))
     rng = np.random.default_rng(5)
     states = tuple(rng.normal(size=2**n) + 1j * rng.normal(size=2**n) for _ in range(2))
-    size = 8 * 2 * 4 * 2 * 2048 + 112 * 2048 + 8 * 1 + 8 * 4 * (2 + 16 * 2) + 26 * 2 + 512 * 4 + 256 * 8 + 296 * 3
-    assert size == 497652
+    size = 8 * 2 * 4 * 2 * 2048 + 112 * 2048 + 8 * 1 + 8 * 8 + 26 * 2 + 512 * 4
 
     def select_wide(cap):
         return nwqlib.plan(wide, method=FixedGCIM(basis=states, max_bytes=cap),
@@ -1402,7 +1681,7 @@ def test_grouped_analysis_is_admitted_before_setting_construction(monkeypatch):
 
     with monkeypatch.context() as guarded:
         guarded.setattr(fixed_basis, "_sampled_construction", unexpected_construction)
-        with pytest.raises(ValueError, match=rf"GCIM planned grouped analysis needs {size} data bytes"):
+        with pytest.raises(ValueError, match=rf"GCIM planned grouped analysis needs about {size} bytes"):
             select_wide(size - 1)
     assert len(select_wide(size).experiments) == 8
 
@@ -1411,7 +1690,7 @@ def test_default_analysis_work_admits_a_fourteen_qubit_grouped_plan():
     """The default max_analysis_work admits a 14-qubit grouped plan at 8,192 shots.
 
     Its planning bound, the grouped-pass law with one chunk per planned
-    setting, is 308,208,312 work units, above 10**8
+    setting, is 308,195,760 work units, above 10**8
     (docs/ENGINEERING_CONSTANTS.md, row "Sampled FixedGCIM analysis
     admission"). Planning only; no circuit is run.
     """
@@ -1433,7 +1712,7 @@ def test_default_analysis_work_admits_a_fourteen_qubit_grouped_plan():
                            shots=8192, seed=1)
 
     assert len(select().experiments) == 540
-    with pytest.raises(ValueError, match=r"needs at most 308208312 work units.*max_analysis_work=100000000\."):
+    with pytest.raises(ValueError, match=r"needs at most 308195760 work units.*max_analysis_work=100000000\."):
         select(max_analysis_work=10**8)
 
 
@@ -1626,15 +1905,15 @@ def test_default_limits_plan_compact_26_qubit_gcim_without_full_state_work(monke
     settings in a pilot stage of 98304 shots and a main stage of 294912.
     Planning bounds the grouped analysis of one stage with the larger stage
     budget S = 294912 at 141276072 work units and 37765896 bytes, within
-    the default limits, and the pre-group work floor is 20082. A planned
-    call without the stage budget would count S stored outcomes for each of
-    the 12 settings, 1157247912 work units, and exceed the default
-    max_analysis_work = 10**9,
-    so this plan also checks that planning passes the stage budget. Its
+    the limits, and the pre-group work floor is 20082. A planned call
+    without the stage budget would count S stored outcomes for each of
+    the 12 settings, 1157247912 work units, so the staged plan sets
+    max_analysis_work = 10**9 between the two and also checks that
+    planning passes the stage budget. Its
     whole-Plan estimate leaves the settings and shots unavailable with the
     PencilSampling reason while the exact evaluations of its counts-only
     measurements are zero.
-    All plans and
+    The other plans and
     resource estimates pass no limit, so the defaults apply. None forms a
     statevector, an operator matrix or a dense Pauli matrix, and the peak
     traced by tracemalloc, which NumPy reports its buffers to, stays below
@@ -1680,17 +1959,18 @@ def test_default_limits_plan_compact_26_qubit_gcim_without_full_state_work(monke
                             execution="quantum", shots=shots, seed=3)
         fixed_workload = nwqlib.estimate(fixed)
         staged = nwqlib.plan(problem, method=fixed.method.revise(
-            sampling=PencilSampling(total_shots=4 * 12 * shots, pilot_fraction=.25)), execution="quantum", seed=3)
+            sampling=PencilSampling(total_shots=4 * 12 * shots, pilot_fraction=.25), max_analysis_work=10**9),
+            execution="quantum", seed=3)
         staged_workload = nwqlib.estimate(staged)
         adapt = nwqlib.plan(problem, method=ADAPT(initial_state=occupied(0, 1), pool=pool, max_iterations=2),
                             execution="quantum", shots=shots, seed=3)
         adapt_workload = nwqlib.estimate(adapt)
         # ADAPT with pair_preparation="vacuum_restore" and the hopping pool
         # 0.5 i(X_a X_b + Y_a Y_b), whose flips of the all-zero state cancel
-        # (1 - 1 = 0), declares W_restore = 2 W_ref + 3l(1 + B) + 12288 l
+        # (1 - 1 = 0), declares W_restore = 2 W_ref + 3l(1 + B)
         # + 2l(T_max + 1) + 8n + 7 for the occupation reference's W_ref = n,
         # l = 2 selections, T_max = 2 terms and the commuting bound
-        # B = 6 n T_max, so 2*26 + 6*313 + 24576 + 12 + 215 = 26733.
+        # B = 6 n T_max, so 2*26 + 6*313 + 12 + 215 = 2157.
         from nwqlib.algorithms import PencilAcquisition
 
         hopping = tuple(ingest_pauli(((word([(a, "X"), (b, "X")]), .5j), (word([(a, "Y"), (b, "Y")]), .5j)),
@@ -1700,7 +1980,7 @@ def test_default_limits_plan_compact_26_qubit_gcim_without_full_state_work(monke
                               execution="quantum", shots=shots, seed=3)
         assert restore.reconstruction.acquisition.pair_preparation == "vacuum_restore"
         assert {s.construction_work for s in restore.construction.selections} == {
-            2 * n + 3 * 2 * (1 + 6 * n * 2) + 12288 * 2 + 2 * 2 * (2 + 1) + 8 * n + 7} == {26733}
+            2 * n + 3 * 2 * (1 + 6 * n * 2) + 2 * 2 * (2 + 1) + 8 * n + 7} == {2157}
         qfd = nwqlib.plan(problem, method=QFD(initial_state=occupied(0, 1), time_step=.1, powers=(0, 1, 2)),
                           execution="quantum", shots=shots, seed=3)
         qfd_workload = nwqlib.estimate(qfd)
@@ -1725,9 +2005,8 @@ def test_default_limits_plan_compact_26_qubit_gcim_without_full_state_work(monke
     assert count(fixed_workload, "logical_width", location="logical_device") == n + 1
     assert count(fixed_workload, "measurements") == shots * 2 * 3 * (n + n + 1)
     assert [e.name for e in staged.experiments] == [e.name for e in fixed.experiments]
-    # The staged plan separates the two work bounds only because 141276072 <= 10**9 < 1157247912, so a
-    # larger default would silently stop it detecting a planned call that drops shot_total.
-    assert FixedGCIM.model_fields["max_analysis_work"].default == 10**9
+    # The staged plan separates the two work bounds because 141276072 <= 10**9 < 1157247912.
+    assert staged.method.max_analysis_work == 10**9
     reason = staged.method.query_catalog_reason()
     assert reason.startswith("PencilSampling measures every setting in a pilot stage")
     assert all(staged_workload.quantity(metric).fact.reason == reason for metric in ("settings", "shots"))

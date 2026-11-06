@@ -30,7 +30,7 @@ def _bell_circuit(*, measured: bool = False) -> QuantumCircuit:
 def _execute(target, circuit, *, seed=7, shots=None, **readout):
     """Prepare and submit one circuit through the shared Aer owners."""
     prepared = qiskit_aer_backend._prepare_aer_execution(target, circuit, shots=shots, seed=seed,
-        simulator_memory_mb=ExecutionLimits().simulator_memory_mb, **readout)
+        simulator_memory_mb=ExecutionLimits().simulator_memory(), **readout)
     return qiskit_aer_backend._submit_aer_execution(prepared)
 
 
@@ -164,6 +164,40 @@ def test_aer_lowering_budget_rejects_hidden_native_names_at_the_owner(monkeypatc
     with pytest.raises(ValueError, match="Aer lowering requires native operations"):
         _execute(AER_STATEVECTOR_TARGET, branch)
     assert len(submissions) == 1
+
+
+def test_aer_operation_counts_read_names_that_translation_binds_to_types():
+    """``_aer_operation_counts`` counts names; on a translated circuit each name fixes its type.
+
+    Every Aer target binds the ``save_*`` names to ``SaveData`` classes and
+    ``delay`` to ``Delay``, and translation keeps an operation only with its
+    target class, so a custom gate named ``save_x`` is decomposed and its H
+    counts as an evolution operation.
+    """
+    from qiskit.circuit import Barrier, Delay, Gate
+    from qiskit_aer.library.save_instructions.save_data import SaveData
+
+    for simulator in (AerSimulator(method="statevector"), AerSimulator()):
+        decompose = qiskit_aer_backend._AerDecompose(simulator.target)
+        for name, kind in decompose.native_types.items():
+            assert name.startswith("save_") == issubclass(kind, SaveData)
+            assert (name == "delay") == issubclass(kind, Delay) and not issubclass(kind, Barrier)
+    definition = QuantumCircuit(1)
+    definition.h(0)
+    custom = Gate("save_x", 1, [])
+    custom.definition = definition
+    circuit = QuantumCircuit(2)
+    circuit.append(custom, [0])
+    circuit.barrier()
+    circuit.delay(10, 1)
+    circuit.cx(0, 1)
+    decompose = qiskit_aer_backend._AerDecompose(AerSimulator(method="statevector").target)
+    lowered, _ = qiskit_aer_backend._lower_aer_circuit(circuit, decompose)
+    lowered.save_statevector()
+    types = [item.operation for item in lowered.data]
+    expected = (sum(not isinstance(op, (SaveData, Barrier, Delay)) for op in types),
+                sum(isinstance(op, SaveData) for op in types))
+    assert qiskit_aer_backend._aer_operation_counts(lowered) == expected == (2, 1)
 
 
 @pytest.mark.parametrize("qubits", [(2, 0)])
@@ -438,3 +472,66 @@ def test_qasm3_path_uses_stream_and_preserves_imported_action(tmp_path, monkeypa
     assert export_qasm(circuit, path=path) == path
     restored = qasm3.loads(path.read_text())
     np.testing.assert_allclose(Operator(restored).data, Operator(circuit).data, atol=1e-14, rtol=0)
+
+
+def test_aer_counts_prepare_shares_only_gates_and_coherent_composite_instructions():
+    # AnnotatedOperation is an SDK operation but not an Instruction, and a
+    # composite with a classical bit is not coherent, so neither becomes a
+    # shared block. A coherent composite Instruction is translated once.
+    import nwqlib
+    from qiskit.circuit import AnnotatedOperation, InverseModifier
+    from qiskit.circuit.library import RYGate
+    from nwqlib._prepared_execution import Run
+    from nwqlib.backends import AerBackend
+    from nwqlib.core.planning import ObservationSpec, RuntimeOptions
+    from test_selected_runtime import ToyMethod, ToyProblem
+
+    pulse = QuantumCircuit(1, name="pulse", global_phase=.37)
+    pulse.h(0)
+    measured_pulse = QuantumCircuit(1, 1, name="measured_pulse")
+    measured_pulse.h(0)
+    measured_pulse.measure(0, 0)
+    circuits = {name: QuantumCircuit(1, 1) for name in ("annotated", "measured", "coherent")}
+    circuits["annotated"].append(AnnotatedOperation(RYGate(.2), [InverseModifier()]), [0])
+    circuits["measured"].append(measured_pulse.to_instruction(), [0], [0])
+    circuits["coherent"].append(pulse.to_instruction(), [0])
+    plan = nwqlib.plan(ToyProblem(width=1), method=ToyMethod(), shots=1, seed=73)
+    with Run(plan, backend=AerBackend(), progress=False) as run:
+        for name, circuit in circuits.items():
+            if name != "measured":
+                circuit.measure(0, 0)
+            prepared = run.backend.prepare(circuit, observation=ObservationSpec(kind="counts", shots=1),
+                                           runtime=RuntimeOptions(seed=22), position=len(circuit.data),
+                                           source_definitions=(), run=run, snapshot=name)
+            native = prepared.native.circuit
+            if name == "annotated":
+                assert dict(native.count_ops()) == {"ry": 1, "measure": 1}
+            if name == "coherent":
+                assert native.global_phase == pytest.approx(.37, abs=1e-15)
+        blocks = next(iter(run._state["backend_context"]["aer_preparations"].values()))._blocks
+        assert [source.name for source, _ in blocks.values()] == ["pulse"]
+
+
+@pytest.mark.parametrize("version", ("qasm3", "qasm2"))
+def test_qasm_text_defaults_to_the_physical_memory_and_a_file_to_no_limit(tmp_path, monkeypatch, version):
+    """Returned text is held in memory and limited by it by default, and a written file has no default limit.
+
+    An explicit max_text_bytes applies to both forms, refusing one byte below
+    the text's size and accepting its size.
+    """
+    from nwqlib import _limits
+
+    circuit = _bell_circuit()
+    text = export_qasm(circuit, format=version)
+    size = len(text.encode("utf-8"))
+    monkeypatch.setattr(_limits, "physical_memory_bytes", lambda: size - 1)
+    with pytest.raises(ValueError, match=rf"^QASM output exceeds the physical memory \({size - 1} bytes\)$"):
+        export_qasm(circuit, format=version)
+    path = tmp_path / "bell.qasm"
+    assert export_qasm(circuit, format=version, path=path) == path and path.read_text() == text
+    for destination in (None, path):
+        with pytest.raises(ValueError, match=f"^QASM output exceeds max_text_bytes={size - 1}$"):
+            export_qasm(circuit, format=version, path=destination, max_text_bytes=size - 1)
+        export_qasm(circuit, format=version, path=destination, max_text_bytes=np.int64(size))
+    monkeypatch.setattr(_limits, "physical_memory_bytes", lambda: size)
+    assert export_qasm(circuit, format=version) == text

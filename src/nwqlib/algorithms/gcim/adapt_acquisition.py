@@ -29,14 +29,14 @@ from nwqlib.ir.expressions import number
 from nwqlib.operators._pauli import apply_terms
 from nwqlib.operators.access import _check_bytes, _check_products
 from nwqlib.problems.inputs import prepare_qiskit
-from .adapt_actions import action_sizes, packed_exponential
+from .adapt_actions import packed_exponential
 from .adapt_records import (
     ADAPTResult,
     AdaptRound,
     BoundedCandidate,
     active_screen_labels,
     chain,
-    commutator_rows,
+    commutator_index,
     energy_labels,
     label_cache,
     screen_labels,
@@ -87,7 +87,11 @@ class AdaptContext:
             ``inverse_realized_gate(forward, native_ucg=False)`` of the
             ``(index, angle, False, False)`` entry of ``gates``, keyed by
             (pool index, angle), for the ``"vacuum_restore"`` construction
-            (``_realized_adjoint``). The ``inverse=True`` entries of ``gates``
+            (``_realized_adjoint``). Each value is ``[adjoint, owner]``, with
+            ``owner`` the token of the circuit construction that reported its
+            copies while its preparation record is not yet saved, and None
+            otherwise. A preparation that ends without a record removes its
+            entry while it is still the current one. The ``inverse=True`` entries of ``gates``
             instead evaluate the generator again at the negated angle. The
             map is separate so that ``_keep_current`` keeps it only for the
             current basis and query chains, not for ``pending_items``. It
@@ -106,17 +110,17 @@ class AdaptContext:
             each extension still to be evaluated when the rows phase starts
             or resumes, not refreshed as each row completes, and empty at the
             start of every other phase. An exit from rows leaves it set. ``_keep_current`` keeps the gates of these items, so a
-            gate that depth screening built is reused by the queries of the
-            same uninterrupted rows phase. The set adds at most
+            gate that the first query of an item built is reused by the
+            later queries of the same uninterrupted rows phase. The set adds at most
             ``candidates_per_round`` items, and so at most four times as many
             gate variants, because ``controlled`` and ``inverse`` are part of
             the gate key. That counts cache entries, not compiled memory.
             It does not make a generator's gate built once per run: a gate
             pruned in an earlier round may be built again later, while its
-            CX count stays in ``depth_weights``. Gates of depth-rejected
-            extensions leave at the next prune, a returned Run can still
-            hold the context, and a resumed rows phase may build a gate once
-            more after the prune that precedes the loop. It is never saved.
+            CX count stays in ``depth_weights``. Depth screening builds no
+            gate, a returned Run can still hold the context, and a resumed
+            rows phase may build a gate once more after the prune that
+            precedes the loop. It is never saved.
         pencil: Latest solved projected pencil.
         pencil_parameters: Chain that produced ``pencil``.
         pencil_attempt: Analysis attempt of the iteration that produced ``pencil``.
@@ -127,7 +131,9 @@ class AdaptContext:
         pair_values: Values ``_read_values`` returned for each read pencil
             query, with the preparation record of its chunk, keyed by the
             canonical chain pair, term and quadrature (``_matrix_entries``).
-            A grouped setting keeps its canonical ``GroupMoment``, the
+            An exact pair reduction also keeps its overlap entry bound once
+            its preparation record has been found, since that record fixes
+            the bound (``_matrix_from_observations``). A grouped setting keeps its canonical ``GroupMoment``, the
             preparation record and the stored bin count of its chunk, keyed
             by the canonical chain pair, quadrature and group.
             Later matrix stages reuse them instead of reading the same
@@ -136,10 +142,10 @@ class AdaptContext:
             observations.
         rules: Resolved shift rule per selected pool index.
         depth_weights: Under ``BoundedRitzGrowth(basis_depth_limit=...)``,
-            ``(w, reason)`` of ``bounded_growth.generator_cx_weight`` per
+            ``(w, reason)`` of ``fermionic_circuits.generator_cx_count`` per
             examined ``(pool index, theta)``, read once from that generator's
-            uncontrolled forward gate and kept for the whole run, because
-            the gate cache keeps only the generators of current chains.
+            compiler plan (``CompilerPlans.peek``) without building its gate
+            or keeping the plan, and kept for the whole run.
         compiler_plans: The quantum Plan's ``adapt.CompilerPlans`` map once
             ``drive_adapt`` has taken it over, so checkpoints save the compiler
             plans built after the Plan archive was written. Before that, a
@@ -282,7 +288,10 @@ def _keep_current(context, basis, *queries):
     at most their four gate variants each and no adjoint. Cache memory
     therefore stays proportional to the current basis instead of growing
     with the whole trajectory. A dropped entry is recomputed if a later
-    query needs it again.
+    query needs it again. A residual query also builds the at most L - 1
+    single-generator states of ``basis_chains(right)`` that are not
+    prefixes, which the next pruning drops. It has no left chain, so its
+    states stay within the classical cache count.
     """
     keep = {()}
     for items in (*basis, *queries):
@@ -308,8 +317,7 @@ def _keep_current(context, basis, *queries):
 
 
 def _native_preparation(
-    items, *, controlled, inverse, inputs, reference, compiler_plans, policy, context,
-    max_direct_amplitudes
+    items, *, controlled, inverse, inputs, reference, compiler_plans, policy, context
 ):
     """Return the cached gate ``U = exp(t_k A_k) ... exp(t_1 A_1) U_ref`` of chain ``items``.
 
@@ -319,8 +327,7 @@ def _native_preparation(
     comes from ``build_generator_circuit`` with its compiler plan from the Plan's map, so
     every query of one Plan uses the same synthesis. The physical global
     phase of the reference is kept, because under control it becomes a
-    relative phase. ``max_direct_amplitudes`` is the circuit-construction
-    limit that the reference preparation was checked against.
+    relative phase.
     """
     from qiskit import QuantumCircuit
 
@@ -329,8 +336,7 @@ def _native_preparation(
         return context.preparations[key]
     q = reference.manifest.basis.dimension.bit_length() - 1
     off = int(controlled)
-    reference_gate = _reference_gate(controlled, inverse, reference=reference, policy=policy, context=context,
-                                     max_direct_amplitudes=max_direct_amplitudes)
+    reference_gate = _reference_gate(controlled, inverse, reference=reference, policy=policy, context=context)
     circuit = QuantumCircuit(q + off)
     if not inverse:
         circuit.append(reference_gate, circuit.qubits, copy=False)
@@ -357,29 +363,36 @@ def _native_preparation(
     return gate
 
 
-def _reference_gate(controlled, inverse, *, reference, policy, context, max_direct_amplitudes):
+def _reference_gate(controlled, inverse, *, reference, policy, context):
     """Return the cached reference preparation gate, controlled on a qubit 0 before the system or inverted as requested.
 
     The uncontrolled gate comes from ``prepare_qiskit`` with the reference's
     physical global phase, its controlled form from ``qiskit_compat.controlled``
     and an inverse from ``inverse_realized_gate`` of the controlled or
-    uncontrolled form. Each variant is built once per Run context.
+    uncontrolled form. Each variant is built once per Run context. Planning
+    counted only the definitions that a supplied reference circuit had built
+    (``adapt.ADAPT.plan``), so the dense syntheses of the controlled form are
+    checked against ``max_bytes`` before they start.
     """
     from nwqlib.subroutines.qiskit_compat import (
         controlled as controlled_gate,
+        dense_gatewise_charges,
         inverse_realized_gate,
     )
 
     rkey = (controlled, inverse)
     if rkey not in context.reference_gates:
         if (False, False) not in context.reference_gates:
-            circuit = prepare_qiskit(
-                reference, max_bytes=policy.max_bytes, max_direct_amplitudes=max_direct_amplitudes
-            ).circuit
+            circuit = prepare_qiskit(reference, max_bytes=policy.max_bytes).circuit
             context.reference_gates[(False, False)] = circuit.to_gate()
         gate = context.reference_gates[(False, False)]
         if controlled:
             if (True, False) not in context.reference_gates:
+                if reference.preparation.implementation == "qiskit.supplied":
+                    from nwqlib.subroutines._dense_synthesis import admit_dense_syntheses
+                    widths, counts, _ = dense_gatewise_charges(gate, 1)
+                    admit_dense_syntheses(widths, controls=(counts,), max_work=None, max_bytes=policy.max_bytes,
+                                          operation="ADAPT controlled reference synthesis")
                 context.reference_gates[(True, False)] = controlled_gate(gate, 1)
             gate = context.reference_gates[(True, False)]
         if inverse:
@@ -407,11 +420,6 @@ def _native_generator(index, theta, *, controlled, inverse, inputs, compiler_pla
 # Rotation instructions of apply_pauli_rotation: one per nonzero nonidentity
 # Pauli row of a commuting generator, in row order.
 _PAULI_ROTATIONS = frozenset(("rx", "ry", "rz", "rxx", "ryy", "rzz"))
-# The largest definition of a multi-controlled RY that _realized_adjoint
-# copies: Qiskit 2.6.0 builds 5, 13, 64 and 96 instructions for 2, 3, 4 and 5
-# controls (docs/ENGINEERING_CONSTANTS.md).
-_CONTROLLED_RY_COPY_LIMIT = 96
-
 
 def _finite_parameters(operation):
     """Return whether every parameter of ``operation`` is a finite number."""
@@ -487,7 +495,7 @@ def _vacuum_phase(index, theta, *, inputs, compiler_plans, context):
     return components
 
 
-def _realized_adjoint(index, theta, *, inputs, compiler_plans, context):
+def _realized_adjoint(index, theta, *, inputs, compiler_plans, context, lowering=None):
     """Return the cached adjoint of the realized uncontrolled forward gate of one generator, for ``"vacuum_restore"``.
 
     The adjoint is ``inverse_realized_gate(forward, native_ucg=False)`` of
@@ -496,8 +504,9 @@ def _realized_adjoint(index, theta, *, inputs, compiler_plans, context):
     and inverts each instruction, so it is the adjoint of the same rounded
     gates. ``build_generator_circuit(inverse=True)``, the ``inverse=True``
     entry of the gate cache, instead evaluates the generator again at
-    ``-theta``, which is only the same ideal operator. The adjoint is built
-    once per ``(index, theta)`` in ``context.adjoints``.
+    ``-theta``, which is only the same ideal operator. ``context.adjoints``
+    keeps one adjoint per ``(index, theta)``, which later constructions
+    reuse once a preparation record that counts it is saved.
 
     Before the helper copies anything, the forward gate must have the
     structure for which it copies only existing definitions and inverts
@@ -505,12 +514,29 @@ def _realized_adjoint(index, theta, *, inputs, compiler_plans, context):
     instructions are standard gates on the helper's standard-inverse
     branch, a plain ``ucry`` multiplexor whose existing definition holds
     only RY and CX, or a multi-controlled RY with at least two closed
-    controls and an existing definition of at most 96 standard-gate
-    instructions. That bound is the Qiskit 2.6.0 count for five controls,
-    the largest an uncontrolled generator uses, and it limits the copy work
-    that the ``"vacuum_restore"`` slot law (``adapt._construction``)
-    declares, so a dependency upgrade that enlarges the definition refuses
-    the instance rather than exceeding the law. Any other structure, a
+    controls and an existing definition of finite standard-gate
+    instructions, so the adjoint is the exact inverse, phase included.
+    The copied definitions are nested, as in the forward gate, so the
+    ``"vacuum_restore"`` slot law (``adapt._construction``) counts each
+    multi-controlled RY as one instruction. Before it copies, the helper
+    reports the instructions of the existing definition of each distinct
+    multi-controlled RY object, the number it appends for that gate, to
+    ``lowering`` (``_ConstructorContext.report_copies``), and they join
+    this construction's work and receipt. Until the preparation record
+    that holds them is saved, the adjoint stays tied to ``lowering``:
+    the same construction reuses it, and another one builds and reports
+    its own copy. Preparations that are pending together, before any of
+    their records is saved, therefore each build the adjoint and count
+    their own copy in their own receipt, as many as
+    ``ExecutionLimits.max_total_circuits`` lets the Run prepare. When a
+    record is saved, its adjoint replaces an entry that another
+    construction built and has not saved, the counts of other saved
+    records stay as they are, and every later construction reuses it
+    without another report. A preparation that fails or is cancelled
+    counts none of its copies, like the rest of its construction work,
+    and retires its own entry while it is still the current one. A
+    reopened Run builds and reports the adjoint again. Without
+    ``lowering``, as for a direct call, nothing is reported. Any other structure, a
     definition still to be built, an extra nesting level or a nonfinite
     parameter makes the instance unavailable: ``ApplicabilityError``
     refuses the query that needs it before its acquisition, and the pair
@@ -522,9 +548,10 @@ def _realized_adjoint(index, theta, *, inputs, compiler_plans, context):
     from nwqlib.algorithms.protocol import ApplicabilityError
     from nwqlib.subroutines.qiskit_compat import inverse_realized_gate
 
-    key = (index, theta)
-    if key in context.adjoints:
-        return context.adjoints[key]
+    key, owner = (index, theta), None if lowering is None else lowering.owner
+    entry = context.adjoints.get(key)
+    if entry is not None and entry[1] in (None, owner):
+        return entry[0]
     forward = _native_generator(index, theta, controlled=False, inverse=False, inputs=inputs,
                                 compiler_plans=compiler_plans, context=context)
 
@@ -546,19 +573,44 @@ def _realized_adjoint(index, theta, *, inputs, compiler_plans, context):
                 and operation.num_ctrl_qubits >= 2
                 and operation.ctrl_state == (1 << operation.num_ctrl_qubits) - 1):
             definition = operation.definition
-            return (definition is not None and len(definition.data) <= _CONTROLLED_RY_COPY_LIMIT
-                    and _finite_parameters(operation) and all(standard(item.operation) for item in definition.data))
+            return (definition is not None and _finite_parameters(operation)
+                    and all(standard(item.operation) for item in definition.data))
         return False
 
     definition = forward.definition if type(forward) is Gate else None
     if definition is None or not all(supported(item.operation) for item in definition.data):
         raise ApplicabilityError(f"pool generator {index} at angle {theta!r} has a realized circuit whose adjoint "
                                  "is not supported by the vacuum_restore construction")
-    context.adjoints[key] = inverse_realized_gate(forward, native_ucg=False)
-    return context.adjoints[key]
+    # The helper's memo inverts each operation object once.
+    copied = {id(item.operation): item.operation for item in definition.data if type(item.operation) is ControlledGate}
+    copies = sum(len(operation.definition.data) for operation in copied.values())
+    entry = [None, None]
+
+    def commit():
+        # Once its record is saved, this adjoint takes the key unless another
+        # saved one holds it: it replaces an entry that another construction
+        # built and has not saved, or one already withdrawn. A key that
+        # _keep_current no longer needs is dropped at the next construction.
+        entry[1] = None
+        current = context.adjoints.get(key)
+        if current is None or current[1] is not None:
+            context.adjoints[key] = entry
+
+    def withdraw():
+        # A preparation that ends without a record retires this entry while
+        # it is still the current one, leaving another construction's entry.
+        if context.adjoints.get(key) is entry:
+            del context.adjoints[key]
+
+    if copies and lowering is not None:
+        entry[1] = owner
+        lowering.report_copies(copies, commit, withdraw)
+    entry[0] = inverse_realized_gate(forward, native_ucg=False)
+    context.adjoints[key] = entry
+    return entry[0]
 
 
-def _append_joint_state(circuit, left, right, rule, kwargs):
+def _append_joint_state(circuit, left, right, rule, kwargs, lowering=None):
     """Append the phase-faithful joint state ``(|0>|left> + |1>|right>)/sqrt(2)`` on ancilla qubit 0.
 
     ``"controlled"``: a Hadamard and an X gate on the ancilla, the complete
@@ -574,12 +626,13 @@ def _append_joint_state(circuit, left, right, rule, kwargs):
     reference's global phase is common to both branches in either
     construction, and each suffix generator keeps its controlled phase.
     ``rule`` is the Plan's resolved ``pair_preparation``. Under the vacuum
-    rules ``pair_route`` selects ``_append_vacuum_pair`` or the prefix
-    construction. Any other value raises ``ValueError``.
+    rules ``pair_route`` selects ``_append_vacuum_pair``, which receives
+    ``lowering``, or the prefix construction. Any other value raises
+    ``ValueError``.
     """
     route = pair_route(left, right, rule)
     if route in ("vacuum_reference", "vacuum_restore"):
-        _append_vacuum_pair(circuit, left, right, kwargs)
+        _append_vacuum_pair(circuit, left, right, kwargs, lowering)
         return
     rule = route
     if rule == "controlled":
@@ -608,7 +661,7 @@ def _append_joint_state(circuit, left, right, rule, kwargs):
         circuit.append(_native_generator(index, theta, **generator), circuit.qubits, copy=False)
 
 
-def _append_vacuum_pair(circuit, left, right, kwargs):
+def _append_vacuum_pair(circuit, left, right, kwargs, lowering=None):
     """Append ``(|0>|left> + |1>|right>)/sqrt(2)`` by controlling only the reference, for the two vacuum rules.
 
     Write ``phi_i = U_i B|vac>`` for the reference preparation B, the
@@ -644,14 +697,15 @@ def _append_vacuum_pair(circuit, left, right, kwargs):
     instance refuses the query before its acquisition. The ideal cost is
     two controlled B, one uncontrolled ``U_j`` and, for a left chain, two
     uncontrolled ``U_i``, one of them as its adjoint. A smaller compiled
-    depth or error is not implied.
+    depth or error is not implied. ``lowering`` is the constructor context
+    of the circuit construction, to which the adjoints report their copies.
     """
     generator = dict(inputs=kwargs["inputs"], compiler_plans=kwargs["compiler_plans"], context=kwargs["context"])
     corrections = [c for item in right for c in _vacuum_phase(*item, **generator)]
     corrections += [-c for item in left for c in _vacuum_phase(*item, **generator)]
-    adjoints = [_realized_adjoint(*item, **generator) for item in reversed(left)]
+    adjoints = [_realized_adjoint(*item, **generator, lowering=lowering) for item in reversed(left)]
     reference = _reference_gate(True, False, reference=kwargs["reference"], policy=kwargs["policy"],
-                                context=kwargs["context"], max_direct_amplitudes=kwargs["max_direct_amplitudes"])
+                                context=kwargs["context"])
     system = circuit.qubits[1:]
 
     def forward(items):
@@ -728,7 +782,6 @@ def construct_adapt(block, arguments, method_context):
         compiler_plans=compiler_plans,
         policy=policy,
         context=context,
-        max_direct_amplitudes=method_context.max_direct_amplitudes,
     )
     choice = block.record.choice
     if pair and choice.startswith(("pair:exact:", "pair:shots:grouped:")):
@@ -744,7 +797,7 @@ def construct_adapt(block, arguments, method_context):
                 copy=False,
             )
         else:
-            _append_joint_state(circuit, left, right, pair_preparation, kwargs)
+            _append_joint_state(circuit, left, right, pair_preparation, kwargs, method_context)
         if choice.startswith("pair:shots:grouped:"):
             if inputs.energy_groups:
                 ordered = energy_labels((label for label, _ in inputs.nonidentity), inputs.cache)
@@ -815,9 +868,7 @@ def construct_adapt(block, arguments, method_context):
         if block.record.choice.startswith(name + ":shots:"):
             if name == "screen":
                 ordered, groups = screen_labels(inputs.members, inputs.cache), inputs.groups
-                active = active_screen_labels(
-                    inputs.members, inputs.cache, {i for i, _ in right}, len(inputs.pool)
-                )[1]
+                active = active_screen_labels(inputs.members, inputs.cache, {i for i, _ in right})[1]
             else:
                 ordered = energy_labels((label for label, _ in inputs.nonidentity), inputs.cache)
                 groups, active = inputs.energy_groups, frozenset(ordered)
@@ -1212,7 +1263,7 @@ def bind_classical(plan, inputs, reference):
     reference constructions and generator exponentials on cache misses, the
     Hamiltonian and generator actions, and the scalar products.
     """
-    from .adapt import HOST, cached_state_vectors
+    from .adapt import HOST
 
     template = plan.construction.kernels[0]
 
@@ -1236,50 +1287,9 @@ def bind_classical(plan, inputs, reference):
                 generator_actions=0,
                 scalar_products=0,
             )
-            # Peak live arrays: C_cache + 12 complex128 vectors of 2**q
-            # amplitudes, 16 bytes each, with C_cache the vectors that the
-            # state cache and the H column cache can hold after _keep_current
-            # (adapt.cached_state_vectors): 8L for the default growth, with
-            # L = max_selections, and 2(B + 2L) for a bounded basis of at
-            # most B chains. The remaining 12 vectors are an allowance for
-            # working arrays such as the query state, H|state>, a generator
-            # action, the two Taylor buffers, the Ritz state and its residual,
-            # and for a pair query on a dense matrix the state copy and one
-            # row of A that removing the mean diagonal holds. The reference
-            # preparation's bytes and the sparse blocks of that removal are
-            # added.
-            #
-            # An energy-and-gradient evaluation of a chain of k generators
-            # stores k + 1 forward states and k raw tangents, (2k + 1) 16d
-            # bytes, and three scalar arrays of norms, step counts and the
-            # gradient, 24k bytes. Inside taylor_action_derivative the old
-            # base and tangent base, the two current Horner vectors, two
-            # action outputs and up to three expression temporaries coexist,
-            # at most 2k + 8 complex vectors at the last forward factor. The
-            # twelve-vector term leaves room for normalizer scans and callback
-            # buffers. With the C_cache <= 8L vectors the Run's caches can
-            # still hold, it reserves 16 (C_cache + 2k + 12) d + 24k +
-            # B_tables + B_H + max_A(B_A - 32d) + B_reference/setup. The input
-            # and output of one Pauli action already occupy two of the vector
-            # slots, so each action adds its shared allowance B_A less 32d:
-            # the finite mask, action metadata and the largest
-            # preprocessing/retry scratch (adapt_actions.action_sizes, over
-            # all admitted tables). B_tables is the Plan's packed tables, B_H
-            # the full Hamiltonian payload, and B_reference/setup the
-            # reference preparation and offset-free setup bytes. A dense or
-            # sparse H enters the maximum with its ordinary action envelope.
-            rec = plan.reconstruction
-            d = 1 << rec.num_qubits
+            # Planning checked the dominant arrays of the largest query once
+            # (adapt.classical_frontier_bytes), so a query repeats no check.
             gradient = name == "energy" and int(number(values["insert_position"])) < 0
-            k = len(right)
-            cached = cached_state_vectors(plan.method, rec.max_selections)
-            outer = 16 * (cached + 2 * k + 12) * d + 24 * k if gradient else 16 * (cached + 12) * d
-            tables = inputs.cache["action_tables"]
-            need = (outer + tables["resident_bytes"]
-                    + inputs.hamiltonian.manifest.payload_bytes
-                    + max((size - 32 * d for size in action_sizes(inputs, d)), default=0)
-                    + rec.reference_action_bytes + rec.offset_free_action_bytes)
-            _check_bytes(need, plan.method.max_bytes, "ADAPT classical frontier")
             if gradient:
                 answer = _classical_energy_gradient(plan, context, counts, right)
                 return output(answer, counts)
@@ -1505,7 +1515,7 @@ def _read_values(plan, point, chunk):
         missing = tuple(label for label in labels if label not in result)
         if missing:
             raise _PartialData(tuple(f"{point.experiment}: missing {label}" for label in missing))
-        if any(label not in frozenset(labels) | {"h0", "overlap"} for label in result):
+        if not result.keys() <= {*labels, "h0", "overlap"}:
             raise ValueError("query returned an undeclared scalar label")
         return result
     if point.experiment == "pair" and plan.execution == "quantum" and plan.shots is None:
@@ -1770,15 +1780,17 @@ def _grouped_moments(plan, basis, context, acquire=None, *, stage=-1, counts=Non
     whole current population, the chunk of each new query and the chunk
     behind each cached moment, is admitted by
     ``fixed_basis.grouped_pass_requirements`` (bytes against ``max_bytes``,
-    work against ``max_products``) with its settings, pairs and oriented
-    view, which charge that pooling too. With ``acquire`` the pass is
-    admitted before the first missing query runs, each table not yet
+    work against ``max_products``) with its oriented view. With ``acquire`` the pass is
+    admitted once, before the first missing query runs, each table not yet
     acquired charged its largest possible bin count ``min(N, 2**(n+1))`` for
     the shots N that its point binds, so a refusal leaves no new
-    acquisition. Once every missing query has its chunk, read from the
-    observations or run by ``acquire``, the pass is admitted again with the
-    stored bins of every chunk before any count is decoded or any current
-    view is formed. Only the new chunks are decoded, and their canonical
+    acquisition. The stored bins of the chunks it then acquires are at most
+    these, and the law increases with every bin count, so they need no
+    second check. A later stage, whose basis depends on the observations,
+    is admitted the same way before its own first query. Without
+    ``acquire`` every chunk comes from the observations, and the pass is
+    admitted with their stored bins before any count is decoded or any
+    current view is formed. Only the new chunks are decoded, and their canonical
     moments enter ``context.pair_values`` with the stored bin count of their
     chunk. The moments are then placed at their basis positions, conjugated
     where the basis reverses the canonical order. Returns
@@ -1799,8 +1811,7 @@ def _grouped_moments(plan, basis, context, acquire=None, *, stage=-1, counts=Non
         """Check the pass of every current setting, with ``bins(key)`` the stored bins of its chunk."""
         size, work = grouped_pass_requirements(
             rec.num_qubits, ((len(groups[key[3]]), bins(key)) for _, _, key, _ in entries),
-            len(rec.nonidentity_terms), len(basis), settings=len(entries),
-            pairs=len({pair for pair, _, _, _ in entries}), oriented=True)
+            len(rec.nonidentity_terms), len(basis), oriented=True)
         _check_bytes(size, plan.method.max_bytes, "ADAPT grouped count arrays and scalar payload")
         _check_products(work, plan.method.max_products)
 
@@ -1819,7 +1830,8 @@ def _grouped_moments(plan, basis, context, acquire=None, *, stage=-1, counts=Non
         if chunk is None:
             raise _PartialData((f"matrix {setting[0]}",))
         new[key] = point, _single_chunk(chunk)
-    admit(lambda key: len(new[key][1].values) if key in new else context.pair_values[key][2])
+    if acquire is None:
+        admit(lambda key: len(new[key][1].values) if key in new else context.pair_values[key][2])
     rows = _group_rows(plan)
     for key, (point, chunk) in new.items():
         context.pair_values[key] = (_reduce_query(plan, point, chunk, rows), chunk.prepared_id, len(chunk.values))
@@ -1901,26 +1913,32 @@ def _matrix_from_observations(plan, basis, context, *, acquire=None, receipt=Non
         # to both H0 and S. The reduction already returns complex entries, so
         # no per-quadrature sign adjustment applies. Its entry bounds come
         # from its own receipt's state error with the ordered-action envelope.
+        # The receipt's content id names that record, so the bound is kept
+        # with the pair's values once the record is found. A pair whose record
+        # is not yet available keeps no bound and is looked up again later.
         from .fixed_basis import _coefficient_mass
         from .pair_reducer import entry_bounds
 
         rec = plan.reconstruction
-        terms = len(rec.nonidentity_terms)
-        c1 = _coefficient_mass([t.coefficient for t in rec.nonidentity_terms])
+        terms, c1 = len(rec.nonidentity_terms), None
         pairs, bounds = {}, {}
         for (i, j), _, key, point in _matrix_entries(plan, basis, context.observations, full):
-            v, prepared_id = read(key, point, f"matrix pair {i},{j}")
+            v, prepared_id, *bound = read(key, point, f"matrix pair {i},{j}")
             h0, overlap = v["h0"], v["overlap"]
             if basis[j] < basis[i]:
                 h0, overlap = h0.conjugate(), overlap.conjugate()
             pairs[(i, j)] = (h0, overlap)
-            prepared = None if receipt is None else receipt(prepared_id)
-            # The input array can carry a shared host phase correction. The
-            # pair entries cancel the common global phase (saved-state budget).
-            delta = None if prepared is None else prepared.saved_state_error(("amplitude-derived masses",))[0]
-            entry = entry_bounds(delta, c1, 1 << rec.num_qubits, terms,
-                                 diagonal=basis[i] == basis[j])
-            bounds[(i, j)] = None if entry is None else entry[0]
+            prepared = None if bound or receipt is None else receipt(prepared_id)
+            if prepared is not None:
+                if c1 is None:
+                    c1 = _coefficient_mass([t.coefficient for t in rec.nonidentity_terms])
+                # The input array can carry a shared host phase correction. The
+                # pair entries cancel the common global phase (saved-state budget).
+                entry = entry_bounds(prepared.saved_state_error(("amplitude-derived masses",))[0], c1,
+                                     1 << rec.num_qubits, terms, diagonal=basis[i] == basis[j])
+                bound = [None if entry is None else entry[0]]
+                context.pair_values[key] = (v, prepared_id, bound[0])
+            bounds[(i, j)] = bound[0] if bound else None
         h, s = assemble_pair_pencil(b, pairs)
         allowance = _exact_overlap_allowance(b, bounds)
         # An unavailable allowance admits no input error beyond the solver's
@@ -2015,6 +2033,46 @@ def _pencil_from_observations(plan, basis, context, *, cutoff=None, receipt=None
 # them apart from the stage cursor ``final``.
 _FINAL_FIXED = {"pilot_counts": "pilot_counts", "decision": "shot_allocation"}
 
+_KIND = "adapt_gcim/4"
+
+
+def _supported_kind(state):
+    """Raise when a saved controller state is of another checkpoint format than ``_KIND``."""
+    if state.get("kind") != _KIND:
+        raise ValueError(f"the saved ADAPT controller state has the unsupported checkpoint format "
+                         f"{state.get('kind')!r}, and this version reads {_KIND!r}")
+
+
+def _history_field(ordinal):
+    """Return the checkpoint field name of history record ``ordinal``."""
+    return f"history.{ordinal:06d}"
+
+
+def _checkpoint_fields(state):
+    """Return ``state`` with each history record as its own checkpoint field.
+
+    Every record carries the gradients of the whole pool, so a checkpoint
+    that names only the records that changed writes O(P) history bytes
+    instead of re-encoding all earlier records.
+    """
+    fields = {name: value for name, value in state.items() if name != "history"}
+    fields.update((_history_field(ordinal), record) for ordinal, record in enumerate(state["history"]))
+    return fields
+
+
+def _joined_history(fields):
+    """Return a saved controller state with its history fields joined into ``history`` in ordinal order.
+
+    Raises:
+        ValueError: If the saved records are not ordinals 0 to n - 1.
+    """
+    names = sorted((name for name in fields if name.startswith("history.")), key=lambda name: int(name[8:]))
+    if names != [_history_field(ordinal) for ordinal in range(len(names))]:
+        raise ValueError("the saved ADAPT history is not a complete sequence of records")
+    state = {name: value for name, value in fields.items() if not name.startswith("history.")}
+    state["history"] = [fields[name] for name in names]
+    return state
+
 
 def _new_controller_state(controls, *, bounded=False):
     """Return the initial checkpoint state of a new ADAPT iteration.
@@ -2056,7 +2114,9 @@ def _new_controller_state(controls, *, bounded=False):
       is not complete, and the labels reported as ``ADAPTResult.pending``.
     - ``history``: one dictionary per projected analysis, the future
       ``AdaptRound`` fields plus ``new_start``/``new_stop`` indices into the
-      contribution order.
+      contribution order. A checkpoint saves record i as its own field
+      ``history.{i:06d}`` (``_checkpoint_fields``), and a saved state is
+      read back through ``_joined_history``.
     - ``value``, ``value_selected``, ``value_theta``, ``coefficients``: the
       latest projected Ritz value, the chain of its basis and its
       coefficient vector as ``[real, imag]`` pairs. ``project_current`` adds
@@ -2081,7 +2141,7 @@ def _new_controller_state(controls, *, bounded=False):
     extra = dict(basis=[[]], value_basis=[], cursor=[]) if bounded else {}
     return dict(
         **extra,
-        kind="adapt_gcim/3",
+        kind=_KIND,
         controls=controls,
         selected=[],
         theta=[],
@@ -2174,7 +2234,7 @@ def _stopping_reason(state, options, reconstruction, count):
 def _bounded_stopping_reason(state, options, reconstruction, size):
     """Return the stop reason of bounded growth after an analysis of a basis of ``size`` chains, or None.
 
-    The rules are checked in this order: the basis holds ``max_basis_size``
+    The rules are checked in this order: the basis holds ``BoundedRitzGrowth.max_basis_size``
     chains, ``max_iterations`` rounds have each added a chain, or the flat
     count is at least ``T = min(t_user, t_auto_fraction * P)``, the rule of
     ``_stopping_reason`` with the pool size P as a fixed scale in place of
@@ -2184,7 +2244,7 @@ def _bounded_stopping_reason(state, options, reconstruction, size):
     examine the extensions of the next round.
     """
     rounds = size - 1
-    if size >= options.max_basis_size:
+    if size >= options.basis_growth.max_basis_size:
         return "max_basis_size"
     if rounds >= options.max_iterations:
         return "max_iterations"
@@ -2349,8 +2409,8 @@ def drive_adapt(plan, *, run, prepare_only=False):
     growth = options.basis_growth
     from .adapt import independence_floor
     from .bounded_growth import (
-        candidate_score, current_projection, frontier, generator_cx_weight, reference_cx_bound, sampled_eligibility,
-        sampled_metric)
+        candidate_score, current_projection, frontier, reference_cx_bound, sampled_eligibility, sampled_metric)
+    from nwqlib.subroutines.fermionic_circuits import generator_cx_count
 
     controls = dict(
         plan_id=plan.content_id, optimizer_resume_policy="restart_if_no_official_resume"
@@ -2374,8 +2434,11 @@ def drive_adapt(plan, *, run, prepare_only=False):
         if run.trace.events:
             raise ValueError("a fresh ADAPT controller requires a run without unrelated attempts")
         state = _new_controller_state(controls, bounded=growth is not None)
-    elif state.get("kind") != "adapt_gcim/3" or state.get("controls") != controls:
-        raise ValueError("resume requires the identical ADAPT Plan/runtime/policy")
+    else:
+        _supported_kind(state)
+        if state.get("controls") != controls:
+            raise ValueError("resume requires the identical ADAPT Plan/runtime/policy")
+        state = _joined_history(state)
     indices, angles = state["selected"], state["theta"]
     context.accepted = tuple(zip(indices, angles, strict=True))
     context.basis = None if growth is None else saved_chains(state["basis"])
@@ -2399,16 +2462,17 @@ def drive_adapt(plan, *, run, prepare_only=False):
     # projected analysis replaces the pencil without editing it, the final
     # stages publish their pilot counts once and their allocation once
     # (_FINAL_FIXED), and the history changes only through project_current's
-    # append and update_last, which both raise `revision`, so identity checks
-    # and one integer comparison find their changes. A reopened Run records
-    # the identities of the values it read, so it writes none of them again
-    # until it replaces one. Raw observations belong to the Run, not to this
-    # state.
-    revision, absent = 0, object()
+    # append and update_last, which both mark the ordinal of the record they
+    # change, so identity checks and that set find the changes. Each history
+    # record is its own field, so a checkpoint writes only the marked records.
+    # A reopened Run records the identities of the values it read, so it
+    # writes none of them again until it replaces one. Raw observations belong
+    # to the Run, not to this state.
+    absent, dirty = object(), set()
     replaced = ("pencil", *_FINAL_FIXED.values())
 
     def identities():
-        return dict(revision=revision, **{name: state.get(name, absent) for name in replaced})
+        return {name: state.get(name, absent) for name in replaced}
 
     saved = identities() if restored else None
 
@@ -2419,9 +2483,9 @@ def drive_adapt(plan, *, run, prepare_only=False):
         if saved is not None:
             changed = [name for name in state
                        if name != "history" and (name not in replaced or state[name] is not saved[name])]
-            if revision != saved["revision"]:
-                changed.append("history")
-        sequence = run.checkpoint(state, changed=changed)
+            changed += [_history_field(ordinal) for ordinal in sorted(dirty)]
+        sequence = run.checkpoint(_checkpoint_fields(state), changed=changed)
+        dirty.clear()
         saved = identities()
         return sequence
 
@@ -2506,6 +2570,26 @@ def drive_adapt(plan, *, run, prepare_only=False):
 
     # Acquire each exact realization once, or resume its saved preparation/job.
     # Persist its seed before any external work can become visible.
+    def admit_growth(*, preparations=0, circuits=0, shots=0):
+        """Check one unit of growth against the Run's limits, together with the final stages' shots.
+
+        Under ``PencilSampling`` a Plan that measures spends ``total_shots``
+        in the two final stages once growth stops, a cost that the Plan
+        fixes, so until then each growth unit is admitted only while those
+        shots still fit after it. Nothing is set aside. The stages' circuits
+        depend on the final basis and are checked when they start.
+        """
+        final = (options.sampling.total_shots
+                 if options.sampling is not None and state["phase"] not in ("final", "complete")
+                 and reconstruction.acquisition.matrix_measurement == "grouped" else 0)
+        try:
+            run.check_capacity(preparations=preparations, circuits=circuits, shots=shots + final)
+        except ValueError as error:
+            if not final or "max_total_shots" not in str(error):
+                raise
+            raise ValueError(f"{error} The requested shots include the {final} total_shots of the two final "
+                             "PencilSampling stages, which this Plan spends once its growth stops.") from None
+
     def acquire(point):
         """Resume or start the data collection for one resolved query and record its result once."""
         if point.content_id in context.observations:
@@ -2539,7 +2623,7 @@ def drive_adapt(plan, *, run, prepare_only=False):
             if prepared_id is None and preparation_id is not None:
                 prepared_id = run._state["preparation_charges"][preparation_id].prepared_id
             _, observation = point.resolved_observation(plan)
-            run.check_capacity(circuits=int(plan.execution == "quantum"), shots=observation.shots)
+            admit_growth(circuits=int(plan.execution == "quantum"), shots=observation.shots)
             if prepared_id is not None:
                 prepared = run._state["handles"].get(prepared_id) or restore_prepared(
                     prepared_id, run=run, for_submission=True
@@ -2712,7 +2796,6 @@ def drive_adapt(plan, *, run, prepare_only=False):
     # one projected-energy decision with the exact basis and observation range.
     def project_current(basis):
         """Solve the obtained projected pencil of the basis chains ``basis`` and checkpoint its basis-specific decision."""
-        nonlocal revision
         selected = selected_tuple()
         state["analysis_in_progress"] = True
         state["analysis_attempts"] += 1
@@ -2746,7 +2829,7 @@ def drive_adapt(plan, *, run, prepare_only=False):
             state["value"],
             iteration,
             valid=state["value"] is not None and pencil.failure_reason is None,
-            tolerance=options.energy_change_tolerance,
+            tolerance=reconstruction.energy_change_tolerance,
         )
         # The diagonal query of the full product identifies this round's
         # basis in its history record (AdaptRound.basis_realization), and the
@@ -2809,7 +2892,7 @@ def drive_adapt(plan, *, run, prepare_only=False):
                 "controller projected stage differs from its committed decision history"
             )
         state["history"].append(record)
-        revision += 1
+        dirty.add(iteration)
         state["stage_start"] = len(context.contribution_order)
         if (
             pencil.failure_reason is not None
@@ -2824,20 +2907,17 @@ def drive_adapt(plan, *, run, prepare_only=False):
         publish_pencil()
 
     def update_last(**fields):
-        nonlocal revision
         state["history"][-1].update(fields)
-        revision += 1
+        dirty.add(len(state["history"]) - 1)
 
     limited = growth is not None and growth.basis_depth_limit is not None
     reference_bound = reference_cx_bound(reconstruction.reference, reconstruction.num_qubits)[0] if limited else 0
 
     def depth_weight(index):
-        """Return the cached CX count bound of generator ``index`` at ``theta``, read once from its uncontrolled forward gate."""
+        """Return the cached CX count bound of generator ``index`` at ``theta``, from its compiler plan without a gate."""
         key = (index, options.theta)
         if key not in context.depth_weights:
-            gate = _native_generator(index, options.theta, controlled=False, inverse=False,
-                                     inputs=plan._native["inputs"], compiler_plans=compilers, context=context)
-            context.depth_weights[key] = generator_cx_weight(gate.definition)
+            context.depth_weights[key] = generator_cx_count(compilers.peek(index), options.theta)
         return context.depth_weights[key]
 
     try:
@@ -2879,9 +2959,10 @@ def drive_adapt(plan, *, run, prepare_only=False):
 
             Each new pencil query is one circuit preparation and one
             acquisition, and each exact pair reduction registers
-            ``pair_work`` host work.
+            ``pair_work`` host work, counted only under an explicit
+            ``max_products``.
             """
-            if plan.shots is None:
+            if plan.shots is None and plan.method.max_products is not None:
                 from .fixed_basis import pair_reduction_point
                 from .pair_reducer import pair_work
 
@@ -2890,7 +2971,7 @@ def drive_adapt(plan, *, run, prepare_only=False):
                     [t.coefficient for t in reconstruction.nonidentity_terms],
                     reconstruction.num_qubits, diagonal=False)
                 _check_products(count * pair_work(json.loads(point.parameters)), plan.method.max_products)
-            run.check_capacity(preparations=count, circuits=count, shots=count * (plan.shots or 0))
+            admit_growth(preparations=count, circuits=count, shots=count * (plan.shots or 0))
 
         # A matrix stage, or bounded rows stage, entered during this call has
         # acquired nothing yet. The stage that a restored call resumes may be
@@ -2959,7 +3040,10 @@ def drive_adapt(plan, *, run, prepare_only=False):
                 state["phase"] = "decision"
                 save()
             elif state["phase"] == "decision":
-                reason = (_stopping_reason(state, options, reconstruction, len(selected)) if growth is None
+                # H = cI (energy_scale 0) has energy c on every state and zero gradients. The run ends on
+                # that fact, independent of the gradient floor, the flat count and their rounding.
+                reason = ("constant_hamiltonian" if reconstruction.energy_scale == 0
+                          else _stopping_reason(state, options, reconstruction, len(selected)) if growth is None
                           else _bounded_stopping_reason(state, options, reconstruction, len(basis)))
                 if reason is not None:
                     stop(reason)
@@ -3062,10 +3146,7 @@ def drive_adapt(plan, *, run, prepare_only=False):
                     measured = _read_values(plan, point, acquire(point))
                     gradients = {i: measured[f"g_{i}"] for i in remaining}
                 else:
-                    active = active_screen_labels(
-                        reconstruction.pool, label_cache(plan), state["selected"],
-                        reconstruction.max_selections,
-                    )[1]
+                    active = active_screen_labels(reconstruction.pool, label_cache(plan), state["selected"])[1]
                     ordered = screen_labels(reconstruction.pool, label_cache(plan))
                     measured = {}
                     groups = (
@@ -3083,9 +3164,11 @@ def drive_adapt(plan, *, run, prepare_only=False):
                         measured.update(_read_values(plan, point, acquire(point)))
                     # [H, A_i] = sum_t c_t P_t (adapt_inputs), so its expectation
                     # is the coefficient-weighted sum of the measured labels.
-                    rows = commutator_rows(reconstruction.pool, label_cache(plan))
+                    # Every label of a remaining member is active and measured.
+                    labels, indices = commutator_index(reconstruction.pool, label_cache(plan))
+                    values = np.array([measured[label] if label in active else 0.0 for label in labels])
                     gradients = {
-                        i: fsum(coefficient * measured[label] for label, coefficient in rows[i])
+                        i: fsum(reconstruction.pool[i].commutator.coefficients.array * values[indices[i]])
                         for i in remaining
                     }
                 norm = stable_vector_norm(np.array(tuple(gradients.values())))
@@ -3095,11 +3178,11 @@ def drive_adapt(plan, *, run, prepare_only=False):
                 update_last(
                     gradient_norm=norm,
                     gradients=sorted(gradients.items()),
-                    winner=winner if norm > options.gradient_norm_floor else None,
+                    winner=winner if norm > reconstruction.gradient_norm_floor else None,
                     new_stop=len(context.contribution_order),
                 )
                 state["stage_start"] = len(context.contribution_order)
-                if norm <= options.gradient_norm_floor:
+                if norm <= reconstruction.gradient_norm_floor:
                     stop("gradient_norm_floor")
                     continue
                 state["selected"].append(winner)
@@ -3164,6 +3247,8 @@ def drive_adapt(plan, *, run, prepare_only=False):
                     evaluate=evaluate_energy,
                     completed_round=completed_round,
                     rules=rules,
+                    identity_shift=reconstruction.identity_shift,
+                    scale=reconstruction.energy_scale,
                 )
                 state["theta"] = list(optimizer["best_theta"])
                 state["optimizer_exhausted"] = reason == "evaluation_budget_exhausted"
@@ -3185,6 +3270,13 @@ def drive_adapt(plan, *, run, prepare_only=False):
                     m = (sampled_setting_count(len(chosen), len(reconstruction.energy_groups),
                                                reconstruction.acquisition.quadratures)
                          if reconstruction.acquisition.matrix_measurement == "grouped" else 0)
+                    if m:
+                        # The final basis is known only now, so the analysis of
+                        # its stages is checked here, before the first pilot circuit.
+                        from .adapt import _admit_final_analysis
+                        _admit_final_analysis(options, len(chosen), reconstruction.num_qubits,
+                                              reconstruction.energy_groups, len(reconstruction.nonidentity_terms),
+                                              reconstruction.acquisition.quadratures)
                     run.check_capacity(preparations=2 * m, circuits=2 * m,
                                        shots=options.sampling.total_shots if m else 0)
                     fields = pencil_workflow.new_state(options.sampling, m)
@@ -3319,8 +3411,6 @@ def _optimizer_rules(plan, generators, context):
                 generator,
                 execution_mode=ExecutionMode.SHOTS if plan.shots else ExecutionMode.STATEVECTOR,
                 compilation_plan=plan._native["compiler_plans"][index],
-                max_bytes=plan.method.max_bytes,
-                max_products=plan.method.max_products,
             )
         rules[index] = context.rules[index]
     return rules
@@ -3353,12 +3443,13 @@ def recover_adapt_analysis(plan, *, run):
     again.
     """
     state = run.checkpoint_state
+    if isinstance(state, dict):
+        _supported_kind(state)
     final = state.get("final") if isinstance(state, dict) else None
     allocation = final is not None and final.get("allocation_in_progress", False)
     if (
         run.plan is not plan
         or not isinstance(state, dict)
-        or state.get("kind") != "adapt_gcim/3"
         or state.get("controls", {}).get("plan_id") != plan.content_id
         or not (state.get("analysis_in_progress") or allocation)
         or state.get("phase") != ("analysis" if final is None else "final")
@@ -3399,12 +3490,15 @@ def recover_adapt_analysis(plan, *, run):
     attempts = final["analysis_attempts"] if allocation else state["analysis_attempts"]
     retry = dict(previous_attempts=attempts, sequence=run.checkpoint_sequence + 1,
                  **({} if final is None else dict(stage=stage)))
+    # Both checkpoints name only the fields they change, so the saved
+    # history records and the pencil are not encoded again.
     state["analysis_retries"] = [*state.get("analysis_retries", ()), retry]
-    run.checkpoint(state)
+    run.checkpoint(state, changed=["analysis_retries"])
     if final is not None:
         final["allocation_in_progress"] = False
     state.update(analysis_in_progress=False, stop_reason="running", pending_labels=[])
-    run.checkpoint(state)
+    run.checkpoint(state, changed=["analysis_in_progress", "stop_reason", "pending_labels",
+                                   *(["final"] if final is not None else [])])
 
 
 def _matched_query_chunks(plan, data):
@@ -3464,8 +3558,11 @@ def analyze_adapt(plan, data, *, settings):
     import json
 
     state = json.loads(data.controller)["state"] if data.controller is not None else {}
+    if state:
+        _supported_kind(state)
     if state.get("controls", {}).get("plan_id") != plan.content_id:
         raise ValueError("ADAPT analysis requires its original controller trajectory")
+    state = _joined_history(state)
     raw = state.get("pencil")
     pencil = None if raw is None else ProjectedPencil.model_validate(raw)
     cutoff = settings.get("overlap_cutoff", plan.method.overlap_cutoff)

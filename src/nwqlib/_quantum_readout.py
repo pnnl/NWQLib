@@ -20,20 +20,22 @@ state, before they are saved
 (``reduce_scaled``, ``validate_saved_masses``).
 The sampled path groups qubit-wise commuting labels (``qwc_groups``) and
 reduces each group's counts to weighted moments (``weighted_group_moments``).
-A sampled physical mass reduces one counts setting (``reduce_setting``).
+A sampled physical mass is one setting's physical shot count
+(``physical_shot_count``) over its returned shots.
 Sampled original-coordinate outcomes reduce to sorted index and count arrays
 (``reduce_sample_arrays``).
 """
 
 import math
-import sys
 from fractions import Fraction as Q
-from math import frexp, fsum, isfinite, ldexp
+from functools import lru_cache
+from math import frexp, isfinite, ldexp
 
 import numpy as np
 
 from pydantic import model_validator
 
+from nwqlib._limits import optional_limit
 from nwqlib.core.records import Record, Text
 
 
@@ -111,52 +113,21 @@ def _coordinate(outcome, coordinates, positions):
     return sum(((outcome >> positions[bit]) & 1) << index for index, bit in enumerate(coordinates))
 
 
-def reduce_setting(chunk, *, observed, success, conditions=(), pivot=None,
-                   coordinates=(), dimension=None):
-    """Return algorithm mass, physical mass and signed Pauli moment.
+def physical_shot_count(chunk, *, observed, success, coordinates=(), dimension=None):
+    """Return the returned shots in the physical slice of a counts setting, as a Python integer.
 
-    All three are fractions of the returned shots (counts) or of total
-    probability. The algorithm mass keeps outcomes whose success selectors
-    match. The physical mass further requires the condition selectors and,
-    with dimension, a coordinate below dimension. The signed moment is that
-    physical mass with outcomes weighted -1 where the pivot bit reads one.
-    With an original-coordinate projection P, mass is sum_{j<dimension}|a_j|².
-    Such a coordinate check is invalid after a Pauli basis rotation, so pivot
-    and dimension cannot be combined. Zero-padded P O P terms are instead
-    measured without this check, then normalized by a separately observed mass.
+    The slice keeps outcomes whose success selectors match and, with dimension,
+    whose coordinate is below dimension, so the physical mass of the setting is
+    this count over ``chunk.returned_shots``. With an original-coordinate
+    projection P, that mass estimates sum_{j<dimension}|a_j|². The count is
+    summed from the integer histogram, because rounding a floating-point mass
+    times the returned shots can give a different integer. It reads outcomes of
+    any width, because a width limit found here would refuse shots already spent.
     """
-    if dimension is not None and pivot is not None:
-        raise ValueError("original-coordinate projection cannot follow a Pauli basis rotation")
-    if dimension is not None and (type(dimension) is not int or dimension < 1
-                                  or (dimension - 1).bit_length() > len(coordinates)):
-        raise ValueError("physical dimension must fit the observed coordinate register")
-    needed = coordinates if dimension is not None else (() if pivot is None else (pivot,))
-    positions = _positions(observed, success, conditions, needed)
-    if chunk.observation.kind == "pauli_expectation":
-        if observed or success or conditions or pivot is not None or dimension is not None:
-            raise ValueError("identity expectation cannot encode selected bit conditions")
-        return (1.0, 1.0, 1.0) if chunk.values else (None, None, None)
-    counts = chunk.observation.kind == "counts"
-    if not counts and chunk.observation.kind != "probabilities":
-        raise ValueError("setting reduction requires counts or probabilities")
-    denominator = chunk.returned_shots if counts else 1.0
-    if denominator == 0:
-        return None, None, None
-    algorithm, plus, minus = [], [], []
-    narrower = bool(conditions) or dimension is not None
-    for outcome, weight in _outcomes(chunk, observed):
-        if any((outcome >> positions[bit]) & 1 != value for bit, value in success):
-            continue
-        if narrower:
-            algorithm.append(weight)
-        if any((outcome >> positions[bit]) & 1 != value for bit, value in conditions):
-            continue
-        if dimension is not None and _coordinate(outcome, coordinates, positions) >= dimension:
-            continue
-        (minus if pivot is not None and (outcome >> positions[pivot]) & 1 else plus).append(weight)
-    positive, negative = fsum(plus), fsum(minus)
-    mass = (positive + negative) / denominator
-    return fsum(algorithm) / denominator if narrower else mass, mass, (positive - negative) / denominator
+    positions = _positions(observed, success, (), coordinates)
+    return sum(count for outcome, count in _outcomes(chunk, observed)
+               if all((outcome >> positions[bit]) & 1 == value for bit, value in success)
+               and (dimension is None or _coordinate(outcome, coordinates, positions) < dimension))
 
 
 def physical_moment(value, recovery, exponent=0):
@@ -207,7 +178,7 @@ def pair_value(pair):
     is ``(0, 0)``. A nonzero mantissa has absolute value in [1/2, 1). Masses
     and numerators carry separate exponents. The exponent check
     [-8192, 8192] is a derived envelope for finite binary64 inputs and the
-    admitted lengths ``F, N, L < 2**51`` defined in ``readout_requirements``:
+    lengths ``F, N, L < 2**51`` of the reductions in this module:
     F is the saved-state length, N the coordinate-space dimension and L the
     number of kept packed Pauli rows. The exponent check is not a precision cutoff.
     Recovered physical exponents lie outside it and are not checked here.
@@ -259,13 +230,90 @@ def sqrt_up(value, bits=128):
     return Q(root, scale)
 
 
+def selected_view(native, fixed=()):
+    """Return a borrowed view of the native amplitudes whose valued selector bits match, or None.
+
+    Callers validate width, dtype and distinct selectors first. The state is
+    reshaped with its most significant bit first, so each selector fixes one
+    axis of length two and the free bits between selectors merge into one
+    axis. The view keeps index order and forms no index, mask or copy. None
+    means that the reshape would need a copy (a noncontiguous state).
+    """
+    values = dict(fixed)
+    shape, index, run = [], [], 0
+    for bit in reversed(range(len(native).bit_length() - 1)):
+        if bit not in values:
+            run += 1
+            continue
+        if run:
+            shape.append(1 << run)
+            index.append(slice(None))
+            run = 0
+        shape.append(2)
+        index.append(values[bit])
+    if run:
+        shape.append(1 << run)
+        index.append(slice(None))
+    try:
+        return np.reshape(native, shape, copy=False)[(*index, ...)]
+    except ValueError:
+        return None
+
+
+def _square_sum(part):
+    """Binary64 sum of the squared real and imaginary components of a complex view, without a temporary array."""
+    parts = ((part.reshape(-1).view(np.float64),) if part.flags.c_contiguous
+             else (part.real, part.imag))
+    total = 0.0
+    for component in parts:
+        axes = list(range(component.ndim))
+        total += float(np.einsum(component, axes, component, axes, []))
+    return total
+
+
+def scaled_mass(part, make_tiles, count):
+    """Return the scaled squared norm ``(mantissa, exponent)`` of one selected set of amplitudes.
+
+    ``part`` is a borrowed view of the M = count selected amplitudes, or
+    None, and ``make_tiles`` yields the same amplitudes in bounded tiles.
+    For the m = 2M real components x_i, one NumPy contraction over the view
+    forms S_hat = fl(sum x_i**2) without a temporary array. Under IEEE
+    binary64 round to nearest with gradual underflow, in any summation order
+    and with or without fused multiply-adds, only a product or fused
+    multiply-add with a subnormal result has an absolute error, at most
+    eta/2, and addition is exact there. So
+    ``|S_hat - S| <= gamma(m) S + (1 + gamma(m-1)) m eta/2 <= gamma(m) S + m eta``
+    for m u <= 1/2. The terms are nonnegative, so a finite S_hat means
+    finite components and no overflow. When also S_hat >= 2**-900 and
+    M < 2**51, ``S >= (S_hat - m eta)/2 > 2**-902 > m eta/u``, so
+    ``m eta <= u S <= (gamma(m+1) - gamma(m)) S`` and
+    ``|S_hat - S| <= gamma(m+1) S``: the relative allowance a_M of
+    ``saved_mass_allowance`` covers it and its absolute allowance is spare. A
+    positive S_hat stays positive. A zero, smaller or nonfinite sum, an
+    unavailable view or a larger population uses the two-pass framed scan
+    ``scaled_mass_tiles``, which keeps such a mass positive and rejects
+    nonfinite components.
+    """
+    if type(count) is not int or count < 0:
+        raise ValueError("invalid population count")
+    total = 0.0
+    if part is not None and 0 < count < 2**51:
+        if part.dtype != np.complex128 or part.size != count:
+            raise ValueError("population differs from its declaration")
+        total = _square_sum(part)
+    if math.isfinite(total) and total >= 2.0**-900:
+        return math.frexp(total)
+    return scaled_mass_tiles(make_tiles, count)[0]
+
+
 def selected_tiles(native, fixed=(), *, tile=1024):
     """Yield bounded tiles of the native amplitudes whose valued selector bits match.
 
     Callers validate width, dtype and distinct selectors before iterating.
     Each tile forms at most ``tile`` native indices and one selected tile.
     No F-entry index or probability array is formed. With no selectors each
-    tile is a borrowed view.
+    tile is a borrowed view. ``scaled_mass`` reads these tiles only when its
+    one-pass route does not apply.
     """
     mask = np.uint64(sum(1 << b for b, _ in fixed))
     value = np.uint64(sum(v << b for b, v in fixed))
@@ -292,7 +340,8 @@ def scaled_mass_tiles(make_tiles, count):
     scaled square is at least 1/4, so a positive mass stays positive even
     below the ordinary binary64 range, and a zero output means that every
     selected amplitude is exactly zero. The scale is fixed on the first pass,
-    so the amplitudes are selected twice.
+    so the amplitudes are selected twice. ``scaled_mass`` calls this scan
+    for the masses its one-pass sum does not cover.
     """
     if type(count) is not int or count < 0:
         raise ValueError("invalid population count")
@@ -324,10 +373,12 @@ def scaled_mass_tiles(make_tiles, count):
 def saved_mass_allowance(pair, count):
     """Relative and absolute allowance for the classical roundoff of a saved mass, from the saved pair alone.
 
-    Since ``2**(2e) <= 4 M_hat`` for this routine, the saved absolute
-    allowance ``U_M = 16 m eta M_hat / (1 - (m+1) u)`` with m = 2*count
-    bounds the scan's underflow without the scaling exponent used when the
-    state was reduced. The relative allowance is ``gamma(m+1)``. A zero
+    Since ``2**(2e) <= 4 M_hat`` for the framed scan ``scaled_mass_tiles``,
+    the saved absolute allowance ``U_M = 16 m eta M_hat / (1 - (m+1) u)``
+    with m = 2*count bounds the scan's underflow without the scaling
+    exponent used when the state was reduced. The relative allowance is
+    ``gamma(m+1)``, which alone covers the one-pass sum of ``scaled_mass``,
+    so the pair does not record which route formed it. A zero
     output of this routine has zero classical roundoff error. Arithmetic is exact rational on a
     bounded number of scalars.
     """
@@ -406,6 +457,10 @@ def validate_saved_masses(complete, success, physical, counts, *,
     return norm_upper, total_window
 
 
+# Every pair entry of a pencil and every readout of one state asks again for
+# the constants of the same few (N, L), so a small cache keeps the exact square
+# roots from being recomputed. A refused domain raises and is not cached.
+@lru_cache(maxsize=64)
 def ordered_action_constants(n, terms):
     """Return exact-rational relative and absolute error allowances for one Pauli action.
 
@@ -447,10 +502,20 @@ def ordered_action_constants(n, terms):
     return mu + g + mu * g, 8 * terms * ETA * sqrt_up(n) / (1 - r * UNIT)
 
 
-def scaled_projected_moment(selected, table, physical, state_exponent):
+def scaled_projected_moment(selected, table, physical):
     """Scaled numerator ``q = v^dagger O v`` on the physical slice and its classical roundoff radius.
 
-    The slice is framed by the physical mass pass's exponent e,
+    ``selected`` is the complex128 physical slice v and ``physical`` its
+    saved mass pair. Computing that mass over the same amplitudes
+    (``scaled_mass`` in ``reduce_scaled``) established that every component
+    is finite, so the slice is not scanned for finiteness again. The
+    coefficients of ``table`` are finite, as ``_projected_fields`` checked
+    when the reducer was admitted, and real, as ``_pauli_table`` stores
+    them.
+
+    The slice is framed by ``e = frexp(a).exponent`` for its largest real or
+    imaginary magnitude a (0 when a = 0), the exponent that the framed mass
+    scan ``scaled_mass_tiles`` uses for the same amplitudes,
     ``r = RN(2**-e v)`` zero padded to N entries. The summed identity
     coefficient c_I contributes ``c_I P_hat`` with the saved physical mass.
     The other coefficients are framed by ``k = frexp(max |c_j|).exponent``,
@@ -473,7 +538,9 @@ def scaled_projected_moment(selected, table, physical, state_exponent):
     assumption is violated. A signed contraction can round to zero with a nonzero radius,
     which is not evidence that the exact numerator is zero. Lost framed
     state components and coefficients are counted as diagnostics. The radius
-    does not depend on them. Against an original dense observable add its
+    does not depend on them. Framing by a nonpositive exponent multiplies by
+    a power of two at least one and below overflow, which is exact, so the
+    count is made only for a positive exponent. Against an original dense observable add its
     conversion discrepancy times the physical mass. Against an ideal state
     add the simulator-state term. No certificate of the simulator's
     floating-point arithmetic is asserted.
@@ -484,15 +551,13 @@ def scaled_projected_moment(selected, table, physical, state_exponent):
     N, d, L = 1 << table.num_qubits, len(selected), len(table)
     if not 0 <= d <= N < 2**51 or L >= 2**51 or table.x.shape[1] != 1:
         raise ValueError("matching single-word observable required")
-    if selected.dtype != np.complex128 or not np.isfinite(selected).all():
-        raise ValueError("finite physical slice required")
+    if selected.dtype != np.complex128:
+        raise ValueError("complex128 physical slice required")
     if p == 0 or L == 0:
         return {"numerator": (0.0, 0), "host_radius": (0.0, 0),
                 "lost_state_components": 0, "lost_coefficients": 0}
     coefficients = table.coefficients
-    if not np.isfinite(coefficients).all() or np.any(coefficients.imag != 0):
-        raise ValueError("finite real Pauli coefficients required")
-    identity = (table.x[:, 0] == 0) & (table.z[:, 0] == 0)
+    identity =(table.x[:, 0] == 0) & (table.z[:, 0] == 0)
     if np.count_nonzero(identity) > 1:
         raise ValueError("use the admitted coalesced observable table")
     cI = float(coefficients.real[identity][0]) if np.any(identity) else 0.0
@@ -506,17 +571,28 @@ def scaled_projected_moment(selected, table, physical, state_exponent):
     lost_state = lost_coeff = 0
     if maximum:
         k = math.frexp(maximum)[1]
-        e = state_exponent
+        largest = 0.0
+        if d:
+            # A contiguous slice is read as one float64 view, two passes. A
+            # strided slice cannot change its item size, so its real and
+            # imaginary views are read, four passes. Both give the same value.
+            components = ((selected.view(np.float64),) if selected.flags.c_contiguous
+                          else (selected.real, selected.imag))
+            for component in components:
+                largest = max(largest, float(np.max(component)), -float(np.min(component)))
+        e = math.frexp(largest)[1] if largest else 0
         vector = np.zeros(N, dtype=np.complex128)
         with np.errstate(under="ignore", over="raise", invalid="raise"):
             for component in ("real", "imag"):
                 before = getattr(selected, component)
                 after = getattr(vector[:d], component)
                 np.ldexp(before, -e, out=after)
-                lost_state += int(np.count_nonzero((after == 0) & (before != 0)))
-            before = coeff.real.copy()
+                if e > 0:
+                    lost_state += int(np.count_nonzero((after == 0) & (before != 0)))
+            before = coeff.real.copy() if k > 0 else None
             np.ldexp(coeff.real, -k, out=coeff.real)
-            lost_coeff = int(np.count_nonzero((coeff.real == 0) & (before != 0)))
+            if k > 0:
+                lost_coeff = int(np.count_nonzero((coeff.real == 0) & (before != 0)))
             del before
         beta = Q(float(np.sum(np.abs(coeff.real), dtype=np.float64)))
         C = (beta + L * ETA) / (1 - gamma(max(0, L - 1)))
@@ -552,13 +628,12 @@ def reduce_scaled(native, *, coordinates, success, conditions, dimension, table,
                   delta=None, window=None, tile=1024, has_moment=True):
     """Reduce one saved simulator state to its scaled masses and projected moment.
 
-    The reducer scans success mass and the complete mass in bounded tiles,
-    then evaluates the observable on the success-and-physical slice. The
-    check against the limits includes the saved state, slice-index workspace,
-    observable representations, coefficient framing and grouping metadata.
-    Work counts the selected mass and gather branches and the grouped action
-    on scaled inputs. The bytes set aside include the upper bound on the
-    shared action's scratch space.
+    The reducer sums the complete mass and the success mass over borrowed
+    views (``scaled_mass``, with bounded tiles when its one-pass route does
+    not apply), then evaluates the observable on the success-and-physical slice.
+    The registered workspace of the projected reduction
+    (``_projected_workspace``) bounds its main arrays, which the Run checks
+    with the saved states before native preparation.
     Scaled scalar statistics carry the recovery information needed for reanalysis.
 
     Exact scalar readout evaluates the stored Pauli observable on the
@@ -596,25 +671,25 @@ def reduce_scaled(native, *, coordinates, success, conditions, dimension, table,
             or (has_moment and (table is None or table.num_qubits != n))):
         raise ValueError("coordinates and valued selectors must partition native wires")
     countA = F >> len(success)
-    complete, eF = scaled_mass_tiles(lambda: selected_tiles(native, tile=tile), F)
+    complete = scaled_mass(native, lambda: selected_tiles(native, tile=tile), F)
     if not success:
-        algorithm, eA = complete, eF
+        algorithm = complete
     else:
-        algorithm, eA = scaled_mass_tiles(
-            lambda: selected_tiles(native, success, tile=tile), countA)
-    # A contiguous layout borrows a view. Other layouts use the 48d gather
-    # allowance of readout_requirements.
+        algorithm = scaled_mass(selected_view(native, success),
+                                lambda: selected_tiles(native, success, tile=tile), countA)
+    # A contiguous layout borrows a view. Other layouts gather the slice
+    # (_projected_workspace counts its arrays).
     selected = (native[:0] if dimension == 0
                 else _slice(native, coordinates, fixed, size=dimension))
     if not conditions and dimension == 1 << n:
         # Use precisely one published mass for identical populations.
         # Its allowance is independent of coordinate order.
-        physical, e = algorithm, eA
+        physical = algorithm
     else:
-        physical, e = scaled_mass_tiles(lambda: selected_tiles(selected, tile=tile), dimension)
+        physical = scaled_mass(selected, lambda: selected_tiles(selected, tile=tile), dimension)
     validate_saved_masses(complete, algorithm, physical, (F, countA, dimension),
                           delta=delta, window=window)
-    moment = (scaled_projected_moment(selected, table, physical, e) if has_moment else {})
+    moment = scaled_projected_moment(selected, table, physical) if has_moment else {}
     return {"kernel": "pow2-mass-pauli-moment/1", "complete": complete,
             "success": algorithm, "physical": physical, **moment}
 
@@ -638,81 +713,6 @@ def recover_scaled_pair(pair, recovery, *, upward=False):
     return (result_m, result_e + int(e) + 2 * recovery.exponent)
 
 
-def readout_requirements(F, n, d, L, payload, *, tile=1024, has_moment=True,
-                         success_count=None, same_mass=False, contiguous=False,
-                         binding_work=0):
-    """Return bytes and input-visit work for a scaled projected reduction.
-
-    F=2**w, N=2**n, d<=N and L describe the saved state, coordinate
-    space, physical prefix and kept packed rows. payload counts the
-    original packed table and all observable representations held in
-    memory. success_count is the size A of the success-only subset. None
-    counts A=F plus a selector scan. A=F denotes an empty success selector.
-    same_mass means no conditions and d=N. contiguous means _slice
-    returns its strided view. Omitted layout facts count their costly
-    branches. binding_work counts the work of JSON decoding and label
-    packing.
-
-    A mass pass costs at most 16 visits per complex entry. A nonempty
-    success selector adds 8F visits. A gather adds (4n+4)d visits.
-    A moment adds 16d+24N+32L and the grouped Pauli-action work. The
-    scaled inputs have components below one and N,L<2**51, so the
-    grouped action cannot overflow and its ordered retry is unreachable.
-    The shared action's byte bound still includes the retry's scratch space.
-
-    With I_p=1 when physical mass is separately scanned, I_g=1 when
-    ``_slice`` gathers and g=min(L,N), the work formula is
-    ``W_mass=16F+1[success nonempty](8F+16A)+16d I_p``,
-    ``W_gather=(4n+4)d I_g``,
-    ``W_moment=16d+24N+32L+(4L+g)+N(L+g+1)`` and
-    ``W_1=W_mass+W_gather+4w+L+W_bind+1[moment and L>0] W_moment``,
-    where the last two terms of W_moment are the grouped action with its
-    initial output zero fill. With t=min(F,tile), s=min(N,tile) and
-    (B_A, W_A) from ``pauli_action_requirements``, an active moment
-    reserves ``16F+P+65536+max{96L, 64t, 16N+48d I_g+B_A+32N+3P+48L+64s}``
-    bytes and a mass-only output ``16F+P+65536+max{64t, 48d I_g+64s}``.
-    This work formula is an upper bound on input visits. It still
-    overcounts early zero or identity exits, uses g as a bound on flip
-    groups and keeps conservative framing allowances.
-
-    Bytes keep the conservative 3*payload allowance for scaled storage and
-    the 65536-byte fixed bookkeeping allowance. They cover known buffers and
-    the qualified CPython objects counted by projected_requirements,
-    not simulator storage, allocator arenas or process RSS.
-    """
-    from nwqlib.operators._pauli import pauli_action_requirements
-
-    N, w = 1 << n, F.bit_length() - 1
-    if not (0 <= d <= N <= F < 2**51 and F & (F - 1) == 0
-            and 1 <= tile <= 1024 and 0 <= L < 2**51):
-        raise ValueError("invalid selected reducer dimensions")
-    if success_count is not None and not d <= success_count <= F:
-        raise ValueError("physical population must fit the success population")
-    t, s = min(F, tile), min(N, tile)
-    held = 16 * F + payload
-    gather_bytes = 0 if contiguous else 48 * d
-    gather_work = 0 if contiguous else (4 * n + 4) * d
-    if success_count is None:
-        masses = 40 * F
-    elif success_count == F:
-        masses = 16 * F
-    else:
-        masses = 24 * F + 16 * success_count
-    if not same_mass:
-        masses += 16 * d
-    work = masses + gather_work + 4 * w + L + binding_work
-    if not L or not has_moment:
-        return held + 65536 + max(64 * t, gather_bytes + 64 * s), work
-    g = min(L, N)
-    action_bytes, action_work = pauli_action_requirements(N, L, g, complex_input=True)
-    action_work -= N + L * N
-    scaled_bytes = action_bytes + 32 * N + 3 * payload + 48 * L
-    work += 16 * d + 24 * N + 32 * L + action_work
-    size = held + 65536 + max(96 * L, 64 * t,
-        16 * N + gather_bytes + scaled_bytes + 64 * s)
-    return size, work
-
-
 # The one exact scalar reduction of LCHS and QLS: its registered name, kernel
 # tag and the order of its saved scalar pairs.
 PROJECTED_MOMENTS = "projected_moments"
@@ -731,10 +731,12 @@ PROJECTED_SCALARS = ("complete_mass", "success_mass", "physical_mass", "numerato
 # (PreparedArtifact.saved_state_error), which includes the charge of a host
 # phase correction of z. For a selected population X with n_X complex
 # entries, put m_X = 2 n_X, u = 2**-53, eta = 2**-1074 and
-# gamma_k = k u/(1 - k u). The two-pass mass kernel (scaled_mass_tiles)
-# finds the largest real or imaginary component, frames every component by a
-# power of two, squares the components and sums them in bounded tiles. A
-# product and the subsequent nonnegative summation tree are covered by
+# gamma_k = k u/(1 - k u). The mass kernel (scaled_mass) sums the squared
+# components of a borrowed view in one pass when that sum is finite and at
+# least 2**-900. Otherwise its two-pass scan (scaled_mass_tiles) finds the
+# largest real or imaginary component, frames every component by a power of
+# two, squares the components and sums them in bounded tiles. In both routes
+# a product and the subsequent nonnegative summation tree are covered by
 # a_X = gamma(m_X + 1), and the stored-pair-only bound is
 # U_X = 16 m_X eta M_hat_X/(1 - (m_X + 1) u) (saved_mass_allowance), so
 # |M_hat_X - M_X| <= a_X M_X + U_X for the exact squared norm M_X of the
@@ -767,8 +769,21 @@ def projected_parameters(*, coordinates, success, conditions=(), dimension, term
             "moment": bool(moment)}
 
 
+def _binary64(value):
+    """Whether an int or float term value is a finite binary64 number."""
+    try:
+        return isfinite(float(value))
+    except OverflowError:
+        return False
+
+
 def _projected_fields(parameters):
-    """Validated tuples of one ``projected_moments`` parameter mapping."""
+    """Validated tuples of one ``projected_moments`` parameter mapping.
+
+    The reducer's shape and workspace checks call it before native
+    preparation, so every term value is established here, once, as a
+    finite binary64 number.
+    """
     if parameters.get("kernel") != PROJECTED_KERNEL or set(parameters) != {
             "kernel", "coordinates", "success", "conditions", "dimension", "terms", "moment"}:
         raise ValueError("projected moments need their kernel tag and selected bindings")
@@ -782,9 +797,9 @@ def _projected_fields(parameters):
             or any(len(item) != 2 for item in success + conditions)
             or type(dimension) is not int or not 1 <= dimension <= 1 << n
             or any(type(label) is not str or len(label) != n or set(label) - set("IXYZ")
-                   or type(value) not in (int, float) for label, value in terms)):
+                   or type(value) not in (int, float) or not _binary64(value) for label, value in terms)):
         raise ValueError("projected moments need nonempty integer coordinates, valued selectors, a fitting "
-                         "dimension and real IXYZ terms of the coordinate width")
+                         "dimension and IXYZ terms of the coordinate width with finite binary64 coefficients")
     return coordinates, success, conditions, dimension, terms, moment
 
 
@@ -809,71 +824,6 @@ def projected_populations(parameters, width):
     return 1 << width, (1 << width) >> len(success), dimension
 
 
-def projected_requirements(parameters, width):
-    """Count the bytes and work of the packing and numerical phases, after the callback releases its parameters.
-
-    Requires _projected_execute to delete parameters and terms after its
-    packed table is built and before reduce_scaled. The parameter string
-    remains held by the point. Parsed rows overlap packing but not the
-    numerical phase. A qualified 64-bit CPython object allowance supplements
-    the logical group metadata that the shared action routine counts.
-
-    M counts every serialized row, including zero coefficients. L counts
-    nonzero packed rows. H is the sum of the parsed outer-list size, the
-    row-list, label and coefficient sizes and the validated outer and row
-    tuple sizes, counting a label or coefficient once per row, which
-    safely overcounts sharing. J=512+64w+(n+40)M bounds canonical JSON
-    characters for native float coefficients, IXYZ labels and wire indices
-    below 51. Integer coefficients use their magnitude-bit count plus two
-    in place of 32. Two JSON decodes, two label validations and one packing
-    pass are included in ``W_bind=2J+2(n+4)M+(n+8)L+8w+64``. The work unit
-    is a character or routine-input visit, not a CPU-instruction or
-    elapsed-time estimate.
-
-    With T=32L, S=64+J and H_action=64L+192g+1024 for the extra action
-    objects, an active moment requires
-    ``16F+T+S+65536+max{H+96L, 64t, 16N+48d I_g+B_A+32N+3T+48L+H_action+64s}``
-    bytes. A mass-only output sets T=0 and omits packing and the numerical
-    action, leaving ``16F+S+65536+max(H, 64t, 48d I_g+64s)``. Work is that of
-    ``readout_requirements`` with payload T+H+64+J. The direct production
-    registry path, this callback and the checked interpreter are assumptions
-    of this release. A wrapper that keeps another reference to the mapping
-    needs the larger bound P=32L+H+64+J throughout.
-    """
-    from nwqlib.operators._pauli import pauli_action_requirements
-
-    coordinates, success, conditions, d, terms, moment = _projected_fields(parameters)
-    n, M = len(coordinates), len(terms)
-    F, N = 1 << width, 1 << n
-    L = sum(value != 0 for _, value in terms)
-    rows = parameters["terms"]
-    H = sys.getsizeof(rows) + sum(
-        sys.getsizeof(row) + sys.getsizeof(label) + sys.getsizeof(value)
-        for row, (label, value) in zip(rows, rows, strict=True))
-    H += sys.getsizeof(terms) + sum(sys.getsizeof(row) for row in terms)
-    J = 512 + 64 * width + sum(
-        n + 8 + (32 if type(value) is float else abs(value).bit_length() + 2)
-        for _, value in terms)
-    binding_work = 2 * J + 2 * (n + 4) * M + (n + 8) * L + 8 * width + 64
-    contiguous = coordinates == tuple(range(coordinates[0], coordinates[0] + n))
-    T = 32 * L if moment else 0
-    _, work = readout_requirements(F, n, d, L, T + H + 64 + J,
-        has_moment=moment, success_count=F >> len(success),
-        same_mass=not conditions and d == N, contiguous=contiguous,
-        binding_work=binding_work)
-    held = 16 * F + T + 64 + J + 65536
-    packing = H + (96 * L if moment else 0)
-    gather = 0 if contiguous else 48 * d
-    t, s = min(F, 1024), min(N, 1024)
-    if not moment or not L:
-        return held + max(packing, 64 * t, gather + 64 * s), work
-    g = min(L, N)
-    action_bytes, _ = pauli_action_requirements(N, L, g, complex_input=True)
-    objects = 64 * L + 192 * g + 1024
-    numerical = 16 * N + gather + action_bytes + 32 * N + 3 * T + 48 * L + objects + 64 * s
-    return held + max(packing, 64 * t, numerical), work
-
-
 def _projected_shape(parameters):
     from nwqlib.core.planning import ReducerOutput
 
@@ -882,15 +832,44 @@ def _projected_shape(parameters):
             ReducerOutput("int64", (2,)))
 
 
-def _projected_work(parameters, width):
-    return projected_requirements(parameters, width)[1]
+def _projected_workspace(parameters, width):
+    """Bytes of the main arrays of one reduction besides its saved state: ``49*2**n + 320*M + 2**17``.
+
+    With N = 2**n coordinates, d <= N physical entries and M Pauli terms
+    (serialized rows), ``reduce_scaled`` sums the masses over views of the state, with
+    bounded tiles (``scaled_mass_tiles``, under 2**15 bytes) only on its
+    fallback route. A noncontiguous layout then gathers the physical slice
+    (``amplitudes._slice``), holding index and counter arrays with their
+    shift temporaries (32d bytes) and the gathered slice (16d bytes), which
+    stays live. A moment then holds the zero-padded framed vector with the
+    action's output and finite-mask reserve (33N bytes,
+    ``pauli_action_requirements`` with a complex input). The peak is
+    16d + 33N <= 49N. Per row, while the action runs, the packed table
+    (32 bytes) and the framed table that ``PauliTerms._snapshot`` copies
+    for it (32) are live. ``apply_terms`` groups the rows in Python
+    containers: a dict from each flip key to a list of member indices, and
+    a list of rotated complex coefficients, formed beside the Y-count
+    arrays. On CPython 3.12 with 64-bit flip keys and one group per row,
+    tracemalloc measured their peak at 760 row counts from 1 to 300,000,
+    chosen around the counts where the dict grows. At the measured counts
+    from 6 to 300,000 rows it is at most 254 bytes per row, and for 1 to 5
+    rows at most 1,282 bytes in all, whose excess over 254 bytes per row
+    the 2**17 bytes cover. The 254 bytes and the two 32-byte tables give
+    318 bytes per row, rounded to 320. The framed coefficient copy,
+    identity mask and saved real parts (25 bytes per row) are released
+    before the action, and the action's grouped tiles
+    take at most 98,304 bytes. A mass-only reduction holds no row arrays.
+    Python objects of the parsed parameters are not counted.
+    """
+    coordinates, _, _, _, terms, moment = _projected_fields(parameters)
+    return 49 * (1 << len(coordinates)) + (320 * len(terms) if moment else 0) + (1 << 17)
 
 
 def _projected_execute(state, parameters, bindings, *, context):
     """Reduce the saved state using the qualified mass window of the preparation record that produced it.
 
     The registry declares amplitude-derived masses resolved because
-    scaled_mass_tiles and saved_mass_allowance bound the sums of squares that
+    scaled_mass and saved_mass_allowance bound the sums of squares that
     this routine forms. The context carries the preparation record's
     saved-state budget after that resolution. The reducer stays registered
     phase sensitive because its lost-component diagnostic can change under a
@@ -910,8 +889,8 @@ def _projected_execute(state, parameters, bindings, *, context):
     coordinates, success, conditions, dimension, terms, moment = _projected_fields(parameters)
     n = len(coordinates)
     table = _pauli_table(terms, n) if moment else None
-    # The packed table owns byte copies of the terms. Releasing the parsed
-    # rows here is the premise of projected_requirements' numerical phase.
+    # The packed table owns byte copies of the terms, so the parsed rows are
+    # released before the numerical phase.
     del terms, parameters
     has_moment = table is not None and len(table) > 0
     result = reduce_scaled(
@@ -980,7 +959,7 @@ def _register_projected_moments():
 
     READOUT_REDUCERS[PROJECTED_MOMENTS] = Reducer(
         shape=_projected_shape,
-        work=_projected_work,
+        workspace=_projected_workspace,
         execute=_projected_execute,
         receives_context=True,
         state_error_resolutions=PROJECTED_MASS_EXCLUSIONS,
@@ -999,13 +978,13 @@ def qwc_groups(terms, num_qubits, *, max_comparisons, max_bytes, limit_name="max
     ``PauliTerms.group``, which checks each tile of label comparisons against
     ``comparisons + charge <= max_comparisons`` and names the caller's limit
     on refusal. With no grouped label no comparison is needed, so only the cap
-    is validated and zero comparisons are returned.
+    is validated, as ``PauliTerms.group`` validates it (None sets no limit),
+    and zero comparisons are returned.
     """
     labels = tuple(dict.fromkeys(label for label, value in terms
                                  if value != 0 and any(axis != "I" for axis in label)))
     if not labels:
-        if type(max_comparisons) is not int or max_comparisons < 1:
-            raise ValueError("max_comparisons must be a positive integer")
+        optional_limit(max_comparisons, limit_name)
         return (), (), 0
     table = _pauli_table(tuple((label, 1.) for label in labels), num_qubits)
     grouping = table.group(strategy="qwc", max_bytes=max_bytes, max_comparisons=max_comparisons,

@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 
 from nwqlib._numerics import stable_vector_norm
-from nwqlib.subroutines.fermionic_pool import apply_spin_squared
+from nwqlib.subroutines.fermionic_pool import _apply_spin_squared
 
 
 def sector_expectations(
@@ -16,6 +16,8 @@ def sector_expectations(
     *,
     num_qubits: int | None = None,
     reference_spin: float = 0.0,
+    max_bytes: int | None = None,
+    max_products: int | None = None,
 ) -> dict[str, Any]:
     """Return the exact particle number, spin projection and total spin of a state.
 
@@ -49,6 +51,10 @@ def sector_expectations(
             before use.
         num_qubits: Number of qubits q, or None to infer it from the length.
         reference_spin: Spin quantum number s of the reference sector.
+        max_bytes: Default None, the physical memory. Limit on the known
+            arrays of the `S^2` action.
+        max_products: Default None, no limit. Limit on the scalar products
+            of the `S^2` action.
 
     Returns:
         expectations (dict): The keys `particle_number`, `spin_z`,
@@ -67,7 +73,16 @@ def sector_expectations(
         >>> print(v["particle_number"], v["spin_z"], v["spin_squared"])
         2.0 0.0 0.0
     """
+    return _sector_expectations(state, num_qubits=num_qubits, reference_spin=reference_spin,
+                                max_bytes=max_bytes, max_products=max_products)
 
+
+def _sector_expectations(state, *, num_qubits, reference_spin, max_bytes, max_products, ladder=None):
+    """Return `sector_expectations`, with the `S^2` action on the ladder product ``ladder`` when given.
+
+    A caller that has already built ``fermionic_pool._spin_ladder_product``
+    to count the action passes it, so one call maps the ladder sums once.
+    """
     vector = np.asarray(state, dtype=complex).reshape(-1)
     if num_qubits is None:
         if vector.size < 1 or vector.size & (vector.size - 1):
@@ -86,7 +101,8 @@ def sector_expectations(
     ]
     particle_number = math.fsum(marginals)
     spin_z = 0.5 * math.fsum(m if qubit % 2 == 0 else -m for qubit, m in enumerate(marginals))
-    spin_squared = _expectation_action(apply_spin_squared(vector, num_qubits=num_qubits), vector)
+    spin_squared = _expectation_action(_apply_spin_squared(vector, num_qubits=num_qubits, max_bytes=max_bytes,
+                                                           max_products=max_products, factors=ladder), vector)
     spin_contamination = spin_squared - reference_spin * (reference_spin + 1.0)
     return {
         "label": "QA metadata",

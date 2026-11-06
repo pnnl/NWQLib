@@ -5,12 +5,14 @@ No quantum SDK is imported.
 
 from typing import TYPE_CHECKING
 
-from .records import ResourceContext, ResourceLaw, ResourceQuantity, WorkloadEstimate, Workspace
+from .records import (TYPICAL_ROTATION_SYNTHESIS, ResourceContext, ResourceLaw, ResourceQuantity, WorkloadEstimate,
+                      Workspace)
 
 if TYPE_CHECKING:
     from .fold import estimate
 
-__all__ = ["ResourceContext", "ResourceLaw", "ResourceQuantity", "WorkloadEstimate", "Workspace", "estimate"]
+__all__ = ["ResourceContext", "ResourceLaw", "ResourceQuantity", "TYPICAL_ROTATION_SYNTHESIS", "WorkloadEstimate",
+           "Workspace", "estimate"]
 
 
 def __getattr__(name):

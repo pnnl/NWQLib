@@ -3,6 +3,7 @@
 from dataclasses import dataclass, replace
 from math import ceil, fsum, log
 import numpy as np
+from nwqlib._limits import ResourceLimitError, exceeds
 from nwqlib._linalg_laws import hermitian_eigensystem_work, singular_values_work
 from nwqlib._numerics import binary_scaled_matrix
 from nwqlib.algorithms.protocol import ApplicabilityError
@@ -154,8 +155,8 @@ def _original_eigensystem(operator, method):
     d = operator.basis.dimension
     work, _, data = original_factor_laws(d, True)
     _check_bytes(data, method.max_bytes, "original QLS eigensystem arrays")
-    if work > method.max_work:
-        raise ValueError(
+    if exceeds(work, method.max_work):
+        raise ResourceLimitError(
             f"original QLS eigensystem exceeds max_work: it needs {work} work units for dimension {d}, "
             f"QLS.max_work={method.max_work}. Raise QLS.max_work to at least {work}.")
     matrix, exponent = binary_scaled_matrix(operator.dense_array())
@@ -199,11 +200,13 @@ def _original_svd(operator, method):
     # power-of-two-scaled copy, its component-maximum temporaries, the SVD's
     # input copy, U and V^dagger. 32 d covers the singular values. 8 d^3 is
     # the SVD work law of dense completion (docs/ENGINEERING_CONSTANTS.md,
-    # DEFAULT_MAX_BLOCK_WORK).
+    # "Dense block-encoding arrays and work").
     work, _, data = original_factor_laws(d, False)
     _check_bytes(data, method.max_bytes, "original QLS SVD arrays")
-    if work > method.max_work:
-        raise ValueError("original QLS SVD exceeds max_work")
+    if exceeds(work, method.max_work):
+        raise ResourceLimitError(
+            f"original QLS SVD exceeds max_work: it needs {work} work units for dimension {d}, "
+            f"QLS.max_work={method.max_work}. Raise QLS.max_work to at least {work}.")
     matrix, exponent = binary_scaled_matrix(operator.dense_array())
     left, singular, right = np.linalg.svd(matrix)
     np.ldexp(singular, exponent, out=singular)
@@ -234,9 +237,7 @@ def _admit_query_synthesis(method, original, dimension, *, encoding=None, rhs=No
     control steps, are counted, their work summed and their circuits held
     together. A supplied encoding circuit (``encoding.native``) takes the
     gate-wise route on every ``dense_control_route`` and is counted from
-    the dense unitaries that
-    ``qiskit_compat.dense_synthesis_widths`` and ``dense_control_counts``
-    find in its circuit.
+    the dense unitaries in its circuit (``qiskit_compat.dense_gatewise_charges``).
 
     The shortcuts also control the RHS preparation, with the control count
     of the ``A`` query. ``shortcut_native_svp`` builds it forward and
@@ -246,23 +247,26 @@ def _admit_query_synthesis(method, original, dimension, *, encoding=None, rhs=No
     on the gate-wise route. Other preparations and encodings hold no dense
     unitary.
 
+    Planning reads only the definitions that a supplied circuit has already
+    built. A gate whose definition is not built, such as a Qiskit
+    ``StatePreparation``, leaves its part of the synthesis unknown: an
+    explicit ``max_work`` is refused, and otherwise the known part is
+    checked here and the construction checks each controlled query against
+    ``max_bytes`` before its synthesis starts (``quantum._query_circuit``).
+
     The inverse of a Hermitian ``A`` calls the query without controls, so its
     construction synthesizes nothing, and a backend that compiles the circuit
-    to a gate basis counts the synthesis against the Run's
-    ``max_synthesis_work``.
+    to a gate basis makes the synthesis, which the Run records.
     """
     from nwqlib.subroutines._dense_synthesis import (admit_dense_syntheses, gatewise_control_counts,
                                                      select_dense_control_route)
+    from nwqlib.subroutines.qiskit_compat import dense_gatewise_charges, refuse_unbuilt_limit
 
     controls = 2 if method.solver == "shortcut_dilation" else 1
-    widths, steps, controlled_widths = [], [], []
+    widths, steps, controlled_widths, supplied = [], [], [], []
     if not (method.solver == "qsvt_inverse" and original.structure == "hermitian"):
         if encoding is not None and encoding.record.implementation.name == "encoding.native":
-            from nwqlib.subroutines.qiskit_compat import dense_control_counts, dense_synthesis_widths
-
-            circuit = encoding._payload.circuit
-            widths += 2 * list(dense_synthesis_widths(circuit))
-            steps += 2 * [dense_control_counts(circuit, controls)]
+            supplied.append((2, encoding._payload.circuit))
         elif encoding is None or encoding.record.implementation.domain == "dense_dilation":
             if select_dense_control_route(method.dense_control_route, controls) == "whole_matrix":
                 controlled_widths += 2 * [dimension.bit_length() + controls]
@@ -270,11 +274,13 @@ def _admit_query_synthesis(method, original, dimension, *, encoding=None, rhs=No
                 widths += 2 * [dimension.bit_length()]
                 steps += 2 * [gatewise_control_counts(dimension.bit_length(), controls)]
     if method.solver != "qsvt_inverse" and rhs is not None and rhs.preparation.implementation == "qiskit.supplied":
-        from nwqlib.subroutines.qiskit_compat import dense_control_counts, dense_synthesis_widths
-
-        specializations = 2 if method.solver == "shortcut_native_svp" else 4
-        widths += specializations * list(dense_synthesis_widths(rhs._native))
-        steps += specializations * [dense_control_counts(rhs._native, controls)]
+        supplied.append((2 if method.solver == "shortcut_native_svp" else 4, rhs._native))
+    for specializations, circuit in supplied:
+        circuit_widths, counts, unbuilt = dense_gatewise_charges(circuit, controls, built=True)
+        if unbuilt is not None and method.max_work is not None:
+            refuse_unbuilt_limit(unbuilt, f"QLS.max_work={method.max_work}")
+        widths += specializations * list(circuit_widths)
+        steps += specializations * [counts]
     admit_dense_syntheses(widths, controls=steps, controlled_qubit_counts=controlled_widths,
                           max_work=method.max_work, max_bytes=method.max_bytes,
                           operation="QLS controlled dense-query synthesis")
@@ -283,6 +289,74 @@ def _admit_query_synthesis(method, original, dimension, *, encoding=None, rhs=No
 def _covers_spectral_estimate(bound, estimate):
     """Compare positive finite estimates without an absolute floor or overflow."""
     return estimate <= bound or (estimate - bound) / estimate <= QLS_SPECTRAL_PREMISE_RTOL
+
+
+def covered_kappa(lower, upper, alpha, kappa):
+    """Return ``kappa_be`` from computed singular endpoints, refusing a premise that they contradict.
+
+    Quantum planning and the classical evaluation share this comparison, so
+    one input gets one refusal. The inverse problem has a square invertible
+    ``A``, ``b != 0``, ``alpha >= sigma_max(A) > 0`` and a finite
+    ``kappa >= alpha / sigma_min(A)``, so every normalized singular value lies
+    in ``[1/kappa, 1]``, and a finite gap excludes a zero singular value. A
+    Hermitian eigenvalue formulation has the signed domain
+    ``[-1, -1/kappa] U [1/kappa, 1]``, which the odd inverse polynomial covers.
+    The polynomial's contract, for example ``|kappa z P(z) - 1| <= epsilon_inv``,
+    holds on that domain, and a wrong ``kappa`` puts the input outside it, which
+    says nothing against the polynomial itself.
+
+    The comparison gives consistency with this numerical endpoint test, in the
+    relative window ``QLS_SPECTRAL_PREMISE_RTOL``, and is not a certified
+    enclosure of the exact spectrum. Endpoints that were not computed, as on
+    compact input, leave ``alpha`` and ``kappa`` as the caller's premises.
+    ``kappa="auto"`` takes the requirement ``max(1, alpha / sigma_min)``.
+    """
+    if lower <= 0 or upper <= 0:
+        raise ApplicabilityError("QLS requires an invertible original matrix")
+    if not _covers_spectral_estimate(alpha, upper):
+        raise ApplicabilityError("supplied alpha is below the original numerical spectral norm")
+    # The encoded gap parameter is alpha/sigma_min, which can differ from
+    # the original matrix condition number sigma_max/sigma_min.
+    # At a unitary endpoint both SVD estimates can round above alpha. Keep the
+    # raw endpoints, but the encoded gap parameter's mathematical domain is >=1.
+    required = max(1., finite_real(alpha / lower, "selected QLS kappa"))
+    if kappa == "auto":
+        return required
+    if not _covers_spectral_estimate(kappa, required):
+        raise ApplicabilityError("supplied kappa does not cover the original selected spectrum")
+    return kappa
+
+
+def conditioning_note(polynomial_kappa, sigma_min, sigma_max, dimension):
+    """Return the sentence a planning refusal adds about the polynomial domain and the singular values.
+
+    It reports only values that planning already holds, so a refusal runs no
+    decomposition. ``sigma_min`` and ``sigma_max`` are ``None`` when planning
+    computed no endpoints.
+
+    Relation (Q1): if the computed singular values are the exact singular values
+    of ``A + dA`` with ``||dA||_2 <= eta ||A||_2``, singular-value perturbation
+    gives, for ``sigma_min > 0``, the precise inequality
+    ``|sigma_hat_min - sigma_min| / sigma_min <= eta sigma_max / sigma_min``.
+    Rounding of the reported values needs its own contribution. ``dimension * eps``
+    is a heuristic diagnostic scale for ``eta``, which certifies no LAPACK
+    implementation, so with it the relation holds only up to constants. A ratio
+    ``sigma_min / sigma_max`` at or below that scale establishes only that this
+    analysis gives no relative-accuracy guarantee. It does not establish that
+    ``A`` is singular or that this value lost its accuracy: a tiny representable
+    diagonal entry can be returned accurately, as for ``diag(1, 1e-20)``, and no
+    singularity cutoff follows. A zero ``sigma_min``, where a relative error is
+    undefined, never reaches this sentence, since ``covered_kappa`` refuses it.
+    The remark changes no decision.
+    """
+    note = f"This QLS input has polynomial_kappa={polynomial_kappa:.6g}"
+    if sigma_min is None:
+        return note + ", and planning computed no singular values of A"
+    note += f", sigma_min={sigma_min:.6g} and sigma_max={sigma_max:.6g}"
+    if sigma_min <= dimension * np.finfo(float).eps * sigma_max:
+        note += (". At this ratio the usual normwise roundoff analysis gives no relative-accuracy guarantee "
+                 "for sigma_min. A may be singular, and this ratio does not establish it")
+    return note
 
 
 def _kappa_premise_refusal(route, alpha, alpha_meaning):
@@ -386,8 +460,10 @@ def _spectrum(operator, method, *, alpha=None, factors=None):
             # 3 d for the singular values.
             work, data = singular_values_work(d) + 8 * d * d, 16 * (5 * d * d + 3 * d)
         _check_bytes(data, method.max_bytes, "original QLS spectral arrays")
-        if work > method.max_work:
-            raise ValueError("original QLS spectral selection exceeds max_work")
+        if exceeds(work, method.max_work):
+            raise ResourceLimitError(
+                f"original QLS spectral selection exceeds max_work: it needs {work} work units for dimension {d}, "
+                f"QLS.max_work={method.max_work}. Raise QLS.max_work to at least {work}.")
         lower, upper, source = _extreme_singular_values(
             operator.dense_array(), hermitian=hermitian, events=events)
     if lower is not None:
@@ -395,20 +471,9 @@ def _spectrum(operator, method, *, alpha=None, factors=None):
             finite_real(lower, "minimum singular value"),
             finite_real(upper, "maximum singular value"),
         )
-        if lower <= 0 or upper <= 0:
-            raise ValueError("QLS requires an invertible original matrix")
     alpha = (upper if method.alpha == "auto" else method.alpha) if alpha is None else alpha
     alpha = finite_real(alpha, "selected QLS alpha")
-    if upper is not None and not _covers_spectral_estimate(alpha, upper):
-        raise ValueError("supplied alpha is below the original numerical spectral norm")
-    # The encoded gap parameter is alpha/sigma_min, which can differ from
-    # the original matrix condition number sigma_max/sigma_min.
-    # At a unitary endpoint both SVD estimates can round above alpha. Keep the
-    # raw endpoints, but the encoded gap parameter's mathematical domain is >=1.
-    required = None if lower is None else max(1., finite_real(alpha / lower, "selected QLS kappa"))
-    kappa = required if method.kappa == "auto" else method.kappa
-    if required is not None and not _covers_spectral_estimate(kappa, required):
-        raise ValueError("supplied kappa does not cover the original selected spectrum")
+    kappa = method.kappa if lower is None else covered_kappa(lower, upper, alpha, method.kappa)
     return dict(
         alpha=alpha,
         alpha_source="original_spectral_norm" if method.alpha == "auto" else "user",
@@ -509,31 +574,31 @@ def select_inputs(problem, method, *, execution):
         # Before the first dense phase, the byte needs that the dimensions
         # and the selected route fix are combined by their maximum: the dense
         # intake 192D**2+32D (every dense route plans through it), the dense
-        # quantum completion 384D**2+32D when it is selected, and the dense
+        # quantum completion 256D**2+32D when it is selected, and the dense
         # Pauli transform 192D**2+64D**2(q+16) when pauli_lcu or
         # multiplexed_pauli is requested. Under auto the Pauli transform
         # depends on the circulant detection, so it is not included.
         known_bytes = 192 * padded * padded + 32 * padded
         if execution == "quantum" and (force_dense or method.block_encoding_implementation == "dense_dilation"):
-            known_bytes = max(known_bytes, 384 * padded * padded + 32 * padded)
+            known_bytes = max(known_bytes, 256 * padded * padded + 32 * padded)
         elif method.block_encoding_implementation in ("pauli_lcu", "multiplexed_pauli"):
             qubits = padded.bit_length() - 1
             known_bytes = max(known_bytes, 192 * padded * padded + 64 * padded * padded * (qubits + 16))
         refuse_known_need("QLS", "max_bytes", method.max_bytes, known_bytes,
                           "the selected polynomial, norming grid and QSP phase solve")
         if execution == "quantum" and (force_dense or method.block_encoding_implementation == "dense_dilation"):
-            # 384 p^2 + 32 p bytes and 9 p^3 work are the completion laws of
+            # 256 p^2 + 32 p bytes and p^3 work are the completion laws of
             # _admit_dense_input(construction=True, selected_svd=True) in
-            # subroutines/block_encoding/core.py (DEFAULT_MAX_BLOCK_WORK
-            # registry row). Checking them here makes a completion that the
+            # subroutines/block_encoding/core.py ("Dense block-encoding arrays
+            # and work" registry row). Checking them here makes a completion that the
             # native build would refuse fail before the original SVD runs.
-            _check_bytes(384*padded*padded+32*padded, method.max_bytes,
+            _check_bytes(256*padded*padded+32*padded, method.max_bytes,
                 "selected dense QLS completion arrays")
-            if 9*padded**3 > method.max_work:
-                raise ValueError(
-                    f"selected dense QLS completion exceeds max_work: it needs {9*padded**3} work units "
-                    f"(9*p**3 with p={padded}), QLS.max_work={method.max_work}. "
-                    f"Raise QLS.max_work to at least {9*padded**3}.")
+            if exceeds(padded**3, method.max_work):
+                raise ResourceLimitError(
+                    f"selected dense QLS completion exceeds max_work: it needs {padded**3} work units "
+                    f"(p**3 with p={padded}), QLS.max_work={method.max_work}. "
+                    f"Raise QLS.max_work to at least {padded**3}.")
             _admit_query_synthesis(method, original, padded)
             svd = _original_svd(original, method)
         elif execution == "quantum":
@@ -587,18 +652,18 @@ def select_inputs(problem, method, *, execution):
         if selected.implementation == "dense_dilation":
             selected = replace(selected, source=encoded_operator.dense_array())
         if method.alpha != "auto" and selected.alpha != method.alpha:
-            raise ValueError("selected encoding cannot realize the supplied alpha")
+            raise ApplicabilityError("selected encoding cannot realize the supplied alpha")
         actual = selected.alpha
         if actual != spectrum["alpha"]:
             required = max(1., actual / spectrum["sigma_min"])
             kappa = required if method.kappa == "auto" else method.kappa
             if not _covers_spectral_estimate(kappa, required):
-                raise ValueError("supplied kappa does not cover the selected encoding")
+                raise ApplicabilityError("supplied kappa does not cover the selected encoding")
             spectrum.update(kappa_be=kappa, polynomial_kappa=max(kappa, QLS_POLYNOMIAL_KAPPA_FLOOR))
         spectrum["alpha"], spectrum["alpha_source"] = actual, "selected_encoding"
         if (spectrum["sigma_max"] is not None
                 and not _covers_spectral_estimate(actual, spectrum["sigma_max"])):
-            raise ValueError("selected encoding alpha is below the original numerical spectral norm")
+            raise ApplicabilityError("selected encoding alpha is below the original numerical spectral norm")
         # The selected original SVD belongs to the family payload. Native dense
         # completion consumes its analytic padding without another padded SVD.
         if isinstance(selected.source, np.ndarray):
@@ -637,7 +702,7 @@ def select_inputs(problem, method, *, execution):
         selected = plan_block_encoding(decomposition, implementation=family,
             max_bytes=method.max_bytes, max_work=method.max_work)
         if method.alpha != "auto" and selected.alpha != method.alpha:
-            raise ValueError("Pauli encoding differs from requested normalization")
+            raise ApplicabilityError("Pauli encoding differs from requested normalization")
         spectrum = _spectrum(original, method, alpha=selected.alpha)
         spectrum["alpha_source"] = "selected_encoding"
         encoding = _select_planned_encoding("base_encoding", selected, operator=original)
@@ -650,9 +715,12 @@ def select_inputs(problem, method, *, execution):
     if (
         execution == "quantum"
         and encoding.record.construction_work is not None
-        and encoding.record.construction_work > method.max_work
+        and exceeds(encoding.record.construction_work, method.max_work)
     ):
-        raise ValueError("selected QLS encoding construction exceeds max_work")
+        raise ResourceLimitError(
+            f"selected QLS encoding construction exceeds max_work: it needs {encoding.record.construction_work} work "
+            f"units, QLS.max_work={method.max_work}. Raise QLS.max_work to at least "
+            f"{encoding.record.construction_work}.")
     # Every controlled query is checked here. The query of an automatically
     # selected or supplied encoding, and a supplied RHS circuit, are checked
     # here for the first time. The explicit and general dense routes were
@@ -666,63 +734,48 @@ def select_inputs(problem, method, *, execution):
 def select_polynomial(method, kappa):
     """Return the ``InversePolynomial`` or ``ReflectionPolynomial`` chosen for domain parameter ``kappa``.
 
-    ``qsvt_inverse`` fits the odd inverse polynomial of
-    ``_fit_inverse_chebyshev`` to the target ``epsilon_inv``. The shortcut
-    solvers construct Dalzell's even kernel-reflection polynomial
+    ``qsvt_inverse`` takes the odd relative minimax inverse polynomial of
+    ``subroutines/qsp/inverse.py`` for the target ``epsilon_inv``. The
+    shortcut solvers construct Dalzell's even kernel-reflection polynomial
     (arXiv:2406.12086v2) with ``eta = epsilon_inv / sqrt(2)``. Both records
     keep the unrescaled Chebyshev coefficients together with
-    ``rescale = s``, the norming bound on ``sup |P|`` times
-    ``1 + QLS_TARGET_MARGIN``. The phase solver targets ``P/s``, and the
+    ``rescale = s``, the Chebyshev-zero norming estimate of ``sup |P|``
+    times ``1 + QLS_TARGET_MARGIN``. The phase solver targets ``P/s``, and the
     inverse route's physical recovery multiplies by ``s`` again. The
     shortcut routes return a unit direction, so there ``s`` enters only the
     success-mass prediction.
     """
-    from nwqlib.subroutines.qsp.inverse import _fit_inverse_chebyshev
+    from nwqlib.subroutines.qsp.inverse import _inverse_chebyshev
     from nwqlib.subroutines.qsp.shortcut import (
         plan_kernel_reflection,
         _realize_kernel_reflection,
         dalzell_eta_from_precision,
-        _KR_CONSTRUCTION_GRID_POINTS,
     )
     from nwqlib.subroutines.qsp.phases import chebyshev_polynomial_sup_bound
 
-    controls = dict(
-        max_degree=method.max_degree, max_work=method.max_work, max_bytes=method.max_bytes
-    )
     if method.solver == "qsvt_inverse":
-        candidates = []
-        fit = _fit_inverse_chebyshev(
-            kappa, method.epsilon_inv, candidate_degrees=candidates, **controls
-        )
-        coefficients = fit.coefficients
+        inverse = _inverse_chebyshev(kappa, method.epsilon_inv, max_bytes=method.max_bytes)
+        coefficients = inverse.coefficients
         record = InversePolynomial
         fields = dict(
-            candidate_degrees=tuple(candidates),
-            certificate=fit.certificate,
-            certificate_basis="affine_chebyshev_residual_norming",
-            certificate_grid_points=fit.certificate_grid_points,
-            lsq_node_count=fit.lsq_node_count,
+            ideal_degree=inverse.ideal_degree,
+            minimax_error=inverse.minimax_error,
+            residual_check_value=inverse.residual_check_value,
         )
     else:
         kr = _realize_kernel_reflection(
             plan_kernel_reflection(kappa, dalzell_eta_from_precision(method.epsilon_inv)),
-            **controls,
+            max_bytes=method.max_bytes,
         )
         coefficients = kr.coefficients
         record = ReflectionPolynomial
-        fields = dict(
-            ell=kr.kr_ell,
-            eta=kr.kr_eta,
-            fit_points=max(_KR_CONSTRUCTION_GRID_POINTS, 8 * (kr.degree + 1)),
-        )
+        fields = dict(ell=kr.kr_ell, eta=kr.kr_eta)
     # Rescale the selected polynomial into the QSP amplitude domain, keeping
     # that factor for later recovery of the physical solution. With
     # s = (norming bound) * (1 + QLS_TARGET_MARGIN), max|P/s| < 1 on [-1, 1],
     # the boundedness condition of [MRTC] Theorems 9-10
     # (arXiv:2105.02859v5, App. A.1).
-    rescale = chebyshev_polynomial_sup_bound(
-        coefficients, max_degree=method.max_degree, max_bytes=method.max_bytes
-    ) * (1 + QLS_TARGET_MARGIN)
+    rescale = chebyshev_polynomial_sup_bound(coefficients, max_bytes=method.max_bytes) * (1 + QLS_TARGET_MARGIN)
     return record(coefficients=coefficients, rescale=rescale, **fields)
 
 
@@ -770,8 +823,9 @@ def selected_work(matrix, *, alpha, embedded, method, polynomial, kappa, t_sourc
     projected augmented matrix separately. Applying the rank-one projector
     has quadratic work, and Hermitian dilations are written into one
     allocated array. Workspace includes factors computed during this
-    evaluation and excludes factors that the Plan already holds and
-    LAPACK's internal workspace.
+    evaluation and excludes factors that the Plan already holds. Only the
+    shortcut actions below count LAPACK's internal workspace, the part that
+    dominates them.
 
     Symbols: ``d`` is
     the original dimension, ``n = d*(2 if embedded else 1)`` the encoded
@@ -804,9 +858,15 @@ def selected_work(matrix, *, alpha, embedded, method, polynomial, kappa, t_sourc
     ``workspace_bytes`` follows these explicit peaks, with
     complex-valued upper bounds even for real input and ``r = min(a, PROJECTOR_ROW_TILE)``:
     ``inverse_action = 208 d``, ``augmentation = 16 a**2 + 16 r a + 64 a``,
-    ``native_action = max(augmentation, 48 a**2 + 192 a + 32 n)``,
+    ``native_action = max(augmentation, 128 a**2 + 192 a + 32 n)``,
     ``dilation_action = max(augmentation, 16 a**2 + 16 h**2,
-    16 a**2 + 32 h**2 + 152 h + 32 n)`` and ``linear_action = 128 d``. For a
+    16 a**2 + 64 h**2 + 224 h + 32 n)`` and ``linear_action = 128 d``. The
+    full SVD of G_t in ``native_action`` holds G_t, NumPy's copy of it, the two
+    singular-vector frames and ZGESDD's workspace of 5 a**2 + 7 a real values
+    and a**2 + 3 a complex entries, about 120 a**2, written as the same
+    128 a**2 as qpe.powers. The eigh in ``dilation_action`` holds the dilation,
+    its eigenvectors and ZHEEVD's workspace of h**2 + 2 h complex entries and
+    2 h**2 + 5 h + 1 real values, 64 h**2 + 72 h, beside G_t. For a
     shortcut, ``scaled_copy = 16 d**2 int(alpha != 1)``, ``encoded_resident
     = 16 n**2 if embedded else scaled_copy``, ``preparation = max(scaled_copy
     + 16 n**2, encoded_resident + 16 (n + d)) if embedded else scaled_copy``,
@@ -851,6 +911,8 @@ def selected_work(matrix, *, alpha, embedded, method, polynomial, kappa, t_sourc
     matvecs = 2 + int(shortcut) + linear
     observable = output.kind in {"quadratic_form", "normalized_expectation"}
     if observable:
+        # The allowance includes the exceptional scaled operator copy, which
+        # ordinary observable scales do not make.
         from nwqlib.operators.inputs import _scaled_observable_requirements
         observable_bytes, observable_work = _scaled_observable_requirements(output.observable)
     else:
@@ -911,9 +973,9 @@ def selected_work(matrix, *, alpha, embedded, method, polynomial, kappa, t_sourc
         augmentation = 16 * a * a + 16 * r * a + 64 * a
         if h:
             selected_action = max(augmentation, 16 * a * a + 16 * h * h,
-                                  16 * a * a + 32 * h * h + 152 * h + 32 * n)
+                                  16 * a * a + 64 * h * h + 224 * h + 32 * n)
         else:
-            selected_action = max(augmentation, 48 * a * a + 192 * a + 32 * n)
+            selected_action = max(augmentation, 128 * a * a + 192 * a + 32 * n)
         numerical = (encoded_resident + rhs_workspace + coefficient_frontier + reference_frontier
                      + max(selected_action, 128 * d if linear else 0))
     statistics = (

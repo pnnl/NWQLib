@@ -5,6 +5,7 @@ import math
 import numpy as np
 import pytest
 import nwqlib
+from _qsp_references import restricted_inverse_residual_bound
 from nwqlib import (
     LinearSystem,
     Solution,
@@ -13,6 +14,7 @@ from nwqlib import (
     QuadraticForm,
     NormalizedExpectation,
 )
+from nwqlib.algorithms.protocol import ApplicabilityError
 from nwqlib.algorithms.qls import QLS, QLSVerification
 from nwqlib.algorithms.qls import method as owner, numerical
 from nwqlib.algorithms.qls.primary_records import InversePolynomial
@@ -82,19 +84,87 @@ def test_original_complex_three_coordinate_models_and_archive(tmp_path, monkeypa
     np.testing.assert_array_equal(loaded.value, result.value)
 
 
-def test_supplied_premise_disclosure_preserves_classical_no_spectrum_contract(monkeypatch):
+def test_archived_inverse_table_meets_its_check_value_in_exact_arithmetic(tmp_path, monkeypatch):
+    """The degree-13 table that planning accepts at kappa = 1.01 and epsilon_inv = 1e-14 survives the archive.
+
+    An exact rational upper bound on the residual of the loaded coefficients
+    lies below the recorded check value, which lies below epsilon_inv.
+    """
+    A, b = np.diag([1.0, 1 / 1.01]), np.array([0.6, 0.8])
+    plan = nwqlib.plan(LinearSystem(A=A, b=b), method=QLS(kappa=1.01, alpha=1.0, epsilon_inv=1e-14),
+                       execution="classical", output=Solution(), seed=11)
+    result = nwqlib.solve(plan)
+    result.save(tmp_path / "result")
+    monkeypatch.setattr(owner, "select_polynomial", forbidden)
+    loaded = nwqlib.load_result(tmp_path / "result").plan.reconstruction
+    polynomial = loaded.polynomial
+    assert polynomial == plan.reconstruction.polynomial and polynomial.degree == 13
+    odd = [Fraction(c) for c in polynomial.coefficients[1::2]]
+    upper = restricted_inverse_residual_bound(odd, Fraction(loaded.polynomial_kappa))
+    assert upper <= Fraction(polynomial.residual_check_value) <= Fraction(1e-14)
+    want = np.linalg.solve(A, b)
+    assert np.linalg.norm(result.value - want) <= 1e-14 * np.linalg.norm(want)
+
+
+def test_supplied_premise_needs_no_planning_spectrum_and_is_refused_where_factors_exist(monkeypatch):
     matrix = np.array([[1.1, .1], [.1, .9]])
     problem = LinearSystem(A=matrix, b=[1, .25])
+    # Planning with both premises supplied computes no spectrum on the classical route.
     with monkeypatch.context() as context:
-        context.setattr(np.linalg, "svd", forbidden)
-        for kappa in (1.05, 1.4):
-            result = nwqlib.solve(problem, method=QLS(alpha=1.2, kappa=kappa), execution="classical")
-            assert result.plan.reconstruction.sigma_min is None
-            assert "supplied spectral premise was not independently checked" in str(result)
-    # The original eigenvalues are 1 +/- sqrt(.02), so alpha/sigma_min > 1.05.
-    # Dense quantum selection already owns these endpoints and must use them.
-    with pytest.raises(ValueError, match="supplied kappa"):
-        nwqlib.plan(problem, method=QLS(alpha=1.2, kappa=1.05), execution="quantum")
+        for name in ("svd", "eigh", "eigvalsh"):
+            context.setattr(np.linalg, name, forbidden)
+        plans = {kappa: nwqlib.plan(problem, method=QLS(alpha=1.2, kappa=kappa), execution="classical", seed=7)
+                 for kappa in (1.05, 1.4)}
+    assert all(selected.reconstruction.sigma_min is None for selected in plans.values())
+    # The original eigenvalues are 1 +/- sqrt(.02), so alpha/sigma_min is about 1.398: 1.05 is
+    # false and 1.4 is true. Both routes refuse the first as soon as they hold the endpoints,
+    # quantum at planning and classical when its evaluation has computed the factors.
+    for refuse in (lambda: nwqlib.plan(problem, method=QLS(alpha=1.2, kappa=1.05), execution="quantum"),
+                   lambda: nwqlib.solve(plans[1.05])):
+        with pytest.raises(ValueError, match="supplied kappa"):
+            refuse()
+    nwqlib.plan(problem, method=QLS(alpha=1.2, kappa=1.4), execution="quantum")
+    result = nwqlib.solve(plans[1.4])
+    assert "supplied spectral premise was not independently checked" in str(result)
+    # A^-1 b = (25/28, 5/28) in closed form (docs/algorithms/qls.md). Under the premise, with
+    # |k z P(z) - 1| <= epsilon_inv on the domain, ||x - A^-1 b|| <= epsilon_inv ||A^-1 b||. The classical
+    # model has no phase term, and its rounding is far below the gap to epsilon_inv at this small input.
+    exact = np.array([25 / 28, 5 / 28])
+    assert np.linalg.norm(result.x - exact) <= result.plan.method.epsilon_inv * np.linalg.norm(exact)
+    # Eigenvalues .9 +/- sqrt(.58), about 1.662 and .138: alpha=1.4 lies above every entry and below sigma_max.
+    with pytest.raises(ValueError, match="supplied alpha"):
+        nwqlib.solve(LinearSystem(A=[[1.2, .7], [.7, .6]], b=[1, 1]), method=QLS(alpha=1.4, kappa=20.),
+                     execution="classical")
+    # A finite inverse-gap premise excludes the zero singular value of this A.
+    with pytest.raises(ValueError, match="invertible"):
+        nwqlib.solve(LinearSystem(A=np.diag([1., 0.]), b=[1, 1]), method=QLS(alpha=1., kappa=2.),
+                     execution="classical")
+    # These two models read no factors, and their one reference solve finds the same singular A.
+    unit = StateVector(normalization="unit", global_phase="modulo_global_phase")
+    for model in ("grid", "noisy_binary_search"):
+        with pytest.raises(ApplicabilityError, match="invertible"):
+            nwqlib.solve(LinearSystem(A=np.diag([1., 0.]), b=[1, 1]),
+                         method=QLS(solver="shortcut_native_svp", alpha=1., kappa=2.,
+                                    encoded_solution_norm_estimate=model),
+                         output=unit, execution="classical", seed=7)
+
+
+def test_reference_solve_of_a_singular_matrix_gives_an_unknown_fact_not_a_pass():
+    """A numeric t and supplied premises need no factors, so a singular A reaches the reference solve."""
+    from nwqlib.evidence.error_model import assemble_check
+
+    result = nwqlib.solve(selected(solver="shortcut_native_svp", A=np.diag([1., 0.]), b=[1., 1.], alpha=1., kappa=4.,
+                                   epsilon_inv=.1))
+    options = QLSVerification(comparisons=("shortcut_direction", "eq17"))
+    receipt, facts = result.verify(checks=options)
+    counts = arguments(receipt)
+    assert counts["solve_attempts"] == 1 and counts["solve_completed"] == 0
+    with pytest.raises(np.linalg.LinAlgError) as cause:
+        np.linalg.solve(np.diag([1., 0.]), np.ones(2))
+    for check, fact in zip(options.verification_checks(result), facts, strict=True):
+        assert fact.fact.availability == "unknown" and fact.fact.value is None
+        assert fact.fact.evidence is None and str(cause.value) in fact.fact.reason
+        assert assemble_check(check, artifact_id=result.content_id, fact=fact).status == "INCONCLUSIVE"
 
 
 def test_general_spectrum_admits_the_singular_values_without_vectors(monkeypatch):
@@ -370,11 +440,8 @@ POWER_OF_TWO_EDGES = [
 @pytest.mark.parametrize("matrix,edge_kappa", POWER_OF_TWO_EDGES)
 def test_named_norm_model_runs_one_ulp_above_a_power_of_two(matrix, edge_kappa, source):
     """Planning and execution count the same norm-search ladder at a power-of-two edge."""
-    # The ladder depends on kappa only. The kernel-reflection degree
-    # 2*ceil(kappa*ln(2/eta)/2), eta = epsilon_inv/sqrt(2), is 428 just above
-    # kappa = 128 at epsilon_inv = 0.1, above the default max_degree of 256.
-    plan = selected(solver="shortcut_native_svp", A=matrix, b=[1.0, 1j], t=source,
-                    epsilon_inv=0.1, max_degree=512)
+    # The ladder depends on kappa only.
+    plan = selected(solver="shortcut_native_svp", A=matrix, b=[1.0, 1j], t=source, epsilon_inv=0.1)
     kappa = plan.reconstruction.polynomial_kappa
     if edge_kappa is not None:
         assert kappa == edge_kappa
@@ -402,11 +469,9 @@ def test_selected_polynomial_exact_shape_independent_eigensystem(monkeypatch):
         return InversePolynomial(
             coefficients=(0.0, 1.0, 0.0, -0.5),
             rescale=2.0,
-            candidate_degrees=(1, 3),
-            certificate=0.0,
-            certificate_grid_points=75,
-            certificate_basis="affine_chebyshev_residual_norming",
-            lsq_node_count=8,
+            ideal_degree=3,
+            minimax_error=0.0,
+            residual_check_value=0.0,
         )
 
     monkeypatch.setattr(owner, "select_polynomial", polynomial)
@@ -482,30 +547,34 @@ def test_default_inverse_error_is_raw_error_over_polynomial_and_phase_allowance(
     # Encoded and physical solves of this kappa-2 system differ by O(1e-16) relative,
     # far below the approximately 3e-3 inverse-fit error being compared.
     assert raw == pytest.approx(expected, rel=1e-10, abs=0)
-    # The componentwise relative inverse residual gives ||error|| <= epsilon*||y||.
-    # Classical execution contributes no phase-synthesis error.
-    assert allowance == pytest.approx(0.01, rel=1e-14, abs=0)
+    # The componentwise relative inverse residual gives ||error|| <= e*||y|| for the polynomial's
+    # recorded check value e, which planning accepted against epsilon_inv. Classical execution
+    # contributes no phase-synthesis error, so the allowance is e itself.
+    check = result.plan.reconstruction.polynomial.residual_check_value
+    assert allowance == check <= QLS().epsilon_inv
     # Eigenvalues .5 and -1 of A/alpha lie in the fit domain, where
     # |k*lambda*p(lambda)-1| <= epsilon bounds the relative vector error by epsilon.
     assert rows[name].frame.metric == "relative_error_over_method_allowance"
     assert rows[name].fact.value.value == raw / allowance <= 1.0
-    # A branch error delta contributes k*rescale*delta/||y|| after recovery.
+    # A branch error delta contributes k*rescale*delta/||y|| after recovery, and the polynomial term
+    # is its check value e=.008, not the target epsilon_inv=.01.
     rec = SimpleNamespace(alpha=2.0, kappa_be=2.0, polynomial_kappa=2.0, phase_error=0.004,
-                          polynomial=SimpleNamespace(rescale=1.25))
-    values = _comparisons(
-        SimpleNamespace(reconstruction=rec, method=QLS(), execution="quantum"), None,
-        QLSVerification(comparisons=("inverse_relative_error",)),
-        bounds=(1.0, 2.0), norm=1.0, discrepancy=0.003, parameters={},
-    )
-    # On the largest-singular-value direction, ||y||=1, so .01 + 2*1.25*.004=.02.
-    assert values[name + ".method_allowance"] == pytest.approx(0.02, rel=1e-15, abs=0)
-    assert values[name] == pytest.approx(0.15, rel=1e-15, abs=0)
+                          polynomial=SimpleNamespace(kind="inverse", residual_check_value=.008, rescale=1.25))
+    for norm, expected in ((1.0, .018), (2.0, .013)):
+        # k=2, s=1.25, delta=.004: .008 + 2*1.25*.004/||y|| separates k, s, ||y|| and e from epsilon_inv.
+        values = _comparisons(
+            SimpleNamespace(reconstruction=rec, method=QLS(), execution="quantum"), None,
+            QLSVerification(comparisons=("inverse_relative_error",)),
+            bounds=(1.0, 2.0), norm=norm, discrepancy=0.003, parameters={},
+        )
+        assert values[name + ".method_allowance"] == pytest.approx(expected, rel=1e-15, abs=0)
+        assert values[name] == pytest.approx(.003 / expected, rel=1e-15, abs=0)
 
     # With k=10, s=1 and ||y||=1 the exact branch amplitude is .1.
     # Relative polynomial error .01 permits amplitude error .001, hence
     # probability error at most (.101)^2-(.1)^2=.000201.
     rec = SimpleNamespace(alpha=1.0, kappa_be=10.0, polynomial_kappa=10.0, phase_error=0.0,
-                          polynomial=SimpleNamespace(rescale=1.0))
+                          polynomial=SimpleNamespace(kind="inverse", residual_check_value=.01, rescale=1.0))
     values = _comparisons(
         SimpleNamespace(reconstruction=rec, method=QLS(), execution="quantum"),
         SimpleNamespace(returned_shots=None, algorithm_success_mass=0.011),

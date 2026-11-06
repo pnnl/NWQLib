@@ -305,7 +305,7 @@ print(f"Planning and estimation took {large_seconds:.2f} s, with a traced peak o
 #
 # - **Hamiltonian.** A Qiskit `SparsePauliOp` with real coefficients, in which qubit 0 is the rightmost character of each label. QFD builds V from its Pauli terms in this cell, and from a fermionic generator when you pass `evolution="fermionic_blocks"` as above.
 # - **Reference.** `ingest_occupation("1100", num_qubits=4)` occupies qubits 0 and 1, listing qubit 0 first. A product state or a vector also works.
-# - **Size limits.** Aer's simulator accepts 20 qubits by default, and each pair circuit adds one ancilla. Exact diagonalization here needs the dense matrix, so keep `my_H` to about 12 qubits.
+# - **Size limits.** Local simulation must fit the computer's memory, and each pair circuit adds one ancilla. Exact diagonalization here needs the dense matrix, so keep `my_H` to about 12 qubits.
 # - **Output.** `my_qfd.eigenvalue`, in hartree here. With exact readout it lies at or above the lowest eigenvalue of `my_H` but does not certify it.
 
 # %%

@@ -17,7 +17,7 @@ from fractions import Fraction
 import numpy as np
 
 from nwqlib.blocks.records import BlockSemantics, SelectedDefinition
-from nwqlib.blocks.selection import SelectedBlock
+from nwqlib.blocks.selection import NATIVE_POSITION_BYTES, SelectedBlock
 from nwqlib.core.records import Source
 from nwqlib.evidence import Evidence
 from nwqlib.ir import BlockSignature, QuantumPort
@@ -441,8 +441,12 @@ def evolution_block(kind, rows, step_rows, step_angles, steps, operator, num_qub
                      "synthesis/allocator overhead",
         construction_work=steps * instructions,
     )
+    # Each constructor slot is one Aer native position, a count that matched the
+    # lowered circuit on every label tried in both forms (Qiskit 2.6.0, Aer
+    # 0.18.0). The bytes per position are those of QPE (qpe.powers.step_memory_bytes).
+    size = NATIVE_POSITION_BYTES * steps * instructions
     return SelectedBlock.bind(record, payload=(tuple(labels), tuple(angles), steps, controlled),
-                              constructor=construct_evolution)
+                              constructor=construct_evolution, native_bytes=size, definition_bytes=size)
 
 
 def construct_evolution(block, arguments, method_context):
@@ -507,29 +511,22 @@ def power_pair_recipes(powers, rule, positions):
     return recipes
 
 
-def macro_uses(powers, rule):
-    """Return the ``PairPreparation`` of every off-diagonal pair and the V and V^dagger calls of every pair circuit.
+def pair_preparations(powers, rule):
+    """Return the ``PairPreparation`` of every off-diagonal pair, from the powers alone.
 
-    Both come from the powers alone, without the recipes of
-    ``power_pair_recipes``. The calls map each upper-triangle pair to
-    ``|b| + |q - b|`` for a prefix pair with base b and other end q, to
-    ``|p_i| + |p_j|`` for a controlled pair and to ``|p_i|`` for a
-    diagonal pair. A prefix ``PairPreparation`` has
+    A ``"prefix"`` pair has base b, the end of smaller absolute power, and
     ``shared_blocks = 1 + |b|``, the reference and the ``|b|`` uses of V or
-    V^dagger of its base, the end of smaller absolute power.
+    V^dagger of its base. Every other ``rule`` gives controlled pairs.
     """
     from nwqlib.algorithms.gcim.fixed_basis import PairPreparation
 
-    pairs, counts = [], {}
+    pairs = []
     for i, left in enumerate(powers):
-        counts[i, i] = abs(left)
         for j in range(i + 1, len(powers)):
             right = powers[j]
             if rule == "prefix":
-                base, other = (left, right) if abs(left) <= abs(right) else (right, left)
-                counts[i, j] = abs(base) + abs(other - base)
+                base = left if abs(left) <= abs(right) else right
                 pairs.append(PairPreparation(pair=(i, j), route="prefix", shared_blocks=1 + abs(base)))
             else:
-                counts[i, j] = abs(left) + abs(right)
                 pairs.append(PairPreparation(pair=(i, j), route="controlled"))
-    return tuple(pairs), counts
+    return tuple(pairs)

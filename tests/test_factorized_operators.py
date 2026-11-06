@@ -38,7 +38,8 @@ def test_multiword_fermion_parity_and_bounded_mapping(monkeypatch):
     monkeypatch.setattr(PauliTerms, "product", lambda *a, **k: pytest.fail("mapping product before byte check"))
     with pytest.raises(ValueError, match="max_bytes"):
         composite.to_pauli(mapping="jw", max_bytes=100)
-    with pytest.raises(ValueError, match="max_bytes"):
+    # Without max_bytes the limit is the physical memory, which the refusal names.
+    with pytest.raises(ValueError, match="mapping exceeds the physical memory"):
         mapping_requirements((10**10,), num_modes=2)
 
 
@@ -71,7 +72,8 @@ def test_sparse_and_pauli_expansion_preserve_order_and_refuse_before_products(mo
     # Each chain step is charged the bytes that its PauliTerms.product call
     # checks (operators/_pauli.py::pauli_product_requirements), and the final
     # operator row adds four L-byte coalescing copies and the identity JSON
-    # share 6q + 360 per product term, so an admitted chain runs every step.
+    # share 3 max(2q + 120, 150) + 112 per product term, so an admitted chain
+    # runs every step.
     from nwqlib.operators import _pauli
     checked, check = [], _pauli._check_bytes
 
@@ -86,8 +88,82 @@ def test_sparse_and_pauli_expansion_preserve_order_and_refuse_before_products(mo
         law = FactorizedOperatorProduct(factors).expansion_requirements()[1]
         FactorizedOperatorProduct(factors).expand(max_bytes=law)
         assert len(checked) == len(factors) - 1
-        assert law == sum(checked) + count * (4 * 32 + 6 * 1 + 360)
+        assert law == sum(checked) + count * (4 * 32 + 3 * 150 + 112)
     law = FactorizedOperatorProduct((x, y)).expansion_requirements()[1]
     monkeypatch.setattr(type(x.pauli_terms()), "product", lambda *a, **k: pytest.fail("Pauli product before byte check"))
     with pytest.raises(ValueError, match="operator expansion needs"):
-        FactorizedOperatorProduct((x, y)).expand(max_bytes=law - 1)
+        FactorizedOperatorProduct((x, y)).expand(max_bytes=law // 2)
+
+
+@pytest.mark.parametrize("left, right", [("csr", "csr"), ("csr", "csc"), ("csc", "csr"), ("csc", "csc")])
+def test_sparse_chain_counts_each_stored_product_before_multiplying(left, right):
+    """A two-factor sparse expansion is admitted at exactly its scalar products and refused one below.
+
+    For A*B the products are the sum over k of the stored entries of A in
+    column k times those of B in row k. Random 40 x 40 patterns in every
+    CSR/CSC combination give that count independently from dense masks.
+    """
+    rng = np.random.default_rng(len(left) + 3 * len(right) + (left == "csc") + 2 * (right == "csc"))
+    masks = [rng.random((40, 40)) < 0.1 for _ in range(2)]
+    a, b = (getattr(sparse, f"{form}_matrix")(mask * rng.uniform(1, 2, (40, 40)))
+            for form, mask in zip((left, right), masks))
+    products = int(masks[0].sum(axis=0) @ masks[1].sum(axis=1))
+    chain = FactorizedOperatorProduct((operator_input(a), operator_input(b)))
+    expanded = chain.expand(max_products=products)
+    np.testing.assert_allclose(expanded._data.toarray(), (a @ b).toarray(), rtol=1e-15, atol=0)
+    with pytest.raises(ValueError, match="max_products"):
+        chain.expand(max_products=products - 1)
+
+
+def test_sparse_triple_product_is_limited_by_its_product_count_alone():
+    """A later sparse factor is counted exactly and checked only against max_products.
+
+    For A*B*C the products are those of A*B plus, for each stored entry of
+    A*B, at most the widest row of C. A random 5 x 5 CSC*CSR*CSC chain
+    expands at exactly that count and is refused one below it by the
+    product limit. With dimension 2**21, a full column of A and full rows of
+    B and C need 2**42 + 2**63 products, which pass with no limit and with
+    max_products=2**65, from the index pointers alone.
+    """
+    from types import SimpleNamespace
+    from nwqlib.operators._factorized import _sparse_chain_requirements
+
+    rng = np.random.default_rng(552)
+    masks = [rng.random((5, 5)) < t for t in (.45, .55, .4)]
+    chain = FactorizedOperatorProduct(tuple(
+        operator_input(form(mask.astype(float)))
+        for form, mask in zip((sparse.csc_matrix, sparse.csr_matrix, sparse.csc_matrix), masks)))
+    first = int(masks[0].sum(axis=0) @ masks[1].sum(axis=1))
+    products = first + min(25, first) * int(masks[2].sum(axis=1).max())
+    expanded = chain.expand(max_products=products)
+    np.testing.assert_array_equal(expanded._data.toarray(), masks[0] * 1 @ masks[1] @ masks[2])
+    with pytest.raises(ValueError, match=f"needs {products} scalar products, exceeding max_products"):
+        chain.expand(max_products=products - 1)
+
+    d = 2**21
+    full = np.concatenate(([0], np.full(d, d, dtype=np.int64)))
+    column = SimpleNamespace(_data=SimpleNamespace(format="csc", indptr=full, nnz=d))
+    row = SimpleNamespace(_data=SimpleNamespace(format="csr", indptr=full, nnz=d))
+    for cap in (None, 2**65):
+        items, _, _ = _sparse_chain_requirements((column, row, row), d, 1 << 72, cap)
+        assert items == d * d
+    with pytest.raises(ValueError, match=f"needs {2**42 + 2**63} scalar products"):
+        _sparse_chain_requirements((column, row, row), d, 1 << 72, 2**42 + 2**63 - 1)
+
+
+def test_pauli_input_reserves_the_identity_share_of_its_widest_term_layout():
+    """S(q) = 3 max(2q + 120, 150) + 112 bytes per term (operators/inputs.py::_pauli_identity_bytes).
+
+    A per-term record enters its parent's content hash as a 150-byte
+    reference, so the share is constant up to q = 15, and each such record
+    keeps its 112-byte content hash. At q = 6 a term costs q + 4L + S =
+    6 + 128 + 562 = 696 bytes, so three labels are admitted at exactly 2,088
+    bytes and refused one byte below.
+    """
+    from nwqlib.operators.inputs import _pauli_identity_bytes
+
+    assert [_pauli_identity_bytes(q) for q in (1, 6, 14, 15, 16)] == [562, 562, 562, 562, 568]
+    labels = [("XIIIIZ", 1.0), ("IYIIII", -0.5), ("ZZZZZZ", 0.25)]
+    assert len(ingest_pauli(labels, num_qubits=6, max_bytes=3 * 696).pauli_terms().labels()) == 3
+    with pytest.raises(ValueError, match="raw Pauli input exceeds max_bytes"):
+        ingest_pauli(labels, num_qubits=6, max_bytes=3 * 696 - 1)

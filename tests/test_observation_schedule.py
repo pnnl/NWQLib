@@ -135,35 +135,95 @@ def test_nwqsim_serves_only_phase_invariant_reductions_before_the_last_boundary(
         assert run.trace.preparations == 0
 
 
-def test_probability_points_reserve_eight_bytes_per_possible_outcome():
-    """Dense or adaptively sparse probability arrays reserve ``8 * 2**q_k`` bytes per point (``V_k``).
+def test_probability_total_is_the_correctly_rounded_sum_of_the_saved_values():
+    """The saved mass is fsum of all values: above fl(1+w) at the endpoint, and not a sum of per-block sums."""
+    from fractions import Fraction
+    from math import fsum, ulp
 
-    With the receipt declaration, the allowance and the point declarations,
-    that total is admitted and one byte less refuses the last point before
-    native work (``_admit_readout``, which ``prepare_experiment`` calls before
-    lowering). Restoration charges no point headers.
-    """
-    from nwqlib.execution import ExecutionLimits
-    from nwqlib._prepared_execution import _admit_readout, _trajectory_value_bounds
-    from nwqlib._run_journal import _json_bound
+    import numpy as np
+
+    from nwqlib._validation import exact_probability_window
+    from nwqlib.artifacts import _FINITE_CHECK_ENTRIES, probability_readout
+
+    # Exact total T + 3*ulp(T)/4 rounds up to the next float after the
+    # endpoint T = fl(1+w); a left-to-right float sum stays at T.
+    endpoint = 1 + exact_probability_window(3, 2)
+    small = 3 * ulp(endpoint) / 8
+    _, _, summary = probability_readout(np.array([endpoint, small, small, 0.0]), width=2)
+    assert summary["mass"] == np.nextafter(endpoint, 2) > endpoint
+
+    # Each block's residual is below half an ulp of its own sum, so
+    # per-block fsums added give 0.75 + c, while the exact total exceeds it
+    # by 9*2**-57, more than half an ulp of 0.75.
+    step = _FINITE_CHECK_ENTRIES
+    values = np.full(2 * step, 2.0**-30)
+    values[[0, 1, step, step + 1]] = 0.5, 3 * 2.0**-56, 0.25, 3 * 2.0**-57
+    _, stored, summary = probability_readout(values, width=(2 * step).bit_length() - 1)
+    assert len(stored) == 2 * step
+    exact = float(sum(map(Fraction, values.tolist())))
+    blockwise = fsum(values[:step].tolist()) + fsum(values[step:].tolist())
+    assert summary["mass"] == fsum(values.tolist()) == exact == np.nextafter(blockwise, 1)
+
+
+def test_probability_points_reserve_eight_bytes_per_possible_outcome():
+    """Dense or adaptively sparse probability arrays reserve ``8 * 2**q_k`` bytes per point (``V_k``)."""
+    from nwqlib._prepared_execution import _trajectory_value_bounds
 
     schedule = trajectory(ObservationPoint(id="first", position=0, kind="probabilities", qubits=(0,)),
                           ObservationPoint(id="end", position=None, kind="probabilities", qubits=(0,)))
     assert _trajectory_value_bounds(schedule, width=1, capacity=None, max_bytes=1 << 40) == [16, 16]
-    metadata = 4096
 
-    def admit(max_data_bytes):
-        run = SimpleNamespace(limits=ExecutionLimits(max_data_bytes=max_data_bytes,
-                                                     max_completion_metadata_bytes=metadata))
-        return _admit_readout(schedule, width=1, classical_width=0, run=run)
 
-    receipt = _json_bound("observation", 1 << 40) + 2 + _json_bound(schedule, 1 << 40)
-    declarations = sum(_json_bound({"observation": ObservationSpec.point_readout_fields(point)}, 1 << 40)
-                       for point in schedule.positions)
-    total = receipt + metadata + declarations + 2 * 8 * 2
-    assert admit(total) == 4
-    with pytest.raises(ValueError, match="trajectory point 'end' storage exceeds remaining max_data_bytes"):
-        admit(total - 1)
+def test_restoring_a_trajectory_checks_its_reservation_against_the_cap_not_the_remaining_bytes():
+    """A Run at its data limit still restores a saved trajectory preparation, admitted when it was prepared."""
+    from nwqlib.execution import ExecutionLimits
+    from nwqlib._prepared_execution import _admit_readout
+
+    schedule = trajectory(ObservationPoint(id="first", position=0, kind="probabilities", qubits=(0,)),
+                          ObservationPoint(id="end", position=None, kind="probabilities", qubits=(0,)))
+    full = SimpleNamespace(limits=ExecutionLimits(max_data_bytes=4096), _available_data_bytes=lambda: 0)
+    assert _admit_readout(schedule, width=1, classical_width=0, run=full) == 4
+
+
+def test_max_data_bytes_of_only_the_probability_arrays_refuses_before_native_preparation(monkeypatch):
+    """Both probability arrays and the fixed bytes are reserved, so a budget of exactly the arrays refuses.
+
+    On 12 qubits the two full-width points need 2 * 8 * 2**12 = 65,536 bytes
+    of arrays besides their declarations and headers. Charging only one
+    array, or neither the declarations nor the headers, would fit that
+    budget, so the refusal shows that all of them are counted. It comes
+    before native preparation, and a budget of 131,072 bytes reaches native
+    preparation.
+    """
+    import nwqlib
+    from nwqlib import Expectation
+    from nwqlib.algorithms.expectation import ExpectationMethod
+    from nwqlib.backends import qiskit_aer as aer
+    from nwqlib.execution import ExecutionLimits
+    from nwqlib.operators import ingest_pauli
+    from nwqlib.problems.inputs import ingest_product
+
+    width = 12
+    base = nwqlib.plan(Expectation(state=ingest_product([(.6, .8)] * width),
+                                   observable=ingest_pauli([("Z" * width, 1.)], num_qubits=width)),
+                       method=ExpectationMethod(), seed=23)
+    marginals = tuple(ObservationPoint(id=name, position=position, kind="probabilities", qubits=tuple(range(width)))
+                      for name, position in (("early", 0), ("late", None)))
+    chosen = base.revise(experiments=(Experiment(name="read", setting="two", observation=trajectory(*marginals)),))
+    chosen = chosen._bind(blocks=base.blocks)
+    monkeypatch.setattr(aer, "_prepare_aer_execution", lambda *args, **kwargs: pytest.fail("native preparation"))
+    with Run(chosen, limits=ExecutionLimits(max_data_bytes=2 * 8 * 2**12)) as run:
+        with pytest.raises(ValueError, match="storage exceeds remaining max_data_bytes"):
+            prepare(chosen.resolve("read"), run=run, runtime=RuntimeOptions(seed=23))
+        assert run.trace.preparations == 0
+
+    class Reached(Exception):
+        pass
+
+    monkeypatch.setattr(aer, "_prepare_aer_execution", lambda *args, **kwargs: (_ for _ in ()).throw(Reached()))
+    with Run(chosen, limits=ExecutionLimits(max_data_bytes=2 * 8 * 2**12 + 65_536)) as run:
+        with pytest.raises(Reached):
+            prepare(chosen.resolve("read"), run=run, runtime=RuntimeOptions(seed=23))
 
 
 def three_call_plan(schedule, *others, state=(1., 2., 3., 4.)):
@@ -508,7 +568,11 @@ def test_registered_reduction_runs_once_per_point_on_its_saved_state(state_reduc
 
 
 def test_reduction_work_and_saved_states_are_admitted_before_native_preparation(state_reducer, monkeypatch):
-    """Work beyond the Method's allowance, a missing allowance and over-budget saved states refuse first."""
+    """Work beyond a finite allowance, a finite allowance for a reducer without registered work and over-budget saved states refuse first.
+
+    Without the hook the Method sets no work limit, and preparation reaches native work.
+    """
+    import dataclasses
     import numpy as np
     import nwqlib
     from nwqlib import Expectation
@@ -519,19 +583,27 @@ def test_reduction_work_and_saved_states_are_admitted_before_native_preparation(
 
     monkeypatch.setattr(aer, "_prepare_aer_execution", lambda *args, **kwargs: pytest.fail("native lowering started"))
     plan = three_call_plan(trajectory(reduction("middle", 2), reduction("end", None)))
+    workless = dataclasses.replace(planning.READOUT_REDUCERS["norm_first"], work=None)
     with Run(plan) as run:
-        for allowance, message in ((2 * (2 << 2) - 1, "more than the remaining allowance 15"),
-                                   (None, "needs the calling Method's remaining work allowance")):
+        for allowance, reducer, message in ((2 * (2 << 2) - 1, None, "more than the remaining allowance 15"),
+                                            (1 << 40, workless, "registers no work")):
             with monkeypatch.context() as patch, pytest.raises(ValueError, match=message):
-                # Without the hook ExpectationMethod supplies no allowance.
-                if allowance is not None:
-                    patch.setattr(ExpectationMethod, "reduction_allowance",
-                                  lambda self, plan, point, *, observation, width, run: allowance, raising=False)
+                if reducer is not None:
+                    patch.setitem(planning.READOUT_REDUCERS, "norm_first", reducer)
+                patch.setattr(ExpectationMethod, "reduction_allowance",
+                              lambda self, plan, point, *, observation, width, run: allowance, raising=False)
                 prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
         assert run.trace.preparations == 0
+
+        class Reached(Exception):
+            pass
+
+        with monkeypatch.context() as patch, pytest.raises(Reached):
+            patch.setattr(aer, "_prepare_aer_execution", lambda *args, **kwargs: (_ for _ in ()).throw(Reached()))
+            prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
     # A reducer without execution, a reducer the target
-    # does not declare and outputs whose stored JSON exceeds max_data_bytes
-    # are refused before native preparation too.
+    # does not declare and outputs whose stored JSON exceeds an explicit
+    # max_data_bytes (10 GB here) are refused before native preparation too.
     registered = planning.READOUT_REDUCERS["norm_first"]
     variants = (
         ("shape_only", Reducer(shape=registered.shape), "has no registered execution"),
@@ -539,9 +611,8 @@ def test_reduction_work_and_saved_states_are_admitted_before_native_preparation(
         ("wide", Reducer(shape=lambda parameters: (ReducerOutput("float64", (10**9,)),), work=registered.work,
                          execute=registered.execute), "point .r. storage exceeds remaining max_data_bytes"),
     )
+    # ExpectationMethod gives no work allowance, so these refusals do not depend on one.
     from nwqlib.backends import targets
-    monkeypatch.setattr(ExpectationMethod, "reduction_allowance",
-                        lambda self, plan, point, *, observation, width, run: 1 << 40, raising=False)
     for name, reducer, message in variants:
         monkeypatch.setitem(planning.READOUT_REDUCERS, name, reducer)
         # A target that names its reducers executes only those names.
@@ -549,7 +620,7 @@ def test_reduction_work_and_saved_states_are_admitted_before_native_preparation(
             reducers=("norm_first",) + (() if name == "undeclared" else (name,))))
         point = ObservationPoint(id="r", position=None, kind="reduction", reducer=name)
         variant = three_call_plan(trajectory(point))
-        with Run(variant) as run:
+        with Run(variant, limits=ExecutionLimits(max_data_bytes=10**10)) as run:
             with pytest.raises(ValueError, match=message):
                 prepare(variant.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
             assert run.trace.preparations == 0
@@ -563,6 +634,106 @@ def test_reduction_work_and_saved_states_are_admitted_before_native_preparation(
         with pytest.raises(ValueError, match=r"saved state for point .end.: counted=1048576, requested=16\*2\*\*16, remaining=0"):
             prepare(wide.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
         assert run.trace.preparations == 0
+
+
+def test_projected_reduction_workspace_is_admitted_with_the_saved_state(monkeypatch):
+    """The saved state and the projected reduction's workspace must fit simulator_memory_mb before native work.
+
+    A two-qubit trajectory reduces its end state with ``projected_moments`` over M rows. Its saved state
+    takes 16*2**2 bytes and its workspace 49*2**2 + 320*M + 2**17 bytes, so at 1 MiB the largest M whose
+    total fits, 2866, reaches native preparation. One more row is refused before it, and the refusal states
+    the total with the saved state, which the boundary alone cannot show because the state is smaller
+    than one row.
+    """
+    from nwqlib._quantum_readout import PROJECTED_MOMENTS, projected_parameters
+    from nwqlib.backends import qiskit_aer as aer
+    from nwqlib.execution import ExecutionLimits
+
+    class Reached(Exception):
+        pass
+
+    monkeypatch.setattr(aer, "_prepare_aer_execution", lambda *args, **kwargs: (_ for _ in ()).throw(Reached()))
+    largest = ((1 << 20) - 16 * 4 - 49 * 4 - (1 << 17)) // 320
+    workspace = 49 * 4 + 320 * (largest + 1) + (1 << 17)
+    assert largest == 2866 and 16 * 4 + workspace > 1 << 20
+    refused = (rf"its saves, 64 bytes with 1 saved simulator state\(s\) of 2 qubits, are held, and their largest "
+               rf"reduction needs {workspace} bytes of arrays besides them, {16 * 4 + workspace} bytes together")
+    for rows, outcome, message in ((largest, Reached, None), (largest + 1, ValueError, refused)):
+        point = ObservationPoint(id="end", position=None, kind="reduction", reducer=PROJECTED_MOMENTS,
+                                 parameters=projected_parameters(coordinates=(0, 1), success=(), dimension=4,
+                                                                 terms=(("ZZ", 1.),) * rows))
+        plan = three_call_plan(trajectory(point))
+        with Run(plan, limits=ExecutionLimits(simulator_memory_mb=1)) as run:
+            with pytest.raises(outcome, match=message):
+                prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
+
+
+def test_a_projected_coefficient_beyond_binary64_is_refused_before_native_preparation(monkeypatch):
+    """A term value that is not a finite binary64 number is refused when the reducer is admitted.
+
+    Canonical point parameters refuse NaN and infinity, so the value is an integer beyond the binary64
+    range. Nothing is prepared or counted.
+    """
+    from nwqlib._quantum_readout import PROJECTED_MOMENTS, projected_parameters
+    from nwqlib.backends import qiskit_aer as aer
+
+    monkeypatch.setattr(aer, "_prepare_aer_execution", lambda *args, **kwargs: pytest.fail("native preparation"))
+    parameters = projected_parameters(coordinates=(0, 1), success=(), dimension=4, terms=(("ZZ", 1.),))
+    parameters["terms"][0][1] = 10**400
+    point = ObservationPoint(id="end", position=None, kind="reduction", reducer=PROJECTED_MOMENTS,
+                             parameters=parameters)
+    plan = three_call_plan(trajectory(point))
+    with Run(plan) as run:
+        with pytest.raises(ValueError, match="finite binary64 coefficients"):
+            prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
+        assert run.trace.preparations == 0
+
+
+def test_reduction_workspace_is_admitted_with_the_kept_probabilities(monkeypatch):
+    """Aer keeps a trajectory's probabilities until the job completes, so they count with the reduction workspace.
+
+    On 14 qubits one ``projected_moments`` reduction over 13 coordinates and one Pauli term saves a
+    262,144-byte state and needs 532,800 bytes of workspace, which fit 1 MiB. Two full-width probability
+    points add 262,144 kept bytes, so that trajectory is refused at 1 MiB before native preparation and
+    reaches it at 2 MiB. The simulation itself, with the live state, fits 1 MiB in both cases.
+    """
+    import nwqlib
+    from nwqlib import Expectation
+    from nwqlib._quantum_readout import PROJECTED_MOMENTS, projected_parameters
+    from nwqlib.algorithms.expectation import ExpectationMethod
+    from nwqlib.backends import qiskit_aer as aer
+    from nwqlib.execution import ExecutionLimits
+    from nwqlib.operators import ingest_pauli
+    from nwqlib.problems.inputs import ingest_product
+
+    class Reached(Exception):
+        pass
+
+    monkeypatch.setattr(aer, "_prepare_aer_execution", lambda *args, **kwargs: (_ for _ in ()).throw(Reached()))
+    width, n = 14, 13
+    base = nwqlib.plan(Expectation(state=ingest_product([(.6, .8)] * width),
+                                   observable=ingest_pauli([("Z" * width, 1.)], num_qubits=width)),
+                       method=ExpectationMethod(), seed=23)
+    reduction = ObservationPoint(id="reduction", position=None, kind="reduction", reducer=PROJECTED_MOMENTS,
+                                 parameters=projected_parameters(coordinates=tuple(range(n)), success=((n, 0),),
+                                                                 dimension=1 << n, terms=(("Z" * n, 1.),)))
+    marginals = tuple(ObservationPoint(id=name, position=position, kind="probabilities", qubits=tuple(range(width)))
+                      for name, position in (("early", 0), ("late", None)))
+    workspace = 49 * (1 << n) + 320 + (1 << 17)
+    assert workspace == 532_800 and (16 << width) + workspace <= 1 << 20 < 2 * (16 << width) + workspace
+    for points, refused in (((reduction,), False), ((*marginals, reduction), True)):
+        chosen = base.revise(experiments=(Experiment(name="read", setting="one", observation=trajectory(*points)),))
+        chosen = chosen._bind(blocks=base.blocks)
+        for cap in (1, 2):
+            with Run(chosen, limits=ExecutionLimits(simulator_memory_mb=cap)) as run:
+                if refused and cap == 1:
+                    with pytest.raises(ValueError, match=rf"its saves, 524288 bytes with 1 saved simulator state\(s\) "
+                                                         rf"of 14 qubits, are held.*{524288 + workspace} bytes together"):
+                        prepare(chosen.resolve("read"), run=run, runtime=RuntimeOptions(seed=23))
+                    assert run.trace.preparations == 0
+                else:
+                    with pytest.raises(Reached):
+                        prepare(chosen.resolve("read"), run=run, runtime=RuntimeOptions(seed=23))
 
 
 def test_saved_trajectory_result_reloads_and_reanalyzes_without_decoding(tmp_path, monkeypatch):
@@ -605,6 +776,44 @@ def test_saved_trajectory_result_reloads_and_reanalyzes_without_decoding(tmp_pat
     partial = dataclasses.replace(data, observations=ObservationView(chunks=data.observations.chunks[1:]))
     with pytest.raises(ValueError, match="missing a declared point"):
         analyze(None, plan, partial)._attach(plan, partial).save(tmp_path / "partial")
+
+
+@pytest.mark.parametrize("observation,expected", [
+    (trajectory(pauli("at0", 0, "IZ")), [1.0]),
+    (trajectory(pauli("at1", 1, "IZ")), [-1.0]),
+    (trajectory(pauli("at0", 0, "IZ"), pauli("at1", 1, "IZ")), [1.0, -1.0]),
+    (trajectory(pauli("at0", 0, "IZ"), pauli("at2", 2, "IZ")), [1.0, 1.0]),
+    (ObservationSpec(kind="pauli_expectation", position=0, labels=("IZ",)), [1.0]),
+    (ObservationSpec(kind="pauli_expectation", position=1, labels=("IZ",)), [-1.0]),
+])
+def test_readouts_around_an_opening_direct_preparation_keep_their_order(observation, expected, monkeypatch):
+    """Each readout sees its own prefix of three preparations of |01>: <IZ> is +1 at 0 and 2 and -1 at 1.
+
+    Aer sets the first preparation as the initial state only when a readout follows it, so a readout
+    at position 0 alone sees |00> and its record has no initial_state_error. Nothing after the last
+    readout is built or executed, so up to position 1 no preparation circuit is built.
+    """
+    from nwqlib._prepared_execution import submit_experiment
+    from nwqlib.subroutines.state_preparation import direct
+
+    built = []
+    original = direct._build_normalized_state_preparation
+    monkeypatch.setattr(direct, "_build_normalized_state_preparation",
+                        lambda *args, **kwargs: built.append(1) or original(*args, **kwargs))
+    plan = three_call_plan(observation, state=(0., 1., 0., 0.))
+    last = (max(point.position for point in observation.positions) if observation.kind == "trajectory"
+            else observation.position)
+    with Run(plan) as run:
+        handle = prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
+        assert (handle.record.initial_state_error is None) == (last == 0)
+        names = [item.operation.name for item in handle._native.circuit.data]
+        assert names.count("set_statevector") == (last > 0)
+        assert (built == []) == (last <= 1)
+        if last == 0:
+            assert set(names) == {"save_expval"}
+        chunks = submit_experiment(handle, run=run)
+    chunks = chunks if isinstance(chunks, tuple) else (chunks,)
+    assert [_chunk_values(chunk)["IZ"] for chunk in chunks] == expected
 
 
 def test_intermediate_amplitude_points_carry_their_own_prefix_phase():
@@ -963,90 +1172,111 @@ def test_projected_reducer_resolves_only_the_amplitude_mass_label_at_every_mass_
             checkpoint()
 
 
-def _zero_state_plan(width, *points):
-    """A trajectory over an allocated ``width``-qubit zero state with the given points."""
-    from nwqlib.blocks import SelectedConstruction
-    from nwqlib.ir import Allocate, Definition, Program, Register, Release, Sequence
-    from test_prepared_execution import base_plan
+def test_an_admitted_aer_acquisition_is_saved_beyond_the_data_limit(monkeypatch, tmp_path):
+    """Records of admitted work are saved beyond ``max_data_bytes``, and new work waits for ``extend_limits``.
 
-    program = Program(root="body", registers=(Register(name="q", width=width),), definitions=(
-        Definition(id="allocate", node=Allocate(wire="q")), Definition(id="release", node=Release(wire="q")),
-        Definition(id="body", node=Sequence(children=("allocate", "release")))))
-    base = base_plan().revise(construction=SelectedConstruction(program=program, selections=()), shots=None)._bind()
-    return base.revise(experiments=(Experiment(name="t", setting=f"{len(points)} marginals",
-                                               observation=trajectory(*points)),))._bind(blocks=base.blocks)
-
-
-@pytest.mark.parametrize("kind,count", [("pauli_expectation", 1), ("probabilities", 16)])
-def test_an_admitted_trajectory_completes_at_its_required_metadata_allowance(monkeypatch, kind, count):
-    """``58*K + 1113`` bytes admit a trajectory that completes; one byte less refuses before lowering.
-
-    Two-qubit points on |00> store a probability marginal sparse (two
-    manifests and four publication rows), the largest encoding at this
-    width, whose record and publication rows the point header funds
-    (``_prepared_execution._probability_point_metadata``). The completion
-    timestamps carry microseconds, the largest growth of the completion rows
-    (``synchronous_completion_growth``), so the allowance is exactly
-    sufficient: K = 1 needs 1171 bytes and K = 16 needs 2041.
+    The limit admits the preparation and the output reservation of the one
+    Aer acquisition but not the unreserved records of its completion, such
+    as its job and timing (``Run._write``). The observation is saved, and
+    the folder Run, closed beyond its limit, reopens with it. The derived
+    Result, a new preparation and a copy to a new folder are
+    refused with the ``extend_limits`` remedy. On that Run a write of a
+    lifecycle revision alone is saved, while the same write with a cache row
+    is refused. After ``extend_limits`` the Result completes from the saved
+    observation without another backend call.
     """
-    import nwqlib._prepared_execution as owner
-    from nwqlib.blocks import lowering
-    from nwqlib.execution import ExecutionLimits, submit_experiment
-
-    fields = (dict(kind="probabilities", qubits=(0, 1)) if kind == "probabilities"
-              else dict(kind="pauli_expectation", labels=("ZZ",)))
-    plan = _zero_state_plan(2, *(ObservationPoint(id=f"p{index}", position=None, **fields) for index in range(count)))
-    monkeypatch.setattr(owner, "_now", lambda: "2026-09-29T12:34:56.123456+00:00")
-    lowered = []
-    original = lowering._lower_qiskit
-    monkeypatch.setattr(lowering, "_lower_qiskit", lambda *a, **k: lowered.append(1) or original(*a, **k))
-    required = 58 * count + 1113
-    with Run(plan, limits=ExecutionLimits(max_completion_metadata_bytes=required - 1)) as run:
-        with pytest.raises(ValueError, match=f"need at least {required} bytes, more than "
-                                             f"max_completion_metadata_bytes={required - 1}, before native work"):
-            prepare(plan.resolve("t"), run=run, runtime=RuntimeOptions(seed=7))
-    assert lowered == []
-    with Run(plan, limits=ExecutionLimits(max_completion_metadata_bytes=required)) as run:
-        chunks = submit_experiment(prepare(plan.resolve("t"), run=run, runtime=RuntimeOptions(seed=7)), run=run)
-        assert len(chunks) == count and run.trace.events[-1].status == "completed"
-        if kind == "probabilities":
-            assert {chunk.values[0].encoding for chunk in chunks} == {"sparse"}
-
-
-@pytest.mark.parametrize("shots", [200])
-def test_counts_and_exact_scalar_metadata_refuse_before_the_backend_call(monkeypatch, shots):
-    """Counts readouts check their completion metadata before native preparation.
-
-    ``prepare_static`` checks the largest known requirement of the Plan's
-    settings (``_prepared_execution._scalar_endpoint_metadata``) before the
-    first preparation, so an allowance one byte below it refuses with no
-    ``AerBackend.submit`` call, no event and no preparation, and the value the
-    refusal names completes on the first retry.
-    """
-    import re
     import nwqlib
+    import nwqlib._prepared_execution as owner
     from nwqlib.algorithms import ExpectationMethod
     from nwqlib.backends import AerBackend
     from nwqlib.execution import ExecutionLimits
     from nwqlib.problems import Expectation
 
-    calls = []
+    def counted(run):
+        state = run._state
+        return (state["data_bytes"] + state["array_bytes"] + state["payload_bytes"] + state["external_bytes"]
+                + sum(state["pending_output"].values()))
+
+    monkeypatch.setattr(owner, "_now", lambda: "2026-09-29T12:34:56.123456+00:00")
+    totals = []
     submit = AerBackend.submit
-    monkeypatch.setattr(AerBackend, "submit", lambda self, *args, **kwargs: calls.append(1) or submit(
-        self, *args, **kwargs))
+    monkeypatch.setattr(AerBackend, "submit", lambda self, native, **kwargs: totals.append(counted(kwargs["run"]))
+                        or submit(self, native, **kwargs))
     plan = nwqlib.plan(Expectation(state=[1, 1], observable=[[1, 0], [0, -.5]]), method=ExpectationMethod(),
-                       shots=shots, seed=7)
-    with Run(plan, limits=ExecutionLimits(max_completion_metadata_bytes=1000)) as run:
-        with pytest.raises(ValueError, match="need max_completion_metadata_bytes of at least") as caught:
-            plan.method.prepare(plan, run=run)
-        assert not run.trace.events and run.trace.preparations == 0
-    required = int(re.search(r"at least (\d+) per completion", str(caught.value)).group(1))
-    with Run(plan, limits=ExecutionLimits(max_completion_metadata_bytes=required - 1)) as run:
-        with pytest.raises(ValueError, match=f"at least {required} per completion, exceeding {required - 1}"):
-            plan.method.prepare(plan, run=run)
-    assert calls == []
-    prepared = nwqlib.prepare(plan, limits=ExecutionLimits(max_completion_metadata_bytes=required), progress=False)
-    with prepared.run:
-        nwqlib.submit(prepared).wait()
-        assert [event.status for event in prepared.run.trace.events] == ["completed"]
-    assert calls == [1]
+                       shots=200, seed=7)
+    with Run(plan, directory=tmp_path / "measured") as run:
+        expected = run.resume().result
+    # The total at the backend call, with the reservation, admits the same
+    # work in the next Run. The margin covers float and limit text whose length varies.
+    limit = totals[0] + 256
+    with Run(plan, limits=ExecutionLimits(max_data_bytes=limit, max_total_shots=10**6),
+             directory=tmp_path / "run") as run:
+        with pytest.raises(ValueError, match=r"extend_limits\(max_data_bytes=\.\.\.\)"):
+            run.resume()
+        assert len(totals) == 2 and counted(run) > limit and run.result is None
+        saved = [chunk.content_id for chunk in run.observations.chunks]
+    with nwqlib.load_run(tmp_path / "run", progress=False) as run:
+        assert counted(run) > limit and [chunk.content_id for chunk in run.observations.chunks] == saved
+        assert [event.status for event in run.trace.events] == ["completed"] and len(saved) == 1
+        with pytest.raises(ValueError, match=r"extend_limits\(max_data_bytes=\.\.\.\)"):
+            prepare(plan.resolve(plan.experiments[0].name), run=run, runtime=RuntimeOptions(seed=8))
+        with pytest.raises(ValueError, match=r"extend_limits\(max_data_bytes=\.\.\.\)"):
+            run.save(tmp_path / "copy")
+        assert not (tmp_path / "copy").exists()
+        submission = run.trace.submissions[0]
+        before = counted(run)
+        run._write((("submission", submission.submission_id, submission.revise(provider_status="done " * 40)),),
+                   release_output=())
+        assert counted(run) > before
+        submission = run.trace.submissions[0]
+        with pytest.raises(ValueError, match="max_data_bytes"):
+            run._write((("submission", submission.submission_id, submission.revise(provider_status="done " * 50)),
+                        ("cache", "probe", {"note": "x"})), release_output=())
+        # Raising another limit keeps max_data_bytes, which no longer covers the counted data.
+        with pytest.raises(ValueError, match=r"the proposed max_data_bytes=\d+ cannot admit the requested data "
+                                             r"bytes already counted .*run\.extend_limits\(max_data_bytes=\.\.\.\)"):
+            run.extend_limits(max_total_shots=2 * 10**6)
+        # The copy's file limit also covers the SQLite pages of its run log.
+        run.extend_limits(max_data_bytes=1_000_000)
+        assert run.resume().result.facts == expected.facts and len(totals) == 2
+        run.save(tmp_path / "copy")
+        # Removing the data limit records one amendment, and a repeated removal
+        # records none. The folder and a copy saved without the limit reopen
+        # without it, with the same observation and no further backend call.
+        run.extend_limits(max_data_bytes=None)
+        run.extend_limits(max_data_bytes=None)
+        lifted = run.limit_amendments[-1]
+        assert run.limits.max_data_bytes is None and len(run.limit_amendments) == 2
+        assert (lifted.old.max_data_bytes, lifted.new.max_data_bytes) == (1_000_000, None)
+        run.save(tmp_path / "lifted")
+    for folder in ("run", "lifted"):
+        with nwqlib.load_run(tmp_path / folder, progress=False) as run:
+            assert run.limits.max_data_bytes is None and run.limit_amendments[-1] == lifted
+            assert run.resume().result.facts == expected.facts and len(totals) == 2
+
+
+def test_aer_translates_a_view_inverse_only_when_it_composes_it(monkeypatch):
+    """A view read only in the schedule's last group applies its tail once and never its inverse.
+
+    The tail definition is translated for Aer and the inverse definition is not, so a direct
+    preparation in it would never build its tree (``qiskit_aer._view_applications``).
+    """
+    from nwqlib.backends import qiskit_aer as aer
+
+    translated = []
+    original = aer._AerPreparation.prepare
+
+    def recorded(self, circuit, decompose):
+        translated.append(circuit)
+        return original(self, circuit, decompose)
+
+    monkeypatch.setattr(aer._AerPreparation, "prepare", recorded)
+    view = ReadoutView(tail="tail", inverse="tail_inverse", wires=(0, 1))
+    plan = view_plan(trajectory(pauli("plain", 1, "ZZ"),
+                                ObservationPoint(id="viewed", position=2, kind="probabilities", qubits=(0, 1), view=view)))
+    with Run(plan, progress=False) as run:
+        handle = prepare(plan.resolve("trajectory"), run=run, runtime=RuntimeOptions(seed=7))
+    saves, _ = aer._trajectory_saves(handle.record.observation, handle.record.boundaries)
+    assert aer._view_applications(saves) == {"tail": 1}
+    # The body and the tail are translated, the inverse is not.
+    assert len(translated) == 2

@@ -269,6 +269,13 @@ def gray_code_rotation_angles(angles: Any) -> np.ndarray:
     return values[..., [index ^ (index >> 1) for index in range(size)]]
 
 
+# Tolerance of the unitarity test of UCGate's constructor in Qiskit 2.6.0
+# (qiskit.circuit.library.generalized_gates.uc._EPS), applied here to each
+# distinct table entry. The test test_ucgate_table_checks_each_distinct_entry
+# compares the gate with the constructor's. Revisit with a Qiskit upgrade.
+_UCGATE_UNITARITY_TOLERANCE = 1e-10
+
+
 @lru_cache(maxsize=None)
 def gray_code_controls(size: int) -> tuple[int | None, ...]:
     """Return the CX controls ``c_i`` of :func:`gray_code_rotation_schedule` for a table of ``size`` angles."""
@@ -287,13 +294,30 @@ def append_uniformly_controlled_unitaries(
     controls: Sequence[Qubit],
     unitaries: Sequence[np.ndarray],
 ) -> UCGate:
-    """Append the pinned exact, unsimplified ``UCGate`` construction."""
-    from qiskit.circuit.library import UCGate
+    """Append the pinned exact, unsimplified ``UCGate`` construction.
 
+    ``UCGate(table, up_to_diagonal=False, mux_simp=False)`` tests every
+    entry with ``is_unitary_matrix`` at tolerance 1e-10, which dominates the
+    construction of large tables of few distinct matrices, such as the local
+    Pauli factors of a SELECT. The same predicate and tolerance are applied
+    once to each distinct entry, and the gate is then formed as that
+    constructor forms it: name, width, table, ``up_to_diagonal=False`` and
+    no simplified controls.
+    """
+    from qiskit.circuit import Gate
+    from qiskit.circuit.library import UCGate
+    from qiskit.exceptions import QiskitError
+    from qiskit.quantum_info.operators.predicates import is_unitary_matrix
 
     controls = _validated_qubits(circuit, target, controls)
     padded = pad_unitary_table(unitaries, control_qubits=len(controls))
-    gate = UCGate(list(padded), up_to_diagonal=False, mux_simp=False)
+    distinct = {matrix.tobytes(): matrix for matrix in padded}
+    if not all(is_unitary_matrix(matrix, _UCGATE_UNITARITY_TOLERANCE) for matrix in distinct.values()):
+        raise QiskitError("A controlled gate is not unitary.")
+    gate = UCGate.__new__(UCGate)
+    Gate.__init__(gate, "multiplexer", len(controls) + 1, list(padded))
+    gate.up_to_diagonal = False
+    gate.simp_contr = (False, set())
     circuit.append(gate, [target, *controls])
     return gate
 
@@ -344,7 +368,8 @@ def project_unitary_table_dependencies(
     )
 
 
-def local_pauli_dependencies(x: np.ndarray, z: np.ndarray, system_bit: int) -> tuple[int, ...]:
+def local_pauli_dependencies(x: np.ndarray, z: np.ndarray, system_bit: int,
+                             negative: np.ndarray | None = None) -> tuple[int, ...]:
     """Return the address bits on which one system qubit's local Pauli letters depend.
 
     ``x`` and ``z`` are the packed Pauli masks of a validated table, uint64
@@ -362,8 +387,12 @@ def local_pauli_dependencies(x: np.ndarray, z: np.ndarray, system_bit: int) -> t
 
     whose right side is the support predicate of
     ``project_unitary_table_dependencies``, and the ordered support agrees.
-    Coefficient phases stay in their separate diagonal, and the equivalence
-    does not cover a local table that incorporates them. One term has no
+    Complex coefficient phases stay in their separate diagonal, and the
+    equivalence does not cover a local table that incorporates them. A
+    Boolean ``negative`` row marks the entries that carry the factor -1 of a
+    negative real coefficient (``project_local_pauli_table``). Adding
+    ``4 negative_k`` to ``c_k`` keeps the map injective, because no signed
+    local Pauli matrix equals another one or its negative. One term has no
     address bits, identical nonidentity letters can acquire dependencies through
     identity padding, and all-identity tables have empty support. An empty
     table is rejected, as the entrywise projection rejects it.
@@ -377,13 +406,62 @@ def local_pauli_dependencies(x: np.ndarray, z: np.ndarray, system_bit: int) -> t
     xx = ((x[:, word] >> np.uint64(bit)) & np.uint64(1)).astype(np.uint8)
     zz = ((z[:, word] >> np.uint64(bit)) & np.uint64(1)).astype(np.uint8)
     codes[:m] = xx | (zz << 1)
+    if negative is not None:
+        codes[:m] |= np.asarray(negative, dtype=np.uint8) << 2
+    return code_dependencies(codes)
+
+
+def local_pauli_codes(x: np.ndarray, z: np.ndarray, system_bit: int, *, address_bits: int) -> np.ndarray:
+    """Return the letter codes ``x + 2z`` of one system qubit on all ``2**address_bits`` addresses.
+
+    The masks are laid out as for ``local_pauli_dependencies``, and an
+    address at or beyond ``len(x)`` is identity padding, code zero. The
+    codes are one byte per address. ``code_dependencies`` gives their
+    support, and ``project_letter_codes`` the projected table.
+    """
+    m = len(x)
+    if m == 0 or (m - 1).bit_length() > address_bits:
+        raise ValueError("letter codes need a nonempty table that address_bits can address")
+    codes = np.zeros(1 << address_bits, dtype=np.uint8)
+    word, bit = divmod(system_bit, 64)
+    codes[:m] = ((x[:, word] >> np.uint64(bit)) & np.uint64(1)).astype(np.uint8)
+    codes[:m] |= ((z[:, word] >> np.uint64(bit)) & np.uint64(1)).astype(np.uint8) << 1
+    return codes
+
+
+def code_dependencies(codes: np.ndarray) -> tuple[int, ...]:
+    """Return the address bits b, in increasing order, on which a padded table of letter codes depends.
+
+    Bit b belongs to the support exactly when some address k with bit b
+    clear has a code different from that of ``k xor 2**b``.
+    """
+    a = len(codes).bit_length() - 1
     return tuple(b for b in range(a)
-                 if np.any(codes.reshape(-1, 2, 1 << b)[:, 0, :]
-                           != codes.reshape(-1, 2, 1 << b)[:, 1, :]))
+                 if np.any(codes.reshape(-1, 2, 1 << b)[:, 0, :] != codes.reshape(-1, 2, 1 << b)[:, 1, :]))
+
+
+def project_letter_codes(codes: np.ndarray, support: tuple[int, ...], factors) -> ProjectedUnitaryTable:
+    """Return the projected table of padded letter codes on their support, with the matrix ``factors[code]``.
+
+    Entry p is the matrix of the code at the address whose supported bits
+    are the bits of p, in increasing supported-bit order, and whose
+    unsupported bits are zero. In the C-order reshape to ``(2,) * a`` axis
+    i is address bit a - 1 - i, so fixing the unsupported axes at zero
+    leaves a view whose flattened order runs the lowest supported bit
+    fastest, without an index array. For the codes of
+    ``local_pauli_codes`` and ``factors`` I, X, Z and Y in that order, this
+    is the table of ``project_local_pauli_table``.
+    """
+    a = len(codes).bit_length() - 1
+    view = codes.reshape((2,) * a)[tuple(slice(None) if a - 1 - axis in support else 0 for axis in range(a))]
+    return ProjectedUnitaryTable(support=support,
+                                 projected_table=tuple(np.array(factors[code], dtype=complex)
+                                                       for code in view.ravel().tolist()))
 
 
 def project_local_pauli_table(
     labels: Sequence[str], system_bit: int, support: tuple[int, ...],
+    negative: Sequence[bool] | None = None,
 ) -> ProjectedUnitaryTable:
     """Return the projected local Pauli table of one system qubit on its known support.
 
@@ -394,7 +472,10 @@ def project_local_pauli_table(
     unsupported bit leaves the entry unchanged, so fixing all unsupported
     bits to zero gives the same projected table as
     ``project_unitary_table_dependencies`` (see ``local_pauli_dependencies``).
-    ``label[-1 - system_bit]`` is the letter on that qubit.
+    ``label[-1 - system_bit]`` is the letter on that qubit. When ``negative``
+    is given, the entry of an address it marks is the negated matrix. Exact
+    negation of the stored entries keeps the sign of a real coefficient as
+    the exact factor -1, with no phase angle.
     """
     from nwqlib.subroutines.pauli_decomposition import _LOCAL_PAULI_FACTORS
 
@@ -402,7 +483,10 @@ def project_local_pauli_table(
     for projected_index in range(1 << len(support)):
         address = sum(((projected_index >> position) & 1) << bit for position, bit in enumerate(support))
         letter = labels[address][-1 - system_bit] if address < len(labels) else "I"
-        table.append(_LOCAL_PAULI_FACTORS[letter].copy())
+        factor = _LOCAL_PAULI_FACTORS[letter].copy()
+        if negative is not None and address < len(labels) and negative[address]:
+            factor = -factor
+        table.append(factor)
     return ProjectedUnitaryTable(support=support, projected_table=tuple(table))
 
 

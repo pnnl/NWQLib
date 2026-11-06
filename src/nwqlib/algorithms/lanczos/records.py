@@ -73,7 +73,7 @@ class LanczosReconstruction(Record):
         operator: Identifier of the operator access whose moments are read. For Pauli input it names the packed Pauli table that fixes the SELECT address order.
         spectral_lower: Lower enclosure endpoint, center-alpha up to outward rounding, not a computed eigenvalue.
         spectral_upper: Upper enclosure endpoint, center+alpha up to outward rounding, not a computed eigenvalue.
-        enclosure_source: ``pauli_l1`` for the centered coefficient L1 norm or ``scaled_gershgorin`` for scaled Gershgorin row intervals, or the equal column intervals of Hermitian CSC storage.
+        enclosure_source: ``pauli_l1`` for the centered coefficient L1 norm or ``gershgorin`` for Gershgorin row intervals, or the equal column intervals of Hermitian CSC storage.
     """
 
     schema_version: Literal[4] = 4
@@ -89,7 +89,7 @@ class LanczosReconstruction(Record):
     operator: InputRef | None = None
     spectral_lower: Real | None = None
     spectral_upper: Real | None = None
-    enclosure_source: Literal["pauli_l1", "scaled_gershgorin"] = "pauli_l1"
+    enclosure_source: Literal["pauli_l1", "gershgorin"] = "pauli_l1"
 
     @property
     def known_moments(self):
@@ -392,7 +392,7 @@ class LanczosResult(Result):
         verify_energy_shift uses them to establish A_target-A_baseline=shift*I,
         unless that relation is asserted, before it compares two such values.
         """
-        from nwqlib.evidence.energy_shift import EnergyEndpoint, _operator_payload
+        from nwqlib.evidence.energy_shift import EnergyEndpoint, _operator_table
 
         plan = self.plan
         operator = plan._native["operator"]
@@ -408,7 +408,7 @@ class LanczosResult(Result):
             order=plan.reconstruction.krylov_dimension,
             sector=plan.problem.sector,
             frame=plan.output.frame(plan.problem),
-            **_operator_payload(operator, max_bytes=plan.method.max_bytes),
+            **_operator_table(operator, max_bytes=plan.method.max_bytes),
             value=self.eigenvalue,
             analyzer=None if self.origin is None else self.origin.analyzer,
         )

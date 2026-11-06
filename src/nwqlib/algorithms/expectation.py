@@ -32,7 +32,7 @@ against its Plan without repeating inference.
 from math import fsum
 from typing import Annotated, ClassVar, Literal, NamedTuple
 
-from pydantic import Field, StrictBool, StrictInt, model_validator
+from pydantic import Field, StrictBool, model_validator
 
 from nwqlib.algorithms._eigen_inputs import AUTO_DENSE_PAULI_DIMENSION, classical_constant_matrix
 from nwqlib.algorithms.protocol import Method, AlgorithmDescriptor, ApplicabilityError
@@ -45,10 +45,12 @@ from nwqlib.core.planning import (
     Plan,
     Realization,
 )
-from nwqlib.core.records import ContentID, InputRef, PositiveInt, Rational, Real, Record, Source, Text, Unit
+from nwqlib.core.records import (
+    STORABLE_INTEGER_BOUND, StrictInteger, ContentID, InputRef, PositiveInt, Rational, Real, Record, Source, Text, Unit,
+    storable_integer,
+)
 from nwqlib.evidence.binary import (
     BINARY_SOURCE,
-    MAX_BINARY_COUNT,
     BinaryCorrection,
     BinaryEstimate,
     BinaryInterval,
@@ -67,7 +69,7 @@ from nwqlib.evidence.statistics import (
     linear_variance,
 )
 from nwqlib.evidence.error_model import ErrorFrame, ErrorModel, ErrorTerm, FramedFact, exact_readout_sampling
-from nwqlib.evidence._work import ExactArithmetic
+from nwqlib.evidence._work import exact
 from nwqlib.execution import EstimateValue, PauliValue, PreparedArtifact
 from nwqlib.ir import (
     Allocate,
@@ -78,14 +80,15 @@ from nwqlib.ir import (
     MeasurementBatch,
     MetadataRef,
     PortMap,
+    Program,
     Register,
     Release,
     Sequence,
     Setting,
 )
-from nwqlib.ir.validation import _Admission, admitted_program
+from nwqlib.ir.validation import _Admission
 from nwqlib.operators.access import Count, _check_bytes
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from nwqlib._limits import ResourceLimitError, exceeds
 from nwqlib.problems.inputs import PhysicalScale, ingest_occupation
 from nwqlib.problems.records import Accuracy, Expectation, NormalizedExpectation, QuadraticForm
 
@@ -216,23 +219,29 @@ def _classical_constant(operator, *, max_bytes):
     )
 
 
-def _classical_action_requirements(operator, state, *, max_bytes):
+def _classical_action_requirements(operator, state, *, max_bytes, scaled=False, operation=None):
     """Check the classical routine against max_bytes and return its (bytes, work) before any vector exists.
 
-    bytes adds the scaled observable copy with the bytes allowed for its
-    matrix-vector product (_scaled_observable_requirements) to the state
-    preparation arrays
+    bytes adds the allowance of one action of the observable in its own
+    storage (_matvec_requirements) with 32*N bytes and 2*N work for vector
+    framing and the reduction, or with ``scaled`` that of the scaled copy
+    (_scaled_observable_requirements), to the state preparation arrays
     (preparation_requirements). work adds their counted products. A custom
     circuit's unknown preparation work is left out. Raises ValueError when
-    bytes exceeds max_bytes.
+    bytes exceeds max_bytes, naming ``operation`` when given.
     """
     from nwqlib.algorithms._eigen_inputs import preparation_requirements
-    from nwqlib.operators.inputs import _scaled_observable_requirements
+    from nwqlib.operators.inputs import _matvec_requirements, _scaled_observable_requirements
 
-    action_bytes, action_work = _scaled_observable_requirements(operator)
+    if scaled:
+        action_bytes, action_work = _scaled_observable_requirements(operator)
+    else:
+        d, action_bytes, action_work = _matvec_requirements(operator)
+        action_bytes, action_work = action_bytes + 32 * d, action_work + 2 * d
     prep_bytes, prep_work = preparation_requirements(state)
     size = prep_bytes + action_bytes
-    _check_bytes(size, max_bytes, "classical expectation scaled action and preparation")
+    _check_bytes(size, max_bytes,
+                 operation or f"classical expectation {'scaled ' if scaled else ''}action and preparation")
     return size, action_work + (prep_work if prep_work is not None else 0)
 
 
@@ -319,7 +328,7 @@ class ExpectationReconstruction(Record):
     output_kind: Literal["normalized_expectation", "quadratic_form"] = "normalized_expectation"
     classical: bool = False
     constant: Real | None = None
-    operator_exponent: StrictInt = 0
+    operator_exponent: StrictInteger = 0
     convention: Literal["normalized: v†Ov; quadratic: norm(psi)^2 v†Ov; v=psi/norm(psi)"] = (
         "normalized: v†Ov; quadratic: norm(psi)^2 v†Ov; v=psi/norm(psi)"
     )
@@ -762,7 +771,9 @@ def _validate_corrections_and_value(result, plan):
     its pivot, with the Plan's mitigation options. The Result's value must
     equal _weighted_sum of the stored per-label points (the corrected
     points with mitigation), and statistics.raw_value the _weighted_sum of
-    the raw means. Nothing is inferred again. Raises ValueError on the first
+    the raw means. Equal floats, signed zeros included, give equal exact
+    sums, so when the two mappings are equal one sum serves both
+    comparisons. Nothing is inferred again. Raises ValueError on the first
     disagreement.
     """
     statistics = result.statistics
@@ -803,11 +814,9 @@ def _validate_corrections_and_value(result, plan):
         for index, (label, name, _) in enumerate(_science_parities(settings))
     }
     raw = {label: populations[name].raw_mean for label, name, _ in _science_parities(settings)}
-    if result.value != _weighted_sum(
-        plan.reconstruction.terms, selected, plan.reconstruction
-    ) or statistics.raw_value != _weighted_sum(
-        plan.reconstruction.terms, raw, plan.reconstruction
-    ):
+    value = _weighted_sum(plan.reconstruction.terms, selected, plan.reconstruction)
+    raw_value = value if raw == selected else _weighted_sum(plan.reconstruction.terms, raw, plan.reconstruction)
+    if result.value != value or statistics.raw_value != raw_value:
         raise ValueError(
             "physical expectation value differs from its selected inference and scale"
         )
@@ -884,7 +893,7 @@ def _accumulated_populations(settings, groups, reused, associations, *, width):
     index, count) pairs of the joint histogram for a QWC group. reused
     maps a setting to the further observations of those sources and
     associations to the receipts of each source. Only distinct sources add
-    counts, and the accumulated total must stay within MAX_BINARY_COUNT.
+    counts, which are summed as Python integers.
 
     A group's label j is read from its joint histogram: n1 counts the
     outcomes with odd ``popcount(outcome & support_j)``, where ``support_j =
@@ -914,16 +923,12 @@ def _accumulated_populations(settings, groups, reused, associations, *, width):
         if item.role != "group":
             n0, n1 = (0, 0)
             for _, pair in unique.values():
-                if pair[0] + pair[1] > MAX_BINARY_COUNT - n0 - n1:
-                    raise ValueError("accumulated binary count exceeds its exact binary64 integer domain")
                 n0, n1 = (n0 + pair[0], n1 + pair[1])
             populations.append(BinaryPopulation(name=item.name, zeros=n0, ones=n1, **fields))
             continue
         joint, total = {}, 0
         for _, pairs in unique.values():
             for key, count in pairs:
-                if count > MAX_BINARY_COUNT - total:
-                    raise ValueError("accumulated binary count exceeds its exact binary64 integer domain")
                 total += count
                 joint[key] = joint.get(key, 0) + count
         histograms[item.name] = joint
@@ -1005,8 +1010,7 @@ def _parity_counts(chunk, plan, trace, events, expected, layouts, support=None):
     ``outcome & support``: summing the counts over the other measured sites
     gives the marginal on the group's support, which is all that its labels'
     parities read. The (restricted outcome, count) pairs are returned in
-    increasing outcome order. Raises ValueError when a check fails or the
-    returned shots exceed MAX_BINARY_COUNT.
+    increasing outcome order. Raises ValueError when a check fails.
     """
     trace.validate_observation(chunk)
     event = events.get(chunk.attempt)
@@ -1044,8 +1048,6 @@ def _parity_counts(chunk, plan, trace, events, expected, layouts, support=None):
     width = sum(len(bits) for _, bits in classical_layout)
     if histogram.entries and histogram.width != width:
         raise ValueError("binary contribution differs from its fixed actual parity pivot/readout layout")
-    if chunk.returned_shots > MAX_BINARY_COUNT:
-        raise ValueError("binary population exceeds the exact binary64 integer domain")
     if histogram.width <= 64:
         indices = histogram.indices().tolist()
     else:
@@ -1390,27 +1392,23 @@ def _classical_value(plan, data):
         raise ValueError("classical expectation scalar differs from its selected frame and scale")
     value = chunk.values[0].value
     if value is not None:
-        arithmetic = ExactArithmetic()
-        value = _output_fraction(arithmetic.fraction(value), rec, arithmetic,
-                                 exponent=rec.operator_exponent)
+        value = _output_fraction(exact(value), rec, exponent=rec.operator_exponent)
     return value, (chunk.content_id,)
 
 
 def _exact_value(plan, data):
     """Reduce the Pauli expectations of exact readout to the requested value.
 
-    Every chunk must come from the Plan's one experiment and carry
-    PauliValue entries only for the nonzero nonidentity labels. Repeated
-    values of a label are averaged exactly by _mean, and the value is
-    _weighted_sum of those means in the output frame.
+    Every chunk must come from the Plan's one experiment, with its point,
+    readout, population and bindings, and carry PauliValue entries only for
+    the nonzero nonidentity labels. Repeated values of a label are averaged
+    exactly by _mean, and the value is _weighted_sum of those means in the
+    output frame.
 
     Returns:
         (value, missing): value is None when a label has no data, and missing
         lists those labels.
     """
-    from nwqlib.saved_evidence import _validate_data
-
-    _validate_data(plan, data)
     labels = tuple(
         term.label
         for term in plan.reconstruction.terms
@@ -1441,53 +1439,54 @@ def _exact_value(plan, data):
     return value, missing
 
 
-def _scale_factor(scale, arithmetic):
-    """Nominal norm squared as bounded binary arithmetic, never a float norm square."""
+def _scale_factor(scale):
+    """Return ||psi||^2 = (m 2**e)**2 as an exact rational, never a float norm square.
+
+    The caller bounds 2e first (``sampling_shots``), so the power of two has at
+    most the bits of ``STORABLE_INTEGER_BOUND``.
+    """
     from fractions import Fraction
 
     exponent = 2 * scale.exponent
-    arithmetic._check(abs(exponent) + 1)
     power = Fraction(1 << exponent) if exponent >= 0 else Fraction(1, 1 << -exponent)
-    return arithmetic.multiply(
-        arithmetic.multiply(
-            arithmetic.fraction(scale.mantissa), arithmetic.fraction(scale.mantissa)
-        ),
-        power,
-    )
+    return exact(scale.mantissa) * exact(scale.mantissa) * power
 
 
-def _output_fraction(value, reconstruction, arithmetic, *, side=None, exponent=0):
+def _output_fraction(value, reconstruction, *, side=None, exponent=0):
     """Map an exact normalized-frame value to the requested output, then round once.
 
     A quadratic form multiplies by ||psi||^2, formed from the PhysicalScale
     mantissa and binary exponent, so no floating norm square can overflow
     first. The keyword exponent multiplies by a further 2**exponent. side
     rounds an interval endpoint outward.
-    Returns None when the result is not representable in binary64.
+    Returns None when the result is not representable in binary64. With
+    ``k = exponent + bit_length(numerator) - bit_length(denominator)`` the
+    value lies in ``[2**(k-1), 2**(k+1))``, so ``k > 1025`` always overflows
+    and ``k < -1076`` always rounds a nonzero value to zero, and neither forms
+    the power of two.
     """
     if value == 0:
         return 0.0
     if reconstruction.output_kind == "quadratic_form":
         scale = reconstruction.physical_scale
-        value = arithmetic.multiply(value, arithmetic.fraction(scale.mantissa))
-        value = arithmetic.multiply(value, arithmetic.fraction(scale.mantissa))
+        value = value * exact(scale.mantissa)
+        value = value * exact(scale.mantissa)
         exponent += 2 * scale.exponent
-    if abs(exponent) + 1 > arithmetic.max_integer_bits:
+    if not -1076 <= exponent + value.numerator.bit_length() - value.denominator.bit_length() <= 1025:
         return None
     if exponent:
         from fractions import Fraction
 
         power = Fraction(1 << exponent) if exponent > 0 else Fraction(1, 1 << -exponent)
-        value = arithmetic.multiply(value, power)
-    return _float(value, arithmetic, side=side)
+        value = value * power
+    return _float(value, side=side)
 
 
 def _output_value(value, reconstruction):
     """Map a binary64 normalized-frame value to the output frame, keeping None."""
     if value is None:
         return None
-    arithmetic = ExactArithmetic()
-    return _output_fraction(arithmetic.fraction(value), reconstruction, arithmetic)
+    return _output_fraction(exact(value), reconstruction)
 
 
 def _weighted_sum(terms, values, reconstruction):
@@ -1496,19 +1495,15 @@ def _weighted_sum(terms, values, reconstruction):
     Identity labels contribute their coefficient. None when a term value is
     unavailable.
     """
-    arithmetic = ExactArithmetic()
-    total = arithmetic.fraction(0)
+    total = exact(0)
     for term in terms:
         if term.coefficient == 0:
             continue
         value = 1.0 if set(term.label) == {"I"} else values[term.label]
         if value is None:
             return None
-        total = arithmetic.add(
-            total,
-            arithmetic.multiply(arithmetic.fraction(term.coefficient), arithmetic.fraction(value)),
-        )
-    return _output_fraction(total, reconstruction, arithmetic)
+        total = total + exact(term.coefficient) * exact(value)
+    return _output_fraction(total, reconstruction)
 
 
 def _combined_interval(terms, selected, options, family_size, reconstruction, *, extra_assumptions=()):
@@ -1557,22 +1552,21 @@ def _combined_interval(terms, selected, options, family_size, reconstruction, *,
         )
     # Apply each coefficient with the appropriate endpoint order. Exact
     # rational accumulation precedes outward rounding to binary64 endpoints.
-    arithmetic = ExactArithmetic()
-    low = high = arithmetic.fraction(0)
+    low = high = exact(0)
     for term in terms:
         if term.coefficient == 0:
             continue
-        coefficient = arithmetic.fraction(term.coefficient)
+        coefficient = exact(term.coefficient)
         if set(term.label) == {"I"}:
-            low, high = (arithmetic.add(low, coefficient), arithmetic.add(high, coefficient))
+            low, high = (low + coefficient, high + coefficient)
             continue
         item = selected[term.label]
-        a = arithmetic.multiply(coefficient, arithmetic.fraction(item.lower))
-        b = arithmetic.multiply(coefficient, arithmetic.fraction(item.upper))
-        low, high = (arithmetic.add(low, min(a, b)), arithmetic.add(high, max(a, b)))
+        a = coefficient * exact(item.lower)
+        b = coefficient * exact(item.upper)
+        low, high = (low + min(a, b), high + max(a, b))
     endpoints = (
-        _output_fraction(low, reconstruction, arithmetic, side="lower"),
-        _output_fraction(high, reconstruction, arithmetic, side="upper"),
+        _output_fraction(low, reconstruction, side="lower"),
+        _output_fraction(high, reconstruction, side="upper"),
     )
     if any((value is None for value in endpoints)):
         return _interval(
@@ -1647,8 +1641,9 @@ def _group_variance(plan, estimates, histograms, frame):
     two, so with the largest denominator D each ``D*c_j`` is an integer,
     ``D*Y_g(s)`` is an exact integer sum (_group_scores), and the quotient
     is ``(n*S2_D - S1_D**2)/(D**2*n**2*(n-1))`` with ``S1_D = D*S1`` and
-    ``S2_D = D**2*S2``. Its width is checked against the exact-arithmetic
-    limit. The work is one pass over the group's outcomes per label.
+    ``S2_D = D**2*S2``. It is unknown when its reduced integers exceed what
+    a saved record holds (``core.records.storable_integer``). The work is
+    one pass over the group's outcomes per label.
     Within-group covariance is essential and per-label
     means alone cannot recover it: for the Bell labels ZI and IZ with
     coefficients one, the weighted score has per-shot variance 4 while the
@@ -1657,7 +1652,6 @@ def _group_variance(plan, estimates, histograms, frame):
     """
     from fractions import Fraction
 
-    arithmetic = ExactArithmetic()
     coefficients = {
         term.label: _output_value(term.coefficient, plan.reconstruction)
         for term in plan.reconstruction.terms
@@ -1680,7 +1674,7 @@ def _group_variance(plan, estimates, histograms, frame):
         if n <= 1:
             fields.update(availability="unknown", reason="selected population variance is unavailable")
         else:
-            ratios = tuple(arithmetic.fraction(value) for value in weights)
+            ratios = tuple(exact(value) for value in weights)
             scale = max(ratio.denominator for ratio in ratios)
             outcomes, counts = tuple(histogram), tuple(histogram.values())
             scores = _group_scores(
@@ -1691,12 +1685,16 @@ def _group_variance(plan, estimates, histograms, frame):
             )
             first = sum(count * score for count, score in zip(counts, scores, strict=True))
             second = sum(count * score * score for count, score in zip(counts, scores, strict=True))
-            value = arithmetic.fraction(Fraction(n * second - first * first, scale * scale * n * n * (n - 1)))
-            fields.update(
-                availability="concrete",
-                value=Rational(numerator=value.numerator, denominator=value.denominator),
-                evidence=Evidence(kind="numerical_estimate", source=BINARY_SOURCE),
-            )
+            value = Fraction(n * second - first * first, scale * scale * n * n * (n - 1))
+            if storable_integer(value.numerator) and storable_integer(value.denominator):
+                fields.update(
+                    availability="concrete",
+                    value=Rational(numerator=value.numerator, denominator=value.denominator),
+                    evidence=Evidence(kind="numerical_estimate", source=BINARY_SOURCE),
+                )
+            else:
+                fields.update(availability="unknown",
+                              reason="exact group variance has integers beyond what a saved record holds")
         data_id = estimates[f"{setting.name}:{setting.labels[0]}"].population.content_id
         contributions.append(
             EstimatorContribution(
@@ -1822,7 +1820,6 @@ def _binary_variance(
     if any(value is None for value in coefficients.values()):
         return kind, None, "physical coefficient-weighted variance is unrepresentable"
     contributions = []
-    arithmetic = ExactArithmetic()
     for index, (label, name, _) in enumerate(_science_parities(plan.reconstruction.settings)):
         estimate = estimates[name]
         if plan.method.mitigation is None:
@@ -1834,11 +1831,7 @@ def _binary_variance(
             weighted = tuple(
                 (
                     _float(
-                        arithmetic.multiply(
-                            arithmetic.fraction(coefficients[label]),
-                            arithmetic.fraction(derivative),
-                        ),
-                        arithmetic,
+                        exact(coefficients[label]) * exact(derivative),
                     )
                     for derivative in correction.derivatives
                 )
@@ -1954,7 +1947,9 @@ def _analyze_measured(plan, observations, *, trace, receipts, inference):
             )
             reasons.extend(correction.unavailable)
     value = _weighted_sum(plan.reconstruction.terms, selected, plan.reconstruction)
-    raw_value = _weighted_sum(plan.reconstruction.terms, raw, plan.reconstruction)
+    # Equal selected and raw means, as without mitigation when the point is
+    # the raw mean, give the same exact sum (_validate_corrections_and_value).
+    raw_value = value if raw == selected else _weighted_sum(plan.reconstruction.terms, raw, plan.reconstruction)
     unavailable = (
         None
         if value is not None
@@ -2047,14 +2042,12 @@ def _sampling_facts(plan, statistics, value, inference):
         return ()
     interval = statistics.interval
     if interval is not None and interval.status == "conditional":
-        arithmetic = ExactArithmetic()
-        point = arithmetic.fraction(value)
+        point = exact(value)
         radius = _float(
             max(
-                abs(point - arithmetic.fraction(interval.lower)),
-                abs(arithmetic.fraction(interval.upper) - point),
+                abs(point - exact(interval.lower)),
+                abs(exact(interval.upper) - point),
             ),
-            arithmetic,
             side="upper",
         )
         failure = inference.failure_probability
@@ -2141,11 +2134,10 @@ def _provider_mean(estimates):
 
 def _mean(values):
     """Arithmetic mean of binary64 values in exact rationals, rounded once."""
-    arithmetic = ExactArithmetic()
-    total = arithmetic.fraction(0)
+    total = exact(0)
     for value in values:
-        total = arithmetic.add(total, arithmetic.fraction(value))
-    return float(arithmetic.divide(total, arithmetic.fraction(len(values))))
+        total = total + exact(value)
+    return float(total / exact(len(values)))
 
 
 def _analyze_estimated(plan, observations, *, trace, receipts):
@@ -2389,9 +2381,7 @@ def _measured_program(problem, labels, method, shots):
             )
     definitions.append(Definition(id="root", node=Sequence(children=tuple(batches))))
     return (
-        admitted_program(
-            "ExpectationMethod.max_admission_steps",
-            method.max_admission_steps,
+        Program(
             root="root",
             definitions=tuple(definitions),
             registers=registers,
@@ -2529,24 +2519,19 @@ class ExpectationMethod(Method):
             the observable's coefficients. It excludes positive shots, a
             non-default `inference` and `mitigation`, and it does not set a
             shot count.
-        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
-            the known bytes of the operator, the state and the classical
-            workspace.
-        max_classical_products: Default `100_000_000`. Limit on the counted
-            scalar work of the classical evaluation, including matrix-vector
-            products, scaling, reductions and known state-preparation work.
-            It also limits the comparisons used to form qubit-wise commuting
-            groups for measured counts.
-        max_admission_steps: Default `1_000_000`. Upper limit on the
-            planning work of checking each `Program` that the method builds
-            (NWQLib's description of a circuit as named steps). It caps the
-            number of stored fields of a `Program` and the work units of one
-            check of it. Summing a `Program`'s resource counts may use up to
-            24 times this value. A larger `Program` is refused with a
-            ValueError that names this field, the refused stage and its
-            count. Raising the limit permits a larger check and changes no
-            quantum operation
-            ([planning work limit](../../development/program_checks.md#planning-work-limit)).
+        max_bytes: Default `None`, the physical memory of this computer.
+            Limit on the known bytes of the operator, the state and the
+            classical workspace.
+        max_classical_products: Default `None`, no limit. Optional limit on
+            the counted scalar work of the classical evaluation, including
+            matrix-vector products, reductions and known state-preparation
+            work. Planning checks the action of the observable O, or the
+            scaled copy `O*2**(-e)` that replaces it when every state needs
+            that copy. A copy that only one state's direction needs is
+            checked after the direction is computed and before the copy is
+            formed, at the copy's work plus the abandoned scaling of the
+            direction. It also limits the comparisons used to form
+            qubit-wise commuting groups for measured counts.
 
     Raises:
         ValueError: If `estimate_precision` is combined with a non-default
@@ -2576,9 +2561,8 @@ class ExpectationMethod(Method):
     inference: BinaryInferenceOptions = BinaryInferenceOptions()
     mitigation: BinaryReadoutMitigation | None = None
     estimate_precision: Annotated[Real, Field(gt=0)] | None = None
-    max_bytes: PositiveInt = DEFAULT_MAX_BYTES
-    max_classical_products: PositiveInt = 100_000_000
-    max_admission_steps: PositiveInt = 1_000_000
+    max_bytes: PositiveInt | None = None
+    max_classical_products: PositiveInt | None = None
 
     descriptor: ClassVar[AlgorithmDescriptor] = _DESCRIPTOR
 
@@ -2598,9 +2582,14 @@ class ExpectationMethod(Method):
         `solve` and `plan` call it when they receive
         `accuracy=Accuracy(component="sampling", absolute_tolerance=epsilon)`
         in place of `shots`. For L nonzero non-identity terms and
-        `C = sum_j abs(c_j)`, the count is
-        `n = ceil(2*(C/epsilon)**2*log(2*L/delta))` with
-        `delta = 1 - confidence`. Each term uses the shots of its group, and a
+        `C = sum_j abs(c_j)`, the count n is the ceiling of
+        `2*(C/epsilon)**2*log(2*L/delta)`, with `delta = 1 - confidence`,
+        evaluated upward in 80-digit decimal arithmetic. It is never below
+        the exact ceiling and exceeds it by at most `1 + n*1e-78` shots, so
+        by at most one shot when n is below 10**78.
+        A Plan saves counts below 10**4300. One measurement of a setting
+        requests at most `2**63 - 1` shots, so `solve` refuses a larger
+        count before submission. Each term uses the shots of its group, and a
         union bound over terms permits their parities to be correlated
         within a shot. A quadratic form uses `s*C`, with s the squared norm
         of the state. This choice supports raw quantum counts without
@@ -2635,8 +2624,9 @@ class ExpectationMethod(Method):
             ApplicabilityError: If `accuracy` is not an absolute sampling
                 tolerance, if execution is classical, or if mitigation, Beta
                 inference or a provider estimate is chosen.
-            ValueError: If `shots` is also given, or if the count exceeds
-                `2**53 - 1`.
+            ValueError: If `shots` is also given, or if the count, or the
+                declared physical scale of a quadratic form's state, needs
+                10**4300 or more shots, which a saved Plan cannot hold.
         """
         if (
             not isinstance(accuracy, Accuracy)
@@ -2677,9 +2667,17 @@ class ExpectationMethod(Method):
 
         coefficient = sum((Fraction(abs(term.coefficient)) for term in terms), Fraction())
         if isinstance(output, QuadraticForm):
-            coefficient *= _scale_factor(
-                problem.state.preparation.physical_scale, ExactArithmetic()
-            )
+            scale = problem.state.preparation.physical_scale
+            # The other factors come from binary64 coefficients and tolerances,
+            # far below STORABLE_INTEGER_BOUND, so 2e alone decides both ends
+            # without forming 2**|2e|.
+            if 2 * scale.exponent > STORABLE_INTEGER_BOUND.bit_length():
+                raise ValueError(
+                    "the declared physical scale 2**e of the state needs more shots than a saved Plan can hold"
+                )
+            if 2 * scale.exponent < -STORABLE_INTEGER_BOUND.bit_length():
+                return 1
+            coefficient *= _scale_factor(scale)
         factor = 2 * (coefficient / Fraction(accuracy.absolute_tolerance)) ** 2
         logarithm_argument = Fraction(2 * len(terms)) / (1 - Fraction(accuracy.confidence))
         with localcontext() as context:
@@ -2693,11 +2691,10 @@ class ExpectationMethod(Method):
                 logarithm_argument.denominator
             )
             required = factor_upper * argument_upper.ln().next_plus()
-            if required > MAX_BINARY_COUNT:
-                raise ValueError(
-                    "selected sampling count exceeds the supported exact integer population"
-                )
-            return max(1, int(required.to_integral_value(rounding=ROUND_CEILING)))
+            shots = max(1, int(required.to_integral_value(rounding=ROUND_CEILING)))
+        if not storable_integer(shots):
+            raise ValueError("the selected sampling count has more decimal digits than a saved Plan can hold")
+        return shots
 
     def before_submit(self, plan, prepared, *, run):
         """Reject a fixed sampling stream already known to the Run when the shots were chosen for an accuracy target."""
@@ -2746,9 +2743,7 @@ class ExpectationMethod(Method):
             q = (problem.dimension - 1).bit_length()
             block = select_preparation("state", problem.state, choice=self.preparation_choice)
             blocks = (block,)
-            program = admitted_program(
-                "ExpectationMethod.max_admission_steps",
-                self.max_admission_steps,
+            program = Program(
                 root="root",
                 registers=(Register(name="system", width=q),),
                 signatures=(block.record.signature,),
@@ -2783,9 +2778,7 @@ class ExpectationMethod(Method):
             )
         else:
             blocks, experiments = (), ()
-            program = admitted_program(
-                "ExpectationMethod.max_admission_steps",
-                self.max_admission_steps,
+            program = Program(
                 root="root",
                 definitions=(Definition(id="root", node=Sequence()),),
             )
@@ -2834,25 +2827,37 @@ class ExpectationMethod(Method):
         """
         from nwqlib.algorithms._eigen_inputs import preparation_requirements
         from nwqlib.algorithms._eigen_support import host_construction
-        from nwqlib.operators.inputs import _observable_exponent
+        from nwqlib.operators.inputs import _observable_exponent, _scaled_copy_certain
 
         _validate_inputs(problem, output, quantum=False)
         state, operator = problem.state, problem.observable
+        if operator.reference.representation not in ("pauli", "dense", "csr", "csc"):
+            raise ApplicabilityError("classical expectation needs a dense, CSR, CSC or Pauli observable, "
+                                     f"and this observable is {operator.reference.representation}")
         zero = state.preparation.physical_scale.mantissa == 0
         constant = 0.0 if zero else _classical_constant(operator, max_bytes=self.max_bytes)
         _, preparation_work = preparation_requirements(state)
         exponent = 0
         if constant is None:
-            _, work = _classical_action_requirements(operator, state, max_bytes=self.max_bytes)
-            if work > self.max_classical_products:
-                raise ValueError("classical expectation exceeds max_classical_products before preparation")
             exponent = _observable_exponent(operator)
+            # When the copy O*2**(-e) is certain, every state's evaluation acts
+            # with it instead of O, so its requirement replaces the ordinary one.
+            certain = _scaled_copy_certain(operator, exponent)
+            _, work = _classical_action_requirements(
+                operator, state, max_bytes=self.max_bytes, scaled=certain,
+                operation="classical expectation scaled copy O*2**(-e) that every state needs, with the preparation"
+                if certain else None)
+            if exceeds(work, self.max_classical_products):
+                stage = ("the scaled copy O*2**(-e) that every state needs, with the preparation" if certain
+                         else "the action of O, the reduction and the preparation")
+                raise ResourceLimitError(f"classical expectation: {stage} requires {work} classical products, above "
+                                         f"max_classical_products={self.max_classical_products}. Raise "
+                                         f"max_classical_products to at least {work} or set it to None.")
             construction, experiments = host_construction(
                 _METHOD,
                 (state.reference, operator.reference),
                 ("scaled_observable",),
                 work=work,
-                admission=("ExpectationMethod.max_admission_steps", self.max_admission_steps),
                 description="original-dimensional observable scaled by recorded binary exponent; "
                 + (
                     "custom preparation work unknown"
@@ -2862,9 +2867,7 @@ class ExpectationMethod(Method):
             )
         else:
             construction = SelectedConstruction(
-                program=admitted_program(
-                    "ExpectationMethod.max_admission_steps",
-                    self.max_admission_steps,
+                program=Program(
                     root="root",
                     definitions=(Definition(id="root", node=Sequence()),),
                 ),
@@ -2894,17 +2897,27 @@ class ExpectationMethod(Method):
                 "classical normalized-direction matvec; floating-point reduction is not a certified bound",
             ),
         )
-        return plan._bind(blocks=self._host_blocks(plan) if experiments else ())
+        return plan._bind(blocks=self._host_blocks(plan, certain) if experiments else ())
 
-    def _host_blocks(self, plan):
+    def _host_blocks(self, plan, certain=None):
         """Bind the classical routine that evaluates v^dagger (O*2**(-e)) v.
 
         v is the normalized state direction and e the Plan's
-        operator_exponent. The routine checks the byte and product limits
-        again before it forms v. It returns one unit-frame scalar
-        ``scaled_observable``, or no value with a reason when scaling lost a
-        nonzero component or the reduction is not finite. _classical_value
-        restores 2**e and, for a quadratic form, ||psi||^2 in exact arithmetic.
+        operator_exponent. Planning checked the byte and product limits of
+        the action, or of the scaled copy in its place when every state needs
+        the copy (_scaled_copy_certain). When scaling O and v by 2**(-e) is
+        exact, the routine applies O in its own storage to v*2**(-e), which
+        gives the bits of the scaled copy's action without forming that copy
+        (_scaled_observable_action). When only v does not scale back
+        exactly, admit_copy checks the copy's bytes and its work plus the
+        abandoned scaling of v before the copy is formed. It returns one
+        unit-frame scalar ``scaled_observable``, or no value with a reason
+        when scaling lost a nonzero component or the reduction is not
+        finite. _classical_value restores 2**e and, for a quadratic form,
+        ||psi||^2 in exact arithmetic. ``certain`` is the planning result of
+        _scaled_copy_certain. A loaded Plan passes None, and its first
+        evaluation computes it, so each bound Plan scans the stored
+        components of O at most once.
         """
         from nwqlib.algorithms._eigen_inputs import state_direction
         from nwqlib.blocks.kernels import BoundKernel, KernelOutput
@@ -2915,24 +2928,44 @@ class ExpectationMethod(Method):
         def invoke():
             """Evaluate the scaled quadratic form once and return it as a KernelOutput."""
             import numpy as np
-            from nwqlib.operators.inputs import _scaled_observable
+            from nwqlib.operators.inputs import _scaled_copy_certain, _scaled_observable_action
 
+            nonlocal certain
             state, operator = plan.problem.state, plan.problem.observable
-            _, work = _classical_action_requirements(operator, state, max_bytes=self.max_bytes)
-            if work > self.max_classical_products:
-                raise ValueError("classical expectation exceeds max_classical_products before preparation")
+            exponent = plan.reconstruction.operator_exponent
+            if certain is None:
+                certain = _scaled_copy_certain(operator, exponent)
+
+            def admit_copy():
+                """Check the scaled copy O*2**(-e) that only this state's direction needs, before it is formed.
+
+                The evaluation acts with the copy and never runs the ordinary
+                action, so the work is the copy's requirement plus the 2N of
+                the abandoned scaling of the direction. Its bytes include the
+                framed direction.
+                """
+                _, work = _classical_action_requirements(
+                    operator, state, max_bytes=self.max_bytes, scaled=True,
+                    operation="classical expectation scaled copy O*2**(-e) that this state's direction needs, "
+                              "with the preparation")
+                work += 2 * operator.basis.dimension
+                if exceeds(work, self.max_classical_products):
+                    raise ValueError(
+                        f"classical expectation: this state's direction does not scale exactly by 2**(-{exponent}), "
+                        f"so the evaluation needs the scaled copy O*2**(-e), which requires {work} classical "
+                        f"products, above max_classical_products={self.max_classical_products}. Raise "
+                        f"max_classical_products to at least {work} or set it to None.")
+
             # O*2**(-e) keeps the matvec finite for extreme coefficients.
             # _classical_value restores 2**e in exact arithmetic.
-            scaled = _scaled_observable(operator, plan.reconstruction.operator_exponent)
+            # The action scales the state instead of copying O when both
+            # scalings are exact, with the same bits (_scaled_observable_action).
+            framed = _scaled_observable_action(operator, exponent,
+                                               lambda: state_direction(state, max_bytes=self.max_bytes), admit_copy,
+                                               certain)
             value = float("nan")
-            if scaled is not None:
-                vector = state_direction(state, max_bytes=self.max_bytes)
-                if "pauli_terms" in operator.manifest.access:
-                    from nwqlib.operators._pauli import apply_terms
-
-                    action = apply_terms(scaled, vector, num_qubits=scaled.num_qubits)
-                else:
-                    action = scaled @ vector
+            if framed is not None:
+                vector, action = framed
                 value = float(np.vdot(vector, action).real)
             finite = bool(np.isfinite(value))
             return KernelOutput(

@@ -48,6 +48,7 @@ import shutil
 import sqlite3
 
 from nwqlib._choice_archive import ArchiveFiles
+from nwqlib._limits import exceeds
 
 
 _ABSENT = object()
@@ -233,7 +234,9 @@ def _cache_entry(token, value, files, name):
 
     Definitions and lowered Aer sources are single instructions stored as QPY. A
     prepared handle stores its native circuit and backend metadata, which is
-    enough to restore it without lowering or transpiling.
+    enough to restore it without lowering or transpiling, and the source vector
+    of a preparation set directly as the initial state as NPY, for its compiled
+    inspection.
     """
     kind = token[0]
     if kind == "definition":
@@ -246,8 +249,11 @@ def _cache_entry(token, value, files, name):
                     lowered=files.write_instruction(name + "-lowered.qpy", lowered))
     if kind == "handle":
         native = value._native
-        return dict(kind=kind, identity=token[1],
-                    circuit=files.write_circuit(name + ".qpy", native.circuit), metadata=native.metadata)
+        # A restored circuit reads its saved source vector only here.
+        state = native.initial_state() if callable(native.initial_state) else native.initial_state
+        return dict(kind=kind, identity=token[1], native_bytes=value._native_bytes,
+                    circuit=files.write_circuit(name + ".qpy", native.circuit), metadata=native.metadata,
+                    initial_state=files.write_array(name + "-initial-state.npy", state))
     raise ValueError("unknown native cache owner")
 
 
@@ -275,14 +281,49 @@ def _copy_cache_files(run, files):
     if any(not name.startswith(CACHE_FILE_PREFIX) and name not in files._written_files for name in names):
         return False
     for name in cached:
-        origin, target = source.file(name), files.file(name)
-        files.reserve(origin.stat().st_size)
-        try:
-            os.link(origin, target)
-        except OSError:
-            shutil.copyfile(origin, target)
-        files._written_files.add(name)
+        _link_or_copy(source.file(name), files, name)
     return True
+
+
+def _link_or_copy(origin, files, name):
+    """Hard-link the file ``origin`` as ``name`` in the new folder ``files``, or copy it, counting its bytes."""
+    files.reserve(origin.stat().st_size)
+    try:
+        os.link(origin, files.file(name))
+    except OSError:
+        shutil.copyfile(origin, files.file(name))
+    if files._pending_files is not None:
+        files._pending_files.append(name)
+    files._written_files.add(name)
+
+
+def _released_entry(identity, handle, files, name, carried):
+    """Return the cache row of a handle whose circuit is not in memory, without decoding the circuit.
+
+    The row takes its circuit and source-vector files from the Run's folder, under
+    new names counted against the new folder. So saving allocates no circuit, which
+    could exceed the Method's memory limit, and leaves the Run's handles and
+    ``native_held`` as they were. ``carried`` maps each source file to its new name,
+    so that rows sharing a file keep sharing one. When another row of the template
+    holds the circuit in memory, this row names the same written circuit as that
+    row (``ArchiveFiles.write_circuit`` writes one object once).
+    """
+    from nwqlib._prepared_execution import _template_key
+    _, source, circuit, metadata, initial_state, run = handle._saved_native
+    folder = ArchiveFiles(source, None)
+
+    def carry(saved, target):
+        if saved is None:
+            return None
+        if saved not in carried:
+            carried[saved] = files._unused_name(target)
+            _link_or_copy(folder.file(saved), files, carried[saved])
+        return carried[saved]
+
+    live = run._state["template_circuits"].get(_template_key(handle.record))
+    return dict(kind="handle", identity=identity, native_bytes=handle._native_bytes,
+                circuit=carry(circuit, name + ".qpy") if live is None else files.write_circuit(name + ".qpy", live.circuit),
+                metadata=metadata, initial_state=carry(initial_state, name + "-initial-state.npy"))
 
 
 def _save_caches(run, files):
@@ -291,7 +332,8 @@ def _save_caches(run, files):
     The rows hold the frontier, the method context, the definition and Aer
     caches, and for an Aer backend its handles. ``save`` uses it for an
     in-memory Run, or when the cache files cannot be copied as they are
-    (``_copy_cache_files``).
+    (``_copy_cache_files``). A handle whose circuit is not in memory keeps its
+    saved files (``_released_entry``).
     """
     rows = [("frontier", _frontier(run, files)), ("method", _method_frontier(run, files))]
     for group, cache in enumerate(run._state["definitions"]):
@@ -304,11 +346,11 @@ def _save_caches(run, files):
             rows.append((name, _cache_entry(("aer", target, key), value, files, name)))
     from nwqlib.backends.connection import AerBackend
     if isinstance(run.backend, AerBackend):
+        carried = {}
         for key, value in run._state["handles"].items():
             name = "entry-" + str(len(rows))
-            if value._native is None:
-                value._restore_native()
-            rows.append((name, _cache_entry(("handle", key), value, files, name)))
+            rows.append((name, _cache_entry(("handle", key), value, files, name) if value._native is not None
+                         else _released_entry(key, value, files, name, carried)))
     return tuple(("cache", key, value) for key, value in rows)
 
 
@@ -449,9 +491,11 @@ def _load_caches(run, rows, files):
             dict.__setitem__(owners[target]._blocks, id(source), (source, files.read_instruction(data["lowered"])))
         elif kind == "handle":
             record = run.prepared_artifact(data["identity"])
-            # The circuit file is registered now and decoded at the handle's
-            # first native use (PreparedHandle._restore_native).
+            # The circuit and source-vector files are registered now and read
+            # at the handle's first native use (PreparedHandle._restore_native).
             files.read_path(data["circuit"])
+            if data["initial_state"] is not None:
+                files.read_path(data["initial_state"])
             # Select the receipt's construction once and resolve the readout
             # from that Experiment and construction, because
             # ``Realization.resolved_observation`` would select it again.
@@ -459,20 +503,16 @@ def _load_caches(run, rows, files):
             if experiment.batch is None:
                 setting, spec = experiment.setting, experiment.observation
             else:
-                from nwqlib._prepared_execution import _named_admission_refusal
-                from nwqlib.ir.validation import AdmissionStepsExceeded, _Admission
+                from nwqlib.ir.validation import _Admission
                 admission = _Admission(construction.program)
-                try:
-                    admission.admitted().require_ready()
-                    setting, spec = experiment._resolved_observation(admission, construction_id=construction.content_id)
-                except AdmissionStepsExceeded as error:
-                    raise _named_admission_refusal(plan, error, "restoration") from error
+                admission.admitted().require_ready()
+                setting, spec = experiment._resolved_observation(admission, construction_id=construction.content_id)
             items = _admit_readout(spec, width=sum(len(reg.bits) for reg in record.quantum_layout),
                 classical_width=sum(len(reg.bits) for reg in record.classical_layout), run=run)
             handle = PreparedHandle._make(record, record.realization, None, items, setting,
-                                          construction.program.bindings)
+                                          construction.program.bindings, native_bytes=data["native_bytes"])
             state["handles"][record.content_id] = handle
-            lazy.append((handle, data["circuit"], data["metadata"]))
+            lazy.append((handle, data["circuit"], data["metadata"], data["initial_state"]))
             token = (kind, record.content_id)
         else:
             raise ValueError("unsupported saved cache kind")
@@ -481,8 +521,8 @@ def _load_caches(run, rows, files):
         state["cache_rows"][key] = data
     # A handle's native object is rebuilt with the Run's final backend
     # configuration, which a saved noise model can replace above.
-    for handle, name, metadata in lazy:
-        object.__setattr__(handle, "_saved_native", (run.backend, run.directory, name, metadata))
+    for handle, name, metadata, initial_state in lazy:
+        object.__setattr__(handle, "_saved_native", (run.backend, run.directory, name, metadata, initial_state, run))
     state["cache_next_key"] = 1 + max((int(key[6:]) for key in state["cache_rows"] if key.startswith("entry-")), default=-1)
     for cache, changed_key in state["cache_changes"].values():
         cache.previous.pop(changed_key, None)
@@ -765,6 +805,7 @@ def write_caches(run, records=(), *, deleted=(), **kwargs):
 
 def release_native(run):
     """Release the native circuits of saved, fully collected handles, keeping the active frontier."""
+    from nwqlib._prepared_execution import _release_held
     state = run._state
     files = state.get("archive_files")
     released, kept = [], []
@@ -801,9 +842,13 @@ def release_native(run):
             kept.append((identity, "already released"))
         else:
             object.__setattr__(handle, "_saved_native",
-                (run.backend, run.directory, row["circuit"], row["metadata"]))
+                (run.backend, run.directory, row["circuit"], row["metadata"], row["initial_state"], run))
             object.__setattr__(handle, "_native", None)
-            files._forget_objects(row["circuit"])
+            # Another row of a template still runs the circuit that this file holds.
+            if _release_held(state, handle):
+                files._forget_objects(row["circuit"])
+            if row["initial_state"] is not None:
+                files._forget_objects(row["initial_state"])
             released.append(identity)
     return dict(released=tuple(released), kept=tuple(kept))
 
@@ -838,14 +883,16 @@ def save(run, *, path):
     under the same names and the rows stay as they are, so no cached QPY
     object is decoded or encoded again (``_copy_cache_files``). Otherwise the
     copy's cache rows are rewritten to point to newly written files, and the
-    native circuits of released handles are loaded again so that they can be
-    written. An in-memory Run writes its header, limits, amendments, RNG,
+    saved files of released handles come along without being decoded
+    (``_released_entry``). An in-memory Run writes its header, limits, amendments, RNG,
     preparation records, events, observations with their collection order,
     checkpoint, arrays and Result into the new run log in one transaction. On
     any failure the new folder is removed. The open Run's run log, files and
     counters are unchanged either way.
 
-    Every file of the new folder is counted against a file-byte limit equal to
+    A Run whose counted data exceed ``max_data_bytes``, which records of
+    admitted work can cause, is refused until ``Run.extend_limits`` raises the
+    limit. Every file of the new folder is counted against a file-byte limit equal to
     ``max_data_bytes``. The files that ``ArchiveFiles`` writes are counted before
     they are written. The copied run log of a Run with a folder is counted by its
     page count before the backup writes those pages. SQLite allocates the pages of a
@@ -863,6 +910,17 @@ def save(run, *, path):
         state = run._state
         if state["publication_batch"] is not None or state["workflow_current"] is not None:
             raise ValueError("save requires a returned execution frontier")
+        # Records of admitted work can take the counted total beyond the
+        # limit (Run._write). Such a Run is copied only after the limit is raised.
+        counted = (state["data_bytes"] + state["array_bytes"] + state["payload_bytes"] + state["external_bytes"]
+                   + sum(state["pending_output"].values()))
+        if exceeds(counted, run.limits.max_data_bytes):
+            raise ValueError(f"this Run counts {counted} data bytes, more than its "
+                             f"max_data_bytes={run.limits.max_data_bytes}, so it cannot be saved to a new folder. "
+                             f"Raise the limit with run.extend_limits(max_data_bytes=...) to more than {counted}, "
+                             "a lower bound, because the files of the new folder, including the page space of "
+                             "its SQLite run log, count against the same limit. Then save again. Its saved "
+                             "results stay readable and no work is repeated.")
         files = ArchiveFiles(path, run.limits.max_data_bytes)
         files.path.mkdir()
         try:
@@ -963,6 +1021,9 @@ def load(path, *, backend, method=None, progress=None):
     from nwqlib._prepared_execution import Run
     from nwqlib.execution import ExecutionLimits
 
+    # Resolved once here, so a later change of working directory cannot lose the
+    # folder. Nothing saved holds this path, so a moved folder still opens.
+    path = Path(path).resolve()
     files = ArchiveFiles(path, None)
     try:
         header = files.read_json("run.json")

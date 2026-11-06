@@ -14,6 +14,7 @@ __all__ = ["InputManifest", "ProductManifest"]
 _INPUT_EXPORTS = [
     "OperatorInput", "PeriodicStencil", "operator_input", "ingest_dense",
     "ingest_pauli", "ingest_pauli_masks", "pauli_table", "ingest_sparse", "ingest_periodic_stencil",
+    "CartesianParts", "SuppliedBlockEncoding", "ingest_band", "ingest_cartesian", "ingest_block_encoding",
 ]
 __all__ += _INPUT_EXPORTS
 _ORDERED_EXPORTS = ["FermionTerms", "fermion_table", "ingest_fermion", "FactorizedOperatorProduct"]

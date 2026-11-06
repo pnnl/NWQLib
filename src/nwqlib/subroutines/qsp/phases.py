@@ -1,164 +1,69 @@
-"""Wx-convention quantum signal processing: evaluation and phase factors.
+"""Real Wx and complex Laurent phase synthesis with canonical inverse NLFT.
 
-[MRTC] is Martyn, Rossi, Tan, and Chuang, arXiv:2105.02859v5, [DMWL] is
-Dong, Meng, Whaley, and Lin, arXiv:2002.11649v2, and [DLNW] is Dong, Lin,
-Ni, and Wang, arXiv:2307.12468v1. Equation and section numbers refer to
-these arXiv versions, those of [DLNW] to the PDF of that version.
+The common solver uses Weiss ratio FFT, causal-prefix divide-and-conquer,
+small peeling leaves, and a fresh balanced reconstruction from the returned
+angles. The reconstructed coefficient one-norm is numerical evidence for
+uniform error. FFT, transcendental and reconstruction arithmetic have no
+complete enclosure, so the result is not a floating-point certificate.
 
-Convention (project standard, [MRTC] arXiv:2105.02859v5, Sec. II.A,
-Eqs. (1)-(3) and Theorem 1, and App. A.1, Eq. (A2)): the signal operator is
-``W(x) = [[x, i sqrt(1-x^2)], [i sqrt(1-x^2), x]]``, phases apply as
-``e^{i phi Z}``, and a phase vector ``(phi_0, ..., phi_d)`` realizes
-
-``P(x) = <0| e^{i phi_0 Z} prod_{j=1..d} [ W(x) e^{i phi_j Z} ] |0>``.
-
-Conversion identities implemented here (each guarded by a unit test):
-
-- Reflection convention: with
-  ``R(x) = [[x, sqrt(1-x^2)], [sqrt(1-x^2), -x]]`` ([MRTC]
-  arXiv:2105.02859v5, Eq. (A4)) and
-  ``W(x) = i e^{-i pi/4 Z} R(x) e^{-i pi/4 Z}`` (the inverse of [MRTC]
-  arXiv:2105.02859v5, Eq. (14)), the Wx product equals ``i^d`` times the
-  reflection product with phases ``phi'_0 = phi_0 - pi/4``,
-  ``phi'_d = phi_d - pi/4``, and interior ``phi'_j = phi_j - pi/2``.
-  ``wx_phases_to_reflection`` returns those shifted phases plus the
-  compensating global phase ``d * pi/2``. [MRTC] arXiv:2105.02859v5,
-  App. A.2, Eq. (A5), uses the same interior and final shifts but sets
-  ``phi'_0 = phi_0 + (2d-1) pi/4``, folding the ``i^d`` factor into
-  the first phase. That form reproduces the ``<0|.|0>`` entry. Keeping the
-  factor as a global phase makes the identity hold for the whole 2 x 2
-  product.
-- Qiskit sign: ``RZGate(theta) = exp(-i theta Z / 2)`` exactly, so applying
-  ``e^{i phi Z}`` is ``RZGate(-2 phi)`` with no residual global phase. The
-  QSVT circuit builders apply projector phases
-  ``e^{i phi (2 Pi - 1)}`` as ``RZGate(+2 phi)`` on a signal qubit that is
-  flipped onto the projector subspace, which is the same identity.
-
-Phase factors follow the symmetric-QSP optimization of [DMWL]
-arXiv:2002.11649v2: symmetric phase vectors ``phi_j = phi_{d-j}``
-(Sec. III.1, Theorem 2, and Eq. (24)),
-the mean-square residual of ``Re P(x)`` against the target polynomial on
-positive Chebyshev nodes (Sec. III.2, Eq. (23)), the initialization
-``(pi/4, 0, ..., 0, pi/4)`` of Eq. (27), which realizes ``Re P = 0``
-and whose free phases ``(pi/4, 0, ..., 0)`` are Eq. (28) (Sec. III.4),
-and L-BFGS descent (Sec. III.5, Algorithm 1). This module
-departs from the paper in four places. The objective uses four times as
-many nodes as free phases (``QSP_SOLVER_GRID_MULTIPLIER``). A damped
-Gauss-Newton polish supplies the terminal digits after L-BFGS. If L-BFGS
-from the Eq. (27) point leaves an objective-node residual at or above the
-tolerance, the same damped iteration runs from that point, which is the
-Newton method of [DLNW] arXiv:2307.12468v1, Sec. 3, Eq. (3.1) and
-Algorithm 3.1. Their zero reduced phases are the [DMWL] start written in
-an imaginary-part convention ([DLNW] Sec. 2.2 and Eq. (2.3)). Acceptance is decided on a
-separate dense verification grid with the Chebyshev norming bound rather
-than on the objective.
-
-The Newton start exists for targets whose sup norm lies near 1. The
-larger parity target of the Hamiltonian evolution of
-``build_qsp_evolution_encoding`` has a sup norm near ``1/(1 + margin)``
-with a margin of ``1e-3``, and every QLS phase target has the norming
-bound ``1/(1 + QLS_TARGET_MARGIN)``, with the same margin. [DMWL]
-arXiv:2002.11649v2, Sec. IV.1, divides the Jacobi-Anger series by 2, so
-their Hamiltonian-simulation tests of the fixed start stay at
-``max|f| <= 1/2``, and Sec. IV.5 reports a Hessian condition number that
-grows as ``max|f|`` approaches 1. [DLNW] arXiv:2307.12468v1, Sec. 2.2,
-states that optimization methods such as L-BFGS lose their
-convergence guarantee near ``max|f| = 1``, and Sec. 4.3 (Fig. 8) reports
-Newton's method from the same start converging for ``1 - max|f|`` down to
-``1e-9``. The engineering constants record the NWQLib sweeps behind this
-order, for the
-[evolution targets](../../ENGINEERING_CONSTANTS.md#qsp-phase-solver-and-evolution-synthesis)
-and for the
-[QLS targets](../../ENGINEERING_CONSTANTS.md#qls-1x-fit-and-phase-pipeline)
-in the `QLS_TARGET_MARGIN` row. In both families L-BFGS missed the
-tolerance on some sampled targets, and the Newton start converged on each
-of them.
-
-L-BFGS runs in ``scipy.optimize`` and each Newton step is one
-``numpy.linalg.lstsq`` solve. Phase-factor computation
-is classical preprocessing of ``poly(d)`` cost, independent of any
-Hilbert-space dimension.
+Wx uses W(x)=[[x,i sqrt(1-x²)],[i sqrt(1-x²),x]] and phases exp(i phi Z).
+General Laurent synthesis uses A0 D ... D Ad iX, D=diag(z,1), with the
+first ell signals replaced by diag(1,z^-1). The adapters differ at their
+endpoints. See docs/algorithms/qsp_phase_derivation.md for the derivation.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+import math
 from numbers import Number
+import operator
 from typing import Any
 
 import numpy as np
-import scipy.optimize
+from scipy.fft import dct
 
+from nwqlib._limits import ResourceLimitError, memory_limit
 from nwqlib._validation import finite_real, integer
-from nwqlib.operators.access import DEFAULT_INPUT_BYTES, _check_bytes
+from nwqlib.operators.access import _check_bytes
+from . import _nlft
 
-# Engineering constants for the phase solver (registered in
-# docs/ENGINEERING_CONSTANTS.md). Rationale:
-# - QSP_SOLVER_GRID_MULTIPLIER 4: the symmetric problem is exactly determined on
-#   ceil((d+1)/2) positive Chebyshev nodes, and a 4x overdetermined grid removes
-#   spurious fit-the-grid minima observed at 1x. Revisit if solver cost binds.
-# - QSP_SOLVER_LBFGS_OPTIONS ftol 1e-30 / gtol 1e-18: the objective is a mean squared
-#   residual, so hitting a 1e-12 residual needs objective ~1e-24. SciPy's defaults stop
-#   at ~1e-18 objective. maxiter 2000 covers the worst converged case (~1500).
-#   Revisit when the residual tolerance or the objective changes.
-# - QSP_SOLVER_POLISH_MAX_STEPS 30 with 15 halvings (QSP_SOLVER_POLISH_MAX_HALVINGS):
-#   damped Gauss-Newton supplies the terminal quadratic digits after L-BFGS, and the
-#   same limits bound the Newton start of [DLNW] arXiv:2307.12468v1. Steps that do not
-#   reduce the max residual are rejected, so each run can only improve its starting
-#   point. On the default grid of the registered tau x epsilon sweep the Newton start
-#   converged within 10 residual evaluations, including the evaluation at
-#   the starting point.
-#   Revisit if the polish or the Newton start stops above the residual
-#   tolerance on a target that passes the max|f| <= 1 check.
-# - QSP_SOLVER_RESIDUAL_TOLERANCE 1e-12: the stopping tolerance of [DMWL]
-#   arXiv:2002.11649v2, Eq. (30),
-#   applied here to the dense verification grid. It is a solver acceptance
-#   control, not a bound on the error of any transformed operator. Revisit
-#   for a different floating-point precision.
-# - QSP_TARGET_BOUNDARY_ULPS 256: admission band above max|f| = 1 for the
-#   binary64 evaluation of the target's norming bound. A target whose bound
-#   exceeds one by more than this band is rejected before optimization.
-#   Revisit if the norming implementation or the supported precision changes.
-QSP_SOLVER_GRID_MULTIPLIER = 4
-QSP_SOLVER_LBFGS_OPTIONS: dict[str, Any] = {"maxiter": 2000, "ftol": 1e-30, "gtol": 1e-18}
-QSP_SOLVER_POLISH_MAX_STEPS = 30
-QSP_SOLVER_POLISH_MAX_HALVINGS = 15
 QSP_SOLVER_RESIDUAL_TOLERANCE = 1.0e-12
-QSP_TARGET_BOUNDARY_ULPS = 256.0
 
 
 class _QSPPhaseConvergenceError(ValueError):
-    """A valid QSP target failed the final phase-residual acceptance check."""
+    """The fixed target failed its residual acceptance before the FFT doubling stopped."""
 
-    def __init__(self, message: str, *, evaluations: int):
+    def __init__(self, message: str, *, evidence=None):
         super().__init__(message)
-        self.evaluations = evaluations
+        self.evidence = evidence
 
 
-class _QSPEvaluationsExhausted(ValueError):
-    """The phase solver used up the evaluation allowance it was given."""
+class _QSPPhaseLimitError(_QSPPhaseConvergenceError, ResourceLimitError):
+    """The doubling stopped because the next FFT exceeds the memory limit or an explicit ``max_fft``.
+
+    The attempts failed their residual acceptance, and ``evidence`` records them.
+    Whether a longer FFT would reach the target stays unknown. A stop by an
+    ideal-arithmetic rule is the plain ``_QSPPhaseConvergenceError``, even when a
+    limit would also block the next attempt, because that attempt would not run.
+    """
 
 
-def _real_coefficients(values: Any, *, max_degree: int, max_bytes: int) -> np.ndarray:
-    """Check that the target is a finite real vector before any polynomial or optimizer work."""
-    max_degree = integer(max_degree, "max_degree", 0)
+def _real_coefficients(values: Any, *, max_bytes=None) -> np.ndarray:
     try:
         count = len(values)
     except TypeError:
         raise ValueError("QSP targets require a coefficient vector") from None
-    if count == 0 or count - 1 > max_degree:
-        raise ValueError(f"QSP target degree must be between zero and max_degree={max_degree}")
+    if count == 0:
+        raise ValueError("QSP targets require a nonempty coefficient vector")
     if isinstance(values, np.ndarray):
         if values.ndim != 1 or values.dtype.kind not in "iufc":
             raise ValueError("QSP targets require a numeric coefficient vector")
     elif not all(isinstance(value, Number) for value in values):
         raise ValueError("QSP targets require a numeric coefficient vector")
-    # Conversion can hold the complex source and its real floating copy.
     _check_bytes(24 * count, max_bytes, "QSP coefficient conversion")
     source = np.asarray(values)
-    if source.ndim != 1 or source.dtype.kind not in "iufc":
-        raise ValueError("QSP targets require a numeric coefficient vector")
-    if np.any(source.imag != 0):
+    if source.ndim != 1 or source.dtype.kind not in "iufc" or np.any(source.imag != 0):
         raise ValueError("QSP targets must have real Chebyshev coefficients")
     coefficients = np.asarray(source.real, dtype=float)
     if not np.all(np.isfinite(coefficients)):
@@ -166,637 +71,511 @@ def _real_coefficients(values: Any, *, max_degree: int, max_bytes: int) -> np.nd
     return coefficients
 
 
-class _PhaseEvaluations:
-    """Count the objective, Jacobian and verification evaluations of one solve against its evaluation limit."""
-
-    def __init__(self, maximum: int, limit_name: str = "max_evaluations"):
-        self.maximum = integer(maximum, limit_name, 1)
-        self.limit_name = limit_name
-        self.used = 0
-
-    def consume(self) -> None:
-        if self.used >= self.maximum:
-            raise _QSPEvaluationsExhausted(f"QSP phase solving exhausted {self.limit_name}={self.maximum}")
-        self.used += 1
-
-
 def chebyshev_grid(num_points: int) -> np.ndarray:
-    """Return the Chebyshev grid ``x_j = cos(pi (j + 1/2) / M)``, ``j = 0, ..., M - 1``, with ``M = num_points``.
-
-    Args:
-        num_points (int): Positive number `M` of nodes.
-
-    Returns:
-        grid (numpy.ndarray): The `M` nodes in index order.
-
-    Raises:
-        ValueError: If `num_points` is not positive.
-    """
-
+    """Return x_j=cos(pi(j+1/2)/N), j=0,...,N-1, for positive N=num_points."""
     if num_points <= 0:
         raise ValueError("num_points must be positive")
     return np.cos(np.pi * (np.arange(num_points) + 0.5) / num_points)
 
 
-def chebyshev_norming_sup_bound(
-    grid_max: float,
-    *,
-    degree: int,
-    num_points: int,
-) -> float:
-    """Bound the sup norm of a polynomial of degree `degree` from its maximum on a Chebyshev grid.
+def chebyshev_norming_sup_bound(grid_max: float, *, degree: int, num_points: int) -> float:
+    """Evaluate the Chebyshev-zero norming bound max|p(x_j)|/cos(pi*d/(2N)).
 
-    Returns ``grid_max / cos(pi d / (2 N))``, an upper bound on
-    ``sup_{x in [-1, 1]} |p(x)|`` when ``grid_max`` is the largest ``|p|``
-    on the ``N`` nodes of ``chebyshev_grid(N)``. This is the Chebyshev-node
-    norming bound of Ehlich and Zeller (1964), doi:10.1007/BF01111276,
-    Satz 2, Eqs. (12)-(14), pp. 42-43, which use exactly these
-    Chebyshev-zero nodes.
-    The extension to complex coefficients follows by rotating a maximum
-    value to the real axis and applying the real-polynomial inequality.
-    Sunderhauf et al., arXiv:2507.15537v1 Eq. (25), state this factor for
-    equidistant x points, where it is not valid. Equispaced angles give
-    the required nodes x_j=cos(theta_j), not an equispaced x grid.
-    Ehlich and Zeller, doi:10.1007/BF01111276, Satz 1, treat equidistant x
-    nodes separately. The QLS
-    guide gives an exact-rational counterexample to the Eq. (25) extension.
-
-    ``num_points`` is the number ``N`` of nodes on the whole interval
-    ``[-1, 1]``, as opposed to the positive-half grid of the phase solver.
-    The inequality requires strictly more nodes than the polynomial degree.
-    The result is an exact-arithmetic bound evaluated in binary64, not an
-    interval-arithmetic enclosure.
+    The polynomial degree d must be nonnegative and N>d. Ehlich and Zeller
+    (1964), doi:10.1007/BF01111276, Satz 2, give this exact-arithmetic
+    inequality. Its binary64 evaluation here is not an arithmetic enclosure.
+    The complex-polynomial extension rotates a maximum to the real axis.
     """
-
     value = float(grid_max)
-    if not np.isfinite(value) or value < 0.0:
-        raise ValueError("grid_max must be a finite nonnegative number")
-    if degree < 0:
-        raise ValueError("degree must be nonnegative")
-    if num_points <= degree:
-        raise ValueError("Chebyshev norming requires num_points > degree")
-    denominator = float(np.cos(degree * np.pi / (2.0 * num_points)))
-    return value / denominator
+    if not math.isfinite(value) or value < 0:
+        raise ValueError("grid_max must be finite and nonnegative")
+    if degree < 0 or num_points <= degree:
+        raise ValueError("Chebyshev norming requires 0 <= degree < num_points")
+    return value / math.cos(degree * math.pi / (2 * num_points))
 
 
-def _chebyshev_polynomial_norming_data(
-    chebyshev_coefficients: Any,
-    *, max_degree: int = 256, max_bytes: int = DEFAULT_INPUT_BYTES,
-) -> tuple[np.ndarray, np.ndarray, float]:
-    """Return ``(grid, values, bound)`` for a real Chebyshev series ``f``.
+def _values_at_zeros(coefficients, points):
+    """Evaluate the Chebyshev series ``coefficients`` at the ``points`` zeros of `chebyshev_grid`.
 
-    ``grid`` holds the ``N = 64 (d + 1)`` Chebyshev zeros of
-    ``chebyshev_grid(N)`` on ``[-1, 1]``, ``values`` the target
-    ``f(x_j) = sum_k c_k T_k(x_j)`` at those nodes, and ``bound`` the
-    Ehlich-Zeller upper bound on ``sup_{[-1, 1]} |f|`` from
-    ``chebyshev_norming_sup_bound``. The phase solver keeps ``grid`` and
-    ``values`` as its final verification grid, so the bound it checks before
-    the solve and the residual it uses for acceptance are evaluated on the
-    same nodes.
+    DCT-III is x0+2 sum_k xk cos(pi*k*(j+1/2)/N), so the input c_0, c_k/2
+    gives sum_k c_k T_k(x_j) in O(N log N) work, not Clenshaw's O(Nd).
+    Requires len(coefficients) <= points.
     """
+    padded = np.zeros(points)
+    padded[:len(coefficients)] = coefficients / 2
+    padded[0] = coefficients[0]
+    return dct(padded, type=3)
 
-    coefficients = _real_coefficients(chebyshev_coefficients, max_degree=max_degree, max_bytes=max_bytes)
-    degree = coefficients.size - 1
-    # At N = 64(d+1), the norming-factor inflation is at most
-    # sec(pi/128)-1 ~= 3.01e-4: rigorous, but small compared with the
-    # registered 1e-3 target margin used by the evolution and QLS callers.
+
+def _chebyshev_norm_bound(coefficients, max_bytes):
+    degree = len(coefficients) - 1
+    if degree == 0:
+        return abs(float(coefficients[0]))
     points = 64 * (degree + 1)
-    # 8*(6N + d + 1) bytes allow six float64 vectors of N entries, for the
-    # nodes and the vectors of NumPy's Clenshaw recurrence in chebval (2x, the
-    # two running coefficient vectors, the previous one and a product
-    # temporary), and chebval's copy of the d + 1 coefficients.
     _check_bytes(8 * (6 * points + degree + 1), max_bytes, "QSP norming grid")
-    grid = chebyshev_grid(points)
-    values = np.polynomial.chebyshev.chebval(grid, coefficients)
-    bound = chebyshev_norming_sup_bound(
-        float(np.max(np.abs(values))),
-        degree=degree,
-        num_points=grid.size,
-    )
-    return grid, values, bound
+    values = _values_at_zeros(coefficients, points)
+    return chebyshev_norming_sup_bound(float(np.max(abs(values))), degree=degree, num_points=points)
 
 
-def chebyshev_polynomial_sup_bound(chebyshev_coefficients: Any, *, max_degree: int = 256,
-                                  max_bytes: int = DEFAULT_INPUT_BYTES) -> float:
-    """Return an upper bound on ``sup_{x in [-1, 1]} |f(x)|`` for ``f = sum_k c_k T_k``.
+def chebyshev_polynomial_sup_bound(chebyshev_coefficients: Any, *, max_bytes=None) -> float:
+    """Estimate a real Chebyshev polynomial's norming upper bound on [-1,1].
 
-    The series is sampled on `N = 64 (d + 1)` Chebyshev zeros, and the
-    sampled maximum is divided by `cos(pi d / (2N))` as in
-    `chebyshev_norming_sup_bound`. The QLS rescale, the evolution target
-    scale and the input check of `solve_symmetric_qsp_phases` all use this
-    bound. `max_degree` (default 256) and `max_bytes` (default 10 GB) are
-    checked before the grid is formed.
-
-    Args:
-        chebyshev_coefficients (array_like): Chebyshev coefficients
-            `(c_0, ..., c_d)` of `f`.
-        max_degree (int): Default 256. Largest accepted degree `d`.
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
-            Limit on the grid arrays.
-
-    Returns:
-        bound (float): The upper bound on ``sup_{x in [-1, 1]} |f(x)|``.
+    ``chebyshev_coefficients`` contains c_0,...,c_d in ascending order.
+    The Chebyshev-zero samples use a DCT with N=64(d+1), followed by the
+    Ehlich-Zeller factor. The inequality is exact in real arithmetic, but
+    this floating-point evaluation has no enclosure. ``max_bytes=None``
+    checks the grid arrays against the physical memory.
     """
+    return _chebyshev_norm_bound(_real_coefficients(chebyshev_coefficients, max_bytes=max_bytes), max_bytes)
 
-    return _chebyshev_polynomial_norming_data(chebyshev_coefficients, max_degree=max_degree, max_bytes=max_bytes)[2]
 
-
-def _signal_matrices(x_values: np.ndarray) -> np.ndarray:
-    """Return the stacked Wx signal matrices ``W(x)`` for a grid.
-
-    The off-diagonal entry uses ``sqrt((1 - x)(1 + x))``. For binary64 ``x``
-    in ``[1/2, 1]``, ``1 - x`` is exact (Sterbenz lemma), so the product has a
-    relative error of a few ulps of ``1 - x^2``. Forming ``1 - x**2`` instead
-    leaves an absolute error of about ``u = 2**-53``, the binary64 unit
-    roundoff, in ``s^2 = 1 - x^2``, which acts like a shift of ``x`` by
-    ``u/2``. The ``<0|.|0>`` entry of a degree-``d`` product depends on ``s``
-    only through ``s^2``, and Markov's polynomial inequality
-    ``|P'| <= d^2`` for ``|P| <= 1`` bounds the resulting endpoint error by
-    about ``d^2 u / 2``. That is ``3.6e-12`` at ``d = 255``, above the
-    solver's ``1e-12`` acceptance tolerance. Near ``x = -1`` the factor
-    ``1 + x`` is the exact one.
-    """
-
-    signal = np.zeros((x_values.size, 2, 2), dtype=complex)
+def _signal_matrices(x_values):
+    signal = np.zeros((x_values.size, 2, 2), complex)
     root = np.sqrt(np.clip((1.0 - x_values) * (1.0 + x_values), 0.0, None))
-    signal[:, 0, 0] = x_values
-    signal[:, 1, 1] = x_values
-    signal[:, 0, 1] = 1j * root
-    signal[:, 1, 0] = 1j * root
+    signal[:, 0, 0] = signal[:, 1, 1] = x_values
+    signal[:, 0, 1] = signal[:, 1, 0] = 1j * root
     return signal
 
 
-def _phase_matrices(phi: float, count: int) -> np.ndarray:
-    """Return stacked ``e^{i phi Z}`` matrices."""
-
-    phase = np.zeros((count, 2, 2), dtype=complex)
+def _phase_matrices(phi, count):
+    phase = np.zeros((count, 2, 2), complex)
     phase[:, 0, 0] = np.exp(1j * phi)
     phase[:, 1, 1] = np.exp(-1j * phi)
     return phase
 
 
 def evaluate_qsp_polynomial(phases: Any, x_values: Any) -> np.ndarray:
-    """Evaluate the Wx-convention QSP polynomial ``P(x)`` on a grid.
+    """Evaluate P(x)=<0|exp(i phi0 Z) W(x)...W(x)exp(i phid Z)|0>.
 
-    Args:
-        phases: Phase vector ``(phi_0, ..., phi_d)``.
-        x_values: Signal values in ``[-1, 1]``.
-
-    Returns:
-        Complex ``P(x)`` values, one per grid point.
+    ``phases`` is the nonempty Wx phase vector and ``x_values`` are points
+    in [-1,1]. Returns complex values, whose real part is the real target.
+    Pointwise evaluation costs O(number of points times degree).
     """
-
-    phase_array = np.asarray(phases, dtype=float).reshape(-1)
-    if phase_array.size == 0:
+    phases = np.asarray(phases, float).reshape(-1)
+    if not len(phases):
         raise ValueError("QSP needs at least one phase")
-    grid = np.asarray(x_values, dtype=float).reshape(-1)
-    signal = _signal_matrices(grid)
-    product = _phase_matrices(float(phase_array[0]), grid.size)
-    for phi in phase_array[1:]:
-        product = product @ signal @ _phase_matrices(float(phi), grid.size)
+    x = np.asarray(x_values, float).reshape(-1)
+    signal = _signal_matrices(x)
+    product = _phase_matrices(phases[0], len(x))
+    for phi in phases[1:]:
+        product = product @ signal @ _phase_matrices(phi, len(x))
     return product[:, 0, 0]
 
 
 def wx_phases_to_reflection(phases: Any) -> tuple[np.ndarray, float]:
-    """Convert Wx phases to reflection-convention phases ([MRTC] arXiv:2105.02859v5, Eq. (14)).
+    """Convert Wx phases to reflection phases and the compensating global phase.
 
-    The shifts are those of [MRTC] arXiv:2105.02859v5, App. A.2, Eq. (A5),
-    except that the
-    ``i^d`` factor is returned as a global phase (see the conversion
-    identities in the module description).
-
-    Args:
-        phases (array_like): Wx phase vector `(phi_0, ..., phi_d)` with
-            `d >= 1`.
-
-    Returns:
-        reflection_phases (numpy.ndarray): The reflection-convention phases.
-        global_phase (float): ``global_phase = d * pi / 2`` compensates the
-            ``i^d`` factor, so that the reflection-form product times
-            ``e^{i global_phase}`` equals the Wx-form product.
-
-    Raises:
-        ValueError: If fewer than two phases are given.
+    For R=[[x,sqrt(1-x²)],[sqrt(1-x²),-x]], W=i exp(-i pi Z/4)
+    R exp(-i pi Z/4). Subtract pi/4 at both endpoints and pi/2 inside,
+    returning global phase d*pi/2. This preserves the full 2x2 product,
+    including controlled use. A constant sequence needs no conversion.
     """
-
-    converted = np.asarray(phases, dtype=float).copy().reshape(-1)
-    if converted.size < 2:
-        raise ValueError("the reflection conversion needs degree >= 1")
-    degree = converted.size - 1
-    converted[0] -= np.pi / 4.0
-    converted[-1] -= np.pi / 4.0
-    if degree >= 2:
-        converted[1:-1] -= np.pi / 2.0
-    return converted, degree * np.pi / 2.0
+    converted = np.asarray(phases, float).copy().reshape(-1)
+    if not len(converted):
+        raise ValueError("reflection conversion needs at least one phase")
+    degree = len(converted) - 1
+    if degree:
+        converted[0] -= np.pi / 4
+        converted[-1] -= np.pi / 4
+        converted[1:-1] -= np.pi / 2
+    return converted, degree * np.pi / 2
 
 
 @dataclass(frozen=True, kw_only=True)
-class SymmetricQSPPhases:
-    """Solved symmetric QSP phase factors with their residual and its sup-norm bound.
+class PhaseSynthesisEvidence:
+    """Numerical synthesis evidence of one fixed target and its FFT doubling.
 
-    [`solve_symmetric_qsp_phases`][nwqlib.subroutines.qsp.phases.solve_symmetric_qsp_phases]
-    returns it. Its `phases` field holds the result. The fields below are
-    read-only.
+    The attempts start at N0=next_power_of_two(2d+1) and double.
+    ``residuals[i]`` is the coefficient one-norm of the polynomial rebuilt
+    from the angles of attempt ``fft_lengths[i]``; a residual that stops
+    decreasing is recorded here as a diagnostic, not used to stop.
+    ``coefficient_residual`` is the last one, which accepted the result when
+    it is at most the requested tolerance. Its exact-arithmetic
+    uniform-error relation excludes the unknown arithmetic error of the FFT,
+    transcendental and reconstruction steps.
 
-    Attributes:
-        phases: Full symmetric Wx phase vector `(phi_0, ..., phi_d)`.
-        degree: Polynomial degree `d`.
-        parity: Target parity (`0` even, `1` odd).
-        target_chebyshev_coefficients: Chebyshev coefficients
-            `(c_0, ..., c_d)` of the target `f` that the phases fit.
-        max_residual: Largest `|Re P - f|` on the dense verification grid.
-        residual_sup_bound: Chebyshev-grid norming bound on
-            `sup_{x in [-1,1]} |Re P(x) - f(x)|`.
-        evaluations: Number of objective and Jacobian evaluations and final
-            verification calls made, across both starts, polish steps and
-            line searches.
+    ``ideal_rule`` names the ideal-arithmetic rule (``"generic_sufficient"``,
+    ``"real_wx_annulus"``, ``"full_ja_sufficient"`` or ``"constant"``) that
+    calls the last attempted length sufficient for half the tolerance, and
+    ``ideal_aliasing_bound`` is its conditional ideal bound there. Both are
+    None when no rule holds at that length. The rules are evaluated only at
+    attempted lengths, so this evidence does not depend on the memory limit.
+    A failed attempt at a length where a rule holds ends the doubling, as do
+    the explicit ``max_fft`` and an attempt whose arrays would exceed the
+    memory limit. ``known_array_bytes`` estimates the dominant arrays of the
+    longest attempt, excluding FFT library workspace and process memory.
     """
+    norm_bound: float
+    norm_bound_qualification: str
+    fft_lengths: tuple[int, ...]
+    residuals: tuple[float, ...]
+    coefficient_residual: float | None
+    ideal_rule: str | None
+    ideal_aliasing_bound: float | None
+    known_array_bytes: int
+    qualification: str = "numerical_uniform_error_estimate"
+    ideal_aliasing_qualification: str = "conditional_ideal_arithmetic"
 
+    def to_dict(self):
+        record = asdict(self)
+        record["fft_lengths"] = list(self.fft_lengths)
+        record["residuals"] = list(self.residuals)
+        return record
+
+
+@dataclass(frozen=True, kw_only=True)
+class WxQSPPhases:
+    """Real definite-parity Wx phases and their numerical residual evidence.
+
+    ``phases`` realizes Re P(x) for the ascending Chebyshev coefficients.
+    ``residual_sup_bound`` carries the reconstructed coefficient one-norm
+    estimate, not a sampled maximum or a certified arithmetic bound.
+    ``evidence`` reports the actual attempts.
+    """
     phases: tuple[float, ...]
     degree: int
     parity: int
     target_chebyshev_coefficients: tuple[float, ...]
-    max_residual: float
     residual_sup_bound: float
-    evaluations: int
+    evidence: PhaseSynthesisEvidence
 
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-like phase-solution record."""
-
+    def to_dict(self):
         return {
             "phases": list(self.phases),
             "degree": self.degree,
             "parity": self.parity,
             "target_chebyshev_coefficients": list(self.target_chebyshev_coefficients),
-            "max_residual": self.max_residual,
             "residual_sup_bound": self.residual_sup_bound,
-            "evaluations": self.evaluations,
+            "evidence": self.evidence.to_dict(),
         }
 
 
-def _symmetric_problem(coefficients: np.ndarray, *, evaluations: _PhaseEvaluations):
-    """Return ``(residual_and_jacobian, num_free, full_from_free)`` for [DMWL] arXiv:2002.11649v2, Eq. (23).
+@dataclass(frozen=True, kw_only=True)
+class LaurentQSPPhases:
+    """General complex Laurent target synthesized as A0 D ... D Ad iX.
 
-    For degree ``d``, the ``num_free = ceil((d+1)/2)`` free phases
-    ``theta_k`` expand to the symmetric vector ``phi_j = theta_{min(j, d-j)}``
-    of [DMWL] arXiv:2002.11649v2, Eq. (24) (``full_from_free``). The
-    residual nodes are the
-    ``M`` positive zeros ``x_m = cos((2m - 1) pi / (4M))``, ``m = 1..M``, of
-    ``T_{2M}``. [DMWL] arXiv:2002.11649v2, Eq. (23), uses ``M = num_free``.
-    This module uses
-    ``M = QSP_SOLVER_GRID_MULTIPLIER * num_free``. Parity makes the negative
-    nodes redundant.
-
-    ``residual_and_jacobian(theta)`` returns ``r_m = Re P(x_m) - f(x_m)``,
-    shape ``(M,)``, and the exact Jacobian ``dr_m/dtheta_k``, shape
-    ``(M, num_free)``. Write ``U = F_0 F_1 ... F_d`` with
-    ``F_0 = e^{i phi_0 Z}`` and ``F_j = W(x) e^{i phi_j Z}``, so
-    ``P = <0|U|0>``. Since ``Z`` commutes with ``e^{i phi_j Z}``,
-    ``dF_j/dphi_j = W(x) (iZ) e^{i phi_j Z}``, and
-    ``dU/dphi_j = (F_0 ... F_{j-1}) W(x) (iZ) e^{i phi_j Z} (F_{j+1} ... F_d)``.
-    Stored prefix and suffix products give all ``d + 1`` columns with a
-    constant number of 2 x 2 products each, ``O(d)`` per node. For
-    ``j = 0``, ``dU/dphi_0 = iZ U`` and ``<0| iZ = i <0|`` give
-    ``dP/dphi_0 = iP``. By the chain rule through
-    ``phi_j = theta_{min(j, d-j)}``, columns ``j`` and ``d - j`` of the full
-    Jacobian add into free column ``min(j, d-j)``, and the middle column of
-    an even degree ``d`` enters once.
+    ``rotation_angles`` gives matrix-order (RZ, RX, RZ) angles for each A.
+    A circuit appends the matrices in reverse order, beginning with
+    RX(``terminal_rx``), and uses the first ``negative_signals`` mathematical
+    signals as diag(1,z^-1). ``target_coefficients`` is indexed from
+    ``minimum_power``. The numerical residual is qualified by ``evidence``.
     """
-
-    degree = coefficients.size - 1
-    num_free = (degree + 2) // 2
-    num_points = QSP_SOLVER_GRID_MULTIPLIER * num_free
-    # Positive-half Chebyshev nodes of [DMWL] arXiv:2002.11649v2. Parity makes
-    # x < 0 redundant.
-    grid = np.cos((2.0 * np.arange(1, num_points + 1) - 1.0) * np.pi / (4.0 * num_points))
-    target = np.polynomial.chebyshev.chebval(grid, coefficients)
-    signal = _signal_matrices(grid)
-    i_z = np.array([[1j, 0.0], [0.0, -1j]])
-    identity = np.broadcast_to(np.eye(2, dtype=complex), (num_points, 2, 2))
-
-    def full_from_free(free: np.ndarray) -> np.ndarray:
-        """Expand free phases to the symmetric vector of [DMWL] arXiv:2002.11649v2, Eq. (24)."""
-        return np.array([free[min(j, degree - j)] for j in range(degree + 1)])
-
-    def residual_and_jacobian(free: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Return ``(r, dr/dtheta)`` at free phases ``free``, consuming one evaluation."""
-        evaluations.consume()
-        full = full_from_free(free)
-        phase_stack = [_phase_matrices(float(phi), num_points) for phi in full]
-        factors = [phase_stack[0]] + [signal @ phase_stack[j] for j in range(1, degree + 1)]
-        # prefix[j] = F_0 ... F_{j-1} and suffix[j] = F_j ... F_d, so
-        # prefix[d+1] is U.
-        prefix = [identity]
-        for factor in factors:
-            prefix.append(prefix[-1] @ factor)
-        suffix = [identity] * (degree + 2)
-        for j in range(degree, -1, -1):
-            suffix[j] = factors[j] @ suffix[j + 1]
-        realized = prefix[degree + 1][:, 0, 0]
-        residual = realized.real - target
-        jacobian_full = np.empty((num_points, degree + 1))
-        # dP/dphi_0 = i P (the leading e^{i phi Z} differentiates in place).
-        jacobian_full[:, 0] = (1j * realized).real
-        for j in range(1, degree + 1):
-            derivative = prefix[j] @ signal @ i_z @ (phase_stack[j] @ suffix[j + 1])
-            jacobian_full[:, j] = derivative[:, 0, 0].real
-        # Chain rule for phi_j = theta_{min(j, d-j)}.
-        jacobian = np.zeros((num_points, num_free))
-        for j in range(degree + 1):
-            jacobian[:, min(j, degree - j)] += jacobian_full[:, j]
-        return residual, jacobian
-
-    return residual_and_jacobian, num_free, full_from_free
+    rotation_angles: tuple[tuple[float, float, float], ...]
+    terminal_rx: float
+    negative_signals: int
+    target_coefficients: tuple[complex, ...]
+    minimum_power: int
+    degree: int
+    evidence: PhaseSynthesisEvidence
 
 
-def _max_abs_residual(residual: np.ndarray) -> float:
-    """Return ``max_m |r_m|``, or ``inf`` when some ``r_m`` is not finite.
+def _wx_target(coefficients):
+    # c_k/2 is inexact only when c_k is a subnormal with an odd significand.
+    # It is then off by 2**-1075 and can round to zero. The degree and parity
+    # come from the input, and the residual is measured against this target,
+    # an estimate without an arithmetic envelope.
+    degree = len(coefficients) - 1
+    target = np.zeros(degree + 1, complex)
+    for k in range(degree % 2, degree + 1, 2):
+        if k == 0:
+            target[degree // 2] += coefficients[0]
+        else:
+            target[(degree + k) // 2] += coefficients[k] / 2
+            target[(degree - k) // 2] += coefficients[k] / 2
+    return target
 
-    ``np.max`` propagates NaN, and every comparison with NaN is False. A
-    NaN maximum would make ``best >= residual_tolerance`` False, which the
-    solver reads as converged, and ``candidate_best < best`` could never
-    replace it. As ``inf``, a nonfinite residual counts as not converged and
-    ranks above every finite one.
+
+@dataclass(frozen=True)
+class _WxProblem:
+    coefficients: np.ndarray
+    target: np.ndarray
+    rho: float
+
+
+def _prepare_wx_problem(values, max_bytes=None):
+    coefficients = _real_coefficients(values, max_bytes=max_bytes)
+    support = np.flatnonzero(coefficients)
+    # Only exact zeros can change support. An underflowed annulus moment
+    # must never be used as this constant predicate.
+    degree = int(support[-1]) if support.size else 0
+    if degree + 1 < len(coefficients):
+        coefficients = coefficients[:degree + 1].copy()
+    if np.any(coefficients[1 - degree % 2::2] != 0):
+        raise ValueError("QSP targets require exact definite parity")
+    rho = _chebyshev_norm_bound(coefficients, max_bytes)
+    if not 0 <= rho < 1:
+        raise ValueError("QSP requires a strict norm bound below one; normalize the target with a recorded scale")
+    return _WxProblem(coefficients, _wx_target(coefficients), rho)
+
+
+def _wx_reconstruct(phases):
+    rotations = np.empty((len(phases), 2, 2), complex)
+    rotations[:, 0, 0] = rotations[:, 1, 1] = np.cos(phases)
+    rotations[:, 0, 1] = rotations[:, 1, 0] = 1j * np.sin(phases)
+    matrix = _nlft.matrix_product(rotations)
+    # H W(x) H=w^-1 D(w²). Thus U00=w^-d sum(M_ab(w²))/2.
+    # Real part on the circle pairs coefficient j with conjugate(d-j).
+    coefficients = np.sum(matrix, axis=(0, 1)) / 2
+    return (coefficients + coefficients[::-1].conj()) / 2
+
+
+def _angles_from_factors(factors):
+    phi = np.arctan(abs(factors))
+    psi = (np.angle(factors) - np.pi / 2) / 2
+    psi[factors == 0] = 0
+    return tuple((-2 * float(p), -2 * float(a), 2 * float(p)) for a, p in zip(phi, psi))
+
+
+def _rotation_matrices(angles):
+    rotations = np.empty((len(angles), 2, 2), complex)
+    for k, (left, rx, right) in enumerate(angles):
+        c, s = math.cos(rx / 2), -1j * math.sin(rx / 2)
+        rz_l = np.exp(-0.5j * left * np.array([1, -1]))
+        rz_r = np.exp(-0.5j * right * np.array([1, -1]))
+        rotations[k] = rz_l[:, None] * np.array([[c, s], [s, c]]) * rz_r[None, :]
+    return rotations
+
+
+def _laurent_reconstruct(angles, terminal_rx):
+    matrix = _nlft.matrix_product(_rotation_matrices(angles))
+    # Rebuild the terminal RX too: sin/cos conversion is part of the result.
+    return math.cos(terminal_rx / 2) * matrix[0, 0] - 1j * math.sin(terminal_rx / 2) * matrix[0, 1]
+
+
+def _check_synthesis_start(degree: int, *, max_fft=None, max_bytes=None) -> int:
+    """Check the first FFT attempt of a phase synthesis of ``degree`` and return its length N0.
+
+    N0 is the least power of two above ``2*degree`` (0 for degree 0). It is
+    refused above an explicit ``max_fft``, and its dominant arrays
+    (``_nlft.known_array_bytes``) against ``max_bytes``, None being the
+    physical memory. Both grow with the degree, so under the same limits a
+    degree that passes admits the first attempt of every lower degree. The
+    later doublings and the residual test are not checked here.
     """
+    n = _nlft.power_two(2 * degree + 1) if degree else 0
+    if max_fft is not None and n > max_fft:
+        raise ResourceLimitError(f"phase synthesis of degree {degree} needs FFT length {n}, above max_fft={max_fft}")
+    _check_bytes(_nlft.known_array_bytes(degree, n), max_bytes, f"QSP phase synthesis at FFT={n}")
+    return n
 
-    value = float(np.max(np.abs(residual)))
-    return value if np.isfinite(value) else np.inf
 
+def _solve(b, target, rho, tolerance, adapter, norm_qualification, *, max_fft, max_bytes,
+           real_coefficients=None, near_flat=None):
+    """Double the FFT length from N0 until the actual coefficient residual is at most ``tolerance``.
 
-def _solve_from(residual_and_jacobian, start: np.ndarray) -> tuple[np.ndarray, float]:
-    """Minimize from one start and return ``(theta, max_m |r_m|)`` on the objective nodes.
+    Doubling stops at the first accepted attempt, after a failed attempt at
+    a length that an ideal-arithmetic rule calls sufficient or at the
+    explicit ``max_fft``, or before an attempt whose dominant arrays exceed
+    the memory limit (`_check_synthesis_start` checks N0). A residual that
+    stagnates is recorded but does not stop the doubling. The target never
+    changes.
 
-    L-BFGS minimizes the [DMWL] arXiv:2002.11649v2, Eq. (23), mean square
-    ``L = mean(r^2)``,
-    whose gradient is ``(2/M) J^T r``. ``_damped_newton`` then polishes the
-    L-BFGS point, so the result is never worse than that point. The returned
-    maximum is taken on the ``M`` objective nodes, and it is ``inf`` when
-    L-BFGS ends at a nonfinite point. The caller decides acceptance on the
-    separate verification grid.
+    The refusal states the observed residual at each attempted length together
+    with the actual stopping cause, and the target and the controls. When the
+    residual has stagnated it says so as an observation at those lengths. A
+    finite sequence of similar measured residuals proves only the absence of
+    improvement at those sizes. It cannot distinguish an arithmetic floor, an
+    estimator limitation, conditioning or delayed convergence without more
+    evidence, so it establishes nothing about further memory and does not
+    authorize loosening the target.
     """
+    degree = len(b) - 1
+    memory = memory_limit(max_bytes)
+    log_r = None if real_coefficients is None else _nlft.real_log_radius(real_coefficients, rho)
+    n = _check_synthesis_start(degree, max_fft=max_fft, max_bytes=max_bytes)
+    lengths, residuals = [], []
+    rule = rule_bound = None
 
-    def objective(free: np.ndarray) -> tuple[float, np.ndarray]:
-        residual, jacobian = residual_and_jacobian(free)
-        return float(np.mean(residual**2)), (2.0 / residual.size) * (jacobian.T @ residual)
+    def evidence():
+        return PhaseSynthesisEvidence(
+            norm_bound=rho, norm_bound_qualification=norm_qualification, fft_lengths=tuple(lengths),
+            residuals=tuple(residuals), coefficient_residual=residuals[-1] if residuals else None,
+            ideal_rule=rule, ideal_aliasing_bound=rule_bound,
+            known_array_bytes=_nlft.known_array_bytes(degree, max(lengths, default=n)))
 
-    result = scipy.optimize.minimize(
-        objective,
-        start,
-        jac=True,
-        method="L-BFGS-B",
-        options=dict(QSP_SOLVER_LBFGS_OPTIONS),
-    )
-    return _damped_newton(residual_and_jacobian, result.x)
-
-
-def _damped_newton(residual_and_jacobian, free: np.ndarray) -> tuple[np.ndarray, float]:
-    """Run damped Newton steps from ``free`` and return ``(theta, max_m |r_m|)``.
-
-    Each step solves ``J s = r`` in the least-squares sense and halves ``s``
-    until the maximum residual on the objective nodes decreases, so the
-    result is never worse than ``free``. The residual is
-    ``r = V (beta(theta) - alpha)``, where ``alpha`` and ``beta`` hold the
-    ``num_free`` Chebyshev coefficients of the target parity of ``f`` and
-    ``Re P``, and ``V`` holds those Chebyshev polynomials at the ``M``
-    positive nodes. ``V`` has full column rank. A coefficient vector in its
-    null space gives a polynomial of that parity that vanishes at the ``M``
-    positive nodes and, by parity, at their negatives. These ``2 M > d``
-    roots force the polynomial, and hence the vector, to be zero. The
-    least-squares step therefore solves
-    ``(d beta / d theta) s = beta - alpha`` exactly whenever that square
-    Jacobian is invertible, which is the Newton update of [DLNW]
-    arXiv:2307.12468v1, Eq. (3.1). [DLNW] arXiv:2307.12468v1, Algorithm 3.1,
-    takes full steps. The halving here only rejects a step that would not
-    decrease the maximum residual.
-
-    At finite phases ``P`` is an entry of a product of unitary matrices and
-    the target is finite, so the residual is nonfinite only at nonfinite
-    phases, and every step from such a point is nonfinite as well. A
-    nonfinite start is therefore returned unchanged with maximum ``inf``.
-    Its nonfinite Jacobian is not passed to ``np.linalg.lstsq``, where
-    LAPACK prints a DLASCL argument error (NumPy 2.5.2 on macOS arm64)
-    before NumPy raises ``LinAlgError``.
-    """
-
-    residual, jacobian = residual_and_jacobian(free)
-    best = _max_abs_residual(residual)
-    for _ in range(QSP_SOLVER_POLISH_MAX_STEPS):
-        # Registered stop below the 1e-12 acceptance tolerance, for the
-        # polish and the Newton start alike (docs/ENGINEERING_CONSTANTS.md,
-        # "QSP phase solver and evolution synthesis"). A nonfinite start has no finite step (see
-        # the docstring).
-        if best < 1.0e-14 or not np.isfinite(best):
-            break
+    while True:
+        lengths.append(n)
+        rule, rule_bound = _nlft.ideal_rule(degree, rho, tolerance, n, log_r=log_r, near_flat=near_flat)
         try:
-            step = np.linalg.lstsq(jacobian, residual, rcond=None)[0]
-        except np.linalg.LinAlgError:
-            break
-        damping, improved = 1.0, False
-        for _ in range(QSP_SOLVER_POLISH_MAX_HALVINGS):
-            candidate = free - damping * step
-            candidate_residual, candidate_jacobian = residual_and_jacobian(candidate)
-            candidate_best = _max_abs_residual(candidate_residual)
-            if candidate_best < best:
-                free, residual, jacobian = candidate, candidate_residual, candidate_jacobian
-                best, improved = candidate_best, True
-                break
-            damping *= 0.5
-        if not improved:
-            break
-    return free, best
+            factors = _nlft.factors_from_target(b, n)
+            if not np.all(np.isfinite(factors)):
+                raise FloatingPointError("phase synthesis produced nonfinite factors")
+            if adapter == "wx":
+                output = np.arctan(factors.imag)
+                output[0] -= np.pi / 4
+                output[-1] -= np.pi / 4
+                realized = _wx_reconstruct(output)
+            else:
+                output = _angles_from_factors(factors)
+                realized = _laurent_reconstruct(output, -math.pi)
+            residual = float(np.sum(abs(realized - target)))
+            if not math.isfinite(residual):
+                raise FloatingPointError("phase reconstruction is nonfinite")
+        except FloatingPointError as error:
+            raise _QSPPhaseConvergenceError(f"phase synthesis stopped at FFT={n}: {error}",
+                                            evidence=evidence()) from error
+        residuals.append(residual)
+        if residual <= tolerance:
+            return output, evidence()
+        del factors, output, realized
+        limits, failure = "bound the FFT length", _QSPPhaseLimitError
+        if rule is not None:
+            reason = (f"the ideal-arithmetic rule {rule} calls FFT={n} sufficient, bounding its aliasing "
+                      f"contribution by {rule_bound:.3g}")
+            limits, failure = "do not extend a stop by this rule", _QSPPhaseConvergenceError
+        elif max_fft is not None and 2 * n > max_fft:
+            reason = f"FFT={2 * n} would exceed max_fft={max_fft}"
+        elif memory is not None and _nlft.known_array_bytes(degree, 2 * n) > memory:
+            reason = (f"FFT={2 * n} needs about {_nlft.known_array_bytes(degree, 2 * n)} bytes, above the "
+                      f"memory limit of {memory} bytes")
+        else:
+            n *= 2
+            continue
+        raise failure(
+            f"numerical phase synthesis residual {residual:.6g} exceeds its target {tolerance:.6g}. "
+            f"FFT lengths {tuple(lengths)} gave residuals {tuple(float(f'{r:.3g}') for r in residuals)}. "
+            f"{_stagnation_note(lengths, residuals)}The doubling stopped because {reason}. Controls: residual_tolerance "
+            "sets the target (LCHS sets it from approximation_tolerance and QLS from phase_residual_tolerance), and a "
+            f"larger target accepts a larger synthesis error. The limits max_fft and max_bytes {limits}",
+            evidence=evidence())
 
 
-def solve_symmetric_qsp_phases(
-    chebyshev_coefficients: Any,
-    *,
-    residual_tolerance: float = QSP_SOLVER_RESIDUAL_TOLERANCE,
-    max_degree: int = 256,
-    max_evaluations: int = 20000,
-    max_bytes: int = DEFAULT_INPUT_BYTES,
-    limit_name: str = "max_evaluations",
-) -> SymmetricQSPPhases:
-    """Solve symmetric Wx phase factors whose `Re P(x)` matches a real definite-parity Chebyshev target.
+def _stagnation_note(lengths, residuals):
+    """Describe the last attempts where no doubling reduced the residual by more than half, or return "" when the last one did.
 
-    Implements the [DMWL] optimization (arXiv:2002.11649v2, Sec. III):
-    symmetric phases, positive Chebyshev node objective,
-    `(pi/4, 0, ..., 0, pi/4)` initialization and L-BFGS, followed by a
-    damped Gauss-Newton polish. If the objective-node residual from that
-    start is at or above `residual_tolerance` or nonfinite, the damped
-    Newton iteration of [DLNW] arXiv:2307.12468v1 (Sec. 3, Eq. (3.1) and
-    Algorithm 3.1) runs from the same initialization, and the better of the
-    two results is verified. Near `max|f| = 1`, where the evolution and QLS
-    targets lie, L-BFGS from that point has no convergence guarantee
-    ([DLNW] Sec. 2.2). The returned phases satisfy `Re P(x) ~= f(x)` in
-    the Wx convention. `residual_sup_bound` bounds `sup |Re P - f|` over
-    `[-1, 1]` by the Chebyshev norming inequality. The degree and the known
-    simultaneous numerical arrays are checked before optimization.
-
-    Args:
-        chebyshev_coefficients (array_like): Finite real Chebyshev
-            coefficients `(c_0, ..., c_d)` of the target `f`. Entries of the
-            wrong parity must be zero, and `max |f|` must not exceed 1.
-        residual_tolerance (float): Default `1e-12`. Largest acceptable
-            `|Re P - f|` on the dense verification grid.
-        max_degree (int): Default `256`. Largest accepted target degree.
-        max_evaluations (int): Default `20000`. Limit on the combined
-            objective and Jacobian evaluations and final verification calls
-            across both starts, polish steps and line searches.
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
-            Bound on known simultaneous numerical arrays. It does not
-            measure process memory, the internal workspace of external
-            libraries or elapsed time.
-        limit_name (str): Default `"max_evaluations"`. Name of the caller's
-            option that sets `max_evaluations`, used in the error messages.
-
-    Returns:
-        solution (SymmetricQSPPhases): The full phase vector in
-            `solution.phases`, with the residual and its sup-norm bound.
-
-    Raises:
-        ValueError: For empty, mixed-parity or out-of-range targets, or when
-            the solver cannot reach `residual_tolerance` (with diagnostics).
-
-    Examples:
-        For `f(x) = x / 2`, a degree-one target, both symmetric phases are
-        `-pi/6 = -0.5235987756...`, and `Re P(0.3) = 0.15`:
-
-        >>> import numpy as np
-        >>> from nwqlib.subroutines.qsp import (
-        ...     evaluate_qsp_polynomial, solve_symmetric_qsp_phases)
-        >>> solution = solve_symmetric_qsp_phases([0.0, 0.5])
-        >>> print([round(phase, 10) for phase in solution.phases])
-        [-0.5235987756, -0.5235987756]
-        >>> values = evaluate_qsp_polynomial(solution.phases, [0.3, -0.8])
-        >>> print(np.round(values.real, 10))
-        [ 0.15 -0.4 ]
+    This wording is the only use of the factor of two, and the stopping rule
+    never reads it. The factor covers a residual that drifts at its floor, such as
+    1.41e-12 then 1.39e-12, which a strict comparison would call an improvement.
     """
+    first = len(residuals) - 1
+    while first and residuals[first] >= residuals[first - 1] / 2:
+        first -= 1
+    if first == len(residuals) - 1:
+        return ""
+    return (f"No doubling from FFT={lengths[first]} to FFT={lengths[-1]} reduced the residual by more than half, and these attempts do "
+            "not show whether a longer FFT would reach the target. ")
 
-    coefficients = _real_coefficients(chebyshev_coefficients, max_degree=max_degree, max_bytes=max_bytes)
-    residual_tolerance = finite_real(residual_tolerance, "residual_tolerance")
-    if residual_tolerance <= 0:
+
+def _controls(residual_tolerance, max_fft):
+    tolerance = finite_real(residual_tolerance, "residual_tolerance")
+    if tolerance <= 0:
         raise ValueError("residual_tolerance must be positive")
-    evaluations = _PhaseEvaluations(max_evaluations, limit_name)
-    if coefficients.size < 2:
-        raise ValueError("the phase solver needs a target of degree >= 1")
-    degree = coefficients.size - 1
-    parity = degree % 2
-    off_parity = coefficients[(1 - parity) :: 2]
-    if off_parity.size and float(np.max(np.abs(off_parity))) > 0.0:
-        raise ValueError(
-            "QSP targets must have definite parity: coefficients of parity "
-            f"{1 - parity} must be exactly zero for a degree-{degree} target"
-        )
-    num_free = (degree + 2) // 2
-    points = QSP_SOLVER_GRID_MULTIPLIER * num_free
-    # Peak live arrays of one solve, checked before the optimization problem
-    # is allocated, with M = points objective nodes, N = 64(d+1)
-    # verification nodes and u = num_free. A stack of 2 x 2 complex128
-    # matrices costs 64 bytes per node.
-    # - kept_bytes, alive throughout: 16N for the verification nodes and
-    #   their target values. 160M for the objective nodes, their targets and
-    #   the W(x) stack (80 bytes per node together) plus the per-call P and
-    #   residual vectors (24 more), which leaves 56 bytes per node to spare.
-    #   128(d+1) for the coefficient, phase and optimizer vectors.
-    # - phase_bytes, one residual_and_jacobian call: 640(d+2)M allows ten
-    #   64-byte stack entries per node for each of the d + 2 prefix
-    #   positions. The phase, factor, prefix and suffix stacks take four of
-    #   them, and the products of one derivative column and the unfolded
-    #   Jacobian fit in the rest.
-    #   16Mu holds the current and the candidate folded Jacobian.
-    # - polish_bytes, one Gauss-Newton least-squares step: 32Mu for Jacobian
-    #   copies, 32u^2 for u x u factors and 16M for two residual vectors.
-    #   LAPACK workspace is not counted.
-    # - verification_bytes: 320N for the five stacks of
-    #   evaluate_qsp_polynomial (W(x), running product, one phase stack and
-    #   two product temporaries).
-    # Optimization and final verification do not overlap, hence the max.
-    kept_bytes = 16 * 64 * (degree + 1) + 160 * points + 128 * (degree + 1)
-    phase_bytes = 640 * (degree + 2) * points + 16 * points * num_free
-    polish_bytes = 32 * points * num_free + 32 * num_free**2 + 16 * points
-    verification_bytes = 320 * 64 * (degree + 1)
-    _check_bytes(kept_bytes + max(phase_bytes + polish_bytes, verification_bytes),
-                 max_bytes, "QSP phase solving")
-    verification_grid, wanted, target_sup_bound = _chebyshev_polynomial_norming_data(
-        coefficients, max_degree=max_degree, max_bytes=max_bytes
-    )
-    # Registered under QSP target-boundary ULP policy in
-    # docs/ENGINEERING_CONSTANTS.md.
-    target_boundary_width = (
-        QSP_TARGET_BOUNDARY_ULPS
-        * np.finfo(float).eps
-        * max(1.0, target_sup_bound)
-    )
-    if target_sup_bound > 1.0 + target_boundary_width:
-        raise ValueError(
-            "QSP targets must satisfy max|f| <= 1; rescale the target and "
-            "record the factor (see subroutines/qsp/evolution.py)"
-        )
+    return tolerance, None if max_fft is None else integer(max_fft, "max_fft", 1)
 
-    residual_and_jacobian, num_free, full_from_free = _symmetric_problem(coefficients, evaluations=evaluations)
-    start = np.zeros(num_free)
-    # [DMWL] arXiv:2002.11649v2, Eq. (28): the free phases (pi/4, 0, ..., 0)
-    # of the full start (pi/4, 0, ..., 0, pi/4) of Eq. (27), which realizes
-    # Re P = 0.
-    start[0] = np.pi / 4.0
-    free, best = _solve_from(residual_and_jacobian, start)
-    # _max_abs_residual reports a nonfinite L-BFGS point as best = inf, so
-    # the Newton start below also runs for it, and any finite Newton result
-    # replaces it.
-    if best >= residual_tolerance:
-        # Near max|f| = 1, L-BFGS from this start has no convergence
-        # guarantee ([DLNW] arXiv:2307.12468v1, Sec. 2.2). Newton's method from
-        # the same start ([DLNW] arXiv:2307.12468v1, Algorithm 3.1) is the
-        # second attempt.
-        candidate, candidate_best = _damped_newton(residual_and_jacobian, start)
-        if candidate_best < best:
-            free, best = candidate, candidate_best
-        attempts = "the L-BFGS and Newton starts"
-    else:
-        attempts = "the L-BFGS start"
 
-    full = full_from_free(free)
-    evaluations.consume()
-    realized = evaluate_qsp_polynomial(full, verification_grid).real
-    verification_residual = realized - wanted
-    max_residual = float(np.max(np.abs(verification_residual)))
-    # Written as `not (residual <= tol)` so that a NaN residual, for which
-    # every comparison is False, is rejected rather than accepted.
-    if not (max_residual <= residual_tolerance):
-        if not np.isfinite(max_residual):
-            raise _QSPPhaseConvergenceError(
-                "symmetric-QSP phase optimization broke down: the verification "
-                f"residual is nonfinite at degree {degree} after {attempts}, "
-                "indicating optimizer overflow on this target. "
-                "Rescale the target coefficients below max|f| = 1 with a "
-                "larger margin, or reduce the degree.", evaluations=evaluations.used,
-            )
-        raise _QSPPhaseConvergenceError(
-            "symmetric-QSP phase optimization did not converge: max residual "
-            f"{max_residual:.3e} > {residual_tolerance:.1e} at degree {degree} "
-            f"after {attempts}. Near-unit-sup targets are the hard regime. "
-            "Rescale the target with a larger recorded margin.", evaluations=evaluations.used,
-        )
-    residual_sup_bound = chebyshev_norming_sup_bound(
-        max_residual,
-        degree=degree,
-        num_points=verification_grid.size,
-    )
-    return SymmetricQSPPhases(
-        phases=tuple(float(value) for value in full),
-        degree=degree,
-        parity=parity,
-        target_chebyshev_coefficients=tuple(float(value) for value in coefficients),
-        max_residual=max_residual,
-        residual_sup_bound=residual_sup_bound,
-        evaluations=evaluations.used,
-    )
+def solve_wx_qsp_phases(chebyshev_coefficients: Any, *, residual_tolerance=QSP_SOLVER_RESIDUAL_TOLERANCE,
+                        max_fft=None, max_bytes=None) -> WxQSPPhases:
+    """Synthesize real definite-parity Wx phases with a strict norm margin.
+
+    ``chebyshev_coefficients`` is a finite ascending real vector. Wrong-parity
+    coefficients must be exactly zero and its numerical norming bound must
+    be strictly below one. Constants and zero targets are supported. The
+    target, degree and normalization never change between attempts.
+
+    ``residual_tolerance`` defaults to 1e-12 in the normalized target frame.
+    The FFT length doubles from N0=next_power_of_two(2d+1) until the actual
+    coefficient residual is at most that tolerance. Doubling stops after a
+    failed attempt at a length that the real-Wx annulus rule or the generic
+    analytic rule calls sufficient (PhaseSynthesisEvidence), at the explicit
+    ``max_fft`` (default None, no cap), or before an attempt whose dominant
+    arrays exceed ``max_bytes`` (default None, the physical memory).
+
+    Returns Wx phases and numerical uniform-error evidence. A residual above
+    the tolerance when doubling stops raises ValueError with every attempted
+    length and residual, the last attempted lengths at which no doubling halved
+    the residual, and the available controls. Those attempts do not show
+    whether a longer FFT would reach the tolerance, and a larger
+    ``residual_tolerance`` accepts a larger synthesis error. The coefficient
+    one-norm relation is rigorous in exact arithmetic, but the numerical result
+    has no complete floating-point error enclosure.
+    """
+    tolerance, max_fft = _controls(residual_tolerance, max_fft)
+    return _solve_wx_problem(_prepare_wx_problem(chebyshev_coefficients, max_bytes), tolerance,
+                             max_fft=max_fft, max_bytes=max_bytes)
+
+
+def _solve_wx_problem(problem, tolerance, *, max_fft=None, max_bytes=None):
+    phases, evidence = _solve(
+        1j * problem.target, problem.target, problem.rho, tolerance, "wx", "numerical_chebyshev_norming",
+        max_fft=max_fft, max_bytes=max_bytes, real_coefficients=problem.coefficients)
+    degree = len(problem.coefficients) - 1
+    return WxQSPPhases(
+        phases=tuple(float(value) for value in phases), degree=degree, parity=degree % 2,
+        target_chebyshev_coefficients=tuple(float(value) for value in problem.coefficients),
+        residual_sup_bound=evidence.coefficient_residual, evidence=evidence)
+
+
+def solve_laurent_qsp_phases(
+    coefficients: Any, *, minimum_power=0, norm_bound: float,
+    norm_bound_qualification="supplied_bound", residual_tolerance=QSP_SOLVER_RESIDUAL_TOLERANCE,
+    max_fft=None, max_bytes=None, full_ja_scale: float | None = None, full_ja_error: float | None = None,
+) -> LaurentQSPPhases:
+    """Synthesize a general complex Laurent polynomial with a known strict cap.
+
+    ``coefficients[j]`` multiplies z**(minimum_power+j), with integer
+    ``minimum_power`` (default zero). ``norm_bound`` must satisfy
+    sup_{|z|=1}|f(z)| <= norm_bound < 1. Its qualification is recorded verbatim
+    by ``norm_bound_qualification``. Degree counts the interval containing
+    both the supplied support and zero, including negative signal powers.
+
+    The normalized residual tolerance defaults to 1e-12. The FFT doubling,
+    ``max_fft`` and ``max_bytes`` act as in `solve_wx_qsp_phases`; the ideal
+    rules are the generic analytic rule and, when supplied, the near-flat
+    rule. The target never changes between attempts.
+
+    ``full_ja_scale`` and ``full_ja_error`` may be supplied together only for
+    a full complex approximation p to a unit-modulus target, f=p/scale,
+    with uniform error <= full_ja_error, including coefficient uncertainty.
+    They enable the separate near-flat ideal rule. They do not apply to
+    individual cosine or sine targets. Failure raises ValueError.
+    """
+    tolerance, max_fft = _controls(residual_tolerance, max_fft)
+    try:
+        count = len(coefficients)
+    except TypeError:
+        raise ValueError("Laurent coefficients must be a nonempty numeric vector") from None
+    if not count:
+        raise ValueError("Laurent coefficients must be a nonempty numeric vector")
+    if isinstance(minimum_power, (bool, np.bool_)):
+        raise ValueError("minimum_power must be an integer")
+    try:
+        lower = operator.index(minimum_power)
+    except TypeError:
+        raise ValueError("minimum_power must be an integer") from None
+    upper = lower + count - 1
+    negative = max(0, -lower)
+    degree = negative + max(0, upper)
+    _check_bytes(48 * (degree + 1), max_bytes, "Laurent target conversion")
+    source = np.asarray(coefficients)
+    if source.ndim != 1 or source.dtype.kind not in "iufc":
+        raise ValueError("Laurent coefficients must be a nonempty numeric vector")
+    source = np.asarray(source, complex)
+    if not np.all(np.isfinite(source)):
+        raise ValueError("Laurent coefficients must be finite")
+    rho = finite_real(norm_bound, "norm_bound")
+    if not 0 <= rho < 1:
+        raise ValueError("norm_bound must lie in [0,1)")
+    target = np.zeros(degree + 1, complex)
+    target[lower + negative:lower + negative + len(source)] = source
+    near_flat = None
+    if (full_ja_scale is None) != (full_ja_error is None):
+        raise ValueError("full_ja_scale and full_ja_error must be supplied together")
+    if full_ja_scale is not None:
+        scale = finite_real(full_ja_scale, "full_ja_scale")
+        error = finite_real(full_ja_error, "full_ja_error")
+        if scale <= 1 or error < 0:
+            raise ValueError("full-JA evidence requires scale > 1 and error >= 0")
+        near_flat = (float(np.sum(abs(target))), scale, error)
+    angles, evidence = _solve(-1j * target, target, rho, tolerance, "laurent", str(norm_bound_qualification),
+                              max_fft=max_fft, max_bytes=max_bytes, near_flat=near_flat)
+    return LaurentQSPPhases(rotation_angles=angles, terminal_rx=-math.pi,
+                            negative_signals=negative, target_coefficients=tuple(source),
+                            minimum_power=lower, degree=degree, evidence=evidence)
+
+
 __all__ = [
-    "QSP_SOLVER_RESIDUAL_TOLERANCE",
-    "SymmetricQSPPhases",
-    "chebyshev_grid",
-    "chebyshev_norming_sup_bound",
-    "chebyshev_polynomial_sup_bound",
-    "evaluate_qsp_polynomial",
-    "solve_symmetric_qsp_phases",
-    "wx_phases_to_reflection",
+    "QSP_SOLVER_RESIDUAL_TOLERANCE", "WxQSPPhases", "LaurentQSPPhases",
+    "PhaseSynthesisEvidence", "chebyshev_grid", "chebyshev_norming_sup_bound",
+    "chebyshev_polynomial_sup_bound", "evaluate_qsp_polynomial",
+    "solve_wx_qsp_phases", "solve_laurent_qsp_phases", "wx_phases_to_reflection",
 ]

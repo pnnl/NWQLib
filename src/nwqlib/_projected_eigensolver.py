@@ -45,7 +45,8 @@ class _GeneralizedEigenResult:
         overlap_eigenvalues: Ascending eigenvalues of S before thresholding, shape (m,).
         kept_overlap_rank: r, the number of overlap eigenvalues above the cutoff.
         residual_norm: ||H c - E S c||_2 of the lowest pair.
-        generalized_eigenpair_backward_error: Dimensionless residual_norm/((||H||_F + |E| ||S||_F) ||c||).
+        generalized_eigenpair_backward_error: Dimensionless residual_norm/((||H||_F + |E| ||S||_F) ||c||),
+            or None when the denominator or the ratio is not a finite positive binary64 value.
         overlap_normalization_error: |c^dagger S c - 1| of the lowest vector with the supplied S.
         overlap_eigenvectors: Eigenvectors of S, shape (m, m), kept only on request, else None.
     """
@@ -57,59 +58,35 @@ class _GeneralizedEigenResult:
     overlap_eigenvalues: np.ndarray
     kept_overlap_rank: int
     residual_norm: float
-    generalized_eigenpair_backward_error: float
+    generalized_eigenpair_backward_error: float | None
     overlap_normalization_error: float
     overlap_eigenvectors: np.ndarray | None = field(default=None, repr=False)
 
 
 def _eigenpair_backward_error(residual_norm, hamiltonian_norm, overlap_matrix_norm, coefficient_norm, ground_energy):
-    """Return ``||Hc - ESc|| / ((||H||_F + |E| ||S||_F) ||c||)`` without overflow.
+    """Return ``||Hc - ESc|| / ((||H||_F + |E| ||S||_F) ||c||)``.
 
     This is the dimensionless ``projected_backward_error`` defined in the GCiM
-    guide's diagnostics table. The denominator is formed in logarithms because
-    ``|E| ||S||_F`` can overflow binary64 for large energy units even when the
-    ratio itself is representable.
+    guide's diagnostics table. A zero residual gives 0.0. For a nonzero
+    residual the estimate is unavailable if either the computed denominator
+    or the quotient is outside the positive finite binary64 range.
     """
     if residual_norm == 0.0:
         return 0.0
-    else:
-        log_hamiltonian_norm = (
-            math.log(hamiltonian_norm) if hamiltonian_norm > 0.0 else -math.inf
-        )
-        log_energy_overlap_norm = (
-            math.log(abs(ground_energy)) + math.log(overlap_matrix_norm)
-            if ground_energy != 0.0 and overlap_matrix_norm > 0.0
-            else -math.inf
-        )
-        log_denominator = float(
-            np.logaddexp(log_hamiltonian_norm, log_energy_overlap_norm)
-        ) + math.log(coefficient_norm)
-        if not math.isfinite(log_denominator):
-            raise RuntimeError("generalized-eigenpair backward-error scale is unavailable")
-        return math.exp(
-            math.log(residual_norm) - log_denominator
-        )
+    denominator = (hamiltonian_norm + abs(ground_energy) * overlap_matrix_norm) * coefficient_norm
+    if not (math.isfinite(denominator) and denominator > 0.0):
+        return None
+    value = residual_norm / denominator
+    return value if math.isfinite(value) and value > 0.0 else None
 
 
 def _hermitian_part(matrix: np.ndarray) -> np.ndarray:
-    """Average conjugate entries without overflowing or halving subnormals first."""
+    """Return ``(A + A^dagger) / 2``, rejecting a sum outside the binary64 range."""
 
-    return _safe_average(matrix, matrix.conj().T)
-
-
-def _safe_average(left: np.ndarray, right: np.ndarray) -> np.ndarray:
-    """Average finite components without overflowing or halving subnormals first."""
-
-    result = np.empty(left.shape, dtype=np.result_type(left, right, np.complex128))
-    for output, left_component, right_component in (
-        (result.real, left.real, right.real),
-        (result.imag, left.imag, right.imag),
-    ):
-        with np.errstate(over="ignore"):
-            np.add(left_component, right_component, out=output, dtype=output.dtype)
-        overflow = ~np.isfinite(output)
-        np.divide(output, 2.0, out=output, where=~overflow)
-        output[overflow] = left_component[overflow] / 2.0 + right_component[overflow] / 2.0
+    with np.errstate(over="ignore", invalid="ignore"):
+        result = 0.5 * (matrix + matrix.conj().T)
+    if not np.all(np.isfinite(result)):
+        raise ValueError("the sum used to form the Hermitian part exceeds the binary64 range")
     return result
 
 
@@ -149,26 +126,25 @@ def entrywise_gram_allowance(entry_errors):
 
     entry_errors contains finite nonnegative bounds e_ij on a Hermitian
     error E. Its spectral norm equals its spectral radius, bounded by the
-    induced infinity norm, so ||E||_2 <= max_i sum_j e_ij. Each binary64
-    entry is summed exactly and the largest sum is converted upward.
-    This adds no assumption of statistical independence. The caller is
-    responsible for the entry bounds, diagonal convention and completeness
-    checks.
+    induced infinity norm, so ||E||_2 <= max_i sum_j e_ij. Each row sum is
+    the least binary64 number at or above its exact value: ``math.fsum``
+    rounds the exact sum to nearest, and ``fsum`` of the row with that
+    result subtracted has the sign of the rounding residual, so the result
+    moves one step up exactly when it lies below the exact sum. A row sum
+    beyond the binary64 range gives inf. This adds no assumption of
+    statistical independence. The caller is responsible for the entry
+    bounds, diagonal convention and completeness checks.
     """
-    from fractions import Fraction
-
-    bound = max(
-        (sum((Fraction(float(value)) for value in row), Fraction(0))
-         for row in entry_errors),
-        default=Fraction(0),
-    )
-    try:
-        result = float(bound)
-    except OverflowError:
-        return math.inf
-    if math.isfinite(result) and Fraction(result) < bound:
-        result = math.nextafter(result, math.inf)
-    return result
+    bound = 0.0
+    for row in entry_errors:
+        values = [float(value) for value in row]
+        try:
+            total = math.fsum(values)
+            below = math.fsum([*values, -total]) > 0
+        except OverflowError:
+            return math.inf
+        bound = max(bound, math.nextafter(total, math.inf) if below else total)
+    return bound
 
 
 def _as_square_pencil(hamiltonian_matrix, overlap_matrix):
@@ -301,7 +277,8 @@ def _solve_projected_pencil(
     Raises:
         ValueError: If the matrices are not matching nonempty square matrices,
             or the cutoff, input tolerance or identity shift is outside its
-            domain.
+            domain, or the Hermitian part of H, S or the effective
+            Hamiltonian has an entry outside the binary64 range.
     """
 
     h_matrix, s_matrix = _as_square_pencil(hamiltonian_matrix, overlap_matrix)

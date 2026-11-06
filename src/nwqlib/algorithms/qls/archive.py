@@ -194,7 +194,7 @@ def save(method, plan, files):
     validate_selection(plan)
     native = plan._native
     data = dict(
-        format="qls/7",
+        format="qls/9",
         plan=plan.to_record(),
         problem=files.write_problem(plan.problem),
         output=files.write_output(plan.output),
@@ -223,7 +223,7 @@ def load(saved, files):
     """
     from .quantum import BaseEncoding, _program
 
-    if saved["format"] != "qls/7":
+    if saved["format"] != "qls/9":
         raise ValueError("unsupported QLS archive")
     problem = files.read_problem(saved["problem"])
     quantum = "encoded_operator" in saved

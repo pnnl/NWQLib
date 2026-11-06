@@ -6,9 +6,10 @@ limits before they run.
 
 from dataclasses import dataclass
 
+import numpy as np
 from scipy import sparse
 
-from .access import DEFAULT_INPUT_BYTES, ProductManifest, _check_bytes, _check_products
+from .access import ProductManifest, _check_bytes, _check_products
 from .inputs import OperatorInput, _matvec_requirements, _coalesced_input, _pauli_identity_bytes, ingest_sparse
 from ._fermion import _check, _count_product, _fermion_law, _coalesced_fermion
 from ._pauli import pauli_product_requirements
@@ -36,15 +37,15 @@ class FactorizedOperatorProduct:
     factors: tuple[OperatorInput, ...]
     manifest: ProductManifest
 
-    def __init__(self, factors, *, max_bytes=DEFAULT_INPUT_BYTES):
+    def __init__(self, factors, *, max_bytes=None):
         """Build the product from its factors, in order, without reading their data.
 
         Args:
             factors (tuple[OperatorInput, ...]): Nonempty tuple of
                 OperatorInput objects with one shared basis and dimension.
-            max_bytes (int): Limit on the bytes of the factor references and
-                dimension metadata. Default 10 GB (decimal,
-                `10_000_000_000`).
+            max_bytes (int | None): Limit on the bytes of the factor references and
+                dimension metadata. Default `None`, the physical
+                memory of this computer.
 
         Raises:
             ValueError: If `factors` is not a nonempty tuple, the bases
@@ -91,7 +92,7 @@ class FactorizedOperatorProduct:
         d = self.manifest.basis.dimension
         return d, 32 * d + sum(law[1] for law in laws), sum(law[2] for law in laws)
 
-    def matvec(self, vector, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000,
+    def matvec(self, vector, *, max_bytes=None, max_products=None,
                limit_name="max_products"):
         """Apply the product to a vector classically, rightmost factor first.
 
@@ -100,10 +101,10 @@ class FactorizedOperatorProduct:
 
         Args:
             vector (numpy.ndarray): float64 or complex128 vector of length D.
-            max_bytes (int): Byte limit. Default 10 GB (decimal,
-                `10_000_000_000`).
-            max_products (int): Limit on the total scalar products. Default
-                `1_000_000_000`.
+            max_bytes (int | None): Byte limit. Default `None`, the physical
+                memory of this computer.
+            max_products (int | None): Limit on the total scalar products.
+                Default `None`, no limit.
             limit_name (str): Name of the caller's option that supplies
                 `max_products`, used in the error message.
 
@@ -123,7 +124,7 @@ class FactorizedOperatorProduct:
                                     limit_name=limit_name)
         return current
 
-    def expansion_requirements(self, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000):
+    def expansion_requirements(self, *, max_bytes=None, max_products=None):
         """Check and return the size of `expand` as `(items, bytes, work)`, before any multiplication.
 
         For sparse factors, the first product `A*B` takes
@@ -136,10 +137,10 @@ class FactorizedOperatorProduct:
         `max_products` and the bytes against `max_bytes`.
 
         Args:
-            max_bytes (int): Byte limit. Default 10 GB (decimal,
-                `10_000_000_000`).
-            max_products (int): Limit on the scalar products of a sparse
-                expansion. Default `1_000_000_000`.
+            max_bytes (int | None): Byte limit. Default `None`, the physical
+                memory of this computer.
+            max_products (int | None): Limit on the scalar products of a sparse
+                expansion. Default `None`, no limit.
 
         Returns:
             sizes (tuple[int, int, int]): Items, bytes and work of the
@@ -163,7 +164,8 @@ class FactorizedOperatorProduct:
         # Admit metadata/index traversal before touching sparse storage or offsets.
         d = self.manifest.basis.dimension
         if sparse_factors:
-            _check_bytes(8 * d, max_bytes, "sparse row census")
+            # Two int64 count arrays of length d (_sparse_chain_requirements).
+            _check_bytes(16 * d, max_bytes, "sparse row census")
             return _sparse_chain_requirements(self.factors, d, max_bytes, max_products)
         q = d.bit_length() - 1
         _check_bytes(8 * len(self.factors) + (q + 8) // 8, max_bytes, "factor expansion metadata")
@@ -196,7 +198,7 @@ class FactorizedOperatorProduct:
         _check(max_bytes, law)
         return law
 
-    def expand(self, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000):
+    def expand(self, *, max_bytes=None, max_products=None):
         """Multiply the factors out into one operator of their shared representation.
 
         Pauli, ordered fermionic, and CSR or CSC factors can be expanded. The
@@ -207,10 +209,10 @@ class FactorizedOperatorProduct:
         and zeros removed.
 
         Args:
-            max_bytes (int): Byte limit. Default 10 GB (decimal,
-                `10_000_000_000`).
-            max_products (int): Limit on the scalar products of a sparse
-                expansion. Default `1_000_000_000`.
+            max_bytes (int | None): Byte limit. Default `None`, the physical
+                memory of this computer.
+            max_products (int | None): Limit on the scalar products of a sparse
+                expansion. Default `None`, no limit.
 
         Returns:
             operator (OperatorInput): The expanded operator.
@@ -245,6 +247,13 @@ def _sparse_layout(nnz, d):
     return 24 * nnz + 8 * (d + 1)
 
 
+def _axis_counts(matrix, compressed, d):
+    """Return int64 stored-entry counts per row (``compressed="csr"``) or per column (``"csc"``) of a CSR or CSC matrix."""
+    if matrix.format == compressed:
+        return np.diff(matrix.indptr).astype(np.int64, copy=False)
+    return np.bincount(matrix.indices, minlength=d).astype(np.int64, copy=False)
+
+
 def _sparse_chain_requirements(factors, d, max_bytes, max_products):
     """Check the size of a whole sparse product chain from row counts, before multiplying.
 
@@ -265,28 +274,23 @@ def _sparse_chain_requirements(factors, d, max_bytes, max_products):
     previous = factors[0]._data.nnz
     for step, factor in enumerate(factors[1:], start=1):
         right = factor._data
-        # CSC needs a row-count histogram, which the traversal work law covers.
-        row_counts = [0] * d
-        if right.format == "csr":
-            for row in range(d):
-                row_counts[row] = int(right.indptr[row + 1]) - int(right.indptr[row])
-        else:
-            for row in right.indices:
-                row_counts[int(row)] += 1
+        # Row counts of B: index-pointer differences for CSR, a histogram of
+        # the stored row indices for CSC, which the traversal work law covers.
+        row_counts = _axis_counts(right, "csr", d)
+        widest = int(row_counts.max(initial=0))
         if step == 1:
+            # Sum over stored A[i, k] of row_nnz(B, k): the number of stored
+            # entries of A in column k times the row count of B at k.
             left = factors[0]._data
-            candidates = 0
-            if left.format == "csr":
-                for k in left.indices:
-                    candidates += row_counts[int(k)]
-                    _check_products(products + candidates, max_products)
+            columns = _axis_counts(left, "csc", d)
+            if left.nnz * widest < 2**63:
+                candidates = int(columns @ row_counts)
             else:
-                for k in range(d):
-                    candidates += _count_product(int(left.indptr[k + 1]) - int(left.indptr[k]),
-                                                 row_counts[k], max_products - products)
-                    _check_products(products + candidates, max_products)
+                candidates = sum(int(a) * int(b) for a, b in zip(columns.tolist(), row_counts.tolist()))
         else:
-            candidates = _count_product(previous, max(row_counts, default=0), max_products - products)
+            # Each stored entry of the previous product meets at most the
+            # widest row of B. The count is a Python integer, exact at any size.
+            candidates = previous * widest
         products += candidates
         _check_products(products, max_products)
         upper = min(d * d, candidates)

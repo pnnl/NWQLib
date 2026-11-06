@@ -39,7 +39,7 @@
 
 using Json = nlohmann::json;
 using Index = std::uint64_t;
-// Request, result, failure packet, --describe and --phase-factor format.
+// Request, result, failure packet and --describe format.
 // nwqsim.py checks the same string; there is no reader for another format.
 static const char* const protocol = "nwqlib.nwqsim/3";
 namespace fs = std::filesystem;
@@ -752,21 +752,6 @@ int main(int argc, char** argv) {
                           {"basis_gates", {"u", "cx"}},
                           {"readouts", readouts}}.dump() << '\n';
         return 0;
-    }
-    if (argc == 3 && std::string(argv[1]) == "--phase-factor") {
-        try {
-            const double angle = real(Json::parse(argv[2]));
-            const auto factor = std::polar(1.0, angle);
-            if (!std::isfinite(factor.real()) || !std::isfinite(factor.imag())) {
-                throw std::runtime_error("nonfinite output phase factor");
-            }
-            std::cout << Json{{"format", protocol},
-                              {"phase_factor", {factor.real(), factor.imag()}}}.dump() << '\n';
-            return 0;
-        } catch (const std::exception& error) {
-            std::cerr << error.what() << '\n';
-            return 2;
-        }
     }
     if (argc != 4) {
         std::cerr << "usage: nwqlib-nwqsim INPUT OUTPUT MAX_INPUT_BYTES\n";

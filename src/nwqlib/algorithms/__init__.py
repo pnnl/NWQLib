@@ -44,7 +44,7 @@ _EXPORT_GROUPS = {
     "qpe": ("QPEAnalysis", "QPEVerification"),
     "lchs": ("LCHSAnalysis",),
     "expectation": ("ExpectationAnalysis",),
-    "protocol": ("Method", "AlgorithmDescriptor", "ApplicabilityError"),
+    "protocol": ("Method", "AlgorithmDescriptor", "ApplicabilityError", "ResourceLimitError"),
     "registry": (
         "Registration",
         "AlgorithmRegistry",

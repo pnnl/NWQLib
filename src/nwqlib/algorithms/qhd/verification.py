@@ -14,6 +14,7 @@ evidence. Work and bytes are checked against the limits of
 """
 
 from math import fsum
+from nwqlib._limits import exceeds, memory_limit
 from nwqlib.core.records import Float64, Unit
 from nwqlib.evidence.error_model import CheckDomain, CheckSpec, ErrorFrame, FramedFact
 from nwqlib.evidence.records import Evidence, Fact
@@ -59,6 +60,11 @@ def verification_checks(options, result):
     """
     plan = result.plan
     result.validate_plan(plan)
+    return _checks(plan, options)
+
+
+def _checks(plan, options):
+    """Return the CheckSpecs of ``verification_checks`` for a Plan already validated against its result."""
     _admit_product(plan, options)
     source, relations = _source(plan, options)
     fields = dict(claim_id=plan.output.content_id, source=source, options_id=options.content_id,
@@ -176,7 +182,8 @@ def _verify(plan, result, choice):
 
     if result.candidate is None:
         raise ValueError("verification requires an observed valid candidate")
-    checks = choice.verification_checks(result)
+    # verify has validated the result against this Plan.
+    checks = _checks(plan, choice)
     grid = _grid(plan)
     dimension = plan.reconstruction.restricted_dimension
     flavors = [
@@ -202,9 +209,9 @@ def _verify(plan, result, choice):
     fidelity_work, fidelity_bytes = sum(s[0] for s in sizes), sum(s[1] for s in sizes)
     chunk = None
     if grid_minimum:
-        node_limit = choice.max_work // dimension
+        node_limit = None if choice.max_work is None else choice.max_work // dimension
         nodes = node_count(plan.problem.objective, node_limit)
-        work_is_lower_bound = nodes > node_limit
+        work_is_lower_bound = exceeds(nodes, node_limit)
         work = dimension * (grid.num_variables + nodes + 12) + fidelity_work
         # The stored artifact and the restricted state stay live (B_held), and the fidelity
         # workspaces are added, not overlapped, with the grid phases. The one-hot ir_product
@@ -213,13 +220,13 @@ def _verify(plan, result, choice):
         held = fidelity_bytes + _held_state_bytes(plan, result)
         if "ir_product" in flavors and plan.method.encoding != "binary":
             held -= 16 * dimension
-        chunk, grid_bytes = _grid_minimum_bytes(grid.num_variables, grid.num_grid_points, nodes,
-                                                max_bytes=choice.max_bytes, held_bytes=held)
+        chunk, grid_bytes = _grid_minimum_bytes(grid.num_variables, grid.num_grid_points, nodes)
         data_bytes = held + grid_bytes
     else:
         work = dimension * (grid.num_variables + 8) + fidelity_work
         data_bytes = dimension * (64 + 8 * grid.num_variables) + fidelity_bytes
-    if work > choice.max_work or data_bytes > choice.max_bytes or (grid_minimum and chunk is None):
+    byte_limit = memory_limit(choice.max_bytes)
+    if exceeds(work, choice.max_work) or exceeds(data_bytes, byte_limit):
         work_requirement = f"at least {work}" if work_is_lower_bound else str(work)
         # The grid-minimum byte law grows with the node count, so a truncated count also bounds the bytes below.
         bytes_lower_bound = work_is_lower_bound and grid_minimum
@@ -232,15 +239,18 @@ def _verify(plan, result, choice):
                 "Increase QHDVerification.max_work to count further. "
                 "Using the displayed lower bound can still refuse"
             )
-        elif work > choice.max_work:
+        elif exceeds(work, choice.max_work):
             remedies.append(f"Set QHDVerification(max_work={work}) or larger to clear this work admission")
-        if data_bytes > choice.max_bytes and not bytes_lower_bound:
-            remedies.append(f"Set QHDVerification(max_bytes={data_bytes}) or larger to clear this byte admission")
+        if exceeds(data_bytes, byte_limit) and not bytes_lower_bound:
+            remedies.append(f"Set QHDVerification(max_bytes={data_bytes}) or larger to clear this byte admission"
+                            if choice.max_bytes is not None else
+                            f"A computer with at least {data_bytes} bytes of physical memory clears this byte admission")
         if len(choice.comparisons) > 1:
             remedies.append("Selecting fewer reference comparisons can reduce their charges")
         raise ValueError(
             f"QHD explicit verification requires {work_requirement} work units and {byte_requirement} bytes, "
-            f"with QHDVerification(max_work={choice.max_work}, max_bytes={choice.max_bytes}). "
+            f"with QHDVerification(max_work={choice.max_work}, max_bytes={choice.max_bytes})"
+            + ("" if choice.max_bytes is not None else f", the physical memory being {byte_limit} bytes") + ". "
             + ". ".join(remedies)
             + ". These limits belong to QHDVerification, not QHD"
         )
@@ -398,8 +408,8 @@ def _held_state_bytes(plan, result):
     return 16 * (entries + restricted)
 
 
-def _grid_minimum_bytes(d, k, nodes, *, max_bytes, held_bytes):
-    """Return ``(chunk, grid_bytes)`` of the grid-minimum reference table, or ``(None, minimum)`` when refused.
+def _grid_minimum_bytes(d, k, nodes):
+    """Return ``(chunk, grid_bytes)`` of the grid-minimum reference table.
 
     Grid-minimum verification counts the bytes of the original-expression
     evaluator and its bounded coordinate and selection slabs. Fidelity
@@ -440,21 +450,16 @@ def _grid_minimum_bytes(d, k, nodes, *, max_bytes, held_bytes):
     ``compiler.evaluate_support``), and the seven arrays of a success-mass
     selection slab, ``N_f + 2d + 16`` in all.
 
-    With the rate ``a = 8(N_f+2) + 8d + 96`` and
-    ``R = max_bytes - B_held - F``, the largest allowed slab is
-    ``b = min(D, R // a)`` when ``R >= a``, and the minimum total byte limit
-    for one-entry slabs is ``B_held + F + a``.
+    With the rate ``a = 8(N_f+2) + 8d + 96``, the slab is the fixed block
+    ``b = min(D, 2**16)`` (``compiler.support_chunk_size``), so the reference
+    minimum does not depend on ``max_bytes``, and ``grid_bytes = F + a b``.
     """
-    from .compiler import H0, OBJECT_HEADER_BYTES
+    from .compiler import H0, OBJECT_HEADER_BYTES, support_chunk_size
 
     dimension = k**d
     h_eval = H0 + OBJECT_HEADER_BYTES * (nodes + 2 * d + 16)
-    resident = 8 * d * k + 8 * dimension + h_eval
-    rate = 8 * (nodes + 2) + 8 * d + 96
-    if held_bytes + resident + rate > max_bytes:
-        return None, resident + rate
-    chunk = min(dimension, (max_bytes - held_bytes - resident) // rate)
-    return chunk, resident + rate * chunk
+    chunk = support_chunk_size(dimension)
+    return chunk, 8 * d * k + 8 * dimension + h_eval + (8 * (nodes + 2) + 8 * d + 96) * chunk
 
 
 def _observed_success_mass(plan, observations, table, minimum, tolerance):
@@ -492,7 +497,7 @@ def _reference_sizes(plan, grid, flavor):
 
     The binary ``ir_product`` reference evaluates QFT operations and
     computed diagonal phase arrays (``theory.binary_product_sizes``). The
-    one-hot ``ir_product`` reference applies each stored block directly
+    one-hot ``ir_product`` reference applies each derived block directly
     (``theory.onehot_product_sizes``), with the start vector's explicit
     payload ``24 D + 8 d K`` (``initial_state.restricted_state``) and the
     restricted stored state of 16D bytes, which stays live for the
@@ -518,11 +523,11 @@ def _reference_sizes(plan, grid, flavor):
         from .theory import onehot_product_sizes
 
         dimension, k = r.restricted_dimension, grid.num_grid_points
-        return onehot_product_sizes(dimension, k, r.steps, start_work=start,
+        return onehot_product_sizes(dimension, k, grid.num_variables, r.onehot, start_work=start,
                                     start_bytes=24 * dimension + 8 * grid.num_variables * k,
                                     held_bytes=16 * dimension)
     return restricted_sizes(
-        r.restricted_dimension, grid.num_variables, len(r.support_values), r.steps, flavor,
+        r.restricted_dimension, grid.num_variables, len(r.support_values), r.onehot, flavor,
         _generator_norms(flavor, method, grid, r.support_values, r.step_weights), start)
 
 

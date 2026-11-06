@@ -482,7 +482,10 @@ def unrecoverable(error, directory, *, end=False):
     preparation record, because it failed or was interrupted (``_prepared_execution._unbuilt``, raised by
     ``execute_static`` before any new submission and by ``_prepare_static_item`` for its own item). Their
     counted work stays spent, the Run repeats neither, and resume never gives a round or level a second Run.
-    The outer run therefore cannot pass this round or level. By default the error propagates instead of
+    The resume functions therefore cannot pass this round or level by themselves. A stopped preparation has
+    one way through, which the note names: ``Run.resume(rebuild_preparations=True)`` on the Run of that round
+    or level, after which the resume function continues from that Run. An uncertain attempt has none. By
+    default the error propagates instead of
     ending the run as ``inner_failed``. The outer record keeps its saved rounds and levels unchanged,
     while the Run keeps the step counted and records an interrupted attempt as uncertain, so a later
     resume can still use an original outcome that becomes retrievable, for example a job that the backend
@@ -509,8 +512,11 @@ def unrecoverable(error, directory, *, end=False):
     if end or not (isinstance(error, RunFailed) and error.status == "uncertain"
                    or isinstance(error, PreparationNotRebuilt)):
         return False
-    error.add_note(f"The durable run in {directory} keeps its committed rounds and levels. This Run cannot finish "
-                   "without new work, which resume never makes, so the run cannot continue past it. Its work "
+    way_on = ("Resume makes no new preparation. To prepare this one again, open the Run of this round or level "
+              "under that directory with load_run, call run.resume(rebuild_preparations=True), and resume again."
+              if isinstance(error, PreparationNotRebuilt) else
+              "This Run cannot finish without new work, which resume never makes, so the run cannot continue past it.")
+    error.add_note(f"The durable run in {directory} keeps its committed rounds and levels. {way_on} Its work "
                    "stays charged. After a completed round or level, resuming with end_at_unfinishable=True "
                    "ends the run here with inner_failed and keeps what has completed. Before any completed "
                    "outer work the error still propagates")

@@ -26,7 +26,43 @@ print(result.value)  # 1.5
 
 The Bell state has `<ZZ> = 1` and `<XX> = 1`, so the expectation of `ZZ + 0.5 XX` is 1.5. Without `shots`, `ExpectationMethod` evaluates the Pauli expectations without shot sampling, subject to numerical rounding. `solve(problem, method=ExpectationMethod(), shots=2000, seed=7)` measures them and also prints 1.5, because both terms are deterministic for this state.
 
-The circuit must have no classical bits, measurements or free parameters. Other inputs that take a state accept a circuit the same way, for example `Lanczos(initial_state=qc)` and the basis states of `FixedGCIM` ([accepted input forms](inputs.md)).
+The circuit must be an ordinary `QuantumCircuit` with no classical bits, measurements or free parameters. An object of a subclass, such as Qiskit's `QFT(3)`, raises a `TypeError`, and `QuantumCircuit(c.num_qubits).compose(c)` copies its gates and global phase into an ordinary circuit. Other inputs that take a state accept a circuit the same way, for example `Lanczos(initial_state=qc)` and the basis states of `FixedGCIM` ([accepted input forms](inputs.md)).
+
+### Gates to expand first {#gates-to-expand-first}
+
+NWQLib copies your circuit, so that later changes to your objects do not alter the computation, and it uses only the gate definitions the circuit already holds. Qiskit's standard gates and gates that hold a definition, such as the result of `to_gate()`, are copied directly. Some other library gates raise a `ValueError` that names the gate, for example `PauliEvolutionGate`, `PermutationGate`, `PauliGate`, and the gates that `qc.mcp` and a `qc.mcx` with three controls append. A subcircuit added with `qc.append(subcircuit, qubits)` raises one too, because Qiskit stores it as an `Instruction`, unless you append `subcircuit.to_gate()` instead. `qc.decompose()` replaces each gate and subcircuit by its definition and returns a circuit you can pass instead. When a definition holds another refused gate, as a `to_gate()` gate holding a `PauliEvolutionGate` does, use `qc.decompose(reps=2)`. A gate without a definition stays unchanged under `decompose`, and `UnitaryGate(Operator(gate))` holds its matrix.
+
+The reference for checking the result depends on that definition. For a circuit small enough to form its matrix, with `expanded` the circuit you pass, the norm of `Operator(expanded).data - Operator(qc).data` shows which of the two cases below applies. Subtract the matrices directly, because `Operator.equiv` ignores a global phase, and a global phase becomes a relative phase when a Method applies the circuit under a control. An exact definition, such as that of `qc.mcp`, keeps the action of the circuit, so your original circuit stays the reference:
+
+```python
+controlled = QuantumCircuit(3)
+controlled.h([0, 1, 2])
+controlled.mcp(0.7, [0, 1], 2)
+parity = SparsePauliOp.from_list([("ZZZ", 1.0), ("XXX", 0.5)])
+
+expanded = controlled.decompose()
+exact_definition = solve(Expectation(state=expanded, observable=parity), method=ExpectationMethod(), seed=7)
+print(exact_definition.value)  # 0.470605, as Statevector(controlled).expectation_value(parity) gives
+```
+
+An approximate definition changes the action, so two comparisons stay separate. The value NWQLib returns belongs to the decomposed circuit, so check it against that circuit. The difference between that circuit and the propagator you want is the approximation error of the synthesis you chose. With Qiskit 2.6.0, the definition of a `PauliEvolutionGate` is by default one first-order product-formula step, while `Statevector` applies the exact exponential to the gate itself. For noncommuting terms the two differ:
+
+```python
+from qiskit.circuit.library import PauliEvolutionGate
+from qiskit.quantum_info import Statevector
+
+generator = SparsePauliOp.from_list([("XX", 1.0), ("ZI", 0.5), ("IZ", 0.5)])
+evolved = qc.copy()
+evolved.append(PauliEvolutionGate(generator, time=0.3), [0, 1])
+
+expanded = evolved.decompose()
+approximate_definition = solve(Expectation(state=expanded, observable=H), method=ExpectationMethod(), seed=7)
+print(approximate_definition.value)  # 1.412668
+print(Statevector(expanded).expectation_value(H).real)  # 1.412668, its reference
+print(Statevector(evolved).expectation_value(H).real)  # 1.415272, the exact exponential
+```
+
+Here the expectation of the decomposed circuit lies about 2.6e-3 below the exact value, and the matrix of the decomposed gate differs from `scipy.linalg.expm(-0.3j * generator.to_matrix())` by about 0.088 in the spectral norm. Passing `synthesis=SuzukiTrotter(order=2, reps=8)` from `qiskit.synthesis` to `PauliEvolutionGate` gives a different definition, and the difference in this expectation falls to about 4.1e-5.
 
 ## Write a Method {#write-a-method}
 
@@ -206,7 +242,7 @@ The Problem and the output kind are ordinary Records. `nwqlib.plan` checks that 
 
 `analyze` receives the Run's data after every experiment has an observation. NWQLib refuses a Result whose Plan or observation content hash differs from the Run's, or that names a chunk (a part of the observations) the Run did not collect. `_summary_lines` on the Result supplies the first lines of `print(result)`.
 
-The Run uses `AerBackend()` when `prepare` receives no backend. Pass `backend=` for another backend, as [Choose a backend](backends.md) describes. `limits=ExecutionLimits(...)` from `nwqlib.execution` changes the Run's limits on circuits, shots and data, and its `max_simulation_qubits`, 20 by default, bounds the width that Aer accepts.
+The Run uses `AerBackend()` when `prepare` receives no backend. Pass `backend=` for another backend, as [Choose a backend](backends.md) describes. `limits=ExecutionLimits(...)` from `nwqlib.execution` changes the Run's limits on circuits, shots, data and simulator memory.
 
 <a id="beyond-counts"></a>
 
@@ -225,7 +261,7 @@ Leave out every hook your Method does not need.
 | `validate_plan(plan)` and `validate_data(data)` on your Result class | When your Result's fields must follow from the Plan or the data beyond their content hashes, and always for `check-method`, which requires `validate_plan` to reject the Result that your case's `invalid_result` returns | [Add a method](algorithm_protocol.md#optional-hooks) |
 | A `Registration` record | Listing your Method and finding it by name | [Register a Method](algorithm_protocol.md#explicit-trusted-registration) |
 | A `case()` factory returning a `MethodCase` | `python -m nwqlib check-method`, which runs the case with its independent expected answer against your Method | [Check a Method](algorithm_protocol.md#author-cases-and-their-limits) |
-| `reduction_allowance` and a registered reducer | A Plan that reduces saved readout data, such as saved simulator states, during data collection | [Add a method](algorithm_protocol.md#reduction-hooks) |
+| A registered reducer, and `reduction_allowance` for an explicit work limit | A Plan that reduces saved readout data, such as saved simulator states, during data collection | [Add a method](algorithm_protocol.md#reduction-hooks) |
 
 The test suite's reference Hadamard Method, a fuller version of the one in the next section, [`tests/_hadamard_method.py`](https://github.com/pnnl/NWQLib/blob/main/tests/_hadamard_method.py) with its registration in [`tests/_hadamard_method_metadata.py`](https://github.com/pnnl/NWQLib/blob/main/tests/_hadamard_method_metadata.py), shows the error model, `_summary_lines`, the author case and the registration. These files are in the source repository and are not installed with the package.
 

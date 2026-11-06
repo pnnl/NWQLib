@@ -240,6 +240,144 @@ def test_cancellation_calls_original_pending_job_and_does_not_refund(tmp_path):
     run.close()
 
 
+def test_cancellation_reaches_every_job_and_sends_a_failed_request_again(tmp_path):
+    """The first of two jobs refuses its first cancellation request.
+
+    The second job still receives its request, each job is read after its request, the first error is
+    raised after both, and only the failed submission's flag returns to unset. A second call sends the
+    failed request once more and repeats no delivered one, and the Run's own request stays throughout.
+    """
+    from nwqlib._prepared_execution import submit_detached
+
+    class Refusing(InjectedBackend):
+        refusals: ClassVar[list] = []
+
+        def launch(self, natives, *, submission_id, run):
+            return JobLocator(provider=self.kind, job_id="job-" + submission_id)
+
+        def cancel(self, locator, *, run):
+            self.calls.append(("cancel", locator.job_id))
+            if self.refusals:
+                raise self.refusals.pop()
+
+    plan = selected()
+    with Run(plan, backend=Refusing(), directory=tmp_path / "two") as run:
+        handle = prepare_experiment(plan.resolve("counts"), run=run)
+        first, second = submit_detached((handle,), run=run), submit_detached((handle,), run=run)
+        failure = RuntimeError("scheduler is down")
+        Refusing.refusals.append(failure)
+        with pytest.raises(RuntimeError) as raised:
+            run.cancel(reason="stop")
+        assert raised.value is failure and run.cancel_requested == "stop"
+        sent = [job for name, job in InjectedBackend.calls if name == "cancel"]
+        assert sent == [first.locator.job_id, second.locator.job_id]
+        assert [call for call in InjectedBackend.calls if call[0] in {"cancel", "refresh"}] == [
+            ("cancel", first.locator.job_id), ("refresh", first.locator.job_id),
+            ("cancel", second.locator.job_id), ("refresh", second.locator.job_id)]
+        saved = {item.locator.job_id: item for item in run.trace.submissions}
+        assert saved[first.locator.job_id].cancel_requested is None
+        assert saved[second.locator.job_id].cancel_requested == "stop"
+        assert "scheduler is down" in saved[first.locator.job_id].refresh_failure
+        run.cancel(reason="stop")
+        assert [job for name, job in InjectedBackend.calls if name == "cancel"] == [*sent, first.locator.job_id]
+        run.cancel(reason="stop")
+        assert [job for name, job in InjectedBackend.calls if name == "cancel"] == [*sent, first.locator.job_id]
+        assert all(item.cancel_requested == "stop" for item in run.trace.submissions)
+        assert run.exposure["reserved"]["jobs"] == 2
+
+
+def test_a_refused_request_and_a_failed_read_of_one_job_both_stay_observable(tmp_path):
+    """The request failed first, so its error is the one raised. The read's error stays on it and in the saved text.
+
+    The job keeps its locator and counted work, and the next good pass sends the request and clears the text.
+    """
+    from nwqlib._prepared_execution import submit_detached
+
+    refused, unread = RuntimeError("scheduler refused"), TimeoutError("status read timed out")
+
+    class Failing(InjectedBackend):
+        failing: ClassVar[bool] = True
+
+        def cancel(self, locator, *, run):
+            self.calls.append(("cancel", locator.job_id))
+            if self.failing:
+                raise refused
+
+        def refresh(self, locator, natives, *, run):
+            if self.failing:
+                raise unread
+            return super().refresh(locator, natives, run=run)
+
+    plan = selected()
+    with Run(plan, backend=Failing(), directory=tmp_path / "both") as run:
+        submitted = submit_detached((prepare_experiment(plan.resolve("counts"), run=run),), run=run)
+        with pytest.raises(RuntimeError) as raised:
+            run.cancel(reason="stop")
+        assert raised.value is refused and raised.value.__context__ is unread
+        assert any("TimeoutError: status read timed out" in note for note in raised.value.__notes__)
+        (saved,) = run.trace.submissions
+        assert "RuntimeError: scheduler refused" in saved.refresh_failure
+        assert "TimeoutError: status read timed out" in saved.refresh_failure
+        assert saved.cancel_requested is None and saved.locator == submitted.locator
+        assert run.exposure["reserved"]["jobs"] == 1
+        Failing.failing = False
+        run.cancel(reason="stop")
+        (saved,) = run.trace.submissions
+        assert saved.refresh_failure is None and saved.cancel_requested == "stop"
+        assert [name for name, _ in InjectedBackend.calls].count("cancel") == 2
+
+
+@pytest.mark.parametrize("interruption", [KeyboardInterrupt(), TimeoutError(), KeyboardInterrupt("during launch")])
+def test_an_error_during_launch_stays_itself_with_a_saved_failure_text(tmp_path, monkeypatch, interruption):
+    """An exception without text must reach the caller as itself, while its attempt stays uncertain and counted."""
+    from nwqlib._prepared_execution import submit_detached
+
+    def launch(self, natives, *, submission_id, run):
+        raise interruption
+
+    monkeypatch.setattr(InjectedBackend, "launch", launch)
+    plan = selected()
+    with Run(plan, backend=InjectedBackend(), directory=tmp_path / "interrupted") as run:
+        handle = prepare_experiment(plan.resolve("counts"), run=run)
+        with pytest.raises(type(interruption)) as raised:
+            submit_detached((handle,), run=run)
+        assert raised.value is interruption
+        (submission,), (event,) = run.trace.submissions, run.trace.events
+        assert submission.status == event.status == "uncertain"
+        assert submission.failure.startswith(type(interruption).__name__) and event.failure == submission.failure
+        assert run.exposure["uncertain"]["shots"] == 7
+
+
+def test_a_reopened_aer_failure_reports_what_its_call_raised(tmp_path, monkeypatch):
+    """Reopening replaces the submission's text with the reopening's own, and the recovery error still names the original."""
+    from nwqlib.backends import AerBackend
+    from nwqlib.execution import RunFailed
+    from nwqlib.scientist import load_run
+
+    calls = []
+
+    def fail(self, native, *, submission_id, run):
+        calls.append(submission_id)
+        raise RuntimeError("Aer: the original reason")
+
+    monkeypatch.setattr(AerBackend, "submit", fail)
+    path = tmp_path / "aer"
+    with Run(selected(), backend=AerBackend(), directory=path) as run:
+        with pytest.raises(RuntimeError, match="the original reason"):
+            run.resume()
+    with load_run(path, backend=AerBackend(), method=CountsMethod) as run:
+        assert "reopen" in run.trace.submissions[0].failure
+        with pytest.raises(RunFailed) as stopped:
+            run.wait(timeout=0)
+        assert stopped.value.stage == "recovery" and "the original reason" in stopped.value.failure
+        # A rebuild request does not reach an attempt whose outcome is uncertain: it keeps its identity,
+        # nothing is prepared or sent again, and the same recovery error follows.
+        attempt, preparations = stopped.value.attempt, run.trace.preparations
+        with pytest.raises(RunFailed) as again:
+            run.resume(rebuild_preparations=True)
+        assert again.value.attempt == attempt and run.trace.preparations == preparations and len(calls) == 1
+
+
 def test_checkpoint_writes_only_changed_fields_and_restores_the_whole_state(tmp_path, monkeypatch):
     """A step that changes one small field neither re-encodes nor rewrites a large one."""
     import json

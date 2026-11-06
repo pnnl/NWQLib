@@ -37,20 +37,15 @@ compute the scalar Beta quantiles of the ``beta`` method.
 """
 
 from itertools import product
-from math import isfinite, log, nextafter, sqrt
+from math import exp, isfinite, log, nextafter, sqrt
 from typing import Annotated, Literal
 
 from pydantic import Field, StrictBool, model_validator
 
-from nwqlib.core.records import ContentID, Nonnegative, Rational, Real, Record, Source, Text
+from nwqlib.core.records import ContentID, Nonnegative, Rational, Real, Record, Source, Text, storable_integer
 from nwqlib.operators.access import Count
-from ._work import DEFAULT_MAX_INTEGER_BITS, ExactArithmetic
+from ._work import exact
 
-
-# Binary64 exactly represents every integer through 2**53. Reserve one endpoint
-# for n+1 in the time-uniform schedule and keep all posterior count inputs exact.
-MAX_BINARY_COUNT = (1 << 53) - 1
-BinaryCount = Annotated[Count, Field(le=MAX_BINARY_COUNT)]
 
 # Largest Beta shape total a+b whose equal-tail interval is published. The
 # endpoint error of SciPy's betaincinv and betainccinv grows about in
@@ -174,8 +169,9 @@ class BinaryReadoutMitigation(Record):
     not verify. Mitigation excludes Beta inference.
 
     Attributes:
-        calibration_shots: Required. Positive number of shots, at most
-            `2**53 - 1`, of each zero and each one calibration circuit.
+        calibration_shots: Required. Positive number of shots of each zero
+            and each one calibration circuit. `solve` refuses a number above
+            `2**63 - 1`, the shots one measurement can request.
         minimum_contrast: Default `0.05`, in (0, 1]. Lower limit on
             `abs(a) = abs(z0 - z1)/2`. Below it the correction, and therefore
             the result's `value`, is unavailable. A negative contrast of
@@ -184,7 +180,7 @@ class BinaryReadoutMitigation(Record):
             ([Engineering constants](../../ENGINEERING_CONSTANTS.md#binary-inference-representation)).
     """
 
-    calibration_shots: Annotated[BinaryCount, Field(gt=0)]
+    calibration_shots: Annotated[Count, Field(gt=0)]
     minimum_contrast: Annotated[Real, Field(gt=0, le=1)] = 0.05
 
 
@@ -218,8 +214,8 @@ class BinaryPopulation(Record):
     """
 
     name: Text
-    zeros: BinaryCount
-    ones: BinaryCount
+    zeros: Count
+    ones: Count
     source_ids: tuple[ContentID, ...]
     observation_ids: tuple[ContentID, ...]
     reused_observation_ids: tuple[ContentID, ...] = ()
@@ -227,8 +223,6 @@ class BinaryPopulation(Record):
 
     @model_validator(mode="after")
     def _population(self):
-        if self.zeros + self.ones > MAX_BINARY_COUNT:
-            raise ValueError("binary inference accumulated count exceeds its exact binary64 integer domain")
         if (len(self.source_ids) != len(self.observation_ids)
                 or len(set(self.source_ids)) != len(self.source_ids)
                 or len(set(self.observation_ids)) != len(self.observation_ids)
@@ -430,7 +424,7 @@ def _interval(options, family_size, *, reason, assumptions, bounds=None, empty=F
 
 
 def infer_binary(population, *, options, family_size, fixed_time, fixed_time_reason,
-                 applicability_reason, max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
+                 applicability_reason):
     """Compute the estimate and interval of one finite population from its counts.
 
     No measurement is taken and no count is recomputed. fixed_time and
@@ -457,7 +451,6 @@ def infer_binary(population, *, options, family_size, fixed_time, fixed_time_rea
         fixed_time_reason: Why fixed_time holds or fails.
         applicability_reason: Reason the interval is unavailable for this
             population, such as missing preparation records, or None.
-        max_integer_bits: Integer width limit of the exact rational arithmetic.
 
     Returns:
         BinaryEstimate with the raw mean (n0-n1)/n, the exact sample-mean
@@ -467,20 +460,22 @@ def infer_binary(population, *, options, family_size, fixed_time, fixed_time_rea
     """
     if type(population) is not BinaryPopulation or type(options) is not BinaryInferenceOptions:
         raise TypeError("binary inference requires concrete population and options records")
-    if type(family_size) is not int or not 1 <= family_size <= MAX_BINARY_COUNT:
-        raise ValueError("binary inference requires a finite predeclared family size")
-    arithmetic = ExactArithmetic(max_integer_bits=max_integer_bits)
+    if type(family_size) is not int or family_size < 1:
+        raise ValueError("binary inference requires a positive predeclared family size")
     n = population.zeros + population.ones
     mean = point = posterior_variance = variance = interval = None
     unavailable = []
     if n:
-        raw = arithmetic.divide(arithmetic.fraction(population.zeros - population.ones), arithmetic.fraction(n))
+        raw = exact(population.zeros - population.ones) / exact(n)
         mean = point = float(raw)
         if n > 1:
-            numerator = arithmetic.integer_product(arithmetic.integer_product(4, population.zeros), population.ones)
-            denominator = arithmetic.integer_product(arithmetic.integer_product(n, n), n - 1)
-            v = arithmetic.divide(arithmetic.fraction(numerator), arithmetic.fraction(denominator))
-            variance = Rational(numerator=v.numerator, denominator=v.denominator)
+            numerator = 4 * population.zeros * population.ones
+            denominator = n * n * (n - 1)
+            v = exact(numerator) / exact(denominator)
+            if storable_integer(v.numerator) and storable_integer(v.denominator):
+                variance = Rational(numerator=v.numerator, denominator=v.denominator)
+            else:
+                unavailable.append("exact sample-mean variance has integers beyond what a saved record holds")
     else:
         unavailable.append("no nonempty observed population")
     if options.method != "point":
@@ -500,7 +495,9 @@ def infer_binary(population, *, options, family_size, fixed_time, fixed_time_rea
             reason = "joint Beta family needs the explicitly selected independent-population/product-prior model"
         # alpha=delta/F for delta=failure_probability and F predeclared
         # settings, so all F intervals hold jointly with probability >=1-delta.
-        alpha = options.failure_probability / family_size
+        # The exact quotient is rounded once, so a family beyond binary64 gives
+        # its subnormal or zero alpha instead of overflowing.
+        alpha = float(exact(options.failure_probability) / family_size)
         if alpha == 0:
             reason = "family error probability is unrepresentable in binary64"
         if reason is not None:
@@ -517,7 +514,11 @@ def infer_binary(population, *, options, family_size, fixed_time, fixed_time_rea
             # alpha/2 above 2**-54 (about 5.6e-17). That is the tail range of
             # the endpoint accuracy measurement behind MAX_BETA_SHAPE_TOTAL,
             # whose smallest tail is 6e-17.
-            a, b = options.prior_alpha + population.zeros, options.prior_beta + population.ones
+            try:
+                a, b = options.prior_alpha + population.zeros, options.prior_beta + population.ones
+            except OverflowError:
+                # A count beyond binary64 cannot enter the posterior shapes.
+                a = b = float("inf")
             total = a + b
             tail = alpha / 2
             represented = (isfinite(total) and total > 0 and total != a and total != b and 0 < tail < 1 - tail < 1
@@ -569,8 +570,20 @@ def infer_binary(population, *, options, family_size, fixed_time, fixed_time_rea
             logarithm = log(2.0) - log(alpha)
             if options.method == "anytime_hoeffding":
                 logarithm += log(n) + log(n + 1)
-            radius = sqrt(2 * logarithm / n)
+            try:
+                radius = sqrt(2 * logarithm / n)
+            except OverflowError:
+                # n beyond binary64: the same radius from logarithms, which accept any integer.
+                radius = exp((log(2 * logarithm) - log(n)) / 2)
             lower, upper = max(-1.0, mean - radius), min(1.0, mean + radius)
+            if mean - radius == mean or mean + radius == mean:
+                # The radius is below the resolution of the mean, or underflows to
+                # zero, which no n up to 2**53 reaches. The exact endpoints, with the
+                # radius at least the smallest subnormal, are rounded outward so that
+                # the interval keeps a positive width.
+                bound = exact(max(radius, nextafter(0.0, 1.0)))
+                lower = max(-1.0, _float(raw - bound, side="lower"))
+                upper = min(1.0, _float(raw + bound, side="upper"))
             interval = _interval(options, family_size, assumptions=assumptions,
                 reason=("Hoeffding endpoint for the prescribed complete acquisition; intersection with [-1,1]"
                     if options.method == "hoeffding" else
@@ -581,7 +594,7 @@ def infer_binary(population, *, options, family_size, fixed_time, fixed_time_rea
         interval=interval, unavailable=tuple(unavailable))
 
 
-def _float(value, arithmetic, *, side=None):
+def _float(value, *, side=None):
     """Convert an exact scalar to binary64, or return None when it overflows or a nonzero value rounds to zero.
 
     With ``side="lower"`` or ``side="upper"`` the result is rounded outward
@@ -594,15 +607,14 @@ def _float(value, arithmetic, *, side=None):
         return None
     if not isfinite(result) or (result == 0 and value != 0):
         return None
-    if side == "lower" and not arithmetic.le(arithmetic.fraction(result), value):
+    if side == "lower" and not (exact(result) <= value):
         result = nextafter(result, float("-inf"))
-    elif side == "upper" and not arithmetic.le(value, arithmetic.fraction(result)):
+    elif side == "upper" and not (value <= exact(result)):
         result = nextafter(result, float("inf"))
     return result if isfinite(result) else None
 
 
-def correct_binary(science, zero, one, *, options, inference, applicability_reason,
-                   max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
+def correct_binary(science, zero, one, *, options, inference, applicability_reason):
     """Correct one mean and propagate the joint rectangle of its three supplied intervals.
 
     Model. A stationary single-bit readout channel maps a true +/-1 mean mu
@@ -631,7 +643,6 @@ def correct_binary(science, zero, one, *, options, inference, applicability_reas
         options: BinaryReadoutMitigation with the minimum contrast.
         inference: BinaryInferenceOptions that produced the three estimates.
         applicability_reason: Reason correction is unavailable, or None.
-        max_integer_bits: Integer width limit of the exact rational arithmetic.
 
     Returns:
         BinaryCorrection with the contrast a, offset b, corrected point mu,
@@ -655,7 +666,6 @@ def correct_binary(science, zero, one, *, options, inference, applicability_reas
         compatible = compatible and len({interval.family_size for interval in intervals}) == 1
     if not compatible:
         raise ValueError("binary correction inference intervals differ in kind, probability or family")
-    arithmetic = ExactArithmetic(max_integer_bits=max_integer_bits)
     assumptions = (
         "same stationary affine readout channel transfers from zero/one calibration to the science pivot",
         "calibration preparation and spectator/gate effects are unverified; fit bias is not removed by sampling intervals",
@@ -667,19 +677,19 @@ def correct_binary(science, zero, one, *, options, inference, applicability_reas
     missing = any(value.raw_mean is None for value in (science, zero, one))
     reason = applicability_reason or ("missing nonempty science or calibration population" if missing else None)
     if not missing:
-        z, z0, z1 = (arithmetic.fraction(value.raw_mean) for value in (science, zero, one))
-        d = arithmetic.subtract(z0, z1)
-        a = arithmetic.divide(d, arithmetic.fraction(2))
-        b = arithmetic.divide(arithmetic.add(z0, z1), arithmetic.fraction(2))
-        contrast, offset = _float(a, arithmetic), _float(b, arithmetic)
-        if not arithmetic.le(arithmetic.fraction(options.minimum_contrast), arithmetic.absolute(a)):
+        z, z0, z1 = (exact(value.raw_mean) for value in (science, zero, one))
+        d = z0 - z1
+        a = d / exact(2)
+        b = (z0 + z1) / exact(2)
+        contrast, offset = _float(a), _float(b)
+        if not (exact(options.minimum_contrast) <= abs(a)):
             reason = reason or "absolute calibration contrast is below the selected minimum"
         if reason is None:
-            mu = arithmetic.divide(arithmetic.subtract(z, b), a)
-            jacobian = (arithmetic.divide(arithmetic.fraction(2), d),
-                arithmetic.divide(-arithmetic.add(arithmetic.fraction(1), mu), d),
-                arithmetic.divide(arithmetic.subtract(mu, arithmetic.fraction(1)), d))
-            values = tuple(_float(value, arithmetic) for value in (mu, *jacobian))
+            mu = (z - b) / a
+            jacobian = (exact(2) / d,
+                -(exact(1) + mu) / d,
+                (mu - exact(1)) / d)
+            values = tuple(_float(value) for value in (mu, *jacobian))
             if any(value is None for value in values):
                 reason = "affine corrected point or Jacobian is unrepresentable in binary64"
             else:
@@ -694,25 +704,25 @@ def correct_binary(science, zero, one, *, options, inference, applicability_reas
         if any(value is None or value.status != "conditional" for value in box):
             interval_reason = interval_reason or "selected science/calibration joint rectangle is unavailable"
         if interval_reason is None:
-            bounds = tuple((arithmetic.fraction(value.lower), arithmetic.fraction(value.upper)) for value in box)
+            bounds = tuple((exact(value.lower), exact(value.upper)) for value in box)
             # The union bound makes the three intervals hold jointly, so on that
             # event d=z0-z1 lies in [z0_low-z1_high, z0_high-z1_low].
-            dlow = arithmetic.subtract(bounds[1][0], bounds[2][1])
-            dhigh = arithmetic.subtract(bounds[1][1], bounds[2][0])
+            dlow = bounds[1][0] - bounds[2][1]
+            dhigh = bounds[1][1] - bounds[2][0]
             if dlow <= 0 <= dhigh:
                 interval_reason = "joint calibration denominator interval contains zero"
             else:
                 corners = []
                 for z, z0, z1 in product(*bounds):
-                    numerator = arithmetic.subtract(arithmetic.subtract(arithmetic.multiply(2, z), z0), z1)
-                    corners.append(arithmetic.divide(numerator, arithmetic.subtract(z0, z1)))
+                    numerator = 2 * z - z0 - z1
+                    corners.append(numerator / (z0 - z1))
                 low = high = corners[0]
                 for corner in corners[1:]:
-                    if arithmetic.le(corner, low):
+                    if corner <= low:
                         low = corner
-                    if arithmetic.le(high, corner):
+                    if high <= corner:
                         high = corner
-                lo, hi = _float(low, arithmetic, side="lower"), _float(high, arithmetic, side="upper")
+                lo, hi = _float(low, side="lower"), _float(high, side="upper")
                 if lo is None or hi is None:
                     interval_reason = "joint calibration interval image is unrepresentable in binary64"
                 else:

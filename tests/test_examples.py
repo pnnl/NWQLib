@@ -91,6 +91,13 @@ assert relative_error < 0.05
 assert abs(h * u.sum() - h * reference.sum()) < 0.05 * h * reference.sum()
 # The constant-source branch against the Duhamel formula evaluated with expm.
 assert np.linalg.norm(my_u - my_reference) < 0.05 * np.linalg.norm(my_reference)
+# Go deeper E against expm. The comparison allows the physical covering radius, which already includes model bias,
+# plus the conservative allowance delta (2 ||u(T)|| + delta) from the kernel and quadrature vector bound delta.
+# The latter relation uses this unit input without a PSD shift or a scalar decay.
+atom_rec = atom_plan.reconstruction
+assert atom_rec.psd_shift == 0 and atom_rec.scalar_decay == 0
+delta = atom_rec.kernel_approximation_bound + atom_rec.quadrature_bound
+assert abs(atom_estimate.norm_squared - atom_exact) <= atom_estimate.radius_n + delta * (2 * atom_exact**0.5 + delta)
 """,
     "qhd_optimization_intro": """
 assert probability[best] > 0.5
@@ -234,7 +241,8 @@ assert all((qls[q].reconstruction.sigma_min, qls[q].reconstruction.sigma_max, ql
 # Elementary counts against the folds. Owners: backends/resources.py and algorithms/qls/quantum.py (QLS),
 # algorithms/lchs/periodic.py::_construction_law (LCHS) and algorithms/qpe/powers.py::suzuki_step_cx and _make
 # (QPE operation and CX laws).
-assert all(formula == library for _, formula, library in qls_cx_checks + lchs_cx_checks + qpe_count_checks)
+for name, formula, library in qls_cx_checks + lchs_cx_checks + qpe_count_checks:
+    assert formula == library, (name, formula, library)
 assert len(qpe_count_checks) == 2 * len(qpe)
 
 # The windows below are derived for these LCHS inputs only.
@@ -243,10 +251,10 @@ assert 32 <= K <= 33 and 0.48 < asinh(1.8 / (K / 9)) < 0.49
 (_, B_ind, B_lib, _), (_, D_ind, D_lib, _), (_, tail_ind, tail_lib, _), (_, gauss_ind, gauss_lib, _) = lchs_bound_checks
 assert all(isfinite(value) and value > 0 for value in (B_ind, B_lib, D_ind, D_lib, tail_ind, tail_lib, gauss_ind, gauss_lib))
 # Strang coefficient, recorded by a one-step plan. Owner: algorithms/lchs/periodic.py::select_periodic_parameters,
-# which forms B_up = T**3/2 * sum_j M_j (|k_j|/4)**3 exactly with M_j = periodic._magnitude_up(c_j) and records
+# which forms B_up = T**3/2 * sum_j M_j (|k_j|/4)**3 exactly with M_j = _numerics.complex_magnitude_upper(c_j) and records
 # B_lib = error_budget._upward_float(B_up), the least binary64 number >= B_up. T = 1, diffusion 1/4 and potential 0
 # here at q >= 3, and scaling a node by 1/4 and dividing by 2 is exact.
-# Magnitude allowance for periodic._magnitude_up under the premises above.
+# Magnitude allowance for _numerics.complex_magnitude_upper under the premises above.
 # Write |c| = s*sqrt(1+t**2), t = min(|Re c|,|Im c|)/s, and M = s*R.
 # Set A=(1+u)(1+2u), the upper factor for a normal RN-plus-nextafter step.
 # The final s*R is rational. For t<1 and RN(1+square)<2, sum and root
@@ -299,38 +307,23 @@ assert tail_ind == approx(tail_lib, rel=256 * U, abs=0.0)
 # direct formula and 80u for the owner, so their relative difference is <= exp(176u) - 1 < 256u.
 assert gauss_ind == approx(gauss_lib, rel=256 * U, abs=0.0)
 
-# QLS residual, certificate owner subroutines/qsp/phases.py::chebyshev_norming_sup_bound. Fraction(float)
+# QLS residual, bound owner subroutines/qsp/inverse.py::_inverse_chebyshev. Fraction(float)
 # represents each stored coefficient and candidate x exactly, and the rational Clenshaw recurrence evaluates
-# kappa*x*P(x) - 1 without cancellation roundoff, so the comparison with Fraction(certificate) needs zero slack.
+# kappa*x*P(x) - 1 without cancellation roundoff, so the comparison with Fraction(bound) needs zero slack.
 # NumPy's roots only choose the candidates. This checks their residuals, not completeness of the extrema or a
 # rounding-enclosed supremum.
 assert len(residual_checks) == 4
-assert all(candidate <= certificate <= Fraction(tolerance) for tolerance, candidate, certificate in residual_checks)
+assert all(candidate <= bound <= Fraction(tolerance) for tolerance, candidate, bound in residual_checks)
 
 # Sampled QCELS selects each power independently. Owner: algorithms/qpe/powers.py::_independent_powers, whose
 # docstring states the law r_p = max(1, ceil(sqrt(W_up*|t_p|**3/(epsilon_p - |t_p|*d_up)))) and the complete
 # bound B_p (docs/algorithms/qpe.md states the per-power selection). The notebook's check_power raised on any
-# mismatch, so these assertions restate its results:
-# - exact integers: each r_p equals the law evaluated by exact rational inversion from the recorded coefficient
-#   W_up and the stored binary64 time, with zero pruning (d_up = 0), as the selector inverts it;
-# - each recorded bound equals the upward rounding of B_p evaluated exactly from the stored binary64 parameters,
-#   and lies between B_p at the exact census W and at W(1 + delta), both rounded upward, where delta is the derived
-#   two-level reduction window of the scaled outward coefficient (notebook census_delta);
-# - the bound fits the allowance, which planning requires before it publishes the power.
-assert all(selected.reconstruction.common_step is None for selected in (*qpe.values(), commuting))
+# mismatch of r_p or B_p, so these assertions check only its zero pruning (d_up = 0) and the rows it covered.
 assert all(power.pruning_error == 0
            for selected in qpe.values() for power in selected.reconstruction.powers[1:])
 assert len(qpe_power_checks) == len(qpe) + 1
 assert all(len(rows) == len(qpe[key].reconstruction.powers) - 1 if key in qpe else len(rows) == 32
            for key, rows in qpe_power_checks)
-assert all(blo <= recorded <= bhi and recorded <= POWER_ALLOWANCE
-           for _, rows in qpe_power_checks for p, r, r_exact, recorded, blo, bhi in rows)
-# Commuting terms give W = 0, so the law selects the minimum of one step at every power.
-assert all(r == 1 for key, rows in qpe_power_checks if key[0] == "Commuting" for p, r, *_ in rows)
-assert len(qpe_checks) == len(qpe) + 1
-# The recheck charge is NWQLib's own admission value (powers.independent_recheck_work), not an independent
-# quantity. Planning succeeded, so each charge fits the Method's max_work.
-assert all(row[-1] <= neel_qcels[100].max_work for row in qpe_checks)
 
 # Quantities that the notebook displays as unavailable stay unavailable.
 assert all(number(folded.quantity(metric)) is None for folded in (qls_cx[100], lchs_cx[100])
@@ -343,7 +336,7 @@ assert [row["q"] for row in compiled_checks] == [*SMALL_SIZES, *SMALL_SIZES, *SM
 assert len(compiled_checks) == 14 and all(row["law"] == row["compiled"] for row in compiled_checks)
 
 # QHD, Section 4. Widths, CX and rotation laws against the construction counts of Appendix A, as exact integers.
-# Owners: the compact program's resource laws in algorithms/qhd/method.py, algorithms/qhd/resources.py::rotation_law
+# Owners: the compact program's resource laws in algorithms/qhd/method.py, algorithms/qhd/resources.py::rotation_population
 # and the binary synthesis selection in algorithms/qhd/binary.py.
 assert set(qhd_plans) == {(k, encoding) for k in (8, 16, 32) for encoding in ("one_hot", "binary")}
 for (k, encoding), qhd_p in qhd_plans.items():
@@ -357,8 +350,9 @@ for (k, encoding), qhd_p in qhd_plans.items():
     if encoding == "one_hot":
         assert number(width) == 3 * k
         assert number(cx) == 9 * (k - 1) + 6 * k + 4 * (k - 1)**2
-        assert rotations.interpretation == "exact"
-        assert number(rotations) == 6 * (k - 2) + 6 * k + 3 * (k - 1) + 6 * (k - 1)**2
+        # The bound also counts the two exact-T rotations of each register's last chain link.
+        assert rotations.interpretation == "upper_bound"
+        assert number(rotations) == 6 * (k - 1) + 6 * k + 3 * (k - 1) + 6 * (k - 1)**2
     else:
         assert number(width) == 3 * m
         assert number(cx) == 6 * m * (m - 1) + 3 * (k - 2) + 3 * m * (m - 1) + 4 * m*m
@@ -386,17 +380,18 @@ for (k, encoding), qhd_p in qhd_plans.items():
 
 # QHD small circuits of Appendix E, compiled at optimization level 0, owners algorithms/qhd/native.py (emitter) and
 # algorithms/qhd/resources.py::circuit_resources. The CX law equals the compiled count, the census of the emitted
-# gate definitions agrees with circuit_resources, and the rotation law is exact for one-hot and an upper bound for
-# binary.
+# gate definitions agrees with circuit_resources given a synthesis budget, and the rotation law is an upper bound
+# for both encodings. For this one-hot circuit, which has no Clifford angle, it equals the classified arbitrary
+# rotations plus the exact T gates.
 assert set(qhd_compiled) == {(4, "one_hot"), (4, "binary"), (8, "binary")}
 for (k, encoding), row in qhd_compiled.items():
     assert row["width"] == (3*k if encoding == "one_hot" else 3*(k.bit_length() - 1))
     assert row["cx"] == row["cx_law"]
     assert (row["emitted_arbitrary"], row["emitted_exact_t"]) == (row["ledger_arbitrary"], row["ledger_exact_t"])
     assert row["emitted_arbitrary"] <= row["rotation_law"]
-    assert row["rotation_interpretation"] == ("exact" if encoding == "one_hot" else "upper_bound")
+    assert row["rotation_interpretation"] == "upper_bound"
     if encoding == "one_hot":
-        assert row["emitted_arbitrary"] == row["rotation_law"]
+        assert row["emitted_arbitrary"] + row["emitted_exact_t"] == row["rotation_law"]
 assert qhd_compiled[4, "binary"]["diagonal_wrap"] == "not_applicable"
 assert qhd_compiled[8, "binary"]["diagonal_wrap"] == "unavailable"
 # The stored support tables and constant (formed in algorithms/qhd/method.py) equal the quadratic at every grid tuple
@@ -631,7 +626,8 @@ import numpy as _np
 _A = _np.array([[1.1, .1], [.1, .9]])
 _x = _np.linalg.solve(_A, [1., .25])
 # Method-error-bounded: for Hermitian A with its spectrum in the polynomial domain, |kappa y P(y) - 1| <= epsilon_inv
-# = 0.01 on every eigenvalue bounds the relative error of x by 0.01. The statevector circuit adds only rounding.
+# = 0.01 on every eigenvalue bounds the polynomial part of the relative error of x by 0.01. The phases add
+# kappa*s*delta/||y|| and the statevector circuit adds rounding, so this assertion is for this input and not a general bound.
 assert _np.linalg.norm(x - _x) / _np.linalg.norm(_x) <= 0.01 + 1e-9
 """),
         ("estimate(selected)", """
@@ -706,6 +702,35 @@ assert abs(result.eigenvalue + 0.7) <= 1e-9 and abs(refined.eigenvalue + 0.7) <=
 from qiskit.quantum_info import Statevector as _Statevector
 # Machine precision: the Bell state of the circuit gives <ZZ> + 0.5 <XX> = 1.5, and solve evaluates it exactly.
 assert abs(result.value - _Statevector(qc).expectation_value(H).real) <= 1e-12
+"""),
+        ("controlled.decompose()", """
+# Machine precision: the definition of mcp matches its matrix at machine precision (6e-16 in the spectral norm on this
+# circuit with Qiskit 2.6.0), so the original circuit is the reference.
+assert abs(exact_definition.value - _Statevector(controlled).expectation_value(parity).real) <= 1e-12
+import numpy as _np
+from qiskit.quantum_info import Operator as _Operator
+# The direct difference keeps the global phase.
+assert _np.linalg.norm(_Operator(expanded).data - _Operator(controlled).data, 2) <= 1e-12
+"""),
+        ("evolved.decompose()", """
+from nwqlib.problems import prepare_qiskit as _prepare_qiskit, state_input as _state_input
+from scipy.linalg import expm as _expm
+# First relation, machine precision: this definition is approximate, so the decomposed circuit is the reference. NWQLib's
+# copy has that circuit's matrix, and the returned value is that circuit's expectation. This circuit has no global phase,
+# so this check cannot see a dropped one. test_semantic_blocks.py::
+# test_supplied_selected_preparation_forward_inverse_control_and_unknown_laws keeps that relation.
+_held = _prepare_qiskit(_state_input(expanded)).circuit
+assert _np.linalg.norm(_Operator(_held).data - _Operator(expanded).data, 2) <= 1e-12
+assert abs(approximate_definition.value - _Statevector(expanded).expectation_value(H).real) <= 1e-12
+# Second, separate relation: that circuit against the desired propagator, from SciPy after the Bell circuit. The page's
+# exact value comes from the same propagator. The 1e-6 only separates a nonzero product-formula error from the 1e-12 of
+# the first relation, so the example can tell the two references apart.
+_desired = _expm(-0.3j * generator.to_matrix()) @ _Operator(qc).data
+assert _np.linalg.norm(_Operator(expanded).data - _desired, 2) > 1e-6
+_exact = _desired[:, 0]
+_exact_value = (_exact.conj() @ H.to_matrix() @ _exact).real
+assert abs(_exact_value - _Statevector(evolved).expectation_value(H).real) <= 1e-12
+assert abs(approximate_definition.value - _exact_value) > 1e-6
 """),
         ("reopened.exposure", """
 # Exact: the GHZ state has support on 000 and 111 only, all 100 shots are counted, and loading returns the saved

@@ -13,7 +13,7 @@ from .error_model import (
     receipt_supported, scalar, union_bindings,
 )
 from .records import Evidence, Fact
-from ._work import DEFAULT_MAX_INTEGER_BITS, ExactArithmetic
+from ._work import exact
 from nwqlib.ir.expressions import Binding
 
 
@@ -130,7 +130,7 @@ class VarianceAssessment(Record):
 def linear_variance(*, joint_id: str, frame: ErrorFrame,
                     contributions: tuple[EstimatorContribution, ...],
                     covariance: tuple[CrossCovariance, ...] = (),
-                    independence: IndependenceLaw | None = None, max_integer_bits=DEFAULT_MAX_INTEGER_BITS) -> VarianceAssessment:
+                    independence: IndependenceLaw | None = None) -> VarianceAssessment:
     """Compute `Var(sum_i a_i X_i)` exactly from supplied variances and covariances.
 
     `Var(sum a_i X_i) = sum a_i^2 Var(X_i) + 2 sum_{i<j} a_i a_j Cov(X_i, X_j)`,
@@ -163,8 +163,6 @@ def linear_variance(*, joint_id: str, frame: ErrorFrame,
             variables. Default `()`.
         independence (IndependenceLaw | None): Declared independence in
             place of covariances. Default `None`.
-        max_integer_bits (int): Bit limit of the exact arithmetic. Default
-            4096.
 
     Returns:
         assessment (VarianceAssessment): The variance, concrete with its
@@ -177,12 +175,10 @@ def linear_variance(*, joint_id: str, frame: ErrorFrame,
             negative, a covariance pair repeats or names an unknown
             variable, a covariance violates Cauchy-Schwarz, the complete sum
             is negative, two contributions give one `data_id` different
-            variance facts, the `IndependenceLaw` has another `joint_id` or
-            an incompatible frame, or an exact intermediate value needs more
-            than `max_integer_bits` bits.
+            variance facts, or the `IndependenceLaw` has another `joint_id`
+            or an incompatible frame.
         TypeError: If `independence` is not an `IndependenceLaw`.
     """
-    arithmetic = ExactArithmetic(max_integer_bits=max_integer_bits)
     if frame.metric != "variance":
         raise ValueError("linear_variance requires the variance metric and its squared unit")
     if independence is not None and covariance:
@@ -193,22 +189,22 @@ def linear_variance(*, joint_id: str, frame: ErrorFrame,
         if independence.joint_id != joint_id or not independence.frame.compatible(frame):
             raise ValueError("independence joint identity/frame/conditioning mismatch")
     grouped, variances, variance_values = {}, {}, {}
-    zero = arithmetic.fraction(0)
+    zero = exact(0)
     for item in contributions:
         statement = item.variance
         applicable(statement, frame=frame, context=None)
         raw = statement.fact.value
         if raw is not None and not isinstance(raw, (Rational, Float64)):
             raise ValueError("variance requires a real scalar")
-        value = scalar(statement, arithmetic)
-        if value is not None and not arithmetic.le(zero, value):
+        value = scalar(statement)
+        if value is not None and not (zero <= value):
             raise ValueError("supplied variance must be nonnegative")
         if item.data_id in variances and statement != variances[item.data_id]:
             raise ValueError("one random variable cannot carry conflicting variance facts")
         variances[item.data_id] = statement
         variance_values[item.data_id] = value
-        coefficient = arithmetic.fraction(item.coefficient)
-        grouped[item.data_id] = arithmetic.add(grouped.get(item.data_id, zero), coefficient)
+        coefficient = exact(item.coefficient)
+        grouped[item.data_id] = grouped.get(item.data_id, zero) + coefficient
     active = {key: coefficient for key, coefficient in grouped.items() if coefficient}
     total, missing = zero, False
     used = []
@@ -219,8 +215,8 @@ def linear_variance(*, joint_id: str, frame: ErrorFrame,
         if value is None:
             missing = True
         else:
-            squared = arithmetic.multiply(coefficient, coefficient)
-            total = arithmetic.add(total, arithmetic.multiply(squared, value))
+            squared = coefficient * coefficient
+            total = total + squared * value
     pairs, relevant_pairs = set(), 0
     for pair in covariance:
         key = tuple(sorted((pair.left, pair.right)))
@@ -231,14 +227,14 @@ def linear_variance(*, joint_id: str, frame: ErrorFrame,
         raw = pair.fact.fact.value
         if raw is not None and not isinstance(raw, (Rational, Float64)):
             raise ValueError("covariance requires a real scalar")
-        value = scalar(pair.fact, arithmetic)
+        value = scalar(pair.fact)
         vx, vy = variance_values[pair.left], variance_values[pair.right]
         # Supplied moments must describe a possible pair, even when its
         # coefficient cancels. Missing unused moments remain unnecessary.
         if value is not None and vx is not None and vy is not None:
-            covariance_squared = arithmetic.multiply(value, value)
-            product_bound = arithmetic.multiply(vx, vy)
-            if not arithmetic.le(covariance_squared, product_bound):
+            covariance_squared = value * value
+            product_bound = vx * vy
+            if not (covariance_squared <= product_bound):
                 raise ValueError("supplied covariance exceeds the variance product; no joint law")
         if pair.left in active and pair.right in active:
             relevant_pairs += 1
@@ -246,10 +242,10 @@ def linear_variance(*, joint_id: str, frame: ErrorFrame,
             if value is None:
                 missing = True
             else:
-                product = arithmetic.multiply(active[pair.left], active[pair.right])
-                product = arithmetic.multiply(product, value)
-                term = arithmetic.multiply(2, product)
-                total = arithmetic.add(total, term)
+                product = active[pair.left] * active[pair.right]
+                product = product * value
+                term = 2 * product
+                total = total + term
     needs_independence = independence is not None and len(active) > 1
     law_supported = False
     assumptions = [a for f in used for a in f.fact.assumptions]

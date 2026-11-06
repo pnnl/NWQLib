@@ -1,6 +1,6 @@
 """Explicit component bounds of a planned LCHS construction, without computing a solution vector."""
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from nwqlib._limits import exceeds
 
 from math import fsum, isfinite
 from typing import Literal
@@ -48,7 +48,16 @@ class LCHSRefinement(Record):
             `"spectral_norms"` evaluates `||A||`, `||A + shift*I||` and
             `||H||` and needs a dense A. `"duhamel"` evaluates the
             Gauss–Legendre remainder of the source time integral (DLMF
-            Eqs. 3.5.19 and 3.5.21). `"fixed_pf"` evaluates the
+            Eqs. 3.5.19 and 3.5.21). The remainder grows as
+            `||A||**(2*duhamel_nodes)`, so it is evaluated with `||A||`
+            itself. For a Hermitian A both components, alone or together,
+            take `||A||` and `||A + shift*I||` from the eigenvalues of L
+            that planning computed, with `||H|| = 0`, and decompose no
+            matrix. For another dense A, `||A||` and `||A + shift*I||` come
+            from singular values and `||H||` from its eigenvalues, and
+            `"duhamel"` reuses `||A||`. For a compact A, which planning
+            bounds structurally, the planned remainder is reported
+            unchanged. `"fixed_pf"` evaluates the
             product-formula commutator bound at the saved step counts
             (Childs et al., doi:10.1103/PhysRevX.11.011020, Propositions
             9-10) and needs the `"trotter"` or `"trotter_error_budgeted"`
@@ -60,18 +69,18 @@ class LCHSRefinement(Record):
             (the commutator bound summed term by term over the Pauli
             commutation table), which it does not replace. Requires `"fixed_pf"`, and a periodic
             stencil refuses it.
-        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Upper
-            limit on the known arrays of this call.
-        max_dense_work: Default `1e8` (`100_000_000`). Upper limit on the
+        max_bytes: Default `None`, the physical memory of this computer.
+            Upper limit on the known arrays of this call.
+        max_dense_work: Default `None`, no work limit. Upper limit on the
             counted dense work of this call.
-        max_structural_work: Default `1e9`. Upper limit on the counted work
+        max_structural_work: Default `None`, no work limit. Upper limit on the counted work
             of reading the saved node table, preparing the Pauli commutation
-            table (the anticommuting Pauli pairs and nested-commutator triples
-            of the commutator bound) and evaluating its terms.
-        max_node_evaluations: Default `4096`. Upper limit on the number of
-            k nodes times operator applications evaluated.
-        max_steps: Default `100_000`. Largest saved product-formula step
-            count this call accepts.
+            census (the anticommuting Pauli pairs and nested commutation
+            indicators of the commutator bound) and evaluating its terms.
+        max_node_evaluations: Default `None`, no limit. Upper limit on the
+            number of k nodes times operator applications evaluated.
+        max_steps: Default `None`, no limit. Largest saved product-formula
+            step count this call accepts.
 
     Raises:
         ValueError: If `components` is empty or repeats a name, or if
@@ -81,11 +90,11 @@ class LCHSRefinement(Record):
     components: tuple[Literal["spectral_norms", "duhamel", "fixed_pf"], ...]
     name: Text = "refinement"
     dense_validation: StrictBool = False
-    max_bytes: PositiveInt = DEFAULT_MAX_BYTES
-    max_dense_work: PositiveInt = 100_000_000
-    max_structural_work: PositiveInt = 1_000_000_000
-    max_node_evaluations: PositiveInt = 4096
-    max_steps: PositiveInt = 100_000
+    max_bytes: PositiveInt | None = None
+    max_dense_work: PositiveInt | None = None
+    max_structural_work: PositiveInt | None = None
+    max_node_evaluations: PositiveInt | None = None
+    max_steps: PositiveInt | None = None
 
     @model_validator(mode="after")
     def _components(self):
@@ -107,34 +116,75 @@ class LCHSRefinement(Record):
         return ()
 
 
-def _spectral_norm(matrix, checks, counts):
+def _spectral_norm(matrix, checks, counts, *, hermitian=False):
     """Return ||matrix||_2, or None when a nonzero matrix gives a nonfinite or zero norm.
 
-    The 4*d*d entrywise scan and scaled copy are counted against the work
-    limit first, and the singular values (_linalg_laws.singular_values_work)
-    only for a nonzero matrix. An exactly zero matrix has norm zero.
+    A general matrix uses its singular values without singular vectors
+    (numpy.linalg.norm(ord=2), LAPACK gesdd with JOBZ='N'). A Hermitian one
+    uses the largest magnitude of its eigenvalues without eigenvectors
+    (numpy.linalg.eigvalsh, LAPACK heevd with JOBZ='N'). The d*d scan for a
+    nonzero entry is counted first, then, for a nonzero matrix only,
+    _linalg_laws.singular_values_work. The Hermitian route borrows that
+    count as a proxy: its cubic term is twice the (2/3) d**3 multiply-adds
+    of the tridiagonal reduction, and the eigenvalue stage after that
+    reduction, not measured in this project, is assumed to fit within the
+    extra (2/3) d**3 and the quadratic term. The count is up to about twice
+    the actual cubic work, so an explicit max_dense_work can refuse this
+    step earlier than needed. The default None is unaffected. An exactly
+    zero matrix has norm zero. Bytes: the matrix and the copy that NumPy
+    passes to LAPACK, 32*d*d.
     """
     from nwqlib._linalg_laws import singular_values_work
-    from .inhomogeneous_theory import _scaling_safe_spectral_norm
     d = len(matrix)
-    dense_work(checks, counts, work=4*d*d, peak_bytes=64*d*d)
+    dense_work(checks, counts, work=d*d, peak_bytes=32*d*d)
     nonzero = bool(np.any(matrix))
     if nonzero:
-        dense_work(checks, counts, work=singular_values_work(d), peak_bytes=64*d*d)
+        dense_work(checks, counts, work=singular_values_work(d), peak_bytes=32*d*d)
+    kind = "spectral_eigvalsh" if hermitian else "spectral_svd"
     counts["matrix_norm_attempts"] += 1
-    counts["spectral_svd_attempts"] += int(nonzero)
-    value = _scaling_safe_spectral_norm(matrix)
+    counts[kind+"_attempts"] += int(nonzero)
+    value = 0.0
+    if nonzero:
+        value = float(np.max(np.abs(np.linalg.eigvalsh(matrix)))) if hermitian else float(np.linalg.norm(matrix, 2))
     counts["matrix_norm_completed"] += 1
-    counts["spectral_svd_completed"] += int(nonzero)
+    counts[kind+"_completed"] += int(nonzero)
     return value if isfinite(value) and (value != 0 or not nonzero) else None
+
+
+def _planned_hermitian_norms(payload, checks, counts):
+    """Return (||A||, ||A_pad + s*I||) from the planned eigenvalues of L when the planned H is exactly zero, else None.
+
+    When H = 0, A = L, and planning's one Hermitian eigensolve of the
+    original L (time_independent_terms._prepare_decomposition), whose two
+    endpoints it then extends by the zero eigenvalue of the padding, gives
+    both norms: lambda_min before the PSD shift s >= 0, and l_norm =
+    ||L_pad + s*I|| after it. For s > 0 the shifted spectrum is
+    nonnegative, so lambda_max = l_norm - s, and for s = 0, l_norm =
+    ||L_pad||. The padding zero does not raise the largest magnitude, so
+    ||A|| = ||L|| = max(|lambda_min|, |l_norm - s|), and ||A_pad + s*I|| =
+    l_norm, which equals ||A|| for s = 0. Detecting H = 0 scans the planned
+    padded H once, D*D work. A refinement has no requested tolerance at
+    which a looser bound on ||A|| would suffice for the Duhamel remainder,
+    which grows as ||A||**(2m), so otherwise ||A|| comes from singular values.
+    """
+    h_part = payload.dense_inputs().h_part
+    dense_work(checks, counts, work=h_part.size, peak_bytes=16*h_part.size)
+    if np.any(h_part):
+        return None
+    conversion, l_norm = payload.quadrature.conversion, payload.quadrature.l_norm
+    norm = max(abs(conversion["min_l_eigenvalue_before_psd_conversion"]), abs(l_norm-conversion["psd_shift"]))
+    counts["planned_l_endpoint_norms"] += 1
+    return norm, (l_norm if conversion["psd_shift"] else norm)
 
 
 def _component_values(plan, result, payload):
     """Collect the existing physical component facts that refinement may replace.
 
-    Only listed_only error terms are read, and each must keep its planned
-    physical frame, so a refined value cannot enter the wrong output frame.
+    Only listed_only error terms that add to the total are read, and each
+    must keep its planned physical frame, so a refined value cannot enter the
+    wrong output frame.
     """
+    from .analysis import adds_to_total
     # Classical Result facts are the host application sums, and
     # selected_grid.host_applications checks their receipts against the Plan
     # first. Quantum facts come from the selected numerical recipe. Neither
@@ -145,7 +195,7 @@ def _component_values(plan, result, payload):
     supplied = {fact.fact.quantity:fact for fact in (*plan.facts, *result.facts)}
     values = {}
     for term in plan.error_model.terms:
-        if term.role != "listed_only":
+        if term.role != "listed_only" or not adds_to_total(term.name):
             continue
         fact = supplied.get(term.name, term.fact)
         if fact.frame != term.fact.frame:
@@ -172,7 +222,7 @@ def _fixed_pf(plan, grid, checks, counts):
     from .solution_error_budget import _build_lchs_application_record, application_stage_bounds
 
     d = plan.reconstruction.encoded_dimension
-    if any(step > checks.max_steps for app in grid.applications for step in app.steps):
+    if any(exceeds(step, checks.max_steps) for app in grid.applications for step in app.steps):
         raise ValueError("fixed-PF refinement exceeds max_steps before work")
     active = tuple(app.weight != 0 and app.input_norm != 0 for app in grid.applications)
     if any(app.input_norm is None for app, on in zip(grid.applications, active, strict=True) if on):
@@ -192,10 +242,15 @@ def _fixed_pf(plan, grid, checks, counts):
     for app, on in zip(grid.applications, active, strict=True):
         if on:
             records = next(certified)
-            synthesis = _trotter_budget_quadrature_terms(records, coefficients=grid.coefficients,
+            # Nodes that planning omitted for this application are never applied.
+            coefficients = grid.coefficients
+            if app.omitted:
+                coefficients = np.array(coefficients)
+                coefficients[list(app.omitted)] = 0
+            synthesis = _trotter_budget_quadrature_terms(records, coefficients=coefficients,
                 method=grid.payload.method)["trotter_synthesis_error_bound"]
             dense = None if not checks.dense_validation else fsum(abs(coefficient)*record.dense_bound_value
-                for coefficient, record in zip(grid.coefficients, records, strict=True))
+                for coefficient, record in zip(coefficients, records, strict=True))
         else:
             synthesis = 0.
             dense = 0. if checks.dense_validation else None
@@ -207,7 +262,7 @@ def _fixed_pf(plan, grid, checks, counts):
             backend="trotter", synthesis_error_bound=synthesis))
         dense_values.append(dense)
     values = application_stage_bounds(raw, applications=tuple(applications), backend="trotter",
-        psd_premise_satisfied=grid.payload.quadrature.numerical_psd_premise_satisfied)
+        psd_premise_satisfied=grid.payload.quadrature.psd_premise_satisfied)
     bound, reason = values["trotter_synthesis"]
     return bound, reason, dense_values
 
@@ -239,7 +294,7 @@ def refine(plan, result, *, checks):
     """
     from .selected_grid import selected_grid, selected_payload, grid_arguments
     from .inhomogeneous_theory import _duhamel_quadrature_error_bound
-    from .solution_error_budget import propagate_physical_error
+    from .solution_error_budget import _StageFailure, _stage_factor, _stage_value, propagate_physical_error
     from .periodic import _PeriodicPayload
 
     if type(checks) is not LCHSRefinement:
@@ -289,7 +344,8 @@ def refine(plan, result, *, checks):
                      "dense commutator validation is unavailable")
                     for index in range(0 if grid is None else len(grid.applications))]
     counts = dict(matrix_norm_attempts=0, matrix_norm_completed=0, spectral_svd_attempts=0, spectral_svd_completed=0,
-        duhamel_bound_attempts=0, duhamel_bound_completed=0, duhamel_source_norms=0,
+        spectral_eigvalsh_attempts=0, spectral_eigvalsh_completed=0, planned_l_endpoint_norms=0,
+        duhamel_bound_attempts=0, duhamel_bound_completed=0,
         pauli_decomposition_attempts=0, pauli_decomposition_completed=0, structural_bound_attempts=0,
         structural_bound_completed=0, pair_commutation_checks=0, nested_commutation_checks=0,
         dense_bound_attempts=0, dense_bound_completed=0, dense_term_matrices=0, dense_matrix_products=0,
@@ -299,59 +355,73 @@ def refine(plan, result, *, checks):
         ("dense_validation", int(checks.dense_validation)), ("duhamel_nodes", len(rec.source_nodes))]
     if grid is not None:
         args += [(name, value) for name, value in grid_arguments(grid) if name != "psd_shift"]
-    _admit_publication(checks, tuple((name, frame, reason) for name, frame, _, reason in metrics),
-        args+[(name, max(checks.max_dense_work, checks.max_structural_work)) for name in counts])
+    _admit_publication(checks, tuple((name, frame, reason) for name, frame, _, reason in metrics), args, counts)
     invocation_id = verification_invocation()
     measured, reasons = {}, {}
-    matrix = source = None
-    matrix_norm = None
+    matrix = matrix_norm = None
     if problem.A.reference.representation == "dense":
         d = problem.dimension
         _check_bytes(16*(d*d+2*d), checks.max_bytes, "LCHS refinement physical inputs")
         matrix = problem.A.dense_array()
     source_zero = problem.source is None or problem.source.preparation.physical_scale.mantissa == 0
-    duhamel_nonzero = ("duhamel" in checks.components and not source_zero
-        and problem.elapsed_time != 0 and matrix is not None and bool(np.any(matrix)))
-    if "spectral_norms" in checks.components or duhamel_nonzero:
-        matrix_norm = _spectral_norm(matrix, checks, counts)
+    duhamel_dense = ("duhamel" in checks.components and matrix is not None and not source_zero
+                     and problem.elapsed_time != 0 and bool(np.any(matrix)))
+    # One scan of the planned H serves both components: when it is exactly
+    # zero, the norms come from the planned eigenvalues of L.
+    planned = None
+    if payload is not None and matrix is not None and ("spectral_norms" in checks.components or duhamel_dense):
+        planned = _planned_hermitian_norms(payload, checks, counts)
     if "spectral_norms" in checks.components:
-        prepared_norm = matrix_norm
-        if rec.psd_shift != 0:
-            d = rec.encoded_dimension
-            dense_work(checks, counts, work=3*d*d, peak_bytes=64*d*d)
-            # A + shift*I on the encoding is the shifted L plus i*H.
-            prepared_norm = _spectral_norm(payload.quadrature.l_part+1j*payload.quadrature.h_part, checks, counts)
-        if payload is None:
-            d = problem.dimension
-            dense_work(checks, counts, work=3*d*d, peak_bytes=64*d*d)
-            h_part = (matrix-matrix.conj().T)/(2j)
+        if planned is not None:
+            (matrix_norm, prepared_norm), h_norm = planned, 0.0
         else:
-            h_part = payload.quadrature.h_part
+            d, shift = problem.dimension, rec.psd_shift
+            matrix_norm = prepared_norm = _spectral_norm(matrix, checks, counts)
+            if shift != 0:
+                # A_pad + s*I = (A + s*I) ⊕ s*I, so its norm is
+                # max(||A + s*I||, s) when there is padding, all on the
+                # original dimension.
+                dense_work(checks, counts, work=2*d*d, peak_bytes=32*d*d)
+                shifted = matrix.astype(complex)
+                shifted[np.diag_indices(d)] += shift
+                prepared_norm = _spectral_norm(shifted, checks, counts)
+                del shifted
+                if prepared_norm is not None and rec.encoded_dimension > d:
+                    prepared_norm = max(prepared_norm, shift)
+            # ||H_pad|| = ||H||.
+            dense_work(checks, counts, work=3*d*d, peak_bytes=64*d*d)
+            h_norm = _spectral_norm((matrix-matrix.conj().T)/(2j), checks, counts, hermitian=True)
         measured.update({checks.name+".matrix_norm":matrix_norm,
-            checks.name+".prepared_matrix_norm":prepared_norm,
-            checks.name+".h_norm":_spectral_norm(h_part, checks, counts)})
+            checks.name+".prepared_matrix_norm":prepared_norm, checks.name+".h_norm":h_norm})
+    elif duhamel_dense:
+        matrix_norm = planned[0] if planned is not None else _spectral_norm(matrix, checks, counts)
     if "duhamel" in checks.components:
-        bound = 0.
-        if duhamel_nonzero and matrix_norm is None:
-            bound = None
-            reasons["duhamel_quadrature"] = "physical generator norm is nonfinite or unrepresentable"
-        elif duhamel_nonzero:
-            source = problem.source.physical_vector()
-            minimum = payload.quadrature.conversion["min_l_eigenvalue_before_psd_conversion"]
-            counts["duhamel_bound_attempts"] += 1
-            counts["duhamel_source_norms"] += 1
-            evaluated = _duhamel_quadrature_error_bound(matrix=matrix, source_term=source,
-                final_time=problem.elapsed_time, node_count=len(rec.source_nodes),
-                lambda_min_before_psd_conversion=minimum, matrix_norm=matrix_norm,
-                max_bytes=checks.max_bytes, max_dense_work=checks.max_dense_work-counts["dense_work"])
-            # Match inhomogeneous_theory's charge with matrix_norm supplied:
-            # 8*d for the stable source norm and 32 for the scalar log formula.
-            counts["dense_work"] += 8*problem.dimension+32
-            counts["duhamel_bound_completed"] += 1
-            bound = None if evaluated.unusable_nonzero or not isfinite(evaluated.value) else evaluated.value
-            if bound is None:
-                reasons["duhamel_quadrature"] = "nonzero Duhamel remainder is nonfinite or underflowed; no zero bound established"
         key = "duhamel_quadrature" if "duhamel_quadrature" in names else checks.name+".duhamel_quadrature"
+        if matrix is None:
+            # Planning evaluated the remainder of a compact A with its
+            # structural bound on ||A|| (parameters._duhamel_bound). Without a
+            # dense A nothing tightens it, so the planned value stays, unknown
+            # when planning had none.
+            bound = values.get("duhamel_quadrature", 0.)
+        elif not duhamel_dense:
+            bound = 0.
+        else:
+            bound = None
+            if not matrix_norm or not isfinite(matrix_norm):
+                reasons[key] = "physical generator norm is nonfinite or unrepresentable"
+            else:
+                counts["duhamel_bound_attempts"] += 1
+                remainder = _duhamel_quadrature_error_bound(generator_norm=matrix_norm,
+                    lower_bound=payload.quadrature.conversion["min_l_eigenvalue_before_psd_conversion"],
+                    source_scale=problem.source.preparation.physical_scale, final_time=problem.elapsed_time,
+                    node_count=len(rec.source_nodes))
+                counts["duhamel_bound_completed"] += 1
+                # The planned stage's single binary64 conversion: a positive
+                # bound stays positive, and one above binary64 is unknown.
+                try:
+                    bound = _stage_value("duhamel_quadrature", _stage_factor("duhamel_quadrature", remainder))
+                except _StageFailure as failure:
+                    reasons[key] = str(failure)
         measured[key] = bound
         if key in values:
             values[key] = bound

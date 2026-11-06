@@ -21,7 +21,6 @@ from typing import Annotated, Literal
 
 from pydantic import Field, StrictBool, model_validator
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
 from nwqlib.core.records import ContentID, Nonnegative, PositiveInt, Real, Record, Text
 from nwqlib.execution import ExecutionLimits
 from nwqlib.operators.access import Count
@@ -74,12 +73,6 @@ PositiveReal = Annotated[Real, Field(gt=0)]
 # problem class with the ``most_probable`` point rule stops at different
 # points under 1e-9 and 1e-6.
 DEFAULT_INEQUALITY_FEASIBILITY_TOLERANCE = 1e-9
-
-# Limits of the explicit constrained_grid_minimum reference, the same
-# defaults as QHDVerification. Registered in docs/ENGINEERING_CONSTANTS.md.
-# Revisit with a deliberately larger reference grid.
-GRID_MINIMUM_MAX_WORK = 1_000_000_000
-GRID_MINIMUM_MAX_BYTES = DEFAULT_MAX_BYTES
 
 # Run statuses that only a round's box refinement can cause: it completed no
 # level for one of these reasons (_outer.refinement_stop).
@@ -627,8 +620,11 @@ class ALResources(Record):
             (`ResourceLaw` with metric `cx`), summed over rounds and levels and not
             multiplied by shots. The Circuit counts note below says when a round counts
             0 and when the value is unknown.
-        arbitrary_rotations: Arbitrary rotations of the same circuits, counted as `cx`
-            is, an upper bound for the binary encoding. For quantum execution it equals
+        arbitrary_rotations: Recorded rotation counts of the same circuits, counted as
+            `cx` is. In both encodings each count is an upper bound on the arbitrary
+            rotations, because it includes every rotation gate before angle
+            classification, Clifford, exact T and zero angles too. The classified numbers
+            are in `circuit_resources`. For quantum execution it equals
             `arbitrary_rotations` of
             [`run_resources`][nwqlib.algorithms.qhd.resources.run_resources], the body
             total that counts each compiled circuit once, not multiplied by shots.
@@ -647,7 +643,9 @@ class ALResources(Record):
             running it, in QHD's work units.
         construction_work: Construction work that the inner Run counted, for a quantum
             circuit or for the setup of classical evolution.
-        synthesis_work: Exact dense synthesis work that the inner Run set aside.
+        synthesis_work: Work units of the exact dense syntheses that the inner Run's saved
+            preparations made, not measured operations or time. Those of controlled
+            transformed blocks are also part of `construction_work`.
         layer_evaluations: Scalar expression evaluations by the augmented-Lagrangian
             layer itself (f, h, g, their gradients and the mean-position value), with
             refinement also the checks of f, h and g at every point that a level
@@ -1122,11 +1120,12 @@ class AugmentedLagrangianRecord(Record):
         feasibility_tolerance: Resolved epsilon_f on normalized residuals.
         complementarity_tolerance: Resolved epsilon_c.
         admitted_work_bound: Upper bound on the run's nominal counted planning work,
-            `(a * M * L + t * M + 1) * qhd.max_work`, fixed before the first round. The
-            Work and byte bounds note below defines a, t, M and L and what the bound
-            covers.
-        admitted_bytes_bound: `(a * M * L + t * M) * qhd.max_bytes`, the sum of the byte
-            allowances over the attempted Plans, levels and trials. It bounds neither
+            `(a * M * L + t_W * M + 1) * qhd.max_work`, fixed before the first round, or
+            None when `qhd.max_work` is None (no limit). The Work and byte bounds note
+            below defines a, t_W, M and L and what the bound covers.
+        admitted_bytes_bound: `(a * M * L + t_B * M) * qhd.max_bytes`, the sum of the byte
+            allowances over the attempted Plans, levels and trials, or None when
+            `qhd.max_bytes` is None, the physical memory, which the record does not fix. It bounds neither
             process memory nor the outer records' content-hash JSON. The Work and byte
             bounds note below gives the details.
         iterations: Every started round, in order, each an
@@ -1152,7 +1151,7 @@ class AugmentedLagrangianRecord(Record):
         SymPy rewriting, coefficient storage or symbolic temporaries. Write M for
         `options.max_iterations`, L for `refinement.max_levels`, and `a = 6` for
         search-model or `a = 4` for physical refinement. The bound is
-        `(a * M * L + t * M + 1) * qhd.max_work`. Without refinement, L = 1 and a = 4.
+        `(a * M * L + t_W * M + 1) * qhd.max_work`. Without refinement, L = 1 and a = 4.
         An ordinary Plan has at most four category bounds: the nominal symbolic term count, the
         running total (the initial state's evaluation and the table, compiled-block
         and schedule-integral work), the optional kept state (the final state that
@@ -1160,19 +1159,25 @@ class AugmentedLagrangianRecord(Record):
         Planning checks the first part of the running total,
         the initial state, alone before evaluating it. A search-model level adds the
         symbolic and running-total bounds of its unscaled table stage. Intermediate checks of one
-        category are not counted separately. The trials of automatic inequality
-        selection under quantum execution add `t = 6 (m + 1) - 4` bounds per round without
-        refinement and `t = 6 (m + 1)` with it, for m kept inequalities, and t = 0
-        otherwise. The layer counts the work of its support-table check of f, h and g,
+        category are not counted separately. Each representation that automatic
+        inequality selection plans under quantum execution reuses its symbolic and
+        running-total admission in its Plan, so it adds at most four work categories, and
+        three byte categories, since construction bytes are checked only when a kept
+        Plan's circuit is built. The trials therefore add `t_W = 4 m` work and
+        `t_B = 3 m` byte categories per round without refinement, where the round reuses
+        the Plan of the representation kept, and `t_W = 4 (m + 1)` and
+        `t_B = 3 (m + 1)` with it, for m kept inequalities, and none otherwise. The layer counts the work of its support-table check of f, h and g,
         which also gives the inequality ranges, and of its evaluations once for the
         whole run. At most M L levels are attempted, an attempted level that stops or
         fails included. Refinement geometry, marginal and joint-mass processing, the
         refinement's repeated objective decomposition and point evaluation, the symbolic
         construction of the inner objectives, and library internals such as SymPy, SciPy
-        and the simulators lie outside these limit checks.
+        and the simulators lie outside these limit checks. Each category is checked
+        against `qhd.max_work` or `qhd.max_bytes` when it runs, and that check refuses a
+        run. The recorded bounds are nominal sums of those limits and refuse nothing.
 
-        `admitted_bytes_bound` is `(a * M * L + t * M) * qhd.max_bytes`, with a, t, M
-        and L as above. It sums the byte allowances of the QHD categories over the
+        `admitted_bytes_bound` is `(a * M * L + t_B * M) * qhd.max_bytes`, with a, t_B,
+        M and L as above. It sums the byte allowances of the QHD categories over the
         attempted Plans, levels and trials, each at most `qhd.max_bytes` while its
         operation runs. It bounds neither process memory, nor the content-hash JSON of
         the outer records, nor the further allocations of refinement itself.
@@ -1195,8 +1200,8 @@ class AugmentedLagrangianRecord(Record):
     inequality_scales: tuple[PositiveReal, ...]
     feasibility_tolerance: Nonnegative
     complementarity_tolerance: Nonnegative
-    admitted_work_bound: PositiveInt
-    admitted_bytes_bound: PositiveInt
+    admitted_work_bound: PositiveInt | None
+    admitted_bytes_bound: PositiveInt | None
     iterations: tuple[ALIteration, ...]
     termination: Literal[
         "feasible_complementary", "feasible", "iteration_limit", "no_valid_point",
@@ -1421,7 +1426,8 @@ class ConstrainedGridMinimum(Record):
             can be negative, including when the point is infeasible or is an off-grid mean
             chosen by `mode_or_mean`. The Gap note below bounds the exact gap.
         feasibility_tolerance: The tolerance used.
-        work: Work checked against `max_work` before the first evaluation.
+        work: Work counted before the first evaluation and checked against
+            `max_work` when it is given.
 
     Gap:
         Let G be the nonempty grid subset passing this check's computed feasibility

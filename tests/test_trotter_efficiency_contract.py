@@ -38,6 +38,44 @@ def fixed_result():
     return solve(selected(execution="quantum"))
 
 
+@pytest.mark.parametrize("execution", ["classical", "quantum"])
+def test_plan_and_refinement_choose_the_census_expression_from_the_same_nodes(monkeypatch, execution):
+    """The budgeted plan and the refinement of its saved node table weight the same K nodes.
+
+    The union labels X, Y and Z anticommute pairwise, so N(A) > 0, and every k-node weights them
+    differently. The threshold is moved to the plan's own selection count N(A)*max(w, K) and one below
+    it, so the plan takes the full expression and then the relaxation, without a large table. Each time
+    the refinement makes the same choice from the same count.
+    """
+    choose = error_budget.census_structure
+    calls = []
+
+    def spy(*args, **kwargs):
+        census = choose(*args, **kwargs)
+        calls.append((kwargs.get("weightings", 1), census.selection_count, census.variant))
+        return census
+
+    def budgeted():
+        return plan(LinearDynamics(A=[[0.45, 0.08j], [0.03j, 0.7]], initial_state=[1.0, 0.2], time=0.2),
+                    method=LCHS(approximation_tolerance=0.7,
+                                lchs_kernel=ProviderConfig(implementation="near_optimal_eq7",
+                                                           parameters={"beta": 0.8}),
+                                k_quadrature=ProviderConfig(implementation="composite_gauss",
+                                                            parameters={"truncation_multiplier": 1.0}),
+                                hamiltonian_evolution_backend="trotter_error_budgeted", trotter_order=2),
+                    execution=execution, seed=7)
+
+    monkeypatch.setattr(error_budget, "census_structure", spy)
+    budgeted()
+    weightings, count, _ = calls[0]
+    assert weightings > 1 and count > 0
+    for threshold, variant in ((count, "exact_census"), (count - 1, "relaxed_prefix")):
+        monkeypatch.setattr(error_budget, "EXACT_CENSUS_WORD_TESTS", threshold)
+        calls.clear()
+        solve(budgeted()).verify(checks=LCHSRefinement(components=("fixed_pf",)))
+        assert len(calls) >= 2 and set(calls) == {(weightings, count, variant)}
+
+
 def test_fixed_trotter_does_not_compute_unrequested_commutator_bounds(monkeypatch):
     monkeypatch.setattr(
         error_budget,

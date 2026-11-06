@@ -1,43 +1,20 @@
-"""Import an unchanged file of the OpenQASM 3 writer into Qiskit after checking the limits derived from its construction."""
+"""Import an unchanged file of the OpenQASM 3 writer into Qiskit after checking it against its write record."""
 
 from dataclasses import dataclass
 import os
 from pathlib import Path
 
-from nwqlib.core.records import Record
-from nwqlib.operators.access import Count
-from .streaming import QasmWriteBudget, QasmWriteReceipt, _Prepared
+from nwqlib._limits import check_memory
+from .streaming import QasmWriteReceipt
 
-
-class QasmMaterializationBudget(Record):
-    """Limits for importing an OpenQASM 3 file back into Qiskit with `materialize_qasm3_file`.
-
-    Build it with keyword arguments, for example
-    `QasmMaterializationBudget(max_bytes=4096, max_qubits=1, max_clbits=0, max_dynamic_visits=100, max_operations=100)`,
-    and pass it as `budget=`. All five fields are required. The counts are
-    derived from the matching construction and checked before the file is
-    opened. Use the unchanged file from that writer call. No limit here
-    estimates the importer's memory.
-
-    Attributes:
-        max_bytes: Required. Limit on the bytes of the file text.
-        max_qubits: Required. Limit on the total declared qubits.
-        max_clbits: Required. Limit on the total declared classical bits.
-        max_dynamic_visits: Required. Limit on
-            [Program](../glossary.md#program) node visits after expanding
-            loops, empty and identity loops included, the count that the
-            writer's `QasmWriteReceipt.dynamic_visits` reports.
-        max_operations: Required. Limit on primitive gate, measurement and reset
-            applications after expanding loops, the count that
-            `QasmWriteReceipt.expanded_operations` reports. Gates that Qiskit
-            synthesizes for controls are not counted.
-    """
-
-    max_bytes: Count
-    max_qubits: Count
-    max_clbits: Count
-    max_dynamic_visits: Count
-    max_operations: Count
+# Coarse memory of Qiskit's OpenQASM 3 import and UnrollForLoops: bytes per
+# top-level instruction after unrolling, per declared qubit or bit, per byte of
+# text, and a fixed part.
+# ENGINEERING_CONSTANTS.md, "OpenQASM import estimate", records the measurement.
+_INSTRUCTION_BYTES = 4096
+_WIRE_BYTES = 2048
+_TEXT_BYTES = 512
+_FIXED_BYTES = 16 * 2**20
 
 
 @dataclass(frozen=True)
@@ -53,8 +30,9 @@ class QasmMaterialization:
             the file stay as logical gates.
         source: The [`QasmWriteReceipt`][nwqlib.io.streaming.QasmWriteReceipt]
             passed as `receipt`, whose `construction_id` names the construction.
-        output_nodes: Top-level instructions of `circuit` after unrolling. It can
-            differ from `source.expanded_operations`.
+        output_nodes: Top-level instructions of `circuit` after unrolling, at
+            most `source.unrolled_instructions`. It can differ from
+            `source.expanded_operations`.
     """
 
     circuit: object
@@ -63,18 +41,16 @@ class QasmMaterialization:
 
 
 def materialize_qasm3_file(construction, path, receipt: QasmWriteReceipt, *,
-                           writer_budget: QasmWriteBudget,
-                           budget: QasmMaterializationBudget) -> QasmMaterialization:
-    """Import an OpenQASM 3 file written by `write_qasm3_file` into Qiskit within explicit limits.
+                           max_bytes: int | None = None) -> QasmMaterialization:
+    """Import an OpenQASM 3 file written by `write_qasm3_file` into Qiskit, after checking it against its write record.
 
     Use the unchanged file, construction and receipt from the same writer
-    call. Before the file is opened, the receipt’s `construction_id` is
-    compared with `construction.content_id`, and the sizes derived again from
-    the construction are checked against `budget`. The comparison pairs the
-    receipt with the construction and does not compare either with the file’s
-    text. The file’s actual byte size is checked before reading. The text then
-    goes to Qiskit’s OpenQASM 3 importer and the `UnrollForLoops` pass. Gate
-    definitions stay logical. Z with more than two controls in total is
+    call. Before the file is opened, the receipt's `construction_id` is
+    compared with `construction.content_id`, and the memory of the import is
+    estimated from the receipt's counts and checked against `max_bytes`. The
+    file's actual size must equal the receipt's `bytes_written`. The text
+    then goes to Qiskit's OpenQASM 3 importer and the `UnrollForLoops` pass.
+    Gate definitions stay logical. Z with more than two controls in total is
     rejected before import, because the installed importer can synthesize such
     gates eagerly. It needs the `qasm` extra
     (`pip install "nwqlib[qasm]"`). The checked combination is OpenQASM parser
@@ -86,36 +62,38 @@ def materialize_qasm3_file(construction, path, receipt: QasmWriteReceipt, *,
         path (str | Path): The file.
         receipt (QasmWriteReceipt): The record that `write_qasm3_file` returned
             for `construction`.
-        writer_budget (QasmWriteBudget): The budget the file was written with.
-        budget (QasmMaterializationBudget): The import limits.
+        max_bytes (int | None): Limit on the estimated memory of the import,
+            4096 bytes per top-level instruction after unrolling
+            (`receipt.unrolled_instructions`), 2048 bytes per qubit and bit of
+            the receipt's layouts, 512 bytes per byte of text and 16 MiB.
+            Default `None`, the physical memory.
 
     Returns:
-        materialization (QasmMaterialization): The imported circuit and its writer’s `QasmWriteReceipt`.
+        materialization (QasmMaterialization): The imported circuit and its writer's `QasmWriteReceipt`.
 
     Raises:
         ValueError: If `receipt.construction_id` is not `construction.content_id`,
-            the construction exceeds `budget`, a Z gate has more than two
-            controls, or the actual file exceeds the byte limit.
+            a Z gate has more than two controls, the estimated memory exceeds
+            `max_bytes`, or the file's size differs from `receipt.bytes_written`.
     """
-    prepared = _Prepared(construction, writer_budget)
-    # After _Prepared, so writer_budget.max_metadata_bytes bounds the JSON that content_id hashes.
     if receipt.construction_id != construction.content_id:
         raise ValueError(f"receipt.construction_id {receipt.construction_id} is not "
                          f"construction.content_id {construction.content_id}. Pass as receipt "
                          "the QasmWriteReceipt that the writer returned for this construction")
-    if (sum(prepared.widths.values()) > budget.max_qubits
-            or sum(prepared.cwidths.values()) > budget.max_clbits
-            or prepared.visits > budget.max_dynamic_visits
-            or prepared.operations > budget.max_operations):
-        raise ValueError("QASM dynamic materialization exceeds consumer budget")
-    for record in prepared.selected.values():
-        if any(operation.gate == "mc_z" and len(operation.qubits) - 1 + int(record.controlled) > 2
-               for operation in record.decomposition):
+    written = set(receipt.selected_definitions)
+    for record in construction.selections:
+        if record.content_id in written and any(
+                operation.gate == "mc_z" and len(operation.qubits) - 1 + int(record.controlled) > 2
+                for operation in record.decomposition):
             raise ValueError("consumer capability: Z with more than two controls requires unadmitted synthesis")
+    wires = sum(width for *_, width in receipt.quantum_layout + receipt.classical_layout)
+    check_memory(_INSTRUCTION_BYTES * receipt.unrolled_instructions + _WIRE_BYTES * wires
+                 + _TEXT_BYTES * receipt.bytes_written + _FIXED_BYTES, max_bytes, "OpenQASM 3 import with unrolled loops")
     with Path(path).open("rb") as source:
         size = os.fstat(source.fileno()).st_size
-        if size > budget.max_bytes:
-            raise ValueError("QASM stored parsing text exceeds consumer budget")
+        if size != receipt.bytes_written:
+            raise ValueError(f"the file has {size} bytes, but its write record has {receipt.bytes_written}. "
+                             "Import the unchanged file of the writer call that returned the record")
         data = source.read(size)
     text = data.decode("ascii")
     from nwqlib._optional import optional_import

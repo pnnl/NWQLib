@@ -153,11 +153,11 @@ def test_lchs_dense_select_applies_each_branch_under_its_address_on_both_routes(
     problem, selected = _lchs_dense_plan(2, address_bits, route)
     data = selected._native["native_data"]
     built = _built_select(problem, selected)
-    quad = data.quadrature
+    dense = data.dense
     expected = np.eye(1 << built.num_qubits, dtype=complex)
-    for index, (coefficient, k_value) in enumerate(zip(data.coefficient_plan.coefficients, quad.k_nodes,
+    for index, (coefficient, k_value) in enumerate(zip(data.coefficient_plan.coefficients, data.quadrature.k_nodes,
                                                        strict=True)):
-        unitary = expm(-1j * problem.elapsed_time * (float(k_value) * quad.l_part + quad.h_part))
+        unitary = expm(-1j * problem.elapsed_time * (float(k_value) * dense.l_part + dense.h_part))
         block = _controlled_matrix(np.exp(1j * np.angle(coefficient)) * unitary, address_bits, index)
         expected = block @ expected
     assert np.max(np.abs(Operator(built).data - expected)) < ROUNDING

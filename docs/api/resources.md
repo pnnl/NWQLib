@@ -68,14 +68,14 @@ Each [`ResourceQuantity`][nwqlib.resources.records.ResourceQuantity] holds its v
 
 An exact count or upper bound is only as strong as its evidence, `fact.evidence.kind`, so a count derived from an asserted rule stays an assertion. The conditions of a value are in `fact.assumptions`.
 
-Totals over the whole run have `location=None`. Widths and memory are peaks at a location, so read them with `quantity(metric, location=...)`:
+Totals over the declared Program have `location=None`. They count what the Program declares, so work that a Method does outside it, such as an adaptive controller or a classical analysis, is not included. `population` says what each count covers. Widths and memory are peaks at a location, so read them with `quantity(metric, location=...)`:
 
 | Metrics | Value | Unit |
 | --- | --- | --- |
-| Gates: `operations`, `single_qubit`, `two_qubit`, `controlled`, `global_phases`, `clifford`, `t`, `toffoli`, `ccz`, `arbitrary_rotations`, `cx` | Whole run | count |
-| Depths: `logical_depth`, `t_depth`, `non_clifford_depth` | Whole run | count |
-| Calls and measurement: `calls`, `measurements`, `resets`, `settings`, `shots`, `exact_evaluations`, `unique_settings`, `root_setting_declarations`, `root_repetitions`, `adaptive_rounds`, `expected_operations` | Whole run | count |
-| Work: `classical_work`, `construction_work`, `preparation_components` | Whole run | count |
+| Gates: `operations`, `single_qubit`, `two_qubit`, `controlled`, `global_phases`, `clifford`, `t`, `toffoli`, `ccz`, `arbitrary_rotations`, `cx` | Total | count |
+| Depths: `logical_depth`, `t_depth`, `non_clifford_depth` | Total | count |
+| Calls and measurement: `calls`, `measurements`, `resets`, `settings`, `shots`, `exact_evaluations`, `unique_settings`, `root_setting_declarations`, `root_repetitions`, `adaptive_rounds`, `expected_operations` | Total | count |
+| Work: `classical_work`, `construction_work`, `preparation_components` | Total | count |
 | Qubits: `logical_width`, `system`, `clean_ancilla`, `dirty_ancilla` at a register's location | Peak | count |
 | Classical registers: `classical_registers`, `classical_bits` at `"host"` | Peak | count |
 | Memory: `memory`, `known_memory`, `input_bytes`, `analysis_bytes`, `io_bytes`, `materialization_bytes`, `stored_bytes` at a workspace's location | Peak | byte |

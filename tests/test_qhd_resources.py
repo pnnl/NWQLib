@@ -8,6 +8,7 @@ checked against an independently integrated time-ordered propagator and against 
 import itertools
 import math
 import re
+import tracemalloc
 from collections import Counter
 from fractions import Fraction
 from types import SimpleNamespace
@@ -36,10 +37,14 @@ from nwqlib.algorithms.qhd import (
     refine_box,
     run_resources,
     solve_augmented_lagrangian,
+    step_blocks,
 )
+from nwqlib._choice_archive import ArchiveFiles, load_plan, save_plan
+from nwqlib.algorithms.qhd.grid import OneHotGrid
 from nwqlib.algorithms.qhd.initial_state import append_amplitude_chain
 from nwqlib.algorithms.qhd.method import _binary_source_reservation, _grid
 from nwqlib.algorithms.qhd.native import append_binary_steps, construct_qhd, raw_blocks
+from nwqlib.algorithms.qhd.onehot_schedule import OneHotSchedule, derivation_bytes
 from nwqlib.algorithms.qhd.records import QHDBlock
 from nwqlib.algorithms.qhd.refinement_records import BoxRefinementResult, RefinementResources
 from nwqlib.algorithms.qhd.resources import (
@@ -52,10 +57,11 @@ from nwqlib.algorithms.qhd.resources import (
     rotation_population,
     synthesis_projection,
 )
+from nwqlib.core.records import FrozenArray
 from nwqlib.execution import ExecutionLimits
 from nwqlib.problems import ConstrainedOptimization, Optimization
 from nwqlib.resources.records import CLIFFORD_ANGLES, T_ANGLES
-from nwqlib.scientist import plan
+from nwqlib.scientist import plan, prepare
 from nwqlib.subroutines.hamiltonian_evolution import append_pauli_evolution_block
 from nwqlib.subroutines.hamiltonian_evolution.pauli_evolution import (
     append_number_projector_phase,
@@ -107,23 +113,26 @@ def test_projector_rotations_match_the_qiskit_definitions(support, angle):
     # rotations and 44 T at s = 8 for a generic angle, against 255 rotations from a 2**s - 1 law).
     provider = structured_number_projector_provider(support)["provider"]
     block = QHDBlock(kind="number_projector", time_step=1.0, time=0.5, support=tuple(range(support)),
-                     coefficient=angle, angle=angle, provider=provider)
+                     coefficient=angle, angle=angle, **structured_number_projector_provider(support))
     circuit = QuantumCircuit(support)
     append_number_projector_phase(circuit, range(support), angle)
-    population = rotation_population(SimpleNamespace(steps=((block,),), initial_amplitudes=()), "none")
+    population = rotation_population(SimpleNamespace(initial_amplitudes=()), "none", [block])
     magnitudes = Counter()
     assert (population.arbitrary_rotations, population.exact_t) == _census(circuit, magnitudes)
     assert population.magnitudes == tuple(sorted(magnitudes.items()))
     if angle == 0.371:
         assert population.arbitrary_rotations + population.exact_t == (1, 3, 7, 15, 31, 63, 129, 179, 237)[support - 1]
-    slots, _, _ = _projector_slots(block, {})
+    slots, _, _ = _projector_slots(block)
     mcphase_slots = max(1, 4 * support - 5) if support <= 5 else 4 * support**2 - 10 * support + 3
     assert sum(slots.values()) == (2**support - 1 if provider == "diagonal_synthesis" else mcphase_slots)
 
 
-def test_rotation_law_counts_the_emitted_circuit_after_pruning():
+def test_rotation_law_bounds_the_emitted_circuit_and_a_budget_classifies_it():
     # Supports of size 1, 2, 3 (MCPhase) and 4 (phase diagonal), the uniform chain, second order. The
-    # 1e-3 y term gives projector angles near 3e-5 that rotation_threshold=1e-4 removes.
+    # 1e-3 y term gives projector angles near 3e-5 that rotation_threshold=1e-4 removes. Planning counts
+    # every rotation gate without classifying an angle, an upper bound on the arbitrary rotations and exact
+    # T gates of the built circuit. Without a synthesis budget no angle is classified, and with one the
+    # record holds the classified counts of the emitted circuit.
     problem = Optimization(objective=x + x * y + x * y * z + 3 * x * y * z * w + y / 1000,
                            variables=(x, y, z, w), bounds=((-1.0, 1.0),) * 4)
     method = QHD(num_grid_points=2, num_steps=2, total_time=0.3, rotation_threshold=1e-4)
@@ -140,8 +149,10 @@ def test_rotation_law_counts_the_emitted_circuit_after_pruning():
         (law,) = [law for law in selected_plan.construction.selections[0].resource_laws
                   if law.metric == "arbitrary_rotations"]
         emitted = _census(construct_qhd(selected_plan.blocks[0], (), None))
-        record = circuit_resources(selected_plan)
-        assert (law.value, law.interpretation) == (emitted[0], "exact")
+        assert law.interpretation == "upper_bound" and law.value >= sum(emitted)
+        unclassified = circuit_resources(selected_plan)
+        assert (unclassified.arbitrary_rotations, unclassified.exact_t, unclassified.synthesis) == (None, None, None)
+        record = circuit_resources(selected_plan, synthesis_epsilon=1e-3)
         assert (record.arbitrary_rotations, record.exact_t) == emitted
         counts[name] = emitted[0]
     assert counts["pruned"] < counts["unpruned"]
@@ -321,7 +332,7 @@ def test_evolution_bound_dominates_the_time_ordered_error(k, box, objective, ord
     selected = _plan(Optimization(objective=objective, variables=(x,), bounds=(box,)), method)
     r = selected.reconstruction
     circuit = QuantumCircuit(k)
-    for block in raw_blocks(r):
+    for block in raw_blocks(r, method, _grid(selected)):
         append_pauli_evolution_block(circuit, block)
     circuit.global_phase += r.physical_phase
     onehot = [1 << i for i in range(k)]
@@ -467,7 +478,7 @@ def test_run_totals_are_sums_over_the_recorded_circuits():
         assert result.resources.arbitrary_rotations == sum(item.rotation_law.value for item in laws)
         totals = run_resources(result, synthesis_epsilon=1e-3)
         assert totals.unavailable == ()
-        assert totals.rotation_interpretation == ("upper_bound" if result is binary else "exact")
+        assert totals.rotation_interpretation == "upper_bound"
         assert totals.arbitrary_rotations == sum(row.circuit_preparations * item.rotation_law.value
                                                  for row, item in zip(rows, laws))
         assert totals.shot_arbitrary_rotations == sum(row.shots * item.rotation_law.value
@@ -486,8 +497,8 @@ def test_run_totals_are_sums_over_the_recorded_circuits():
                            unavailable=(("t_estimate", "its QHD result is not available"),)))
     assert _total(entries, "shots", "arbitrary_rotations") == (640, None)
     assert _total(entries, "shots", "t_estimate") == (None, "round 1: its QHD result is not available")
-    # A level that stopped a refinement keeps its recorded count without a Plan, whose law interpretation
-    # the record does not keep, so the totals do not claim an exact count even for this exact law.
+    # A level that stopped a refinement keeps its recorded count without a Plan, and the count stays an
+    # upper bound.
     single = QHD(num_grid_points=2, num_steps=1, total_time=0.3, trotter_order=1, rotation_threshold=0.0,
                  initial_state=UniformState(), schedule=QuadraticSchedule(gamma=0.0))
     stopping = _plan(Optimization(objective=x / 3, variables=(x,), bounds=((0.0, 1.0),)), single)
@@ -499,7 +510,7 @@ def test_run_totals_are_sums_over_the_recorded_circuits():
                                   termination="no_valid_point", failure="no valid one-hot samples",
                                   stopped_resources=spent, resources=spent, max_plannings=2)
     totals = run_resources(stopped)
-    assert law.interpretation == "exact"
+    assert law.interpretation == "upper_bound"
     assert (totals.rotation_interpretation, totals.arbitrary_rotations, totals.shot_arbitrary_rotations) == (
         "upper_bound", law.value, 8 * law.value)
     # Exact readout reserves no shots, and its shot totals are unknown rather than zero work, while the
@@ -542,6 +553,46 @@ def test_error_ledger_names_every_stage():
         assert 0 < sources[0][name].value < 1e-12
 
 
+def test_one_hot_angle_formation_bounds_the_exact_discrepancies():
+    # Oracle: the exact sum of min(2, |lambda^ - lambda*|) over the hopping blocks and of
+    # min(2, (1 - 2**-s) |zeta^ - zeta*|) over the projectors, at the nominal durations, which the a priori
+    # bound 3u/(1 - 6u) |lambda^| + 2u/(1 - 4u) (1 - 2**-s) |zeta^| must reach without exceeding about
+    # 3u sum |angle|. The blocks are those the circuit emits (step_blocks), and the entry is the Plan's record.
+    problem = Optimization(objective=x + 3 * x * y * z * w + y / 1000 + x * y / 7, variables=(x, y, z, w),
+                           bounds=((-1.0, 1.0), (-0.7, 1.3), (-1.0, 1.0), (-1.0, 1.0)))
+    method = QHD(num_grid_points=3, num_steps=3, total_time=0.7, schedule=QuadraticSchedule(gamma=0.3),
+                 initial_state_preparation="none")
+    selected = _plan(problem, method)
+    r, grid = selected.reconstruction, _grid(selected)
+    k, dt = grid.num_grid_points, Fraction(method.total_time / method.num_steps)
+    tables = {table.support: table.values.array for table in r.support_values}
+    odd = {link for index, link in enumerate(grid.links()) if index % 2}
+
+    def oracle(steps):
+        total = magnitude = Fraction(0)
+        for group, (_t, a, b) in zip(steps, r.step_weights, strict=True):
+            for block in group:
+                stored = Fraction(block.angle)
+                if block.kind == "kinetic":
+                    left, right = block.support
+                    t = dt / 2 if (left % k, right % k) in odd else dt
+                    intended = -t * Fraction(a) / (2 * Fraction(grid.spacing(left // k)) ** 2)
+                    norm = Fraction(1)
+                else:
+                    index = sum((q % k) * k ** (len(block.support) - 1 - i) for i, q in enumerate(block.support))
+                    v = tables[tuple(q // k for q in block.support)][index]
+                    intended, norm = dt / 2 * Fraction(b) * Fraction(v), 1 - Fraction(1, 2 ** len(block.support))
+                total += min(2, norm * abs(stored - intended))
+                magnitude += norm * abs(stored)
+        return total, magnitude
+
+    steps = tuple(step_blocks(selected, step) for step in range(len(r.step_weights)))
+    exact, magnitude = oracle(steps)
+    formation = {item.name: item for item in circuit_resources(selected).error_sources}["angle_formation"]
+    assert {block.provider for step in steps for block in step} >= {"XXPlusYYGate", "diagonal_synthesis"}
+    assert 0 < exact <= formation.value <= Fraction(3, 2**53) * (1 + 2.0**-40) * magnitude
+
+
 COUPLED = x**2 / 3 + x * y - y / 50 + sp.Rational(1, 7)
 
 
@@ -564,7 +615,7 @@ def test_later_ledger_stages_bound_the_native_circuit_against_the_split_product(
     selected = _plan(problem, method)
     r = selected.reconstruction
     circuit = QuantumCircuit(2 * k)
-    for block in raw_blocks(r):
+    for block in raw_blocks(r, method, _grid(selected)):
         append_pauli_evolution_block(circuit, block)
     circuit.global_phase += r.physical_phase
     states = list(itertools.product(range(k), repeat=2))
@@ -598,7 +649,7 @@ def test_later_ledger_stages_bound_the_native_circuit_against_the_split_product(
     later = ("angle_formation", "rotation_pruning", "gate_parameters", "identity_phase")
     assert all(sources[name].status == "bound" for name in later)
     assert sources["rotation_pruning"].value > 0
-    hopping = sum(block.kind == "kinetic" for step in r.steps for block in step)
+    hopping = r.onehot.hopping_blocks
     assert (hopping < 4 * method.num_steps) == (lower < -1.0)
     assert 1e-3 < distance <= sum(sources[name].value for name in later)
 
@@ -632,7 +683,7 @@ def test_planning_refuses_arithmetic_outside_the_normal_range(objective, box, fi
     boundary = _plan(Optimization(objective=sp.Integer(2) ** 60 * x, variables=(x,), bounds=((0.0, 1.0),)),
                      method.revise(total_time=2.0**-1021, trotter_order=2, encoding="one_hot", boundary="dirichlet",
                                    num_grid_points=2, schedule=QuadraticSchedule(gamma=0.0)))
-    assert {block.time_step for step in boundary.reconstruction.steps for block in step} >= {2.0**-1022}
+    assert {block.time_step for block in step_blocks(boundary, 0)} >= {2.0**-1022}
 
 
 def test_a_chain_link_below_the_range_ends_the_structured_preparation():
@@ -663,7 +714,7 @@ def test_hopping_parameter_is_twice_the_stored_angle():
                      QHD(num_grid_points=2, num_steps=1, total_time=5e307, trotter_order=1, rotation_threshold=0.0,
                          initial_state=UniformState(), schedule=QuadraticSchedule(gamma=0.0)))
     circuit = QuantumCircuit(2)
-    for block in raw_blocks(selected.reconstruction):
+    for block in raw_blocks(selected.reconstruction, selected.method, _grid(selected)):
         append_pauli_evolution_block(circuit, block)
     assert [item.operation.params[0] for item in circuit.data if item.operation.name == "xx_plus_yy"] == [-50.0]
     sources = {item.name: item for item in circuit_resources(selected).error_sources}
@@ -768,8 +819,9 @@ def test_binary_rotations_match_the_emitted_circuit(k, fields):
 
 
 def test_binary_census_and_evolution_states_are_admitted_with_the_model_before_synthesis(monkeypatch):
-    # Inspection and the binary product share QHD.max_bytes between the caller's live data and the model's
-    # baseline (binary.BinaryModel), checked before any synthesis. The binary product holds three D-entry
+    # Inspection with a synthesis budget, which runs the census, and the binary product share QHD.max_bytes
+    # between the caller's live data and the model's baseline (binary.BinaryModel), checked before any
+    # synthesis. The binary product holds three D-entry
     # state owners and the phase buffers 16 (sum_potential E_t + K + E_max) (theory.run_binary_product), and
     # both refusals name the smallest admitting max_bytes, which then admits with the unchanged result. The
     # census reservation holds the Plan's tables, 8 bytes per entry, and at least the grouping and Python
@@ -783,7 +835,7 @@ def test_binary_census_and_evolution_states_are_admitted_with_the_model_before_s
     method = QHD(encoding="binary", boundary="periodic", num_grid_points=4, num_steps=2, total_time=0.45,
                  binary_synthesis=BinarySynthesis(potential="dense_diagonal"))
     selected = _plan(Optimization(objective=BINARY, variables=(x, y), bounds=((0.0, 1.7), (-1.0, 1.2))), method)
-    reference = circuit_resources(selected)
+    reference = circuit_resources(selected, synthesis_epsilon=1e-4)
     grid, r = _grid(selected), selected.reconstruction
     start = np.full(16, 0.25, dtype=np.complex128)
     evolved = run_binary_product(grid, selected.method, r, start.copy())
@@ -803,12 +855,12 @@ def test_binary_census_and_evolution_states_are_admitted_with_the_model_before_s
             except ValueError as error:
                 limit = int(re.search(r"max_bytes>=(\d+)", str(error)).group(1))
 
-    limit, record = smallest(lambda b: circuit_resources(limited(b)))
+    limit, record = smallest(lambda b: circuit_resources(limited(b), synthesis_epsilon=1e-4))
     ignored = {"content_id", "plan_id"}
     assert record.model_dump(exclude=ignored) == reference.model_dump(exclude=ignored)
     synthesized.clear()
     with pytest.raises(ValueError, match=f"resource inspection.*requires {limit} bytes") as caught:
-        circuit_resources(limited(limit - 1))
+        circuit_resources(limited(limit - 1), synthesis_epsilon=1e-4)
     assert not synthesized
     entries = [t.values.array.size for t in r.support_values]
     census = int(re.search(r"\((\d+) held", str(caught.value)).group(1)) - 8 * sum(entries)
@@ -1080,12 +1132,12 @@ def test_binary_norm_inputs_bound_the_dense_commutators(k, objective):
 
 def test_default_estimate_reports_the_rotation_counts_of_both_encodings():
     # Both encodings publish their rotation law in the selected_logical basis, so the default resource estimate
-    # reports one-hot and binary rotation counts side by side: the one-hot count as exact, the binary count of
-    # rotation gates before angle classification as an upper bound.
+    # reports one-hot and binary rotation counts side by side, each the count of rotation gates before angle
+    # classification and so an upper bound.
     from nwqlib.resources import estimate
 
     problem = Optimization(objective=(x - sp.Rational(1, 5)) ** 2, variables=(x,), bounds=((-1.0, 1.0),))
-    for method, interpretation in ((QHD(num_grid_points=4, num_steps=2, initial_state=UniformState()), "exact"),
+    for method, interpretation in ((QHD(num_grid_points=4, num_steps=2, initial_state=UniformState()), "upper_bound"),
                                    (QHD(num_grid_points=4, num_steps=2, initial_state=UniformState(),
                                         encoding="binary", boundary="periodic"), "upper_bound")):
         selected = _plan(problem, method)
@@ -1114,3 +1166,249 @@ def test_a_classical_binary_product_plan_runs_at_its_smallest_planning_limit():
             assert required > limit
             limit = required
     solve(selected)
+
+
+def test_binary_circuit_bytes_are_recorded_at_planning_and_checked_at_construction():
+    # Planning records the coarse construction estimate W as the preparation workspace without refusing on
+    # it, so a Plan with max_bytes = W - 1 is made. construct_qhd checks W before it allocates, refuses one
+    # byte below with that amount, and builds at W.
+    method = QHD(encoding="binary", boundary="periodic", num_grid_points=16, num_steps=2, total_time=0.45,
+                 binary_synthesis=BinarySynthesis(potential="dense_diagonal"))
+    problem = Optimization(objective=BINARY, variables=(x, y), bounds=((0.0, 1.7), (-1.0, 1.2)))
+    workspace = max(w.bytes for block in _plan(problem, method).blocks
+                    for w in block.record.workspace if w.purpose == "preparation")
+    below = _plan(problem, method.model_copy(update={"max_bytes": workspace - 1}))
+    with pytest.raises(ValueError, match=f"construction and use requires {workspace} bytes"):
+        construct_qhd(below.blocks[0], (), None)
+    circuit = construct_qhd(_plan(problem, method.model_copy(update={"max_bytes": workspace})).blocks[0], (), None)
+    assert circuit.num_qubits == 8
+
+
+def test_onehot_circuit_bytes_are_recorded_at_planning_and_checked_at_construction(tmp_path):
+    # Planning admits the construction work and records the byte estimate W, so a Plan with max_bytes = W - 1 is
+    # made. construct_qhd checks W before it allocates, for a loaded Plan too, refuses one byte below and builds at
+    # W. Eighty second-order steps on K = 8 make W exceed the bytes that planning itself checks.
+    problem = Optimization(objective=x, variables=(x,), bounds=((-1.0, 1.0),))
+    method = QHD(num_grid_points=8, num_steps=80, total_time=0.3, trotter_order=2)
+    selected = _plan(problem, method)
+    (workspace,) = [w.bytes for w in selected.blocks[0].record.workspace if w.purpose == "preparation"]
+    below = _plan(problem, method.revise(max_bytes=workspace - 1))
+    loaded = load_plan(save_plan(below, ArchiveFiles(tmp_path, 4_000_000)), ArchiveFiles(tmp_path, 4_000_000))
+    for candidate in (below, loaded):
+        with pytest.raises(ValueError, match=f"needs about {workspace} bytes, exceeding max_bytes={workspace - 1}"):
+            construct_qhd(candidate.blocks[0], (), None)
+    assert construct_qhd(_plan(problem, method.revise(max_bytes=workspace)).blocks[0], (), None).num_qubits == 8
+    # More steps on two variables: the Plan records its larger W and is made at W - 1 without building a circuit.
+    pair = Optimization(objective=x * y + x + y, variables=(x, y), bounds=((-1.0, 1.0),) * 2)
+    longer = QHD(num_grid_points=8, num_steps=32, total_time=0.3, trotter_order=2)
+    (estimate,) = [w.bytes for w in _plan(pair, longer).blocks[0].record.workspace if w.purpose == "preparation"]
+    made = _plan(pair, longer.revise(max_bytes=estimate - 1))
+    assert [w.bytes for w in made.blocks[0].record.workspace if w.purpose == "preparation"] == [estimate]
+
+
+def test_one_hot_stage_bounds_cap_an_overflowing_angle_sum_at_two():
+    # Zero objective, 64 Dirichlet points in (0, 6.5e-152) and one first-order step of length 8: each of the 63
+    # hopping angles is finite and their absolute sum exceeds the largest binary64 number. From the last grid point
+    # only the last hop acts, and its stored angle differs from the intended exponent by about 3.8e290 rad, so the
+    # step differs from the intended one by more than 1 even up to a global phase. Formation takes the stage cap 2.
+    method = QHD(num_grid_points=64, num_steps=1, total_time=8.0, trotter_order=1, schedule=QuadraticSchedule(gamma=0))
+    zero = Optimization(objective=sp.Integer(0), variables=(x,), bounds=((0.0, 6.5e-152),))
+    overflow = _plan(zero, method)
+    blocks = step_blocks(overflow, 0)
+    assert sum(abs(Fraction(b.angle)) for b in blocks) > Fraction(np.finfo(float).max)
+    h = Fraction(_grid(overflow).spacing(0))
+    delta = abs(Fraction(blocks[-1].angle) + Fraction(8) / (2 * h * h))
+    with mpmath.workdps(355):
+        gap = mpmath.sqrt(2 - 2 * abs(mpmath.cos(mpmath.mpf(delta.numerator) / delta.denominator)))
+    entries = {e.name: e for e in circuit_resources(overflow, synthesis_epsilon=1e-3).error_sources}
+    assert 1 < gap <= overflow.reconstruction.onehot.angle_formation == entries["angle_formation"].value == 2.0
+    # A threshold that prunes every hop: the dropped angles' sum exceeds the binary64 range and is not recorded,
+    # and both pruning totals take the cap.
+    pruned = _plan(zero, method.revise(rotation_threshold=1e307)).reconstruction
+    assert (pruned.dropped_count, pruned.dropped_angle_sum, pruned.pruning_error_bound,
+            pruned.onehot.rotation_pruning) == (63, None, 2.0, 2.0)
+    # Control on (0, 1): the angles sum within range and keep the a priori bound 3u/(1 - 6u) sum |lambda|.
+    control = _plan(Optimization(objective=sp.Integer(0), variables=(x,), bounds=((0.0, 1.0),)), method)
+    u = Fraction(1, 2**53)
+    exact = 3 * u / (1 - 6 * u) * sum(abs(Fraction(b.angle)) for b in step_blocks(control, 0))
+    assert exact <= Fraction(control.reconstruction.onehot.angle_formation) <= exact * (1 + Fraction(1, 2**40))
+
+
+def test_one_hot_projector_assignments_beyond_range_give_an_infinite_phase_allowance():
+    # 8e307 x on 16 points: the scaled projector angles sum beyond the binary64 range while their signed identity
+    # phases cancel. The assignment sum is recorded as beyond range, the identity-phase and formation stages take
+    # the cap 2, and a kept state, whose phase allowance is then infinite, is refused at planning.
+    problem = Optimization(objective=sp.Float(8e307) * x, variables=(x,), bounds=((-1.0, 1.0),))
+    method = QHD(num_grid_points=16, num_steps=1, total_time=1.0)
+    selected = _plan(problem, method)
+    assert selected.reconstruction.onehot.phase_assignments is None
+    entries = {e.name: e for e in circuit_resources(selected, synthesis_epsilon=1e-3).error_sources}
+    assert entries["identity_phase"].value == entries["angle_formation"].value == 2.0
+    with pytest.raises(ValueError, match="keep_state needs the physical phase"):
+        _plan(problem, method.revise(keep_state=True))
+
+
+def test_one_hot_derivation_storage_follows_the_largest_table():
+    # A two-entry table is charged its two entries, not a full tile, so the two-qubit, two-step Plan plans, lists its
+    # step, counts its rotations and builds its 13 gates within 1 MiB, with the default Plan's error sources.
+    problem = Optimization(objective=x, variables=(x,), bounds=((-1.0, 1.0),))
+    method = QHD(num_grid_points=2, num_steps=2, total_time=0.3)
+    regular = _plan(problem, method)
+    bounded = _plan(problem, method.revise(max_bytes=1 << 20))
+    assert step_blocks(bounded, 0) == step_blocks(regular, 0)
+    reference, limited = (circuit_resources(p, synthesis_epsilon=1e-3) for p in (regular, bounded))
+    assert (limited.arbitrary_rotations, limited.exact_t, limited.error_sources) == (
+        reference.arbitrary_rotations, reference.exact_t, reference.error_sources)
+    assert len(construct_qhd(bounded.blocks[0], (), None).data) == 13
+
+
+@pytest.mark.parametrize("k, d, provider, order, threshold", [
+    (64, 2, None, 2, 0.0),
+    (32, 2, ("mcphase", 2), 2, 0.0),
+    (6, 4, ("diagonal_synthesis", 0), 1, 0.0),
+    (6, 4, ("diagonal_synthesis", 0), 2, 10.0),
+    (256, 2, ("mcphase", 2), 1, 0.0),
+    (256, 2, ("mcphase", 2), 1, 10.0),
+])
+def test_one_hot_derivation_peak_stays_within_its_storage(k, d, provider, order, threshold):
+    # The traced peak of deriving one step's blocks and of the planning summary, without a table, with a 1,024- or
+    # 1,296-entry table and with a full 65,536-entry tile, all kept or all pruned, against derivation_bytes.
+    grid = OneHotGrid(tuple(f"v{j}" for j in range(d)), ((-1.0, 1.0),) * d, k, True, "dirichlet")
+    tables = () if provider is None else (
+        SimpleNamespace(support=tuple(range(d)), values=FrozenArray(np.linspace(1.0, 2.0, k**d))),)
+    schedule = OneHotSchedule(grid, tables=tables, providers={} if provider is None else {d: provider},
+                              step_weights=((0.1, 1.0, 1.0),), constant=0.0, total_time=0.2, num_steps=1,
+                              trotter_order=order, rotation_threshold=threshold)
+    storage = derivation_bytes(k, d, (len(t.support) for t in tables))
+
+    def blocks():
+        for _ in schedule.blocks(0):
+            pass
+
+    for run in (blocks, schedule.summary):
+        run()
+        tracemalloc.start()
+        try:
+            run()
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        assert peak <= storage
+
+
+def test_summary_objectives_equal_pointwise_objective_at(monkeypatch):
+    # The summary gathers each point's constant and table entries and sums them with fsum, so every value,
+    # the candidate, its objective, the mean and the marginals equal an evaluation by objective_at at each
+    # observed point, for dense probabilities and for sparse counts, without calling objective_at.
+    from math import fsum
+    from nwqlib.algorithms.qhd import method as qhd_method
+
+    method = QHD(encoding="binary", boundary="periodic", num_grid_points=8, num_steps=2, total_time=0.45)
+    selected = _plan(Optimization(objective=BINARY, variables=(x, y), bounds=((0.0, 1.7), (-1.0, 1.2))), method)
+    r = selected.reconstruction
+    rng = np.random.default_rng(3)
+    probabilities = rng.random((8, 8)) * (rng.random((8, 8)) < 0.6)
+    probabilities /= probabilities.sum()
+    points = np.array(sorted({(int(i), int(j)) for i, j in rng.integers(0, 8, size=(20, 2))}))
+    counts = rng.integers(1, 50, size=len(points)).astype(np.int64)
+    pointwise = qhd_method.objective_at
+    for weights, shots, kept in ((probabilities, None, None), (counts, int(counts.sum()), points)):
+        cells = ([tuple(p) for p in np.argwhere(weights > 0)] if kept is None
+                 else [tuple(map(int, p)) for p in kept])
+        flat = weights[weights > 0] if kept is None else weights
+        expected = {cell: pointwise(r, cell, 8) for cell in cells}
+        with monkeypatch.context() as patch:
+            patch.setattr(qhd_method, "objective_at", lambda *a: pytest.fail("pointwise objective_at"))
+            summary = qhd_method._summarize(selected, weights, 0.0, None, 0.0, shots=shots, points=kept)
+        best = min(cells, key=lambda cell: (expected[cell], cell))
+        assert summary["candidate_indices"] == best and summary["value"] == expected[best]
+        valid = int(flat.sum()) / shots if shots else fsum(flat.tolist())
+        probability = (flat / shots) if shots else flat
+        assert summary["expected_objective"] == qhd_method._array_mean(
+            [expected[cell] for cell in cells], probability, valid)
+        for axis in range(2):
+            for i in range(8):
+                block = [weight for cell, weight in zip(cells, flat.tolist(), strict=True) if cell[axis] == i]
+                assert summary["marginals"][axis][i] == (sum(block) / shots if shots else fsum(block))
+
+
+def test_binary_rotation_census_is_admitted_only_when_a_synthesis_budget_runs_it(monkeypatch):
+    # The default Plan and resource query classify no angle, so a work limit one unit below the census
+    # still plans and reports the rotation law and the error sources, while a synthesis budget, which runs
+    # the census, is refused with its work.
+    from nwqlib.algorithms.qhd import resources
+
+    problem = Optimization(objective=x * y + x**2 + y, variables=(x, y), bounds=((-1.0, 1.0),) * 2)
+    method = QHD(encoding="binary", boundary="periodic", num_grid_points=16, num_steps=3, total_time=0.4,
+                 binary_synthesis=BinarySynthesis(potential="dense_diagonal"))
+    selected = plan(problem, method=method)
+    sizes, original = [], resources._census_sizes
+    monkeypatch.setattr(resources, "_census_sizes", lambda *a, **k: sizes.append(original(*a, **k)) or sizes[-1])
+    default = circuit_resources(selected)
+    assert sizes == [] and (default.arbitrary_rotations, default.exact_t) == (None, None)
+    circuit_resources(selected, synthesis_epsilon=1e-3)
+    (work, _), = sizes
+    bounded = plan(problem, method=method.revise(max_work=work - 1))
+    record = circuit_resources(bounded)
+    assert (record.rotation_law.value, record.rotation_law.interpretation) == (default.rotation_law.value, "upper_bound")
+    assert record.error_sources == default.error_sources
+    with pytest.raises(ValueError, match=f"binary rotation census requires {work} work units"):
+        circuit_resources(bounded, synthesis_epsilon=1e-3)
+
+
+def _aer_positions(circuit):
+    from qiskit_aer import AerSimulator
+    from nwqlib.backends.qiskit_aer import _AerDecompose, _lower_aer_circuit
+
+    lowered, _ = _lower_aer_circuit(circuit, _AerDecompose(AerSimulator().target))
+    return len(lowered.data)
+
+
+@pytest.mark.parametrize("fields", [
+    dict(num_grid_points=20, num_steps=10),
+    dict(num_grid_points=4, num_steps=2, initial_state_preparation="qiskit_state_preparation"),
+    dict(num_grid_points=16, num_steps=4, encoding="binary", boundary="periodic"),
+    dict(num_grid_points=16, num_steps=2, encoding="binary", boundary="periodic",
+         binary_synthesis=BinarySynthesis(qft_bit_reversal="swap")),
+    dict(num_grid_points=32, num_steps=2, encoding="binary", boundary="periodic",
+         binary_synthesis=BinarySynthesis(aqft_cutoff=2)),
+])
+def test_construction_memory_counts_the_native_positions_of_the_built_circuit(fields):
+    # Aer's lowering of the built circuit is the independent count of what the Run's estimate multiplies. Hopping
+    # blocks, projector providers, the preparation recipes, QFT swaps and an approximate QFT all change that count.
+    from nwqlib.blocks.selection import NATIVE_POSITION_BYTES
+
+    selected = _plan(Optimization(objective=sp.cos(x), variables=(x,), bounds=((-1.0, 1.0),)),
+                     QHD(total_time=.5, **fields))
+    block = selected.blocks[0]
+    native = _aer_positions(construct_qhd(block, (), None))
+    assert native / 2 <= block._native_bytes / NATIVE_POSITION_BYTES <= 2 * native
+    (workspace,) = [w.bytes for w in block.record.workspace if w.purpose == "preparation"]
+    assert block._native_bytes + block._definition_bytes == workspace
+
+
+def test_binary_memory_counts_a_walsh_diagonal_at_most_once_per_gate():
+    # A weight-two parity rotation is one native RZZ, which the recorded CX and rotation counts overstate.
+    from nwqlib.algorithms.qhd.native import _binary_positions
+
+    selected = _plan(Optimization(objective=sp.cos(x) + sp.cos(y) + x * y, variables=(x, y), bounds=((-1.0, 1.0),) * 2),
+                     QHD(num_grid_points=8, num_steps=4, total_time=.5, encoding="binary", boundary="periodic"))
+    native = _aer_positions(construct_qhd(selected.blocks[0], (), None))
+    assert native <= _binary_positions(selected.reconstruction, selected.method, 2) <= 2 * native
+
+
+def test_prepare_refuses_a_long_circuit_before_deriving_a_block_and_after_loading(tmp_path, monkeypatch):
+    # K = 20 and N = 8000 flatten to about 3.5 million native positions, and a fresh process grew by 3.5 GB to build
+    # them. With a limit of 60 MiB the Run refuses before the first block is derived, for a loaded Plan as well.
+    from nwqlib.algorithms.qhd import native
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("a block was derived before the memory comparison")
+
+    monkeypatch.setattr(native, "raw_blocks", forbidden)
+    selected = _plan(Optimization(objective=sp.cos(x), variables=(x,), bounds=((-1.0, 1.0),)),
+                     QHD(num_grid_points=20, num_steps=8000, max_bytes=60 * 2**20))
+    loaded = load_plan(save_plan(selected, ArchiveFiles(tmp_path, 4_000_000)), ArchiveFiles(tmp_path, 4_000_000))
+    for candidate in (selected, loaded):
+        with pytest.raises(ValueError, match=rf"preparing this circuit needs about \d+ bytes.*max_bytes={60 * 2**20}"):
+            prepare(candidate, settings="first", progress=False)

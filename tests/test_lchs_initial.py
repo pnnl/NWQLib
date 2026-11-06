@@ -18,9 +18,9 @@ def initial_problem():
 
 
 def test_initial_identity_does_not_need_unused_source_data(monkeypatch):
-    from nwqlib.algorithms.lchs import time_independent_terms
-    monkeypatch.setattr(time_independent_terms,'generate_lchs_quadrature',
-        lambda **kw: pytest.fail('algebraic identity selected an evolution'))
+    from nwqlib.algorithms.lchs import selection
+    monkeypatch.setattr(selection,'dense_common',
+        lambda *a,**kw: pytest.fail('algebraic identity selected an evolution'))
     problem,_,_,_=initial_problem()
     source=StateInput.from_record(problem.initial_state.to_record())
     chosen=LinearDynamics(A=OperatorInput.from_record(problem.A.to_record()),initial_state=problem.initial_state,

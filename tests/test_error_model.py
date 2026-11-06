@@ -11,7 +11,7 @@ from nwqlib.evidence import (
     ErrorTerm, Evidence, EstimatorContribution, Fact, FramedFact, IndependenceLaw,
     TargetReference, assemble_check, linear_variance,
 )
-from nwqlib.evidence._work import ExactArithmetic
+from nwqlib.evidence._work import exact
 from nwqlib.problems.records import Accuracy
 
 SCOPE = Scope(domain="supplied projected-energy evidence")
@@ -192,33 +192,14 @@ def test_impossible_covariance_and_negative_variance_reject_without_roundoff_fic
     assert linear_variance(contributions=(x, y, z), covariance=pairs[:2], **kwargs).value.fact.availability == "unknown"
 
 
-def test_exact_integer_guard_precedes_arithmetic_and_preserves_small_cases(monkeypatch):
-    arithmetic = ExactArithmetic(max_integer_bits=64)
-    conversions = []
-    original = Fraction.__new__
-    def converted(cls, *args, **kwargs):
-        conversions.append(args)
-        return original(cls, *args, **kwargs)
-    with monkeypatch.context() as scoped:
-        scoped.setattr(Fraction, "__new__", converted)
-        with pytest.raises(ValueError, match="before operation"):
-            arithmetic.fraction(2**64)
-    assert conversions == []
-    left, right = Fraction(2**40), Fraction(2**40)
-    multiplications = []
-    multiply = Fraction.__mul__
-    def multiplied(a, b):
-        multiplications.append((a, b))
-        return multiply(a, b)
-    with monkeypatch.context() as scoped:
-        scoped.setattr(Fraction, "__mul__", multiplied)
-        with pytest.raises(ValueError, match="max_integer_bits"):
-            arithmetic.multiply(left, right)
-    assert multiplications == []
-    assert arithmetic.add(Fraction(1, 8), Fraction(1, 4)) == Fraction(3, 8)
-    assert arithmetic.divide(Fraction(-3, 8), Fraction(3, 4)) == Fraction(-1, 2)
+def test_exact_conversion_keeps_every_binary64_value_and_rejects_nonfinite_input():
     smallest = float.fromhex("0x0.0000000000001p-1022")
-    assert ExactArithmetic().fraction(smallest) == Fraction(1, 2**1074)
+    assert exact(smallest) == Fraction(1, 2**1074)
+    assert exact(Float64(value=-0.375)) == exact(Rational(numerator=-3, denominator=8)) == Fraction(-3, 8)
+    assert exact(2**64) == 2**64
+    for value in (float("inf"), float("nan")):
+        with pytest.raises(ValueError, match="finite real scalar"):
+            exact(value)
 
 
 def test_independent_scalar_bound_integer_boundary_and_conditions():

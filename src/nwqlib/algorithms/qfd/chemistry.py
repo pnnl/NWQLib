@@ -5,8 +5,7 @@ from math import isfinite
 
 import numpy as np
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
-from .construction import canonical_order, canonical_partner, fermionic_blocks
+from .construction import canonical_order, canonical_partner
 from .records import QFDEvolutionDiagnostics
 
 
@@ -19,6 +18,23 @@ def _signed_midpoint(coefficient, partner, sign):
     """
     exact = (Fraction(coefficient) + sign * Fraction(partner)) / 2
     return exact, float(exact)
+
+
+def _normalized_trace(key):
+    """Return ``tr(T)/2**q`` of a canonical monomial T, its identity coefficient in any Pauli expansion.
+
+    The canonical order puts the higher mode first among creations and among
+    annihilations (``canonical_order``). The scalar has 1 and a number term
+    ``a_p^dagger a_p`` has 1/2. The only self-adjoint four-operator word is
+    ``a_p^dagger a_q^dagger a_p a_q = -n_p n_q`` with p > q, which has -1/4.
+    Every other canonical T changes an occupation and has trace 0.
+    """
+    if not key:
+        return Fraction(1)
+    creations, annihilations = [mode for mode, action in key if action], [mode for mode, action in key if not action]
+    if creations != annihilations:
+        return Fraction(0)
+    return Fraction(1, 2) if len(key) == 2 else Fraction(-1, 4)
 
 
 def chemistry_evolution_terms(data, evolution_coefficient_cutoff=0.0):
@@ -176,7 +192,8 @@ def chemistry_evolution_terms(data, evolution_coefficient_cutoff=0.0):
             conserving += all(sum(2 * action - 1 for mode, action in key if mode % 2 == spin) == 0 for spin in (0, 1))
 
     generator = ingest_fermion([(value, key) for key, value in kept.items()], num_modes=q)
-    shift, _ = fermionic_blocks(generator, max_bytes=DEFAULT_MAX_BYTES)
+    # c_B of fermionic_blocks, from the kept canonical table without a Pauli mapping.
+    shift = sum((Fraction(value) * _normalized_trace(key) for key, value in kept.items()), Fraction(0))
     n = one.shape[0]
     asymmetry = max((abs(Fraction(float(one[p, r].real)) - Fraction(float(one[r, p].real)))
                      for p in range(n) for r in range(p + 1, n)), default=Fraction(0))

@@ -8,10 +8,11 @@ doi:10.1137/090752286, with the per-value truncation rule stated in
 proof of Theorem 2.2 (p. 2299). The work and byte limits are checked for
 the whole sweep before the first SVD. The
 [layered MPS construction formula](../../ENGINEERING_CONSTANTS.md#layered-mps-construction-law)
-bounds the work and bytes of the layered circuit that ``mps_circuit``
-builds from these cores.
+bounds the work of the layered circuit that ``mps_circuit`` builds from
+these cores and gives a coarse estimate of its dominant arrays' bytes.
 """
 
+import weakref
 from dataclasses import dataclass
 from math import fsum, sqrt
 
@@ -22,15 +23,10 @@ from nwqlib._numerics import (
     normalized_fidelity_with_window,
     stable_vector_norm,
 )
+from nwqlib._limits import ResourceLimitError, exceeds, optional_limit
 from nwqlib._validation import integer
-from nwqlib.operators.access import DEFAULT_INPUT_BYTES, _check_bytes, _check_products
+from nwqlib.operators.access import _check_bytes, _check_products
 from nwqlib.operators.inputs import _array_input, _digest, _freeze_array
-
-# Dense economy SVD is performed before truncation. This logical work ceiling
-# bounds sum(rows*columns*min(rows,columns)). It is not FLOPs, RSS or CPU time.
-# Raise it explicitly only for an intended larger dense decomposition.
-# Registered in docs/ENGINEERING_CONSTANTS.md.
-DEFAULT_MAX_SVD_WORK = 100_000_000
 
 
 def _input(vector, max_bytes):
@@ -41,6 +37,46 @@ def _input(vector, max_bytes):
     """
     array = _array_input(vector, ndim=1, max_bytes=max_bytes, extra_bytes_per_item=48)
     return normalize_state_vector(array)
+
+
+def _layout(array):
+    """Return the dtype, shape, strides and data address that interpret an array's storage."""
+    return array.dtype.str, array.shape, array.strides, array.__array_interface__["data"][0]
+
+
+def _bind_target(decomposition, target):
+    """Remember that ``target`` has the content hash ``decomposition.input_id`` when its storage cannot change.
+
+    Only an array whose storage belongs to an immutable ``bytes`` object, as
+    ``inputs._freeze_array`` makes, qualifies, because no view, buffer or
+    flag change can write to it. A read-only flag alone does not: an earlier
+    writable view, a writable buffer exporter or another mapping of a file
+    can still change the elements. The record holds a weak reference and the
+    layout, so it keeps no state-sized array alive, and an array whose shape
+    or dtype was reassigned is hashed again.
+    """
+    owner = target
+    while isinstance(owner, np.ndarray):
+        owner = owner.base
+    if type(owner) is bytes:
+        object.__setattr__(decomposition, "_target", (weakref.ref(target), _layout(target)))
+
+
+def _selected_target_id(target, decomposition):
+    """Return ``decomposition.input_id`` after checking that it is the content hash of ``target``.
+
+    A target with immutable storage (``_bind_target``) is hashed at most
+    once per decomposition, by the TT-SVD that produced the cores from it or
+    by the first check here, and a later check of the same array with the
+    same layout reuses that hash. Any other target, such as a writable array
+    or the read-only mapping of a loaded Plan file, is hashed at every check.
+    """
+    bound = decomposition.__dict__.get("_target")
+    if bound is None or bound[0]() is not target or bound[1] != _layout(target):
+        if decomposition.input_id != _digest("mps.normalized.C-order", (len(target),), (target,)):
+            raise ValueError("selected MPS cores differ from the actual normalized vector")
+        _bind_target(decomposition, target)
+    return decomposition.input_id
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -111,25 +147,23 @@ class MPSDecomposition:
         """Total bytes of the stored core arrays."""
         return sum(core.nbytes for core in self.cores)
 
-    # max_products=1_000_000_000 here and in the contraction functions below is
-    # an untuned ceiling on output entries times contracted rank, registered
-    # in docs/ENGINEERING_CONSTANTS.md. Revisit for a deliberately larger
-    # requested materialization.
-    def to_statevector(self, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000):
+    def to_statevector(self, *, max_bytes=None, max_products=None):
         """Contract the stored cores into the raw compressed vector, without renormalizing it or computing an SVD.
 
         The vector approximates the normalized input. It is not rescaled by
         `input_norm`.
 
         Args:
-            max_bytes (int): Default 10 GB (decimal, `10_000_000_000`
-                bytes). Limit on the stored cores plus the known arrays of
-                each contraction step and of the output vector, checked
-                before each step. It does not measure process memory.
-            max_products (int): Default `1_000_000_000`. Limit on the
-                scalar multiplications of the whole contraction, the sum
-                over steps of the step's output entries times the
-                contracted bond rank, checked before each step.
+            max_bytes (int | None): Default `None`, the physical memory of
+                this computer. Limit on the stored cores plus the known
+                arrays of each contraction step and of the output vector,
+                checked before each step. It does not measure process
+                memory.
+            max_products (int | None): Default `None`, no limit. Optional
+                limit on the scalar multiplications of the whole
+                contraction, the sum over steps of the step's output
+                entries times the contracted bond rank, checked before each
+                step.
 
         Returns:
             vector (numpy.ndarray): The `original_dimension = 2**num_qubits`
@@ -137,8 +171,8 @@ class MPSDecomposition:
 
         Raises:
             ValueError: If a contraction step or the output would exceed
-                `max_bytes` or `max_products`, or if either limit is not a
-                positive integer.
+                `max_bytes` or `max_products`, or if either limit is neither
+                None nor a positive integer.
         """
         return _reconstruct_cores(self.cores, max_bytes=max_bytes, max_products=max_products)
 
@@ -202,7 +236,7 @@ class MPSCompressionAnalysis:
 
 
 def decompose_state_to_mps(vector, *, max_bond_dim=None, threshold=1e-14,
-                           max_bytes=DEFAULT_INPUT_BYTES, max_svd_work=DEFAULT_MAX_SVD_WORK):
+                           max_bytes=None, max_svd_work=None):
     """Normalize a state vector and compute its tensor-train (MPS) cores by TT-SVD, without reconstructing the state.
 
     Each site follows steps 4 to 7 of Oseledets (2011),
@@ -228,11 +262,12 @@ def decompose_state_to_mps(vector, *, max_bond_dim=None, threshold=1e-14,
             rank at each bond.
         threshold (float): Default `1e-14`. Singular values at or below it
             are dropped individually. It is not a total error tolerance.
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+        max_bytes (int | None): Default `None`, the physical memory of this computer.
             Limit on the known arrays. It does not measure process memory.
-        max_svd_work (int): Default `100_000_000`. Limit on the declared
-            dense-SVD work of the whole sweep, the sum of rows times columns
-            times the smaller dimension over all economy SVDs.
+        max_svd_work (int | None): Default `None`, no limit. Limit on the
+            declared dense-SVD work of the whole sweep, the sum of rows times
+            columns times the smaller dimension over all economy SVDs,
+            checked before the first SVD.
 
     Returns:
         decomposition (MPSDecomposition): The cores, bond dimensions and
@@ -251,7 +286,7 @@ def decompose_state_to_mps(vector, *, max_bond_dim=None, threshold=1e-14,
 
 
 def _decompose_normalized_state(normalized_state, *, max_bond_dim, threshold,
-                                max_bytes=DEFAULT_INPUT_BYTES, max_svd_work=DEFAULT_MAX_SVD_WORK,
+                                max_bytes=None, max_svd_work=None,
                                 input_norm=1.0):
     """Check the work and bytes of the TT-SVD sweep and run it once on an already normalized power-of-two vector.
 
@@ -261,7 +296,7 @@ def _decompose_normalized_state(normalized_state, *, max_bond_dim, threshold,
         integer(max_bond_dim, "max_bond_dim", 1)
     if isinstance(threshold, (bool, np.bool_)) or not np.isfinite(threshold) or threshold < 0:
         raise ValueError("threshold must be finite and nonnegative")
-    integer(max_svd_work, "max_svd_work", 1)
+    max_svd_work = optional_limit(max_svd_work, "max_svd_work")
     dimension = normalized_state.size
     if normalized_state.ndim != 1 or dimension < 1 or dimension & (dimension-1):
         raise ValueError("normalized tensor requires a power-of-two vector")
@@ -285,8 +320,8 @@ def _decompose_normalized_state(normalized_state, *, max_bond_dim, threshold,
             2*rows*columns + rows*computed + computed*columns + kept*columns + 2*rows*kept) + 8*computed)
         core_bytes += 16*rows*kept
         rank = kept
-    if work > max_svd_work:
-        raise ValueError(f"TT-SVD needs at most {work} logical SVD work, exceeding max_svd_work={max_svd_work}")
+    if exceeds(work, max_svd_work):
+        raise ResourceLimitError(f"TT-SVD needs at most {work} logical SVD work, exceeding max_svd_work={max_svd_work}")
     _check_bytes(peak, max_bytes, "TT-SVD known arrays")
     input_id = _digest("mps.normalized.C-order", (dimension,), (np.ascontiguousarray(normalized_state),))
     remaining = normalized_state.reshape(1, -1)
@@ -306,14 +341,16 @@ def _decompose_normalized_state(normalized_state, *, max_bond_dim, threshold,
         del u, s, vh
     cores.append(_freeze_array(remaining.reshape(rank, 2 if qubits else 1, 1, 1)))
     ranks.append(1)
-    return MPSDecomposition(cores=tuple(cores), num_qubits=qubits, original_dimension=dimension,
-                            bond_dimensions=tuple(ranks), max_bond_dim=max_bond_dim,
-                            threshold=float(threshold), discarded_weight=fsum(losses),
-                            input_id=input_id, input_norm=input_norm)
+    decomposition = MPSDecomposition(cores=tuple(cores), num_qubits=qubits, original_dimension=dimension,
+                                     bond_dimensions=tuple(ranks), max_bond_dim=max_bond_dim,
+                                     threshold=float(threshold), discarded_weight=fsum(losses),
+                                     input_id=input_id, input_norm=input_norm)
+    _bind_target(decomposition, normalized_state)
+    return decomposition
 
 
 def analyze_mps_state_compression(decomposition, *, reference=None,
-                                  max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000):
+                                  max_bytes=None, max_products=None):
     """Estimate the truncation error of MPS cores, and compare them with a reference vector on request.
 
     The estimates use only the stored discarded weight D: raw L2 distance
@@ -329,10 +366,10 @@ def analyze_mps_state_compression(decomposition, *, reference=None,
         reference (array_like | None): Default `None`. Vector to compare
             with, normalized first. The result says whether it matches the
             compressed input.
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
-            Limit on the arrays of the comparison.
-        max_products (int): Default `1_000_000_000`. Limit on the scalar
-            products of the contraction.
+        max_bytes (int | None): Default `None`, the physical memory of this
+            computer. Limit on the arrays of the comparison.
+        max_products (int | None): Default `None`, no limit. Optional limit
+            on the scalar products of the contraction.
 
     Returns:
         analysis (MPSCompressionAnalysis): The estimates, and the computed
@@ -380,7 +417,10 @@ def analyze_mps_state_compression(decomposition, *, reference=None,
 
 
 def layered_construction_size(bond_dimensions, num_layers) -> tuple[int, int]:
-    """Return upper bounds `(work, bytes)` of building the layered circuit from MPS cores.
+    """Return the `(work, bytes)` of building the layered circuit from MPS cores: a work bound and a byte estimate.
+
+    The work is an upper bound on the counted units below. The bytes are a
+    coarse estimate of the dominant arrays, not a bound on process memory.
 
     The formula follows the scikit_tt calls of
     [`mps_to_circuit`][nwqlib.subroutines.state_preparation.mps_circuit.mps_to_circuit],
@@ -421,25 +461,22 @@ def layered_construction_size(bond_dimensions, num_layers) -> tuple[int, int]:
 
     Bytes, 16 per entry: the target vector, the stored cores, the
     right-canonical input TT and the rank-2 copies of a truncation are held
-    throughout. On top of them comes the largest of four steps: the initial
-    ``ortho``, a truncation (working and truncated TT and their sweep),
-    ``mpo.dot`` (the old working TT, the product TT and one core's broadcast
-    copy) and the ``ortho`` of the product (the product TT and its sweep).
-    The peak of a sweep is the larger of an SVD step and a product step. An
-    SVD step holds the reshaped core and the Fortran copy that LAPACK
-    factors, U, s and Vh and zgesdd's work arrays, at most ``k k + 194 k``
-    complex entries for LAPACK block sizes up to 64 (SciPy 1.18.1's optimal
-    size stayed at or below 0.95 of it for m and c up to 4096),
-    ``k max(5 k + 7, 2 max(m, c) + 2 k + 1)`` reals and ``8 k`` integers. A
-    product step holds U, Vh, ``diag(s)`` with its complex copy and the
-    product arrays. An untuned allowance of ``32768 + 4096 n`` bytes covers
-    the gate MPOs, the Python objects of the TTs and the headers of their
-    core arrays. Under tracemalloc these exceeded the array bytes by up to
-    31 kB for ten sites (SciPy 1.18.1). Qiskit circuit objects
-    are outside the formula, and the two-qubit syntheses have their own
-    limit check. Cores whose bond dimensions are all one form a product state,
-    which the builder prepares site by site without scikit_tt, 64 units per
-    site.
+    throughout. On top of them come 8 entries per entry of the largest TT
+    that the construction forms, the working TT of a layer or the product
+    of a gate MPO and the working TT at the rank bounds above. They cover
+    that TT, the TT it replaces, and the reshaped core, its copy and the
+    singular factors of one sweep step. An untuned allowance of
+    ``65536 + 4096 n`` bytes covers LAPACK's work arrays for these small
+    SVDs, the gate MPOs, the Python objects of the TTs and the headers of
+    their core arrays. Over 3 to 16 sites, bond-dimension caps 2 to 256 and
+    1 to 6 layers the estimate was 1.03 to 2.99 times the earlier
+    step-by-step formula for the same arrays and zgesdd's work arrays
+    (SciPy 1.18.1). That comparison is between the two formulas, and no
+    memory was measured for it. Qiskit
+    circuit objects are outside the formula, and the two-qubit syntheses
+    have their own limit check. Cores whose bond dimensions are all one form
+    a product state, which the builder prepares site by site without
+    scikit_tt, 64 units per site.
     """
     b = [int(rank) for rank in bond_dimensions]
     n = len(b) - 1
@@ -447,65 +484,53 @@ def layered_construction_size(bond_dimensions, num_layers) -> tuple[int, int]:
     def entries(ranks):
         return sum(2 * ranks[j] * ranks[j + 1] for j in range(n))
 
-    def svd(m, c):
-        k = min(m, c)
-        return 2 * m * c * k, (16 * (2 * m * c + m * k + k * c + k * k + 194 * k)
-                               + 8 * k * max(5 * k + 7, 2 * max(m, c) + 2 * k + 1) + 40 * k)
-
     def left(ranks):
-        a, work, peak = [1] * (n + 1), 0, 0
+        a, work = [1] * (n + 1), 0
         for i in range(n - 1):
             m, c, r = 2 * a[i], ranks[i + 1], ranks[i + 2]
             k = min(m, c)
-            svd_work, svd_bytes = svd(m, c)
-            work += svd_work + k * k * c + 2 * k * c * r
-            peak = max(peak, svd_bytes, 16 * (m * k + 2 * k * c + 2 * c * r + 2 * k * r) + 24 * k * k)
+            work += 2 * m * c * k + k * k * c + 2 * k * c * r
             a[i + 1] = k
-        return a, work, peak
+        return a, work
 
     def right(ranks, cap):
-        a, work, peak = list(ranks), 0, 0
+        a, work = list(ranks), 0
         for i in range(n - 1, 0, -1):
             m, c = a[i], 2 * a[i + 1]
-            full = min(m, c)
-            k = min(full, cap)
-            svd_work, svd_bytes = svd(m, c)
+            k = min(m, c, cap)
             rows = 2 * a[i - 1]
-            work += svd_work + rows * m * k + rows * k * k
-            peak = max(peak, svd_bytes, 16 * (m * full + full * c + rows * m + 2 * rows * k) + 24 * k * k)
+            work += 2 * m * c * min(m, c) + rows * m * k + rows * k * k
             a[i] = k
-        return a, work, peak
+        return a, work
 
     def ortho(ranks, cap=1 << 62):
-        a, left_work, left_peak = left(ranks)
-        a, right_work, right_peak = right(a, cap)
-        return a, left_work + right_work, max(left_peak, right_peak)
+        a, left_work = left(ranks)
+        a, right_work = right(a, cap)
+        return a, left_work + right_work
 
+    allowance = 65536 + 4096 * n
     if n == 0 or max(b) == 1:
         # The builder prepares a product state site by site without scikit_tt.
-        return 64 * max(1, n), 16 * ((1 << n) + entries(b)) + 32768 + 4096 * n
+        return 64 * max(1, n), 16 * ((1 << n) + entries(b)) + allowance
     two = [min(2, 1 << j, 1 << (n - j)) for j in range(n + 1)]
-    held = 16 * ((1 << n) + 2 * entries(b) + 4 * entries(two)) + 32768 + 4096 * n
-    working, work, peak = ortho(b)
+    working, work = ortho(b)
     work += 2 * entries(b)
+    largest = entries(b)
     for layer in range(num_layers):
-        truncated, ortho_work, ortho_peak = ortho(working, 2)
-        _, norm_work, norm_peak = right(truncated, 1 << 62)
+        largest = max(largest, entries(working))
+        truncated, ortho_work = ortho(working, 2)
+        _, norm_work = right(truncated, 1 << 62)
         work += entries(working) + ortho_work + 3 * entries(truncated) + norm_work + 64 * n
-        peak = max(peak, 32 * entries(working) + ortho_peak, 16 * entries(working) + norm_peak)
         if layer + 1 == num_layers:
             break
         for site in range(n - 1, -1, -1):
             product = list(working)
             if site < n - 1:
                 product[site + 1] *= 4
-            broadcast = max(2 * working[j] * working[j + 1] for j in range(n))
-            after, ortho_work, ortho_peak = ortho(product)
+            largest = max(largest, entries(product))
+            working, ortho_work = ortho(product)
             work += 64 + 2 * entries(product) + ortho_work
-            peak = max(peak, 16 * (entries(working) + entries(product) + broadcast),
-                       16 * entries(product) + ortho_peak)
-            working = after
-    return work, held + peak
+    return work, 16 * ((1 << n) + 2 * entries(b) + 4 * entries(two) + 8 * largest) + allowance
 
 
 def admit_layered_construction(bond_dimensions, num_layers, *, max_svd_work, max_bytes) -> tuple[int, int]:
@@ -515,13 +540,60 @@ def admit_layered_construction(bond_dimensions, num_layers, *, max_svd_work, max
         The ``(work, bytes)`` of ``layered_construction_size``.
     """
     work, data_bytes = layered_construction_size(bond_dimensions, num_layers)
-    if work > max_svd_work:
-        raise ValueError(f"layered MPS construction needs {work} work, exceeding max_svd_work={max_svd_work}")
+    if exceeds(work, max_svd_work):
+        raise ResourceLimitError(f"layered MPS construction needs {work} work, exceeding max_svd_work={max_svd_work}")
     _check_bytes(data_bytes, max_bytes, "layered MPS construction")
     return work, data_bytes
 
 
-def _reconstruct_cores(cores, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000):
+def _sweep_work(num_qubits, max_bond_dim) -> tuple[int, tuple[int, ...]]:
+    """Return the TT-SVD work of a 2**n state and the largest bond dimension each bond can keep.
+
+    The work is the dense-SVD work of ``_decompose_normalized_state``, the
+    sum of rows times columns times the smaller dimension of each economy
+    SVD. A bond keeps at most min(rows, columns, max_bond_dim).
+    """
+    rank, work, bonds = 1, 0, [1]
+    for site in range(num_qubits - 1):
+        rows, columns = 2*rank, 1 << (num_qubits-site-1)
+        computed = min(rows, columns)
+        work += rows*columns*computed
+        rank = computed if max_bond_dim is None else min(computed, max_bond_dim)
+        bonds.append(rank)
+    return work, tuple(bonds + [1])
+
+
+def admit_mps_circuit(num_qubits, *, max_bond_dim, num_layers, max_svd_work) -> None:
+    """Raise before the TT-SVD of an MPS circuit whose whole construction exceeds an explicit ``max_svd_work``.
+
+    The work is the TT-SVD sweep plus the circuit route that the largest
+    bond dimensions the sweep can keep select in the builder: nothing for a
+    scalar, one gate per site (``layered_construction_size``) when every
+    bond is one, and otherwise the at most ``num_layers * (n - 1)`` exact
+    two-qubit syntheses (``_dense_synthesis.dense_synthesis_size``) and the
+    layered construction at those bonds. The construction law does not
+    decrease when a bond dimension grows, and actual bonds that are all one
+    take the cheaper product route, so the actual construction never needs
+    more. Without a limit nothing is computed.
+    """
+    if max_svd_work is None:
+        return
+    from nwqlib.subroutines._dense_synthesis import dense_synthesis_size
+
+    sweep, bonds = _sweep_work(num_qubits, max_bond_dim)
+    if num_qubits == 0:
+        work = sweep
+    elif max(bonds) == 1:
+        work = sweep + layered_construction_size(bonds, num_layers)[0]
+    else:
+        work = (sweep + num_layers*(num_qubits-1)*dense_synthesis_size(2)[0]
+                + layered_construction_size(bonds, num_layers)[0])
+    if work > max_svd_work:
+        raise ResourceLimitError(f"MPS circuit needs {work} work for its TT-SVD and circuit construction, "
+                                 f"exceeding max_svd_work={max_svd_work}")
+
+
+def _reconstruct_cores(cores, *, max_bytes, max_products):
     """Contract adjacent TT ranks after checking the known arrays and scalar products against their limits."""
     core_bytes = sum(core.nbytes for core in cores)
     tensor = cores[0][:, :, 0, :]

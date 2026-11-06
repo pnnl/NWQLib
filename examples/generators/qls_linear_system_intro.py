@@ -3,7 +3,7 @@
 #
 # A metal plate with cold edges is warmed by two small heaters, and on a 4 × 4 grid its steady temperature solves a 16-unknown linear system $Ax=b$. This notebook solves it with NWQLib's quantum linear-system solver (QLS) and checks the answer against `numpy.linalg.solve`.
 #
-# Install with `python -m pip install "nwqlib[aer,notebook]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook]"` in a clone of the repository instead. The notebook simulates at most 12 qubits and runs in about 17 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.6.0, Aer 0.18.0).
+# Install with `python -m pip install "nwqlib[aer,notebook]"`. To work on NWQLib itself, run `python -m pip install -e ".[aer,notebook]"` in a clone of the repository instead. The notebook simulates at most 12 qubits and runs in about 10 s on an Apple M3 Max with 36 GiB of memory (Python 3.12.14, Qiskit 2.6.0, Aer 0.18.0).
 #
 # > **How to read this notebook.** The next cells solve the plate and show the answer with its cost.
 # >
@@ -110,7 +110,7 @@ def show_card(result, reference, check, predicted, seconds, peak_bytes):
     display(HTML(
         f"<p><strong>Result.</strong> QLS solved the {len(x)}-unknown plate on a {rec.width}-qubit circuit. Its "
         f"temperatures agree with <code>numpy.linalg.solve</code> to a relative error of {error:.2%}, "
-        f"{'within' if ratio < 1 else 'outside'} the error the selected polynomial allows (error / allowance = "
+        f"{'within' if ratio < 1 else 'outside'} the nominal allowance of its polynomial and phases (error / allowance = "
         f"{ratio:.2f}). Execution: <code>{target}</code> simulator, exact readout of every amplitude. Output: "
         f"<code>result.x</code>, the physical solution with its scale, not a unit vector.</p>"
         f"<p><strong>Cost.</strong> Quantum: {rec.width} qubits, "
@@ -146,7 +146,7 @@ from nwqlib.algorithms.qls import QLSVerification
 from nwqlib.resources import ResourceContext
 
 reference = np.linalg.solve(A, b)                                    # the classical answer, used only for comparison
-check, _ = result.verify(checks=QLSVerification(                     # error against the polynomial's allowance
+check, _ = result.verify(checks=QLSVerification(                     # error against the nominal polynomial and phase allowance
     comparisons=("spectral_domain", "inverse_relative_error", "inverse_success")))
 predicted = estimate(selected, context=ResourceContext(basis="cx"))  # counts from the resource formulas, no circuit built
 peak_bytes = traced_peak(lambda: solve(plan(problem, method=QLS(epsilon_inv=EPSILON), seed=7), progress=False))
@@ -162,33 +162,43 @@ show_card(result, reference, check, predicted, seconds, peak_bytes)
 # - **Input.** A square invertible NumPy array, real or complex, a Qiskit `SparsePauliOp`, or a periodic stencil. Planning refuses a SciPy CSR matrix with an `ApplicabilityError`. For a small matrix, `.toarray()` converts it ([Supply inputs](../docs/inputs.md)).
 # - **Output.** `result.x` is the physical solution, available from exact readout, in which the simulator computes the amplitudes without shot sampling, subject to numerical rounding. Finite-shot runs return one requested quantity instead (Go deeper B).
 # - **Size.** A dimension that is not a power of two is padded and uses a dense block encoding, which costs many more CX gates. `plan` reports the qubits before anything runs.
-# - **Conditioning.** The polynomial degree grows with the encoded inverse-gap parameter κ, the ratio $\alpha/\sigma_{\min}(A)$ of the block encoding's normalization to the smallest singular value of $A$ (`kappa_be` in the [QLS guide](../docs/algorithms/qls.md)). It is at least the condition number of $A$, and Go deeper A compares the two. At ε = 0.01 the default cap `max_degree=256` stops planning above κ ≈ 44.
+# - **Conditioning.** The polynomial degree grows with the encoded inverse-gap parameter κ, the ratio $\alpha/\sigma_{\min}(A)$ of the block encoding's normalization to the smallest singular value of $A$ (`kappa_be` in the [QLS guide](../docs/algorithms/qls.md)). It is at least the condition number of $A$, and Go deeper A compares the two. For large κ the degree is about κ ln(2/ε), and the CX count and the run time grow with it.
 #
-# The cell plans a 10-unknown 1D Poisson matrix, whose κ lies above that limit. Planning refuses it with a `ValueError` that names `max_degree`. Raising the cap is the remedy, and the second half of the cell plans and solves it, one solve in about 4 s.
+# The cell plans and solves a 10-unknown 1D Poisson matrix, whose κ is larger than the plate's.
 
 # %%
 n = 10
 poisson = 2 * np.eye(n) - np.eye(n, k=1) - np.eye(n, k=-1)  # a 1D Poisson matrix, more ill-conditioned than the plate
 steep = LinearSystem(A=poisson, b=np.ones(n))
 started = perf_counter()
-try:
-    plan(steep, method=QLS(epsilon_inv=EPSILON), seed=7)
-except ValueError as refusal:
-    print(f"Refused after {perf_counter() - started:.3f} s, before any circuit existed:\n{refusal}")
-
-raised = plan(steep, method=QLS(epsilon_inv=EPSILON, max_degree=512), seed=7)  # the remedy: a higher degree cap
-steep_x = np.asarray(solve(raised, progress=False).x).real
+steep_plan = plan(steep, method=QLS(epsilon_inv=EPSILON), seed=7)
+steep_x = np.asarray(solve(steep_plan, progress=False).x).real
+steep_seconds = perf_counter() - started
 steep_reference = np.linalg.solve(poisson, np.ones(n))
 show_table([
-    ("Encoded inverse-gap parameter κ", raised.reconstruction.kappa_be, "Above the limit of the default cap"),
-    ("Polynomial degree", raised.reconstruction.degree, f"Allowed by max_degree = {raised.method.max_degree}"),
-    ("Qubits", raised.reconstruction.width,
-     f"{n} unknowns padded to {raised.reconstruction.padded_dimension} amplitudes"),
-    ("Predicted CX gates", estimate(raised, context=ResourceContext(basis="cx")).quantity("cx").fact.value.value,
+    ("Encoded inverse-gap parameter κ", steep_plan.reconstruction.kappa_be, f"The plate's is {format_value(selected.reconstruction.kappa_be)}"),
+    ("Polynomial degree", steep_plan.reconstruction.degree, f"The plate's is {selected.reconstruction.degree}"),
+    ("Qubits", steep_plan.reconstruction.width,
+     f"{n} unknowns padded to {steep_plan.reconstruction.padded_dimension} amplitudes"),
+    ("Predicted CX gates", estimate(steep_plan, context=ResourceContext(basis="cx")).quantity("cx").fact.value.value,
      "Predicted by estimate, before building"),
     ("Relative error against numpy.linalg.solve", np.linalg.norm(steep_x - steep_reference) / np.linalg.norm(steep_reference),
      f"Requested ε = {EPSILON}"),
-], headers=("After raising max_degree", "Value", "Meaning"))
+    ("Plan and solve time", f"{steep_seconds:.1f} s", "On this computer"),
+], headers=("10-unknown Poisson matrix", "Value", "Meaning"))
+
+# %% [markdown]
+# **A refusal.** `max_work` limits the classical work of each planning stage and defaults to no limit. The cell sets one too small for the plate, then a larger one. A refusal names the amount that the first stage above the limit needs, so a later stage can name a larger amount.
+
+# %%
+started = perf_counter()
+try:
+    plan(problem, method=QLS(epsilon_inv=EPSILON, max_work=10_000), seed=7)
+except ValueError as refusal:
+    print(f"Refused after {(perf_counter() - started) * 1e3:.1f} ms, before any circuit existed:\n{refusal}")
+
+remedied = plan(problem, method=QLS(epsilon_inv=EPSILON, max_work=100_000), seed=7)  # above what every stage needs
+print("With max_work=100,000, plan selects polynomial degree", remedied.reconstruction.degree)
 
 # %% [markdown]
 # ## 2. What it costs
@@ -236,7 +246,7 @@ show_table([
 #
 # ## 3. How accurate?
 #
-# **The error is measured against `numpy.linalg.solve` and set beside the bound the selected polynomial allows.** Each row says which kind of number it is: measured against reference, upper bound, or unavailable with its reason.
+# **The error is measured against `numpy.linalg.solve` and set beside the nominal allowance of the selected polynomial and phases.** Each row says which kind of number it is: measured against reference, nominal, upper bound, or unavailable with its reason.
 
 # %%
 values = checked_values(check)
@@ -244,11 +254,13 @@ roundoff, roundoff_reason = result.data.receipts[0].state_error()
 show_table([
     ("Relative error ‖x − x_ref‖ / ‖x_ref‖", values["raw_relative_error"], "Measured against reference"),
     ("Largest temperature error", np.max(np.abs(x - reference)), "Measured against reference"),
-    ("Error allowance of the selected polynomial", values["method_allowance"],
-     "Upper bound from the polynomial and phase-fit errors, if every eigenvalue is covered"),
+    ("Nominal allowance of the polynomial and phases", values["method_allowance"],
+     "Nominal: the polynomial's check value plus the phase term, if every eigenvalue is covered. "
+     "It leaves out circuit, reference and rounding contributions"),
     ("Eigenvalues outside the polynomial's interval", values["spectral_domain_deficit"],
      "Measured against reference. Zero: every eigenvalue is covered"),
-    ("Error / allowance", values["relative_error_over_method_allowance"], "Below one: within the allowance"),
+    ("Error / allowance", values["relative_error_over_method_allowance"],
+     "Below one: within the nominal allowance. Above one: outside it, without saying which contribution is responsible"),
     ("Success probability", result.algorithm_success_mass,
      f"Measured. Predicted from the polynomial: {format_value(values['predicted_mass'])}. On hardware it sets the shots"),
     ("Roundoff of the simulated state", roundoff,
@@ -257,6 +269,8 @@ show_table([
 ], headers=("Quantity", "Value", "Kind of number"))
 
 # %% [markdown]
+# The allowance and its two parts are numerical values without an arithmetic enclosure, so a ratio above one would say only that the measured error exceeds them. It would not show that the polynomial missed ε, and the total error of x stays unknown either way. To compare the measured error with a number of your choice, pass `relative_tolerance` to `QLSVerification` ([error components](../docs/algorithms/qls.md#error-budget)).
+#
 # With the default parameters, the error map in the card has one sign and resembles the smoothest temperature mode of the plate. That mode belongs to the smallest eigenvalue, at the edge of the interval the polynomial must cover, where its error is largest.
 #
 # **The requested accuracy ε trades accuracy for circuit size.** A larger ε gives a lower polynomial degree and fewer CX gates. The cell solves the plate once more at ε = 0.1, one solve in under a second. Go deeper E sweeps six values.
@@ -280,9 +294,9 @@ show_table([(run.plan.method.epsilon_inv, run.plan.reconstruction.degree,
 limits = result.data.trace.limits
 host_plan = plan(problem, method=QLS(epsilon_inv=EPSILON), seed=7, execution="classical")  # nothing runs yet
 show_table([
-    ("Qubits the local simulator accepts", limits.max_simulation_qubits, f"Default. This plate uses {rec.width}"),
-    ("Simulator memory cap", f"{limits.simulator_memory_mb:,} MiB", "Default simulator_memory_mb"),
-    ("Polynomial degree cap", selected.method.max_degree, f"Default max_degree. This plate needs {rec.degree}"),
+    ("Simulator memory cap", "Physical memory (default)" if limits.simulator_memory_mb is None else f"{limits.simulator_memory_mb:,} MiB",
+     f"Default simulator_memory_mb. The {rec.width} qubits of this plate hold a {format_bytes(16 << rec.width)} complex128 state"),
+    ("Polynomial degree", rec.degree, f"Smallest odd degree that meets ε = {EPSILON}"),
     ("Classical evaluation: peak memory", format_bytes(host_plan.reconstruction.work.workspace_bytes),
      "Stated by plan before it runs"),
     ("Classical evaluation: work", host_plan.reconstruction.work.size_units, "Units, a planning quantity, not seconds"),
@@ -299,7 +313,7 @@ show_table([
 #
 # - **Input.** `my_A` is a square invertible NumPy array, real or complex, and `my_b` a vector of the same length. A non-Hermitian matrix is embedded in a Hermitian matrix of twice the size.
 # - **SciPy sparse matrices.** Convert a small one with `.toarray()`, as the cell does. This is not a route for large sparse matrices.
-# - **Size limits.** The encoded inverse-gap parameter κ must stay below about 44 at ε = 0.01 with the default `max_degree`, and the circuit within 20 qubits. The 8-unknown example sits just below the κ limit.
+# - **Size limits.** The polynomial degree, about κ ln(2/ε) for large κ, sets the circuit's length, and the circuit must fit within the simulator's memory and the intended runtime.
 # - **A Qiskit `SparsePauliOp`** works as A when you also pass `QLS(kappa=K)` with $K\ge\alpha/\sigma_{\min}(A)$. Here α is the sum of the absolute Pauli coefficients.
 # - **Output.** `my_result.x` is the physical solution, from exact readout by the simulator, and `my_result.algorithm_success_mass` the success probability.
 
@@ -471,12 +485,12 @@ print(f"Encoded solution norm ν = {rec.alpha * np.linalg.norm(reference) / np.l
 #
 # The polynomial only needs to match $1/(\kappa x)$ where eigenvalues of $A/\alpha$ lie, so it is free to turn around inside the grey gap. Its peak slightly exceeds one, and the circuit implements $P/s$ with the rescale $s$ from the table, which keeps every value within $[-1,1]$.
 #
-# The reported error bound is an upper bound on the maximum of $|\kappa xP(x)-1|$ over $[1/\kappa,1]$, obtained from the residual at the points of a Chebyshev grid with a polynomial norming inequality and evaluated in binary64 arithmetic. Planning chooses the degree so that this bound is at most $\epsilon$.
+# $P$ is the odd polynomial of its degree with the smallest maximum of $|\kappa xP(x)-1|$ over $[1/\kappa,1]$, and planning takes the smallest degree whose maximum meets $\epsilon$. The reported residual check value adds to that maximum an evaluation resolution of a few machine epsilons and twice an estimate of the rounding error of the coefficients, obtained at the points of a Chebyshev grid with a polynomial norming inequality. Planning computes it in binary64, without interval arithmetic, and requires it to be at most $\epsilon$. It is a numerical check and not a bound.
 
 # %%
 show_table([
     ("Polynomial degree", rec.degree, f"Odd, selected for ε = {EPSILON}"),
-    ("Polynomial error bound", rec.polynomial.certificate, "Bound on |κ x P(x) − 1| over [1/κ, 1]"),
+    ("Polynomial residual check value", rec.polynomial.residual_check_value, "Binary64 check of |κ x P(x) − 1| over [1/κ, 1]"),
     ("Polynomial rescale s", rec.polynomial.rescale, "The circuit implements P/s, whose values stay within [−1, 1]"),
 ])
 eigenvalues = np.linalg.eigvalsh(A) / rec.alpha
@@ -562,7 +576,7 @@ show_estimate(predicted)
 # %% [markdown]
 # ### B. A saved result, reloaded and recomputed
 #
-# `result.save` saves the plan, the polynomial and its phases, and the solution. Loading restores them without repeating the singular-value computation, the phase fit or the circuit run. The cell recomputes the card's relative error from the loaded solution and compares the two.
+# `result.save` saves the plan, the polynomial and its phases, and the solution. Loading restores them without repeating the singular-value computation, the phase synthesis or the circuit run. The cell recomputes the card's relative error from the loaded solution and compares the two.
 
 # %%
 from pathlib import Path

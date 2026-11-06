@@ -8,14 +8,13 @@ from math import frexp, ldexp
 from typing import Annotated, Literal
 
 import numpy as np
-from pydantic import Field, StrictInt, model_validator
+from pydantic import Field, model_validator
 
-from nwqlib._limits import DEFAULT_MAX_DIRECT_AMPLITUDES
 from nwqlib._numerics import _occupation_bits, normalize_state_vector_with_scale, normalize_physical_vector_with_scale
-from nwqlib.core.records import Basis, InputRef, Record, Real, Source, Text
+from nwqlib.core.records import StrictInteger, Basis, InputRef, Record, Real, Source, Text
 from nwqlib._validation import finite_real
-from nwqlib.operators.access import Count, DEFAULT_INPUT_BYTES, InputManifest, _check_bytes
-from nwqlib.operators.inputs import _array_input, _basis, _digest, _freeze_array, _manifest
+from nwqlib.operators.access import Count, InputManifest, _check_bytes
+from nwqlib.operators.inputs import _array_input, _basis, _digest, _freeze_array, _freeze_numbers, _manifest
 
 
 class PhysicalScale(Record):
@@ -35,24 +34,29 @@ class PhysicalScale(Record):
         exponent: Power of two, 0 for a zero scale.
         evidence: Default `"floating_point_norm"`, a computed norm.
             `"composed_floating_point_recovery"` is a product of a Method's
-            factors, and `"supplied_unitary_contract"` is the unit norm that
-            a supplied preparation circuit promises, which is an assumption,
-            not a measured norm.
+            factors, `"supplied_unitary_contract"` is the unit norm that a
+            supplied preparation circuit promises, and
+            `"supplied_norm_assertion"` is a nonzero norm declared for a
+            supplied preparation circuit. The last two are assumptions, not
+            measured norms.
 
     Raises:
         ValueError: If the mantissa and exponent are not in the form above,
-            or `"supplied_unitary_contract"` has a scale other than
-            `(0.5, 1)`.
+            `"supplied_unitary_contract"` has a scale other than `(0.5, 1)`,
+            or `"supplied_norm_assertion"` has a zero scale.
     """
 
     mantissa: Annotated[Real, Field(ge=0, lt=1)]
-    exponent: StrictInt
-    evidence: Literal["floating_point_norm", "composed_floating_point_recovery", "supplied_unitary_contract"] = "floating_point_norm"
+    exponent: StrictInteger
+    evidence: Literal["floating_point_norm", "composed_floating_point_recovery", "supplied_unitary_contract",
+                      "supplied_norm_assertion"] = "floating_point_norm"
 
     @model_validator(mode="after")
     def _normalized(self):
         if self.evidence == "supplied_unitary_contract" and (self.mantissa, self.exponent) != (0.5, 1):
             raise ValueError("supplied unitary evidence requires the canonical unit norm")
+        if self.evidence == "supplied_norm_assertion" and self.mantissa == 0:
+            raise ValueError("a supplied norm assertion requires a nonzero norm")
         if self.mantissa == 0:
             if self.exponent != 0:
                 raise ValueError("zero scale has exponent zero")
@@ -79,33 +83,87 @@ class PhysicalScale(Record):
     def apply_vector(self, vector):
         """Scale finite complex128 components, or return None if any is lost.
 
-        Per-component binary decomposition avoids an underflowing mantissa
-        product before an exponent can recover a representable value. This
-        allocates one complex output plus real mantissa/exponent scratch, all
-        linear in the supplied vector. It does not normalize or change phase.
+        When the scale is a normal binary64 number, each real and imaginary
+        part is multiplied by it once, the correctly rounded exact product.
+        Only a scale above one can then overflow, and only a scale below one
+        can round a nonzero part to zero. Another scale uses a per-component
+        binary decomposition, which avoids an underflowing mantissa product
+        before the exponent can recover a representable value, with real
+        mantissa/exponent scratch linear in the vector. A result at or below
+        the smallest normal is rounded once from the exact product
+        (`_subnormal_products`). Both routes allocate one complex output and
+        neither normalizes or changes phase.
         """
         if type(vector) is not np.ndarray or vector.dtype != np.dtype("complex128") or vector.ndim != 1:
             raise ValueError("physical scaling requires a complex128 vector")
         if not np.isfinite(vector).all():
             raise ValueError("physical scaling requires finite components")
+        return self._scale_finite(vector)
+
+    def _scale_finite(self, vector):
+        """Return ``apply_vector(vector)`` for a complex128 vector already checked to be finite."""
         result = np.empty_like(vector)
+        if self.mantissa == 0:
+            result.fill(0)
+            return result
         limits = np.finfo(float)
+        # mantissa * 2**exponent with mantissa in [0.5, 1) is normal exactly here.
+        if limits.minexp < self.exponent <= limits.maxexp:
+            factor = ldexp(self.mantissa, self.exponent)
+            with np.errstate(over="ignore", under="ignore"):
+                np.multiply(vector.real, factor, out=result.real)
+                np.multiply(vector.imag, factor, out=result.imag)
+            if self.exponent > 0:
+                return result if np.isfinite(result).all() else None
+            lost = np.any((result.real == 0) & (vector.real != 0)) or np.any((result.imag == 0) & (vector.imag != 0))
+            return None if lost else result
         # Outside the entire binary64 exponent span no nonzero binary64 input
         # can produce a representable nonzero product. Returning early avoids
         # huge integer casts.
-        span = limits.maxexp - limits.minexp + limits.nmant + 2
-        if abs(self.exponent) > span and np.any(vector != 0):
-            return None
-        if self.mantissa == 0 or not np.any(vector != 0):
+        if abs(self.exponent) > limits.maxexp - limits.minexp + limits.nmant + 2:
+            if np.any(vector != 0):
+                return None
             result.fill(0)
             return result
         for values, output in ((vector.real, result.real), (vector.imag, result.imag)):
             mantissas, exponents = np.frexp(values)
+            products = mantissas * self.mantissa
             with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-                np.ldexp(mantissas * self.mantissa, exponents + self.exponent, out=output)
+                np.ldexp(products, exponents + self.exponent, out=output)
+            # ldexp rounds only a result at or below the smallest normal, the
+            # second rounding of an already rounded product.
+            small = np.flatnonzero((np.abs(output) <= limits.tiny) & (values != 0))
+            if small.size:
+                output[small] = _subnormal_products(mantissas[small], self.mantissa, products[small],
+                                                    exponents[small] + self.exponent)
             if not np.isfinite(output).all() or np.any((output == 0) & (values != 0)):
                 return None
         return result
+
+
+def _subnormal_products(mantissas, factor, products, shifts):
+    """Return the correctly rounded ``mantissas * factor * 2**shifts`` for results at most the smallest normal.
+
+    ``products`` is ``mantissas * factor`` rounded to binary64, with both
+    factors in [0.5, 1). In units of the smallest subnormal 2**-1074 the
+    result is ``q = products * 2**(shifts + 1074)``, an exact binary64 value
+    whose rounding to an integer is the correct one unless q is halfway
+    between two integers. There the sign of the exact rounding error of
+    ``products``, found by Dekker's product splitting, decides the direction.
+    A q below 1/2 in magnitude rounds to zero whatever that error is.
+    """
+    split = 134217729.0  # 2**27 + 1
+    high = split * mantissas - (split * mantissas - mantissas)
+    low = mantissas - high
+    factor_high = split * factor - (split * factor - factor)
+    factor_low = factor - factor_high
+    error = ((high * factor_high - products) + high * factor_low + low * factor_high) + low * factor_low
+    units = np.ldexp(products, np.maximum(shifts + 1074, -2))
+    rounded = np.rint(units)
+    tie = np.abs(units - np.trunc(units)) == 0.5
+    rounded[tie & (error > 0)] = np.ceil(units[tie & (error > 0)])
+    rounded[tie & (error < 0)] = np.floor(units[tie & (error < 0)])
+    return np.ldexp(rounded, -1074)
 
 
 def compose_recovery(*factors):
@@ -367,7 +425,7 @@ def _spec(manifest, scale, implementation, *, items, payload_bytes, work, law, b
     )
 
 
-def ingest_vector(vector, *, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
+def ingest_vector(vector, *, max_bytes=None) -> StateInput:
     """Return a StateInput for a physical state vector, kept unnormalized.
 
     Integer and real data become float64 and complex data complex128. A
@@ -382,8 +440,8 @@ def ingest_vector(vector, *, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
     Args:
         vector (numpy.ndarray | list | tuple): One-dimensional real or
             complex numbers, finite and nonempty.
-        max_bytes (int): Limit on the bytes of the stored amplitudes and
-            direction. Default 10 GB (decimal, `10_000_000_000`).
+        max_bytes (int | None): Limit on the bytes of the stored amplitudes and
+            direction. Default `None`, the physical memory of this computer.
 
     Returns:
         state (StateInput): Its `preparation.implementation` is
@@ -400,7 +458,7 @@ def ingest_vector(vector, *, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
     dimension = vector.size
     if dimension < 1:
         raise ValueError("physical state dimension must be positive")
-    physical = _freeze_array(vector)
+    physical = _freeze_numbers(vector, max_bytes)
     if not np.isfinite(physical).all():
         raise ValueError("state amplitudes must be finite")
     if np.any(physical != 0):
@@ -423,7 +481,7 @@ def ingest_vector(vector, *, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
     return StateInput._from_admitted(manifest, spec, physical, direction)
 
 
-def ingest_product(amplitudes, *, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
+def ingest_product(amplitudes, *, max_bytes=None) -> StateInput:
     """Return a StateInput for a product state given as one pair of amplitudes per qubit.
 
     Row j of the `(q, 2)` array belongs to qubit j, so the state is
@@ -436,8 +494,8 @@ def ingest_product(amplitudes, *, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
     Args:
         amplitudes (numpy.ndarray | list | tuple): Real or complex array of
             shape `(q, 2)` with `q >= 1`.
-        max_bytes (int): Byte limit. Default 10 GB (decimal,
-            `10_000_000_000`).
+        max_bytes (int | None): Byte limit. Default `None`, the physical
+            memory of this computer.
 
     Returns:
         state (StateInput): Its preparation is `"qiskit.product"`, one
@@ -451,7 +509,7 @@ def ingest_product(amplitudes, *, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
     amplitudes = _array_input(amplitudes, ndim=2, max_bytes=max_bytes, extra_bytes_per_item=16)
     if amplitudes.shape[0] < 1 or amplitudes.shape[1] != 2:
         raise ValueError("product amplitudes must have shape (positive qubits, 2)")
-    physical = _freeze_array(amplitudes)
+    physical = _freeze_numbers(amplitudes, max_bytes)
     if not np.isfinite(physical).all():
         raise ValueError("product amplitudes must be finite")
     if np.any(np.all(physical == 0, axis=1)):
@@ -476,7 +534,7 @@ def ingest_product(amplitudes, *, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
     return StateInput._from_admitted(manifest, spec, physical, direction)
 
 
-def ingest_occupation(occupations, *, num_qubits: int, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
+def ingest_occupation(occupations, *, num_qubits: int, max_bytes=None) -> StateInput:
     """Return a StateInput for a computational basis state given as one bit per qubit, qubit 0 first.
 
     The string `"10"` means qubit 0 is 1 and qubit 1 is 0: computational
@@ -487,8 +545,8 @@ def ingest_occupation(occupations, *, num_qubits: int, max_bytes=DEFAULT_INPUT_B
     Args:
         occupations (str | list | tuple): Exactly `num_qubits` bits, 0 or 1.
         num_qubits (int): Positive number of qubits q.
-        max_bytes (int): Byte limit. Default 10 GB (decimal,
-            `10_000_000_000`).
+        max_bytes (int | None): Byte limit. Default `None`, the physical
+            memory of this computer.
 
     Returns:
         state (StateInput): Its preparation is `"qiskit.occupation"`, at
@@ -517,18 +575,27 @@ def ingest_occupation(occupations, *, num_qubits: int, max_bytes=DEFAULT_INPUT_B
     return StateInput._from_admitted(manifest, spec, physical, None)
 
 
-def bind_preparation_circuit(circuit, *, reference: InputRef, basis: Basis,
-                             max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
-    """Return a StateInput for the state `U|0...0>` of a Qiskit circuit, under an identifier you choose.
+def bind_preparation_circuit(circuit, *, reference: InputRef, basis: Basis, norm=None, phase=0.0,
+                             max_bytes=None) -> StateInput:
+    """Return a StateInput for the physical state `norm * exp(i*phase) * U|0...0>` of a Qiskit circuit, under an identifier you choose.
 
     NWQLib computes no content hash of circuit data, so `reference` is a
-    declared identifier. Pass one reference for circuits you know prepare the
-    same input. The call copies the circuit's stored data, keeps its global
-    phase and checks that it has a supported unitary structure. It does not
-    simulate or synthesize the circuit, measure a norm or expose amplitudes.
-    The unit norm is the circuit's unitarity, an assumption rather than a
-    measurement. The byte check counts the copied data with fixed per-object
-    allowances, not the Qiskit synthesis or allocator overhead.
+    declared identifier. Pass one reference only for inputs you know are the
+    same physical state, including its norm and phase. The call copies the
+    circuit data, adds `phase` to the global phase of the copy, and checks
+    that it has a supported unitary structure. It does not simulate or
+    synthesize the circuit, measure a norm or expose amplitudes. The
+    magnitude goes into the preparation's `physical_scale` and the phase
+    into the circuit, so a controlled preparation turns the phase into the
+    correct relative phase between branches. Without `norm` the unit norm is
+    the circuit's unitarity, an assumption rather than a measurement. A
+    given `norm` is likewise a declared value, and a
+    [`PhysicalScale`][nwqlib.problems.inputs.PhysicalScale] norm may lie
+    outside the float64 range. The byte check uses a coarse estimate of the
+    copy, 256 bytes for each instruction and each qubit of the circuit and of
+    every stored gate definition, plus 16 bytes per scalar parameter and the
+    array bytes of gates other than Qiskit's standard gates, such as unitary
+    matrices and amplitude lists. Qiskit synthesis is not counted.
 
     Args:
         circuit (qiskit.QuantumCircuit): Unitary circuit without classical
@@ -536,8 +603,13 @@ def bind_preparation_circuit(circuit, *, reference: InputRef, basis: Basis,
         reference (InputRef): An [`InputRef`][nwqlib.core.records.InputRef]
             with `representation="circuit"`.
         basis (Basis): Basis of dimension `2**circuit.num_qubits`.
-        max_bytes (int): Byte limit of the copy. Default 10 GB (decimal,
-            `10_000_000_000`).
+        norm (PhysicalScale | float | None): Physical magnitude of the state,
+            a positive finite float or a nonzero `PhysicalScale`. Default
+            `None`, the unit norm.
+        phase (float): Finite global phase in radians added to the circuit.
+            Default `0.0`.
+        max_bytes (int | None): Byte limit of the copy. Default `None`, the physical
+            memory of this computer.
 
     Returns:
         state (StateInput): Its preparation is `"qiskit.supplied"`.
@@ -546,7 +618,8 @@ def bind_preparation_circuit(circuit, *, reference: InputRef, basis: Basis,
         TypeError: If `circuit` is not a `QuantumCircuit`.
         ValueError: If `reference` or `basis` does not fit the circuit, the
             circuit has classical bits, free parameters or an unsupported
-            operation, or the copy exceeds `max_bytes`.
+            operation, `norm` is zero, negative or not finite, `phase` is not
+            finite, or the copy exceeds `max_bytes`.
     """
     from nwqlib._optional import optional_import
     optional_import("qiskit", extra="qiskit")
@@ -562,18 +635,33 @@ def bind_preparation_circuit(circuit, *, reference: InputRef, basis: Basis,
         raise ValueError("supplied preparation width must match its power-of-two basis")
     if circuit.num_clbits or circuit.num_parameters:
         raise ValueError("supplied preparation requires no classical bits or free parameters")
+    if norm is None:
+        scale = PhysicalScale(mantissa=.5, exponent=1, evidence="supplied_unitary_contract")
+    elif isinstance(norm, PhysicalScale):
+        if norm.mantissa == 0:
+            raise ValueError("a supplied preparation norm must be nonzero; use a zero vector for a zero state")
+        scale = PhysicalScale(mantissa=norm.mantissa, exponent=norm.exponent, evidence="supplied_norm_assertion")
+    else:
+        value = finite_real(norm, "norm")
+        if value <= 0:
+            raise ValueError("a supplied preparation norm must be positive; use a zero vector for a zero state")
+        mantissa, exponent = frexp(value)
+        scale = PhysicalScale(mantissa=mantissa, exponent=exponent, evidence="supplied_norm_assertion")
+    phase = finite_real(phase, "phase")
     native, data_bytes = snapshot_circuit(circuit, max_bytes=max_bytes)
+    if phase:
+        native.global_phase += phase
     manifest = InputManifest(reference=reference, basis=basis, identity_status="declared",
         dtype=None, shape=None, byte_order=None, payload_bytes=data_bytes, access=(),
         checked=("width matches power-of-two basis", "no classical bits or free parameters",
                  "finite bound native parameters", "top-level gates or gate-based annotations",
                  "stored definitions only; barriers omitted"),
-        work_law="supplied native circuit; logical stored-data snapshot census in preparation spec")
+        work_law="supplied native circuit; coarse snapshot byte estimate in preparation spec")
     spec = StatePreparationSpec(input=reference, basis=basis,
-        physical_scale=PhysicalScale(mantissa=.5, exponent=1, evidence="supplied_unitary_contract"),
+        physical_scale=scale,
         required_ancillas=0, inverse_available=True, control_available=True,
         implementation="qiskit.supplied", approximation=None,
-        work_law="memo-preserving stored-data copy; supplied unitary premise; numerical/synthesis error and native allocation overhead unknown",
+        work_law="memo-preserving stored-data copy with a coarse byte estimate; supplied unitary premise; numerical/synthesis error unknown",
         items=len(native.data), payload_bytes=data_bytes, work=len(native.data))
     return StateInput._from_admitted(manifest, spec, None, None, native)
 
@@ -595,30 +683,25 @@ class QiskitPreparation:
     circuit: object
 
 
-def prepare_qiskit(state: StateInput, *, max_bytes=DEFAULT_INPUT_BYTES,
-                   max_direct_amplitudes=DEFAULT_MAX_DIRECT_AMPLITUDES) -> QiskitPreparation:
+def prepare_qiskit(state: StateInput, *, max_bytes=None) -> QiskitPreparation:
     """Build the Qiskit circuit that prepares a StateInput, without running it.
 
     The circuit prepares the normalized direction stored with the input, so
     its global phase is kept. It may be composed, inverted or made into a
-    controlled gate. Nothing is submitted, transpiled or simulated. Direct
-    synthesis of a vector takes `O(q*2**q)` arithmetic even when the data fit
-    in memory, so its amplitude count is limited by `max_direct_amplitudes`.
-    That limit does not apply to product, occupation or supplied-circuit
-    preparations. For a supplied circuit the call returns a new copy of the
+    controlled gate. A vector's direct preparation is one gate whose
+    definition, the direct magnitude/phase tree, is built when first read.
+    That tree has about `4 * 2**q` gates on `q` qubits. Inside a Run, the
+    direct preparations of each circuit are checked against the physical
+    memory before its preparation, and the gate checks its tree again when
+    it is built. Nothing is submitted, transpiled
+    or simulated. For a supplied circuit the call returns a new copy of the
     stored circuit on every call, so extending the returned circuit in place
-    leaves the stored one unchanged. Inside a Run, preparation uses
-    [`ExecutionLimits.max_direct_amplitudes`][nwqlib.execution.ExecutionLimits]
-    instead, checked for the whole Plan before the first preparation.
+    leaves the stored one unchanged.
 
     Args:
         state (StateInput): A state with an available preparation.
-        max_bytes (int): Limit on the bytes of the preparation data. Default
-            10 GB (decimal, `10_000_000_000`).
-        max_direct_amplitudes (int): Largest vector dimension for direct
-            synthesis. Default `65_536 = 2**16`, that is 16 qubits
-            ([engineering
-            constants](../ENGINEERING_CONSTANTS.md#explicit-input-operation-defaults)).
+        max_bytes (int | None): Limit on the bytes of the preparation data. Default `None`,
+            the physical memory of this computer.
 
     Returns:
         preparation (QiskitPreparation): The circuit and its specification.
@@ -626,22 +709,12 @@ def prepare_qiskit(state: StateInput, *, max_bytes=DEFAULT_INPUT_BYTES,
     Raises:
         ValueError: If the state has no preparation (the error gives the
             `blocker`, for example a zero vector), holds metadata only, or
-            exceeds `max_direct_amplitudes` or `max_bytes`.
+            exceeds `max_bytes`.
     """
     state._require_data()
     spec = state.preparation
-    if type(max_direct_amplitudes) is not int or max_direct_amplitudes < 1:
-        raise ValueError("max_direct_amplitudes must be a positive integer")
     if spec.blocker is not None or spec.implementation is None:
         raise ValueError(spec.blocker or "executable state preparation unavailable")
-    # The direct magnitude/phase construction has O(q*2**q) arithmetic even
-    # when its input data fit in memory. This finite synthesis limit does not
-    # constrain compact preparations or legal input/Plan dimension metadata.
-    # The default 65_536 = 2**16 amplitudes (_limits.py) is registered in
-    # ENGINEERING_CONSTANTS.md, "Explicit input operation defaults".
-    if spec.implementation == "qiskit.direct" and state.basis.dimension > max_direct_amplitudes:
-        raise ValueError(f"direct preparation has {state.basis.dimension} amplitudes, "
-                         f"exceeding max_direct_amplitudes={max_direct_amplitudes}")
     _check_bytes(spec.payload_bytes, max_bytes, "state preparation data")
     if spec.implementation == "qiskit.supplied":
         from nwqlib.blocks._qiskit_intake import snapshot_circuit
@@ -650,12 +723,11 @@ def prepare_qiskit(state: StateInput, *, max_bytes=DEFAULT_INPUT_BYTES,
     from nwqlib._optional import optional_import
     optional_import("qiskit", extra="qiskit")
     from qiskit import QuantumCircuit
-    from nwqlib.subroutines.state_preparation.direct import _build_normalized_state_preparation
+    from nwqlib.subroutines.state_preparation.direct import (
+        _build_normalized_state_preparation, direct_preparation_circuit)
 
     if spec.implementation == "qiskit.direct":
-        circuit = _build_normalized_state_preparation(
-            state._direction, input_norm=spec.physical_scale.as_float(), register_name="system",
-        ).circuit
+        circuit = direct_preparation_circuit(state._direction, register_name="system")
     else:
         qubits = spec.basis.dimension.bit_length() - 1
         circuit = QuantumCircuit(qubits, name="state_preparation")
@@ -670,7 +742,7 @@ def prepare_qiskit(state: StateInput, *, max_bytes=DEFAULT_INPUT_BYTES,
     return QiskitPreparation(spec, circuit)
 
 
-def state_input(value, *, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
+def state_input(value, *, max_bytes=None) -> StateInput:
     """Return a StateInput for a state vector, a Qiskit `Statevector` or a preparation circuit.
 
     The call dispatches on the type of `value`:
@@ -689,16 +761,21 @@ def state_input(value, *, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
 
     Args:
         value (object): The state or circuit.
-        max_bytes (int): Byte limit of the dispatched function. Default
-            10 GB (decimal, `10_000_000_000`).
+        max_bytes (int | None): Byte limit of the dispatched function. Default `None`,
+            the physical memory of this computer.
 
     Returns:
         state (StateInput): The state, ready to use in a Problem.
 
     Raises:
-        TypeError: If `value` has none of the types above, or a dispatched
-            function rejects its contents.
-        ValueError: If the dispatched function rejects `value`.
+        TypeError: If `value` has none of the types above, is a subclass of
+            `QuantumCircuit`, or a dispatched function rejects its contents.
+            `QuantumCircuit(circuit.num_qubits).compose(circuit)` makes an
+            ordinary circuit from a subclass.
+        ValueError: If the dispatched function rejects `value`, for example a
+            circuit with a gate that it cannot copy. The error names the gate,
+            and [Run your own circuit](../own_circuit.md#gates-to-expand-first)
+            shows how to expand it.
 
     Examples:
         The vector `[3, 4j]` has norm 5 and is prepared from the direction
@@ -723,14 +800,17 @@ def state_input(value, *, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
         from qiskit.quantum_info import Statevector
         if type(value) is Statevector:
             return ingest_vector(value.data, max_bytes=max_bytes)
-    if module == "qiskit.circuit.quantumcircuit" and name == "QuantumCircuit":
+    # Compare class names, so that an input unrelated to Qiskit does not import it.
+    if any(base.__module__ == "qiskit.circuit.quantumcircuit" and base.__name__ == "QuantumCircuit"
+           for base in type(value).__mro__):
         from qiskit import QuantumCircuit
         from uuid import uuid4
         if type(value) is QuantumCircuit:
-            # 16 bytes per qubit, the same per-qubit allowance that the snapshot
-            # census charges a circuit, plus the dimension integer 2**q of
-            # (q + 8) // 8 bytes, checked before the basis record is built.
-            _check_bytes(16 * value.num_qubits + (value.num_qubits + 8) // 8, max_bytes,
+            from nwqlib.blocks._qiskit_intake import SLOT_BYTES
+            # The qubit term of the snapshot estimate, SLOT_BYTES per qubit,
+            # plus the dimension integer 2**q of (q + 8) // 8 bytes, checked
+            # before the basis record is built.
+            _check_bytes(SLOT_BYTES * value.num_qubits + (value.num_qubits + 8) // 8, max_bytes,
                          "circuit width metadata")
             reference = InputRef(identity="circuit:" + str(uuid4()), representation="circuit",
                 source=Source(name="supplied QuantumCircuit", version="1",
@@ -738,4 +818,7 @@ def state_input(value, *, max_bytes=DEFAULT_INPUT_BYTES) -> StateInput:
                     reference="immutable stored-data snapshot; no numerical action or native content hash"))
             return bind_preparation_circuit(value, reference=reference,
                 basis=_basis(1 << value.num_qubits), max_bytes=max_bytes)
+        raise TypeError(f"state input requires an ordinary QuantumCircuit, and {name} is a subclass of it. "
+                        "QuantumCircuit(circuit.num_qubits).compose(circuit) copies its gates and global phase "
+                        "into an ordinary circuit")
     raise TypeError("state input requires numerical vector data, Statevector, QuantumCircuit or StateInput")

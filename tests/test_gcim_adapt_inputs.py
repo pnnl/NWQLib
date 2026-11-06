@@ -30,6 +30,7 @@ def test_absolute_pruning_preserves_combination_identity_shift_and_dropped_bound
             initial_state=[1, 0, 0, 0],
             pool_rows=((("IY", 1j),),),
             max_iterations=1,
+            pauli_coefficient_cutoff=cutoff,
         )
         rec = plan.reconstruction
         assert {t.label: t.coefficient for t in rec.terms if t.label != "II"} == {
@@ -37,6 +38,11 @@ def test_absolute_pruning_preserves_combination_identity_shift_and_dropped_bound
             "IZ": 1.2e-14,
         }
         assert rec.hamiltonian_dropped_l1 == pytest.approx(expected, rel=2e-16, abs=0.0)
+    # An identity coefficient at or below the cutoff stays whole, so H -> H + bI moves every energy by b
+    # whichever side of the cutoff the sum falls on, and it adds nothing to the removed mass.
+    rec = plan_for(A=ingest_pauli((("II", cutoff / 2), ("ZI", 1.0)), num_qubits=2), initial_state=[1, 0, 0, 0],
+                   pool_rows=((("IY", 1j),),), max_iterations=1, pauli_coefficient_cutoff=cutoff).reconstruction
+    assert rec.identity_shift == cutoff / 2 and rec.hamiltonian_dropped_l1 == 0.0
 
 
 def _exact_commutator(h_rows, a_rows):
@@ -82,8 +88,7 @@ def test_commutator_from_anticommuting_pairs_equals_product_and_cancel_table():
     a = pauli_table(a_rows, num_qubits=q)
     ledger = [0]
     arrays, removed = _commutator_arrays(h, a, cutoff=0.0, ledger=ledger, held=0,
-                                         max_bytes=1 << 30, max_products=1 << 40,
-                                         admit_rows=lambda rows: None)
+                                         max_bytes=1 << 30, max_products=1 << 40)
     assert removed == 0.0 and ledger[0] > 0
     ha, ah = h.product(a), a.product(h)
     rows = combine_terms((*ha.labels(), *((p, -c) for p, c in ah.labels())))

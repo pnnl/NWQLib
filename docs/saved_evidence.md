@@ -74,7 +74,7 @@ A missing trajectory point makes its dependent quantity incomplete, and loading 
 
 ## Storage and loading cost
 
-The data of a saved Result are limited to 10 GB. The limit applies to saved data, not to the temporary memory of Qiskit, other SDKs or NumPy. Data count against it when they are written, and loading a Result does not count its files again. If saving fails, the new directory is removed.
+If saving fails, the new directory is removed.
 
 Saved arrays are loaded on first access as read-only memory maps, so opening a large saved Result reads its metadata and array headers, not all of its data. Keep the folder available while you use a loaded Result. Backend input arrays, Method caches and QPY circuit files (Qiskit's binary circuit format) are also used as saved ([circuit files](run_archives.md#qiskit-ucgate-compatibility)). NWQLib imports the code it needs explicitly, and a saved `Source` never determines which code is imported.
 

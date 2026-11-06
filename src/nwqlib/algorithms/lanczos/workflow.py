@@ -212,8 +212,9 @@ def execute_sensitivity(plan, *, run):
                 state["analysis_attempts"] += 1
                 run.checkpoint(state)
                 if k:
-                    # Lanczos.plan admitted the pilot's solve and derivative
-                    # under this Plan's limits (numerical.admit_projected_analysis).
+                    # Lanczos.plan admitted the bytes of the projected
+                    # analysis, which also hold the pilot's solve and
+                    # derivative (numerical.admit_projected_analysis).
                     statistics, _, _ = plan.method.statistics(plan, run.data, stage=0)
                     rows = tuple(statistics[i] for i in plan.reconstruction.moment_indices)
                     weights, evidence = _sensitivity_weights(

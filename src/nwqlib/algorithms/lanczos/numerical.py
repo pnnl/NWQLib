@@ -18,7 +18,7 @@ is dimensionless in the normalized frame K=(H-center*I)/alpha.
 
 from __future__ import annotations
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from nwqlib._limits import exceeds
 
 import math
 
@@ -539,10 +539,14 @@ def _moment_energy_derivatives(result, hamiltonian, overlap, cutoff):
 def restore_ritz_values(values, center, alpha):
     """Return center+alpha*x for each normalized Ritz value x, without repeating the solve.
 
-    A binary64 product alpha*x can overflow although center+alpha*x is finite, for
-    example under a large identity shift. Such entries are recomputed once in
-    exact rational arithmetic. Entries that remain unrepresentable stay
-    nonfinite for the caller to report.
+    The binary64 product alpha*x overflows only when |x| > DBL_MAX/alpha >= 1,
+    that is, for a normalized Ritz value outside [-1, 1], from sampling
+    noise, an ill-conditioned pencil or rounding, with a half-width alpha
+    above DBL_MAX/|x|. center+alpha*x can still be finite when center has
+    the opposite sign and cancels enough of the product. Such entries are
+    recomputed once in exact rational arithmetic. Entries that remain
+    unrepresentable stay nonfinite, and the caller reports them as outside
+    the binary64 range.
     """
     from fractions import Fraction
 
@@ -578,21 +582,16 @@ def _moment_payload(reconstruction, statistics):
     return tuple(moments), tuple(variances)
 
 
-def admit_projected_analysis(
-    m, *, max_bytes, max_work, solves=1, operation="Lanczos projected analysis"
-):
-    """Raise ValueError if ``solves`` projected analyses of trial dimension m exceed the limits.
+def admit_projected_analysis(m, *, max_bytes):
+    """Raise ValueError if the arrays of a projected analysis of trial dimension m exceed max_bytes.
 
     One analysis is what reconstruct does after the moments are assembled.
-    Its size bound depends on m alone, so Lanczos.plan calls this before any
-    moment is obtained, and reconstruct calls it again for the limits it
-    receives.
-    For the sensitivity pilot, Lanczos.plan passes ``solves=2``. The pilot
-    solves the same pencil and then differentiates the solve
-    (_moment_energy_derivatives), and each of the two costs one analysis's
-    work. The derivative keeps (K, S) and the solve's Ritz and overlap
-    eigenvector matrices besides its own m-by-m temporaries, so one byte
-    bound covers both.
+    Its byte bound depends on m alone, so Lanczos.plan calls this before any
+    moment is obtained, and reconstruct calls it again for the limit it
+    receives. The sensitivity pilot solves the same pencil and then
+    differentiates the solve (_moment_energy_derivatives). The derivative
+    keeps (K, S) and the solve's Ritz and overlap eigenvector matrices
+    besides its own m-by-m temporaries, so the same bound covers the pilot.
 
     512*m*m bytes, the size of 32 complex128 m-by-m arrays, bound the
     projected arrays alive at once. They include the six index maps and
@@ -600,22 +599,11 @@ def admit_projected_analysis(
     overlap eigenvectors, the Lowdin orthogonalizer, the effective
     Hamiltonian and its eigenvectors, and the S and physical H recorded in the Result.
     128*m bytes cover the length-2m moment, variance, spectrum and
-    coefficient vectors. In the work of one analysis, 16*m**3 covers the two
-    Hermitian eigensolves and the congruence X^dagger H X, and 32*m*m the
-    gathers and Hermitian checks. docs/ENGINEERING_CONSTANTS.md registers
-    this bound, and docs/CODE_TOUR.md, "Byte and work budgets", explains
-    the units.
+    coefficient vectors. docs/ENGINEERING_CONSTANTS.md registers this bound.
     """
     from nwqlib.operators.access import _check_bytes
 
-    _check_bytes(512 * m * m + 128 * m, max_bytes, operation)
-    work = solves * (32 * m * m + 16 * m * m * m)
-    if work > max_work:
-        raise ValueError(
-            f"{operation} exceeds max_analysis_work: work {work} = solves*(32*m*m + 16*m**3) "
-            f"with solves={solves}, m={m}; raise Lanczos(max_analysis_work=...) to at least {work} "
-            f"(now {max_work})"
-        )
+    _check_bytes(512 * m * m + 128 * m, max_bytes, "Lanczos projected analysis")
 
 
 def reconstruct(
@@ -624,8 +612,7 @@ def reconstruct(
     *,
     cutoff,
     sampled,
-    max_bytes=DEFAULT_MAX_BYTES,
-    max_work=1_000_000_000,
+    max_bytes=None,
     overlap_failure_probability=0.05,
     overlap_cutoff_policy="empirical",
     overlap_noise_multiplier=1.0,
@@ -650,8 +637,8 @@ def reconstruct(
         statistics: Dict from obtained degree to pooled MomentStatistics.
         cutoff: Caller's fixed overlap cutoff, or None for the policy.
         sampled: Whether the moments are finite-shot estimates.
-        max_bytes: Byte limit for the projected arrays.
-        max_work: Work limit for the projected solve.
+        max_bytes: Byte limit for the projected arrays, None for the physical
+            memory of this computer.
         overlap_failure_probability: delta of the Hoeffding Gram bound.
         overlap_cutoff_policy: ``empirical`` or ``confidence``.
         overlap_noise_multiplier: Scale of the empirical Gram RMS cutoff.
@@ -661,10 +648,10 @@ def reconstruct(
         physical units of the operator.
     """
     m = reconstruction.krylov_dimension
-    # Lanczos.plan admitted this envelope under the planning Method's limits.
-    # The limits passed here come from the Method that runs the analysis, or
+    # Lanczos.plan admitted these bytes under the planning Method's limit.
+    # The limit passed here comes from the Method that runs the analysis, or
     # from a direct caller, and can be smaller.
-    admit_projected_analysis(m, max_bytes=max_bytes, max_work=max_work)
+    admit_projected_analysis(m, max_bytes=max_bytes)
     moments, variances = _moment_payload(reconstruction, statistics)
     missing = tuple(i for i, value in enumerate(moments) if value is None)
     fields = dict(
@@ -800,8 +787,8 @@ def chebyshev_moments(
     m,
     center=0.0,
     alpha=1.0,
-    max_bytes=DEFAULT_MAX_BYTES,
-    max_products=1_000_000_000,
+    max_bytes=None,
+    max_products=None,
 ):
     """Evaluate mu_0, ..., mu_(2m-1) classically with the Chebyshev recurrence.
 
@@ -828,8 +815,10 @@ def chebyshev_moments(
         m: Trial dimension.
         center: Identity shift of the matrix frame.
         alpha: Positive scale of the matrix frame.
-        max_bytes: Byte limit for recurrence_requirements.
-        max_products: Work limit for recurrence_requirements.
+        max_bytes: Byte limit for recurrence_requirements, None for the
+            physical memory of this computer.
+        max_products: Work limit for recurrence_requirements, None for no
+            limit.
 
     Returns:
         Float64 array of the 2m moments, with mu_0=1.
@@ -842,7 +831,7 @@ def chebyshev_moments(
     affine = "pauli_terms" not in operator.manifest.access
     required_bytes, work = recurrence_requirements(operator, m, affine=affine)
     _check_bytes(required_bytes, max_bytes, "classical Chebyshev moments")
-    if work > max_products:
+    if exceeds(work, max_products):
         raise ValueError("classical Chebyshev moments exceed max_products")
     if alpha <= 0 or not math.isfinite(alpha) or not math.isfinite(center):
         raise ValueError("recurrence needs a finite positive affine scale")

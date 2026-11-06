@@ -146,7 +146,7 @@ class ArchiveFiles:
         # exactly those files and refund their bytes.
         if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 1):
             raise ValueError("archive max_bytes must be a positive integer or None")
-        self.path, self.remaining = Path(path), max_bytes
+        self.path, self.max_bytes, self.remaining = Path(path), max_bytes, max_bytes
         self._written_arrays, self._read_arrays = {}, {}
         self._written_circuits, self._read_circuits = {}, {}
         self._written_instructions, self._read_instructions = {}, {}
@@ -165,7 +165,10 @@ class ArchiveFiles:
         if type(size) is not int or size < 0:
             raise ValueError("archive byte count must be a nonnegative integer")
         if self.remaining is not None and size > self.remaining:
-            raise ValueError("archive exceeds its explicit file-byte allowance")
+            raise ValueError(f"the archive folder needs {size} more file bytes after {self.max_bytes - self.remaining} "
+                             f"counted, beyond its limit of {self.max_bytes} bytes. Raise the limit that the folder "
+                             "is written under, for a saved Run its max_data_bytes with "
+                             "run.extend_limits(max_data_bytes=...), and write it again")
         if self._on_reserve is not None:
             self._on_reserve(size)
         if self.remaining is not None:
@@ -533,10 +536,13 @@ class ArchiveFiles:
     def write_operator(self, name, operator):
         """Save an operator in its own representation, never a converted one, and return its description.
 
-        Dense, CSR, CSC, Pauli, ordered fermionic and periodic-stencil inputs
-        keep their arrays or parameters, so saving never turns a sparse, Pauli
-        or fermionic operator into a dense matrix. A declaration without data
-        is saved as a declaration.
+        Dense, CSR, CSC, Pauli, ordered fermionic, periodic-stencil and
+        periodic-band inputs keep their arrays or parameters, so saving never
+        turns a sparse, Pauli, fermionic or band operator into a dense matrix.
+        A Cartesian input saves each of its two parts the same way, and a
+        supplied block encoding saves its circuit as QPY with its alpha,
+        widths, error bound and assertions. A declaration without data is
+        saved as a declaration.
 
         Args:
             name (str): Prefix of the file names.
@@ -571,6 +577,28 @@ class ArchiveFiles:
             data.update(num_modes=terms.num_modes, **{
                 field: self.write_array(name + "." + field + ".npy", getattr(terms, field))
                 for field in ("offsets", "modes", "actions", "coefficients")})
+        elif representation == "band":
+            import numpy as np
+            bands = operator.band()
+            data.update(num_qubits=bands.num_qubits,
+                offsets=self.write_array(name + ".offsets.npy", np.array(bands.offsets, dtype=np.int64)),
+                coefficients=self.write_array(name + ".coefficients.npy",
+                                              np.array(bands.coefficients, dtype=np.complex128)))
+        elif representation == "cartesian":
+            parts = operator.cartesian_parts()
+            data["parts"] = [None if part is None else self.write_operator(f"{name}.{role}", part)
+                             for role, part in (("dissipative", parts.dissipative), ("hamiltonian", parts.hamiltonian))]
+            # JSON stores this binary64 scalar by its shortest round-trip repr, so the declared bound reloads bit for bit.
+            data["dissipative_lower_bound"] = parts.dissipative_lower_bound
+        elif representation == "block_encoding":
+            supplied = operator.supplied_block_encoding()
+            encoding = supplied.encoding
+            # JSON stores each binary64 scalar by its shortest round-trip repr,
+            # so alpha, the error bound and the lower bound reload bit for bit.
+            data.update(circuit=self.write_circuit(name + ".qpy", encoding.circuit), alpha=encoding.alpha,
+                num_ancillas=encoding.num_ancillas, system_qubits=encoding.system_qubits,
+                error_bound=encoding.error_bound, implementation=encoding.implementation,
+                hermitian=supplied.hermitian, lower_bound=supplied.lower_bound)
         else:
             raise ValueError(f"execution archive has no saved operator format for {representation}")
         return data
@@ -587,8 +615,13 @@ class ArchiveFiles:
         with ``D = 2**q``, M + 1 int64 offsets with ``offsets[0] == 0`` and
         ``offsets[-1]`` equal to the entry count P, P int64 modes, P uint8
         actions and M complex128 coefficients. A periodic stencil restores its
-        parameters and checks its declared width. In every case the payload
-        bytes must equal the declared size.
+        parameters and checks its declared width. A periodic band needs B
+        int64 offsets and B complex128 coefficients. In every case with
+        stored arrays the payload bytes must equal the declared size. A
+        Cartesian input restores both parts and any stated lower bound of L
+        and checks that the parts use its
+        basis, and a supplied block encoding restores its circuit and checks
+        its width against the saved ancilla and system counts.
         Individual sparse indices and coefficient values are not scanned. The
         restored object wraps the memory-mapped arrays without copying them. A
         sparse matrix is built empty with the declared shape, and its three
@@ -658,10 +691,7 @@ class ArchiveFiles:
             _array_layout(arrays["coefficients"], manifest.shape, "complex128", manifest.byte_order)
             if sum(a.nbytes for a in arrays.values()) != manifest.payload_bytes:
                 raise ValueError("saved Pauli storage size differs from its declaration")
-            native = object.__new__(PauliTerms)
-            object.__setattr__(native, "num_qubits", qubits)
-            for name in ("x", "z", "coefficients"):
-                object.__setattr__(native, name, arrays[name])
+            native = PauliTerms._from_saved(qubits, arrays["x"], arrays["z"], arrays["coefficients"])
         elif representation == "fermion":
             from nwqlib.operators._fermion import FermionTerms
             modes = data["num_modes"]
@@ -683,6 +713,36 @@ class ArchiveFiles:
             object.__setattr__(native, "num_modes", modes)
             for name, array in arrays.items():
                 object.__setattr__(native, name, array)
+        elif representation == "band":
+            from nwqlib.subroutines.block_encoding.banded import BandSpecification
+            qubits = data["num_qubits"]
+            if (type(qubits) is not int or qubits < 1 or dimension != 1 << qubits or manifest.shape is None
+                    or len(manifest.shape) != 1 or manifest.dtype != "int64+complex128"):
+                raise ValueError("saved band width or encoding differs from its declaration")
+            offsets, coefficients = self.read_array(data["offsets"]), self.read_array(data["coefficients"])
+            _array_layout(offsets, manifest.shape, "int64", manifest.byte_order)
+            _array_layout(coefficients, manifest.shape, "complex128", manifest.byte_order)
+            if offsets.nbytes + coefficients.nbytes != manifest.payload_bytes:
+                raise ValueError("saved band storage size differs from its declaration")
+            native = BandSpecification(offsets=tuple(int(value) for value in offsets),
+                coefficients=tuple(complex(value) for value in coefficients), num_qubits=qubits)
+        elif representation == "cartesian":
+            from nwqlib.operators.inputs import CartesianParts
+            parts = tuple(None if part is None else self.read_operator(part) for part in data["parts"])
+            if len(parts) != 2 or any(part is not None and part.basis != manifest.basis for part in parts):
+                raise ValueError("saved Cartesian parts differ from their declared basis")
+            native = CartesianParts(*parts, data["dissipative_lower_bound"])
+        elif representation == "block_encoding":
+            from nwqlib.operators.inputs import SuppliedBlockEncoding
+            from nwqlib.subroutines.block_encoding.core import BlockEncoding
+            circuit = self.read_circuit(data["circuit"])
+            if (circuit is None or dimension != 1 << data["system_qubits"]
+                    or circuit.num_qubits != data["num_ancillas"] + data["system_qubits"]):
+                raise ValueError("saved block-encoding circuit width differs from its declaration")
+            native = SuppliedBlockEncoding(encoding=BlockEncoding(circuit=circuit, alpha=data["alpha"],
+                num_ancillas=data["num_ancillas"], system_qubits=data["system_qubits"],
+                error_bound=data["error_bound"], implementation=data["implementation"], metadata={}),
+                hermitian=data["hermitian"], lower_bound=data["lower_bound"])
         else:
             raise ValueError(f"execution archive has no saved operator format for {representation}")
         return OperatorInput._from_admitted(manifest, data["structure"], native)

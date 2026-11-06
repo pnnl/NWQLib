@@ -9,14 +9,22 @@ from itertools import product
 
 import numpy as np
 
+from nwqlib._limits import ResourceLimitError, exceeds, optional_limit
 from nwqlib._numerics import stable_complex_sum
-from .access import DEFAULT_INPUT_BYTES, _check_bytes
+from .access import _check_bytes
 
 # Tile length C of the label decoder, the product and grouping candidate
 # blocks and the coordinate tiles of the action. The default C = 1024 is an
 # engineering choice, not a scientific threshold. Changing C changes
 # storage, not labels, order or scientific records.
 _PAULI_TILE = 1024
+
+
+def _label_bytes(rows, num_qubits):
+    """Return the bytes that ``PauliTerms.labels`` checks for ``rows`` > 0 labels of ``num_qubits`` letters."""
+    return rows * (num_qubits + 16) + num_qubits + 4 + min(rows, _PAULI_TILE) * (num_qubits + 25)
+
+
 # i**e for e = 0..3, the same binary64 values as the Python powers 1j**e.
 _PHASES = np.array([1j ** power for power in range(4)], dtype=np.complex128)
 
@@ -48,12 +56,112 @@ def pauli_coefficients(matrix):
     O(D²) storage and the arithmetic is O(q*D²). Each component average uses
     ``_half_sum`` so finite entries near the binary64 maximum do not overflow.
     """
+    coefficients = _block_transform(matrix)
+    if coefficients is None:
+        return ()
+    width = matrix.shape[0].bit_length()-1
+    # Half-label tables need O(q*D) characters. Joining two halves avoids
+    # decoding q base-four digits in Python for each of the possible D² words.
+    low_width = width//2
+    low = tuple(map("".join, product("IXYZ", repeat=low_width)))
+    high = low if width % 2 == 0 else tuple(map("".join, product("IXYZ", repeat=width-low_width)))
+    low_bits, mask = 2*low_width, (1 << (2*low_width))-1
+    return tuple(
+        (high[int(index) >> low_bits]+low[int(index) & mask], complex(coefficients[index]))
+        for index in np.flatnonzero(coefficients != 0)
+    )
+
+
+def pauli_coefficient_masks(matrix, *, max_bytes):
+    """Return the nonzero coefficients of ``pauli_coefficients`` as packed masks, without labels.
+
+    Returns ``(x, z, coefficients)``: uint64 X and Z masks of shape
+    ``(R, W)`` with ``W = ceil(q/64)`` and the complex128 coefficients of
+    the R nonzero words, in the order of ``pauli_coefficients``. Base-four
+    digit j of a word's transform index, I, X, Y or Z as 0, 1, 2 or 3, is
+    the letter of qubit j, so X and Y set bit j of x, and Y and Z bit j of
+    z. The masks denote the same words as the labels in the convention of
+    ``inputs.ingest_pauli_masks``, so ingesting them gives the operator and
+    content hash of ingesting the labels.
+
+    The caller checks the transform, 64*D**2 bytes for the D-by-D matrix,
+    the two active levels and their componentwise temporaries, before the
+    call. R is known only after the transform, so the packing stage is
+    checked here against ``max_bytes`` (None is the physical memory) before
+    any mask exists: the caller's matrix and the coefficient vector,
+    32*D**2 bytes, and per word the flat index, the two mask rows, the
+    selected coefficient and the per-qubit digit temporaries, (48+16W)*R
+    bytes.
+    """
+    return _coefficient_masks(_block_transform(matrix), matrix.shape[0].bit_length()-1, max_bytes=max_bytes)
+
+
+def _coefficient_masks(coefficients, width, *, max_bytes):
+    """Pack the nonzero words of ``_block_transform`` output, or of None for a zero matrix, as ``pauli_coefficient_masks`` does.
+
+    A caller that counts the nonzero words first packs them only when it
+    needs the words, with the same byte check.
+    """
+    words = -(-width // 64)
+    if coefficients is None:
+        empty = np.zeros((0, words), dtype=np.uint64)
+        return empty, empty.copy(), np.zeros(0, dtype=np.complex128)
+    nonzero = coefficients != 0
+    _check_bytes(32 * len(coefficients) + (48 + 16 * words) * int(np.count_nonzero(nonzero)), max_bytes,
+                 "Pauli mask packing")
+    index = np.flatnonzero(nonzero)
+    del nonzero
+    x, z = _index_masks(index, width)
+    return x, z, coefficients[index]
+
+
+def _index_masks(index, width):
+    """Return the packed uint64 X and Z masks of the words at transform indices ``index`` of a width-qubit operator.
+
+    Base-four digit j of an index, I, X, Y or Z as 0, 1, 2 or 3, is the
+    letter of qubit j (``pauli_coefficient_masks``).
+    """
+    words = -(-width // 64)
+    x = np.zeros((len(index), words), dtype=np.uint64)
+    z = np.zeros((len(index), words), dtype=np.uint64)
+    for qubit in range(width):
+        digit = (index >> (2 * qubit)) & 3
+        bit = np.uint64(1) << np.uint64(qubit % 64)
+        x[:, qubit // 64] |= np.where((digit == 1) | (digit == 2), bit, np.uint64(0))
+        z[:, qubit // 64] |= np.where(digit >= 2, bit, np.uint64(0))
+    return x, z
+
+
+def _inverse_block_transform(coefficients, width):
+    """Return ``sum_P c_P P`` from the 4**width coefficients in transform-index order of ``_block_transform``.
+
+    Each level rebuilds the blocks ``[[a, b], [c, d]]`` of the next larger
+    size from the I, X, Y and Z blocks of ``_block_transform``:
+    a = I + Z, d = I - Z, b = X - iY and c = X + iY. Two complex levels of
+    d**2 entries are live at once, and the arithmetic is O(q*d**2).
+    """
+    blocks = np.asarray(coefficients, dtype=complex).reshape(-1, 1, 1)
+    for _ in range(width):
+        size = blocks.shape[-1]
+        quads = blocks.reshape(-1, 4, size, size)
+        identity, x, y, z = quads[:, 0], quads[:, 1], quads[:, 2], quads[:, 3]
+        merged = np.empty((len(quads), 2 * size, 2 * size), dtype=complex)
+        merged[:, :size, :size] = identity + z
+        merged[:, size:, size:] = identity - z
+        merged[:, :size, size:] = x - 1j * y
+        merged[:, size:, :size] = x + 1j * y
+        blocks = merged
+    return blocks[0]
+
+
+def _block_transform(matrix):
+    """Return the complex128 coefficients of every Pauli word of ``matrix`` in transform-index order, or None when it is zero."""
     if (matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]
             or matrix.shape[0] < 1 or matrix.shape[0] & (matrix.shape[0]-1)):
         raise ValueError("Pauli block transform requires a square power-of-two matrix")
     width = matrix.shape[0].bit_length()-1
     if not np.any(matrix != 0):
-        return ()
+        return None
     blocks = matrix[None, :, :]
     for _ in range(width):
         half = blocks.shape[-1]//2
@@ -73,16 +181,7 @@ def pauli_coefficients(matrix):
     coefficients = blocks.reshape(-1)
     if not np.isfinite(coefficients).all():
         raise ValueError("Pauli block transform produced a nonfinite coefficient")
-    # Half-label tables need O(q*D) characters. Joining two halves avoids
-    # decoding q base-four digits in Python for each of the possible D² words.
-    low_width = width//2
-    low = tuple(map("".join, product("IXYZ", repeat=low_width)))
-    high = low if width % 2 == 0 else tuple(map("".join, product("IXYZ", repeat=width-low_width)))
-    low_bits, mask = 2*low_width, (1 << (2*low_width))-1
-    return tuple(
-        (high[int(index) >> low_bits]+low[int(index) & mask], complex(coefficients[index]))
-        for index in np.flatnonzero(coefficients != 0)
-    )
+    return coefficients
 
 
 
@@ -162,15 +261,19 @@ def pauli_product_requirements(left, right, words):
     return 2 * count * (16 * words + 16) + 64 * tile * words + 128 * tile
 
 
-@dataclass(frozen=True, eq=False, init=False, slots=True)
 class PauliTerms:
     """Immutable packed Pauli table, a Pauli sum stored as X and Z bit masks with complex coefficients.
 
     [`pauli_table`][nwqlib.operators.inputs.pauli_table] and
     `OperatorInput.pauli_terms()` return it, and constructing it directly
-    raises `TypeError`. Its arrays are read-only copies. M is the number of
-    rows, `len(table)`, and q is `num_qubits`. Bit b of mask word j refers
-    to qubit 64*j + b, so word j covers qubits 64*j through 64*j+63.
+    raises `TypeError`. A table built in memory holds copies of its arrays
+    in immutable ``bytes`` objects, and a table loaded from a saved archive
+    holds the archive's read-only memory-mapped arrays without copying them.
+    Each read of ``x``, ``z`` or ``coefficients`` returns a new read-only
+    view with its own dtype and shape, the table keeps its own headers, and
+    no attribute can be assigned. M is the number of rows,
+    `len(table)`, and q is `num_qubits`. Bit b of mask word j refers to
+    qubit 64*j + b, so word j covers qubits 64*j through 64*j+63.
 
     Raw layout is M*(16*W+16) bytes, W=ceil(q/64). Python object overhead
     is outside logical byte limits. Product tables keep pair order and
@@ -194,10 +297,7 @@ class PauliTerms:
         coefficients: complex128 coefficients, shape (M,).
     """
 
-    num_qubits: int
-    x: np.ndarray
-    z: np.ndarray
-    coefficients: np.ndarray
+    __slots__ = ("num_qubits", "_x", "_z", "_coefficients")
 
     def __init__(self, *args, **kwargs):
         raise TypeError("Pauli tables require bounded input admission")
@@ -207,15 +307,59 @@ class PauliTerms:
         """Build a table from read-only byte copies, so later changes to the caller's arrays cannot reach it."""
         instance = object.__new__(cls)
         object.__setattr__(instance, "num_qubits", num_qubits)
-        for name, array in (("x", x), ("z", z), ("coefficients", coefficients)):
+        for name, array in (("_x", x), ("_z", z), ("_coefficients", coefficients)):
+            # reshape gives a private header above the frombuffer root, which later views take as their base.
             frozen = np.frombuffer(array.tobytes(order="C"), dtype=array.dtype).reshape(array.shape)
             object.__setattr__(instance, name, frozen)
         return instance
 
-    def __len__(self):
-        return len(self.coefficients)
+    @classmethod
+    def _from_saved(cls, num_qubits, x, z, coefficients):
+        """Hold arrays without copying them, each under the table's own header.
 
-    def labels(self, *, max_bytes=DEFAULT_INPUT_BYTES):
+        The arrays are ones that a saved archive maps read-only, or fresh
+        arrays that no other owner keeps or changes.
+        """
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "num_qubits", num_qubits)
+        for name, array in (("_x", x), ("_z", z), ("_coefficients", coefficients)):
+            object.__setattr__(instance, name, array.view())
+        return instance
+
+    # Each read returns a new view, so a change to its dtype or shape cannot reinterpret the stored table.
+    @property
+    def x(self):
+        return self._x.view()
+
+    @property
+    def z(self):
+        return self._z.view()
+
+    @property
+    def coefficients(self):
+        return self._coefficients.view()
+
+    def __setattr__(self, name, value):
+        raise AttributeError("a PauliTerms table cannot be changed")
+
+    def __delattr__(self, name):
+        raise AttributeError("a PauliTerms table cannot be changed")
+
+    def __reduce__(self):
+        # New views, so the returned arrays' headers are not the stored ones. Unpickling copies the
+        # arrays into new bytes storage again.
+        return _pauli_terms, (self.num_qubits, self._x.view(), self._z.view(), self._coefficients.view())
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo):
+        return self
+
+    def __len__(self):
+        return len(self._coefficients)
+
+    def labels(self, *, max_bytes=None):
         """Return the ``(label, coefficient)`` pairs in table order, decoding the labels in tiles of ASCII columns.
 
         In addition to the returned logical payload ``M*(q+16)``, a tile of t
@@ -228,18 +372,17 @@ class PauliTerms:
         and one t-entry uint8 output column, ``tq + 16t + 8t + t = t(q+25)``
         bytes with an eight-byte intp. The alphabet takes four bytes and one
         row converted to ``bytes`` adds q transient bytes, so the checked total
-        is ``M(q+16) + t(q+25) + q + 4`` for M > 0. The tile is chosen from
-        the bytes that remain after the payload, before the first tile is
-        allocated. An empty table returns ``()`` and counts nothing. The
+        is ``M(q+16) + t(q+25) + q + 4`` for M > 0, checked before the first
+        tile is allocated. An empty table returns ``()`` and counts nothing. The
         code ``x_bit + 2*z_bit`` indexes ``b"IXZY"`` (I, X, Z, Y for 0..3)
         and bits are written from q-1 down to 0, so qubit zero stays the
         rightmost letter. Decoding visits M*(q+1) entries. The returned
         tuple belongs to the caller and is not cached by the table.
 
         Args:
-            max_bytes (int): Byte limit of the returned labels and the
-                decoding workspace, checked before decoding. Default 10 GB
-                (decimal, `10_000_000_000`).
+            max_bytes (int | None): Byte limit of the returned labels and
+                the decoding workspace, checked before decoding. Default
+                `None`, the physical memory.
 
         Returns:
             labels (tuple[tuple[str, complex], ...]): One `(label,
@@ -247,17 +390,14 @@ class PauliTerms:
                 the rightmost letter.
 
         Raises:
-            ValueError: For a nonempty table, if `max_bytes` is not a
-                positive integer or the checked bytes exceed it.
+            ValueError: For a nonempty table, if `max_bytes` is neither None
+                nor a positive integer or the checked bytes exceed it.
         """
         m, q = len(self), self.num_qubits
         if m == 0:
             return ()
-        fixed = m * (q + 16) + q + 4
         tile = min(m, _PAULI_TILE)
-        if type(max_bytes) is int:
-            tile = max(1, min(tile, (max_bytes - fixed) // (q + 25)))
-        _check_bytes(fixed + tile * (q + 25), max_bytes, "Pauli labels")
+        _check_bytes(_label_bytes(m, q), max_bytes, "Pauli labels")
         alphabet = np.frombuffer(b"IXZY", dtype=np.uint8)
         result = []
         for start in range(0, m, tile):
@@ -285,7 +425,7 @@ class PauliTerms:
             del letters, xx, zz, index, char, row
         return tuple(result)
 
-    def product(self, other, *, max_bytes=DEFAULT_INPUT_BYTES):
+    def product(self, other, *, max_bytes=None):
         """Return the ordered product P*Q, without pruning and without summing identical words.
 
         A packed row denotes ``i**popcount(x & z) X**x Z**z``. Ordered
@@ -311,8 +451,8 @@ class PauliTerms:
         Args:
             other (PauliTerms): The right factor Q, with the same
                 `num_qubits`.
-            max_bytes (int): Byte limit, checked before the product is
-                formed. Default 10 GB (decimal, `10_000_000_000`).
+            max_bytes (int | None): Byte limit, checked before the product
+                is formed. Default `None`, the physical memory.
 
         Returns:
             table (PauliTerms): The M*K product rows, row ``i*K+j`` being
@@ -320,8 +460,8 @@ class PauliTerms:
 
         Raises:
             ValueError: If `other` is not a PauliTerms of the same width,
-                `max_bytes` is not a positive integer or the product
-                exceeds it, or a product coefficient is not finite.
+                `max_bytes` is neither None nor a positive integer or the
+                product exceeds it, or a product coefficient is not finite.
         """
         if not isinstance(other, PauliTerms) or self.num_qubits != other.num_qubits:
             raise ValueError("Pauli product requires equal qubit widths")
@@ -353,8 +493,7 @@ class PauliTerms:
             raise ValueError("Pauli product coefficients must be finite")
         return PauliTerms._snapshot(self.num_qubits, x, z, coefficients)
 
-    def group(self, *, strategy, max_bytes=DEFAULT_INPUT_BYTES, max_comparisons=1_000_000,
-              limit_name="max_comparisons"):
+    def group(self, *, strategy, max_bytes=None, max_comparisons=None, limit_name="max_comparisons"):
         """Partition the terms deterministically into first-fit qubit-wise commuting (QWC) or commuting groups.
 
         QWC compares each term with the group's accumulated basis, while
@@ -376,10 +515,11 @@ class PauliTerms:
         group masks, while general commuting groups compare members.
         ``comparison_count`` counts every comparison evaluated.
 
-        Grouping checks each block of comparisons against the limit before
-        evaluating it. ``comparison_count`` counts all comparisons in the
-        evaluated blocks. For L input terms it is at most L(L-1)/2. The next
-        block is evaluated only if ``C_so_far + charge <= max_comparisons``,
+        With an explicit ``max_comparisons``, grouping checks each block of
+        comparisons against it before evaluating the block.
+        ``comparison_count`` counts all comparisons in the evaluated blocks.
+        For L input terms it is at most L(L-1)/2. The next block is
+        evaluated only if ``C_so_far + charge <= max_comparisons``,
         where ``C_so_far`` is the count already accepted and ``charge`` is
         the number of comparisons in the next block. The error raised
         otherwise names the comparisons already counted, the next charge and
@@ -394,11 +534,10 @@ class PauliTerms:
         membership sequences (``M(16W+16)``). It also covers four t-by-W
         uint64 arrays of one comparison block, their t-entry reductions and,
         for commuting groups, the gathered member rows, masks and popcounts
-        (``64tW + 64t``). The scalar term masks add ``32W``. With the
-        block length C = 1024, a table needing comparisons uses
-        ``t = min(M, C, floor((max_bytes - M*(16*W+16) - 32*W)/(64*W+64)))``.
-        A table is rejected when ``max_bytes`` cannot hold a block of one
-        comparison. If ``g_i`` is the number of groups present before term
+        (``64tW + 64t``). The scalar term masks add ``32W``. The block
+        length is ``t = min(M, C)`` with C = 1024, so the memory limit never
+        changes the blocks or the comparison count, and a table whose reserve
+        exceeds ``max_bytes`` is refused. If ``g_i`` is the number of groups present before term
         i, indexed from zero, ``g_0 = 0`` and a QWC pass costs at most
         ``sum_i g_i`` comparisons.
         Forming all G final groups as early as possible maximizes every
@@ -413,16 +552,15 @@ class PauliTerms:
         exists and ``g_i`` otherwise. A caller that passes a Method field as
         ``max_comparisons`` passes that field's name as ``limit_name``, such
         as ``"FixedGCIM.max_analysis_work"``, and the error message names
-        it. The default ``max_comparisons`` is registered in [engineering
-        constants](../ENGINEERING_CONSTANTS.md#explicit-input-operation-defaults).
+        it.
 
         Args:
             strategy (str): `"qwc"` for qubit-wise commuting groups or
                 `"commuting"` for general commuting groups.
-            max_bytes (int): Byte limit of the grouping arrays, checked
-                before grouping. Default 10 GB (decimal, `10_000_000_000`).
-            max_comparisons (int): Positive limit on the counted
-                comparisons. Default `1_000_000`.
+            max_bytes (int | None): Byte limit of the grouping arrays,
+                checked before grouping. Default `None`, the physical memory.
+            max_comparisons (int | None): Positive limit on the counted
+                comparisons. Default `None`, no limit.
             limit_name (str): Name of the caller's option that supplies
                 `max_comparisons`, used in the error message. Default
                 `"max_comparisons"`.
@@ -437,28 +575,25 @@ class PauliTerms:
 
         Raises:
             ValueError: If `strategy` is another value, `max_bytes` or
-                `max_comparisons` is not a positive integer, the grouping
-                arrays exceed `max_bytes`, or the next block of comparisons
-                would exceed `max_comparisons`.
+                `max_comparisons` is neither None nor a positive integer, the
+                grouping arrays exceed `max_bytes`, or the next block of
+                comparisons would exceed `max_comparisons`.
         """
         if strategy not in ("qwc", "commuting"):
             raise ValueError("grouping strategy must be qwc or commuting")
         m, w = len(self), self.x.shape[1]
+        max_comparisons = optional_limit(max_comparisons, limit_name)
+        tile = max(1, min(m, _PAULI_TILE))
         fixed = m * (16 * w + 16) + 32 * w if m else 0
-        _check_bytes(fixed, max_bytes, "Pauli grouping")
-        if type(max_comparisons) is not int or max_comparisons < 1:
-            raise ValueError("max_comparisons must be a positive integer")
-        tile = max(1, min(m, _PAULI_TILE, (max_bytes - fixed) // (64 * w + 64)))
-        if m > 1:
-            _check_bytes(fixed + 64 * tile * w + 64 * tile, max_bytes, "Pauli grouping")
+        _check_bytes(fixed + (64 * tile * w + 64 * tile if m > 1 else 0), max_bytes, "Pauli grouping")
         groups = []
         comparisons = 0
 
         def admit(charge):
             nonlocal comparisons
             total = comparisons + charge
-            if total > max_comparisons:
-                raise ValueError(
+            if exceeds(total, max_comparisons):
+                raise ResourceLimitError(
                     f"Pauli grouping exceeds {limit_name}={max_comparisons}: "
                     f"grouping used={comparisons}, next charge={charge}. "
                     f"Increase {limit_name} or reduce the term population.")
@@ -498,6 +633,11 @@ class PauliTerms:
                 else:
                     groups.append([i])
         return PauliGrouping(tuple(tuple(group) for group in groups), comparisons)
+
+
+def _pauli_terms(num_qubits, x, z, coefficients):
+    """Rebuild a pickled ``PauliTerms`` table (``PauliTerms.__reduce__``)."""
+    return PauliTerms._snapshot(num_qubits, x, z, coefficients)
 
 
 @dataclass(frozen=True, slots=True)
@@ -555,7 +695,7 @@ def _rotate(value, exponent):
 
 
 def pauli_action_requirements(rows, terms, flips, columns=1, *, complex_input=False, label_width=None):
-    """Return logical ``(bytes, work)`` allowances for one ``apply_terms`` call.
+    """Return the ``(bytes, work)`` allowances for one ``apply_terms`` call.
 
     N = rows, b = columns >= 1, L = terms (including stored zeros),
     g = flips >= the number of distinct flip masks, and t = min(N, C),
@@ -563,7 +703,7 @@ def pauli_action_requirements(rows, terms, flips, columns=1, *, complex_input=Fa
     a valid upper bound on the number of groups. A single-word N-coordinate action
     can use g = min(L, N) from counts alone. This helper reads no table.
 
-    Bytes are ``(33 if complex_input else 49)*N*b + 24*L + 16*g + 8
+    Bytes are ``(33 if complex_input else 49)*N*b + 254*L + 1282
     + max(9*L, (64+32*b)*t)``. Input, output and a finite-mask reserve
     occupy 33Nb. A possible conversion to complex128 adds 16Nb, whose
     result stays live throughout the action. Set complex_input=True
@@ -572,11 +712,21 @@ def pauli_action_requirements(rows, terms, flips, columns=1, *, complex_input=Fa
     or output entry, which covers the float64 and complex128 entries that
     the callers pass.
 
-    Logical metadata is 8L member indices, 16L rotated coefficients,
-    8g flip keys and 8(g+1) group offsets. Forming the Y counts holds
-    an 8L AND array beside an L-byte popcount array. Both are released
-    before the grouped tiles. The larger of the grouped (64+16b)t and
-    ordered-retry (64+32b)t buffers therefore shares a maximum with 9L.
+    ``apply_terms`` groups the rows in Python containers, a dict from
+    each flip key to a list of member indices and a list of rotated
+    complex coefficients, which stay live through the tiles. On CPython
+    3.12 with 64-bit flip keys and one group per row, tracemalloc
+    measured their peak at most 254 bytes per row from 6 to 300,000 rows
+    and at most 1,282 bytes in all for 1 to 5 rows
+    (``_projected_workspace`` in ``nwqlib._quantum_readout``), so
+    254L + 1282 bounds them. Merging rows into fewer groups removes lists
+    and dict entries and adds only list slots, so one group per row is
+    the largest case and g does not enter the bytes. Revisit when the
+    grouping of ``apply_terms`` or the Python version changes.
+    Forming the Y counts holds an 8L AND array beside an L-byte popcount
+    array. Both are released before the grouped tiles. The larger of the
+    grouped (64+16b)t and ordered-retry (64+32b)t buffers therefore
+    shares a maximum with 9L.
     If label_width=q is supplied, add 32L for the packed x, z and
     coefficient arrays. Those arrays stay live through both phases.
 
@@ -587,17 +737,17 @@ def pauli_action_requirements(rows, terms, flips, columns=1, *, complex_input=Fa
     The 3L preprocessing work is independent of b. Labels add L*(q+1) work.
     The retry is reserved in full because grouping can fail late.
 
-    These are conservative counts of passes over the data and of logical
-    buffer bytes, including an overestimate for empty tables. They exclude
-    the caller's packed table or labels, Python object overhead, workspace
-    allocated inside NumPy and the resident memory of the process.
+    These are conservative counts of passes over the data and of buffer
+    bytes, including an overestimate for empty tables. They exclude the
+    caller's packed table or labels, workspace allocated inside NumPy and
+    the resident memory of the process.
     """
     if type(columns) is not int or columns < 1:
         raise ValueError("a Pauli action requires at least one state column")
     n, b, tile = rows, columns, min(rows, _PAULI_TILE)
     size = (
         (33 if complex_input else 49) * n * b
-        + 24 * terms + 16 * flips + 8
+        + 254 * terms + 1282
         + max(9 * terms, (64 + 32 * b) * tile)
     )
     work = (

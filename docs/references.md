@@ -214,9 +214,10 @@ Sources listed in other sections:
  - Childs, A. M., Kothari, R., & Somma, R. D. (2017). Quantum algorithm for systems of linear equations with exponentially improved dependence on precision. SIAM Journal on Computing, 46(6), 1920-1950. [arXiv 1511.02306v2](https://arxiv.org/abs/1511.02306v2)
     - arXiv:1511.02306v2, Lemmas 17–19: inverse-polynomial approximation bounds from which the degree formula d = O(κ log(κ/ε)) follows.
  - Sünderhauf, Nemeth, Walayat, Patterson, and Berntson (2025). Matrix inversion polynomials for the quantum singular value transformation. [arXiv 2507.15537v1](https://arxiv.org/abs/2507.15537v1)
-    - arXiv:2507.15537v1, Theorem 1, with Python code in Appendix B: the optimal odd polynomial in closed form.
-    - Sec. III, Eq. (26): the grid density.
+    - arXiv:2507.15537v1, Theorem 1, Eqs. (4)–(7): the odd polynomial with the smallest absolute error `|p(x) - 1/x|`, which differs from the relative minimax polynomial that NWQLib uses.
     - Eq. (25): its equidistant-x statement is not valid.
+ - Golub, G. H., and Varga, R. S. (1961). Chebyshev semi-iterative methods, successive overrelaxation iterative methods, and second order Richardson iterative methods, Part I. *Numerische Mathematik* **3**, 147–156. [10.1007/BF01386013](https://doi.org/10.1007/BF01386013)
+    - The scaled Chebyshev polynomials of Chebyshev semi-iteration, whose extremal property gives the relative minimax inverse polynomial of [Proposition 23](mathematics.md#r23).
  - Ehlich, H., and Zeller, K. (1964). Schwankung von Polynomen zwischen Gitterpunkten. *Mathematische Zeitschrift* **86**, 41–44. [10.1007/BF01111276](https://doi.org/10.1007/BF01111276), [Original scans at GDZ](https://gdz.sub.uni-goettingen.de/dms/resolveppn/?PPN=GDZPPN002394847).
     - doi:10.1007/BF01111276, Satz 2, Eqs. (12)–(14), pp. 42–43, on Chebyshev-zero nodes: the norming factor used by NWQLib.
  - Dalzell, A. M. (2024). A shortcut to an optimal quantum linear system solver. arXiv preprint arXiv:2406.12086. [arXiv 2406.12086v2](https://arxiv.org/abs/2406.12086v2)
@@ -335,11 +336,6 @@ Sources listed in other sections:
     - QSP background.
  - Martyn, Rossi, Tan, and Chuang (2021). Grand unification of quantum algorithms. PRX Quantum, 2, 040203. [arXiv 2105.02859v5](https://arxiv.org/abs/2105.02859v5)
     - arXiv:2105.02859v5: QSP conventions.
- - Dong, Meng, Whaley, and Lin (2021). Efficient phase-factor evaluation in quantum signal processing. PRA, 103, 042419. [arXiv 2002.11649v2](https://arxiv.org/abs/2002.11649v2)
-    - arXiv:2002.11649v2: symmetric phase-factor optimization.
- - Dong, Lin, Ni, and Wang (2023). Robust iterative method for symmetric quantum signal processing in all parameter regimes. [arXiv 2307.12468v1](https://arxiv.org/abs/2307.12468v1)
-    - arXiv:2307.12468v1, Sec. 3, Eq. (3.1) and Algorithm 3.1: the Newton method that the phase solver runs when L-BFGS misses its tolerance.
-    - Sec. 2.2: the convergence limits of L-BFGS near `max|f| = 1`.
  - Haah, J. (2019). Product decomposition of periodic functions in quantum signal processing. Quantum, 3, 190. [arXiv 1806.10236v4](https://arxiv.org/abs/1806.10236v4)
     - Comparison background.
  - Camps, D., & Van Beeumen, R. (2022). FABLE: fast approximate quantum circuits for block-encodings. IEEE Quantum Computing and Engineering. [arXiv 2205.00081v2](https://arxiv.org/abs/2205.00081v2)

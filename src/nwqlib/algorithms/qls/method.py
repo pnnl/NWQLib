@@ -1,6 +1,6 @@
 """QLS Method: input checks, planning, the classical polynomial model and analysis on the original A and b."""
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from nwqlib._limits import ResourceLimitError, byte_allowance, exceeds, memory_limit
 
 from math import isfinite
 from typing import Annotated, Any, ClassVar, Literal
@@ -32,8 +32,8 @@ from nwqlib.problems.records import (
 from nwqlib.problems.scalars import physical_scalar, physical_vector_statistics, _observable_moment
 from nwqlib.resources.records import ResourceLaw, Workspace
 from .host_planning import (
-    application_arguments, input_access_refusal, original_factor_laws, select_inputs, select_polynomial,
-    selected_work,
+    application_arguments, conditioning_note, input_access_refusal, original_factor_laws, select_inputs,
+    select_polynomial, selected_work,
 )
 from .primary_records import METHOD, DESCRIPTOR, QLSAnalysis, QLSReconstruction, validate_selection
 
@@ -212,13 +212,13 @@ class QLS(Method):
     recorded in `plan.reconstruction`. P approximates
     `1/(polynomial_kappa x)` with
     `|polynomial_kappa x P(x) - 1| <= epsilon_inv` for
-    `1/polynomial_kappa <= |x| <= 1`. NWQLib fits P and evaluates this bound
-    in binary64 on an affine Chebyshev grid (Ehlich and Zeller,
-    doi:10.1007/BF01111276, Satz 2). Its degree search stops at an
-    engineering limit motivated by the degree scaling
-    `O(kappa log(kappa/epsilon))` of Childs, Kothari and Somma
-    (arXiv:1511.02306v2, Lemmas 17-19), or at `max_degree` if that is
-    smaller. This scaling does not guarantee a passing fit below the limit. Physical recovery multiplies the success branch of the circuit,
+    `1/polynomial_kappa <= |x| <= 1`. P is the relative minimax polynomial of
+    the smallest odd degree that meets `epsilon_inv`, built in closed form
+    from a Chebyshev polynomial. NWQLib bounds the residual of its stored
+    coefficients in binary64 at Chebyshev zeros (Ehlich and Zeller,
+    doi:10.1007/BF01111276, Satz 2) and takes one degree refinement when
+    rounding leaves too little room below `epsilon_inv`
+    ([QLS guide](../../algorithms/qls.md)). Physical recovery multiplies the success branch of the circuit,
     or of the classical model, by `||b|| polynomial_kappa s / alpha`, with s
     the polynomial's rescale.
     The two shortcut solvers implement Dalzell's kernel-reflection method
@@ -227,7 +227,8 @@ class QLS(Method):
 
     `epsilon_inv` sets the accuracy of the polynomial approximation. It does
     not bound the total error of x, which also depends on the spectral assumptions, the
-    phase fit, the circuit execution and sampling. Vector outputs
+    phase synthesis, the circuit execution and sampling. The phase synthesis
+    has its own target, `phase_residual_tolerance`. Vector outputs
     (`Solution`, `StateVector`) need exact readout, in which the amplitudes
     are computed without shot sampling, subject to numerical rounding, so
     they take no `shots`, and `Samples` needs positive `shots` with quantum execution.
@@ -252,8 +253,8 @@ class QLS(Method):
         >>> from nwqlib.algorithms.qls import QLS
         >>> problem = LinearSystem(A=[[1.1, .1], [.1, .9]], b=[1., .25])
         >>> result = solve(problem, method=QLS(), seed=7)
-        >>> print(np.round(result.x, 4))
-        [0.8966+0.j 0.1813+0.j]
+        >>> print(np.round(result.x.real, 4))
+        [0.8973 0.1815]
 
     Attributes:
         solver: Default `"qsvt_inverse"`, which recovers the physical
@@ -274,13 +275,33 @@ class QLS(Method):
             For the shortcuts it is `sqrt(2)` times the kernel-reflection
             parameter `eta`. It does not bound the total error of the
             physical output.
+        phase_residual_tolerance: Default `None`. Positive limit on the
+            actual coefficient residual delta of the QSP phases of quantum
+            execution, relative to the rescaled polynomial `P/s`. A number
+            is used as given and can be above or below the default, which
+            also lowers or raises the phase-solve memory and time. With
+            `None`, `"qsvt_inverse"` takes
+            `max(1e-12, 0.1 * epsilon_inv / (polynomial_kappa * s))` once
+            the polynomial is chosen, and a shortcut solver takes `1e-12`.
+            When the second argument of that maximum decides, the phase term
+            `polynomial_kappa * s * delta / ||y||` of the relative inverse
+            error is at most `0.1 * epsilon_inv`, because `||y|| >= 1`
+            for `y = (A/alpha)^-1 b/||b||` under the spectral assumptions.
+            This statement is nominal, because delta has no arithmetic
+            enclosure, and it is not a bound on the total error. When `1e-12`
+            decides, it does not hold, and `print(result)` gives the actual
+            values. For a shortcut solver, `print(result)` gives the effect
+            of delta on the unit direction instead. A residual above the
+            target raises `ValueError` with the attempted transform lengths.
+            Classical execution has no phase synthesis, so the value has no
+            effect on it.
         alpha: Default `"auto"`, which takes the normalization of the chosen
             block encoding, for Pauli input the coefficient 1-norm. A
             positive number is the caller's assumption. Supplied `alpha` and
             `kappa` do not force an extra spectral computation. When planning
-            computes the original singular endpoints anyway, an assumption
-            that misses them by more than a relative window of `1e-12` is
-            rejected.
+            or a classical evaluation computes the original singular endpoints
+            anyway, an assumption that misses them by more than a relative
+            window of `1e-12` is rejected with `ApplicabilityError`.
         kappa: Default `"auto"`, which uses `kappa_be = alpha/sigma_min(A)`
             from the original singular endpoints, at least 1. A number at
             least 1 is the caller's bound on `kappa_be`, the encoded
@@ -318,40 +339,25 @@ class QLS(Method):
             Secs. 5.1-5.3), which evaluate the classical probability model
             of that search. t is not the recovered physical norm.
             `"qsvt_inverse"` rejects any value.
-        max_degree: Default `256`. Upper limit on the polynomial degree,
-            checked before the coefficients and phases are computed.
-        max_qsp_evaluations: Default `20_000`. Upper limit on the residual
-            evaluations of the QSP phase solver.
-        max_work: Default `1e9` (`1_000_000_000`). Upper limit on the
+        max_work: Default `None`, no limit. Optional upper limit on the
             counted classical work, applied separately to each planning
             phase, for example spectral selection (computing the extreme
             singular values of A), dense completion (completing `A/alpha` to
-            the unitary of the dense dilation), encoding construction, the
-            polynomial fit and the grouping of sampled Pauli terms. It
+            the unitary of the dense dilation), encoding construction and
+            the grouping of sampled Pauli terms. It
             includes the exact synthesis of a dense
             dilation, or of the dense unitaries in a supplied encoding or
             RHS circuit, that a controlled query needs, and Qiskit's control
-            of the synthesized gates. The exact scalar readouts of one Run
-            count together against it. Work units are operation counts, not
+            of the synthesized gates. Work units are operation counts, not
             timings.
-        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Upper
-            limit on the known bytes of numerical arrays, including those
+        max_bytes: Default `None`, the physical memory of this computer.
+            Upper limit on the known bytes of numerical arrays, including those
             syntheses. It excludes the undocumented internal workspace of
-            external libraries. Each exact
-            scalar readout must fit it before the circuits run.
-        max_admission_steps: Default `1_000_000`, sized for sampled
-            `Program`s, whose planning work grows with the number of their
-            distinct measured registers. Upper limit on the planning work of
-            checking the quantum `Program` (NWQLib's description of a circuit
-            as named steps), counting the fields of that description and the
-            work of each check during validation, preparation and circuit
-            building. Each stage applies the limit before doing that work.
-            Summing the Program's resource counts may use up to 24 times
-            this value. A larger Program is rejected with a ValueError that
-            names this field, the stage at which it was rejected and the
-            work count of that stage. Raising the limit changes neither
-            the polynomial nor any quantum operation. See the
-            [planning work limit](../../development/program_checks.md#planning-work-limit).
+            external libraries. `prepare` also compares this limit with a
+            coarse estimate of the circuit's memory before building the
+            circuit. That estimate is not a bound on memory, and the refusal
+            names any calls it could not count, such as a controlled query
+            of a banded or Pauli encoding.
 
     Raises:
         ValueError: If `encoded_solution_norm_estimate` is set with
@@ -363,6 +369,7 @@ class QLS(Method):
     descriptor: ClassVar[AlgorithmDescriptor] = DESCRIPTOR
     solver: Literal["qsvt_inverse", "shortcut_native_svp", "shortcut_dilation"] = "qsvt_inverse"
     epsilon_inv: Annotated[Real, Field(gt=0, lt=1)] = 0.01
+    phase_residual_tolerance: Annotated[Real, Field(gt=0)] | None = None
     alpha: Annotated[Real, Field(gt=0)] | Literal["auto"] = "auto"
     kappa: Annotated[Real, Field(ge=1)] | Literal["auto"] = "auto"
     block_encoding_implementation: Literal[
@@ -375,13 +382,8 @@ class QLS(Method):
         | Literal["grid", "noisy_binary_search", "linear_kappa_sequence"]
         | None
     ) = None
-    max_degree: PositiveInt = 256
-    max_qsp_evaluations: PositiveInt = 20000
-    max_work: PositiveInt = 1_000_000_000
-    max_bytes: PositiveInt = DEFAULT_MAX_BYTES
-    # Ten times the shared Program default (ENGINEERING_CONSTANTS.md, "Shared
-    # Program admission limits").
-    max_admission_steps: PositiveInt = 1_000_000
+    max_work: PositiveInt | None = None
+    max_bytes: PositiveInt | None = None
 
     @field_validator("encoding")
     @classmethod
@@ -391,12 +393,12 @@ class QLS(Method):
         return value
 
     @field_serializer("encoding")
-    def _describe_encoding(self, value):
-        return (
-            None
-            if value is None
-            else value.record.model_dump(mode="json", exclude_computed_fields=True)
-        )
+    def _describe_encoding(self, value, info):
+        # Inside the Method's content hash computation, the block record's reference.
+        if value is None:
+            return None
+        return value.record._identity_reference(info) or value.record.model_dump(
+            mode="json", exclude_computed_fields=True)
 
     @model_validator(mode="after")
     def _choices(self):
@@ -407,10 +409,28 @@ class QLS(Method):
     def plan(self, problem, *, output, execution, shots, rng):
         """Choose the encoding, the inverse or reflection polynomial and the physical recovery before declaring execution.
         """
+        from nwqlib.subroutines.qsp.phases import _QSPPhaseConvergenceError
+
         _admit(problem, self, output, execution, shots)
         encoding, encoded_operator, rhs, svd, spectrum = select_inputs(
             problem, self, execution=execution
         )
+        try:
+            return self._plan_from_inputs(problem, output, execution, shots, rng, encoding, encoded_operator,
+                                          rhs, svd, spectrum)
+        except _QSPPhaseConvergenceError:
+            # plan_quantum put the conditioning into the message, and the class and evidence stay.
+            raise
+        except ResourceLimitError as error:
+            # The polynomial and its phases depend on polynomial_kappa, so a singular or
+            # nearly singular A can first show up here as a limit. compare's row keeps
+            # str(error), so the context goes into the message and not into a note.
+            note = conditioning_note(spectrum["polynomial_kappa"], spectrum["sigma_min"], spectrum["sigma_max"],
+                                     problem.dimension)
+            raise ResourceLimitError(f"{error}. {note}") from error
+
+    def _plan_from_inputs(self, problem, output, execution, shots, rng, encoding, encoded_operator, rhs, svd, spectrum):
+        """Build the Plan from the selected encoding and spectrum."""
         polynomial = select_polynomial(self, spectrum["polynomial_kappa"])
         # A non-Hermitian inverse uses Hermitian dilation. Its auxiliary coordinate
         # is distinct from power-of-two padding of the original input.
@@ -421,7 +441,7 @@ class QLS(Method):
         )
         t = self.encoded_solution_norm_estimate
         if isinstance(t, float) and t > spectrum["polynomial_kappa"]:
-            raise ValueError("numeric shortcut t exceeds the selected polynomial domain")
+            raise ApplicabilityError("numeric shortcut t exceeds the selected polynomial domain")
         source = (
             "not_applicable"
             if self.solver == "qsvt_inverse"
@@ -458,8 +478,10 @@ class QLS(Method):
                 original_dimension=problem.dimension,
                 system_dimension=problem.dimension * (2 if embedding != "none" else 1),
             )
-        if work.size_units > self.max_work or work.workspace_bytes + held > self.max_bytes:
-            raise ValueError("selected QLS classical action exceeds max_work or max_bytes")
+        if exceeds(work.size_units, self.max_work) or exceeds(work.workspace_bytes + held, memory_limit(self.max_bytes)):
+            raise ResourceLimitError(
+                f"selected QLS classical action exceeds max_work={self.max_work} or {byte_allowance(self.max_bytes)}: "
+                f"it needs {work.size_units} work units and {work.workspace_bytes + held} bytes")
         # Compose the RHS norm, encoding normalization and polynomial rescaling
         # once, so readout can recover the physical x rather than only its direction.
         recovery = (
@@ -515,38 +537,6 @@ class QLS(Method):
 
             return analyze_quantum(plan, data)
         return _analyze_classical(plan, data)
-
-    def reduction_allowance(self, plan, point, *, observation, width, run):
-        """Check the workspace of the exact reduction and return the remaining ``max_work``.
-
-        Before the circuits run, the bytes that each ``projected_moments``
-        point needs (``readout_requirements``) must fit ``max_bytes``. The
-        returned allowance is ``max_work`` minus the recorded work of the
-        reductions that this Run already completed for other experiments,
-        and the registry checks this point's reduction against it. QLS
-        limits each planning phase, such as grouping, by ``max_work``
-        separately, so the reductions of a Run count only against each
-        other. This method reads the record of completed reductions without
-        changing it, so it can be called again on submission and after the
-        Run is reopened.
-        """
-        import json
-        from nwqlib._quantum_readout import PROJECTED_MOMENTS, projected_requirements
-
-        def reductions(readout):
-            return (item for item in readout.positions
-                    if item.kind == "reduction" and item.reducer == PROJECTED_MOMENTS)
-
-        for item in reductions(observation):
-            reserved, _ = projected_requirements(json.loads(item.parameters), width)
-            if reserved > self.max_bytes:
-                raise ValueError(f"QLS projected reduction needs {reserved} bytes, more than "
-                                 f"max_bytes={self.max_bytes}; refused before acquisition")
-        spent = sum(projected_requirements(json.loads(item.parameters), width)[1]
-                    for chunk in run.observations.chunks
-                    if chunk.point is not None and chunk.experiment != point.experiment
-                    for item in reductions(chunk.observation))
-        return max(0, self.max_work - spent)
 
     def validate_point(self, plan, experiment, values):
         if not plan._bound:
@@ -852,7 +842,10 @@ def _realize(plan, *, matrix, rhs_direction):
     The inverse and the linear norm model reuse the original factors that
     planning computed (``plan._native["svd"]``), or compute them once here
     when supplied ``alpha`` and ``kappa`` deferred the factorization
-    (``host_planning._original_factors``, counted in ``QLSWork``). The
+    (``host_planning._original_factors``, counted in ``QLSWork``). Factors
+    computed here are compared with the supplied premises before their first
+    use, with the refusal of quantum planning (``host_planning.covered_kappa``),
+    which costs no further decomposition. The
     inverse applies its odd polynomial on the d original coordinates and
     returns the d-entry branch ``y = V P(Sigma/alpha) U† b_hat`` directly,
     so its algorithm-branch mass and physical-slice mass both equal
@@ -866,7 +859,7 @@ def _realize(plan, *, matrix, rhs_direction):
     array is formed only when an output requests it.
     """
     from nwqlib._numerics import stable_vector_norm, normalized_matrix
-    from .host_planning import _original_factors, classical_factor_consumer
+    from .host_planning import _original_factors, classical_factor_consumer, covered_kappa
     from .numerical import (
         inverse_polynomial_action,
         shortcut_matrix,
@@ -880,6 +873,7 @@ def _realize(plan, *, matrix, rhs_direction):
         factors.require_source(plan.problem.A)
     elif classical_factor_consumer(plan.method):
         factors = _original_factors(plan.problem.A, plan.method)
+        covered_kappa(*factors.endpoints(), r.alpha, r.kappa_be)
     coefficients = np.asarray(r.polynomial.coefficients) / r.polynomial.rescale
     t_value, source, metadata, reference_norm = 1.0, "not_applicable", {}, None
     if plan.method.solver == "qsvt_inverse":
@@ -895,7 +889,10 @@ def _realize(plan, *, matrix, rhs_direction):
         if r.work.target_solves:
             # y=(A/alpha)^-1*b_hat is already in the t model's encoded frame.
             # This is the selected classical norm-search model's only solve.
-            reference_norm = stable_vector_norm(np.linalg.solve(encoded, rhs_direction))
+            try:
+                reference_norm = stable_vector_norm(np.linalg.solve(encoded, rhs_direction))
+            except np.linalg.LinAlgError as error:
+                raise ApplicabilityError("QLS requires an invertible original matrix") from error
         t_value, source, metadata = _resolve_shortcut_norm(
             plan.method.encoded_solution_norm_estimate,
             kappa_be=r.polynomial_kappa,

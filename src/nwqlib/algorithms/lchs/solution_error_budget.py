@@ -22,6 +22,15 @@ stage values once into the algorithmic-approximation component of the
 requested output. Floating-point and sampling errors remain separate terms,
 and one missing stage makes that sum unknown.
 
+Weights, recoveries, gamma and supplied bounds may be PhysicalScale values,
+whose integer exponents can lie outside the binary64 range. Every factor
+and term of a stage is combined with those exponents, and the completed
+stage is converted to binary64 once. A positive stage above the binary64
+range is unknown with the reason ``nonfinite_stage:<stage>``. A positive
+stage below the normal range is rounded up to a binary64 number, at least
+2**-1074, so it stays a positive upper bound. Only an exactly zero factor
+gives an exact zero stage.
+
 The sum bounds the distance between the exact solution of du/dt = -A u + b
 and the output that the planned construction would give in exact
 arithmetic without noise, through the stages listed above and only under
@@ -42,19 +51,36 @@ with bounds (half each for the default pair, a third each for Low-Somma
 arXiv:2508.19238v2), and 0.1 times its value is the QSP synthesis
 allowance or the per-node allowance of trotter_error_budgeted. Fixed-step
 trotter, the Duhamel stage and the preparation stages receive no allowance
-from it, and it is not a certificate for the total physical error.
+from it, and it is not a certificate for the total physical error. Fixed-step
+trotter leaves trotter_synthesis unknown and reports the known part it can,
+its Pauli pruning, as the separate listed component trotter_pruning
+(pruning_stage), which enters no sum.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from math import exp, floor, fsum, isfinite, log
+from math import exp, floor, frexp, fsum, inf, isfinite, ldexp, log, nextafter
 from typing import Any
 
 from nwqlib.serialization import FieldSerializedRecord
 
 _LN2 = log(2.0)
+_SMALLEST_NORMAL = 2.2250738585072014e-308
+
+
+def signed_shift(conversion: Mapping[str, Any]) -> float:
+    """Return the signed scalar shift s = psd_shift - scalar_decay of an LCHS conversion record.
+
+    For a lower bound ell <= lambda_min(L),
+    psd_shift = max(0, -ell) is the shift that makes L + s*I positive
+    semidefinite and scalar_decay = max(0, ell) is known physical decay, so
+    s = -ell and exp(-A*t) = exp(s*t)*exp(-(A + s*I)*t). Recovery and
+    compensation use this signed s. Component error bounds may use the
+    nonnegative psd_shift instead, since exp(s*t) <= exp(psd_shift*t).
+    """
+    return float(conversion["psd_shift"]) - float(conversion["scalar_decay"])
 
 
 def psd_recovery(shift: float, elapsed: float) -> float | None:
@@ -63,27 +89,144 @@ def psd_recovery(shift: float, elapsed: float) -> float | None:
     exp(-A*t) = exp(shift*t)*exp(-(A + shift*I)*t), so every application of
     a shifted LCHS construction is multiplied back by this factor. It
     overflows once shift*elapsed exceeds log(max float), about 709.78, even
-    when the recovered physical vector itself is representable.
+    when the recovered physical vector itself is representable. A negative
+    signed shift (known decay) can instead make it smaller than the smallest
+    normal binary64 number, which also returns None, because the value would
+    have lost relative precision or become zero.
     """
     try:
-        return exp(shift*elapsed)
+        value = exp(shift*elapsed)
     except OverflowError:
         return None
+    return value if isfinite(value) and value >= _SMALLEST_NORMAL else None
+
+
+def binary_exponent(value: float) -> int:
+    """Return floor(value/ln 2), the power of two that carries exp(value), or refuse a nonfinite value.
+
+    A value or quotient outside binary64 has no representable recovery, so
+    it raises ApplicabilityError, the range refusal of a legal input, before
+    any floor or exp conversion.
+    """
+    from nwqlib.algorithms.protocol import ApplicabilityError
+
+    quotient = value/_LN2 if isfinite(value) else value
+    if not isfinite(quotient):
+        raise ApplicabilityError(f"the LCHS scalar compensation exp({value!r}) is outside the range LCHS represents: "
+                                 "its exponent s*t/ln 2 is not a finite binary64 number")
+    return floor(quotient)
+
+
+def scaled_exp(value: float):
+    """Return exp(value) as a PhysicalScale, or None when value or value/ln 2 is not finite.
+
+    When exp(value) is a normal binary64 number, the scale holds exactly
+    that number. Otherwise q = value/ln 2 is split into floor(q) and
+    q - floor(q), which binary64 subtracts exactly, so exp(value) =
+    2**(q - floor(q))*2**floor(q) with an integer exponent and no overflow
+    or underflow. The quotient rounds with absolute error of order u*|q| in
+    the exponent, a numerical estimate without an enclosure.
+    """
+    from nwqlib.problems.inputs import PhysicalScale
+
+    if not isfinite(value):
+        return None
+    direct = psd_recovery(value, 1.0)
+    if direct is not None:
+        mantissa, exponent = frexp(direct)
+    else:
+        quotient = value/_LN2
+        if not isfinite(quotient):
+            return None
+        whole = floor(quotient)
+        mantissa, exponent = frexp(2.0**(quotient - whole))
+        exponent += whole
+    return PhysicalScale(mantissa=mantissa, exponent=exponent, evidence="composed_floating_point_recovery")
+
+
+def admitted_exp(value: float):
+    """Return exp(value) as a PhysicalScale (``scaled_exp``), or raise the range refusal of ``binary_exponent``."""
+    scale = scaled_exp(value)
+    if scale is None:
+        binary_exponent(value)
+    return scale
+
+
+def extracted_phase(time: float, k: float, scalar_phase) -> complex:
+    """Return exp(-i*time*(k*a + b)), the scalar phase a recipe takes out of its evolved children, or refuse.
+
+    With children L - c_L*I and H - c_H*I, a = c_L + s and b = c_H
+    (``selection.LCHSGenerator``). A finite phase argument is evaluated in
+    binary64, with rounding that grows with |time*(k*a + b)| and no separate
+    enclosure. A nonfinite argument raises ApplicabilityError before any
+    complex exponential is formed.
+    """
+    from cmath import exp as complex_exp
+    from nwqlib.algorithms.protocol import ApplicabilityError
+
+    dissipative, hamiltonian = scalar_phase
+    argument = time*(float(k)*dissipative + hamiltonian)
+    if not isfinite(argument):
+        raise ApplicabilityError(f"the extracted LCHS scalar phase argument t*(k*a + b) = {argument!r} at t={time!r}, "
+                                 f"k={float(k)!r} is not a finite binary64 number")
+    return complex_exp(-1j*argument)
+
+
+def unit_angle(angle: float) -> float:
+    """Return the angle of exp(i*angle) in [-pi, pi], reduced through its unit phase.
+
+    An angle already in [-pi, pi] is returned unchanged. A larger finite
+    angle is reduced as atan2(sin(angle), cos(angle)): libm reduces the
+    argument against pi itself, while ``angle % (2*pi)`` reduces it against
+    the binary64 value of 2*pi, which is 2.4e-16 too small, and so is off
+    by about 3.9e-17*|angle| radians, several turns near 2**60. A bounded
+    phase added afterwards, such as a coefficient argument, keeps its value,
+    whereas added to the unreduced angle it would round at that angle's
+    spacing. The result carries the ordinary rounding of the reduction,
+    and the finite input angle carries its own rounding; neither is an
+    enclosure.
+    """
+    from math import atan2, cos, pi, sin
+
+    return angle if -pi <= angle <= pi else atan2(sin(angle), cos(angle))
+
+
+def scaled_sum(scales):
+    """Return the sum of nonnegative PhysicalScale values as a PhysicalScale, without a binary64 conversion.
+
+    Each term is ldexp(mantissa, exponent - top) relative to the largest
+    exponent top, and the binary64 sum of those relative values is composed
+    with 2**top. A term more than 1100 binary orders below the largest is
+    below the rounding of that sum and is added as zero. A zero total is the
+    zero scale.
+    """
+    from nwqlib.problems.inputs import PhysicalScale, compose_recovery
+
+    terms = [scale for scale in scales if scale.mantissa != 0]
+    if not terms:
+        return PhysicalScale(mantissa=0.0, exponent=0)
+    top = max(scale.exponent for scale in terms)
+    relative = fsum(ldexp(scale.mantissa, max(scale.exponent - top, -1100)) for scale in terms)
+    return compose_recovery(relative, PhysicalScale(mantissa=0.5, exponent=top + 1))
 
 
 def psd_recovery_exponent(shift: float, final_time: float) -> int:
     """Return the power of two e that a recovery carries outside every array, or 0.
 
-    While exp(shift*final_time) is representable, e = 0 and the arrays hold
-    the full recovery. Otherwise e = floor(shift*final_time/ln 2), so
-    exp(shift*final_time)*2**-e lies in [1, 2) up to rounding, and the
+    While exp(shift*final_time) is a normal binary64 number, e = 0 and the
+    arrays hold the full recovery. Otherwise e = floor(shift*final_time/ln 2),
+    so exp(shift*final_time)*2**-e lies in [1, 2) up to rounding, and the
     factor 2**e joins the output's binary PhysicalScale recovery instead
-    (problems.inputs.compose_recovery). final_time is the longest elapsed
-    time of the Problem, so every application's part fits the same e.
+    (problems.inputs.compose_recovery). For a nonnegative shift, final_time
+    is the longest elapsed time of the Problem, so every application's part
+    fits the same e. A constant-source layout with known decay chooses its
+    common scale from all applications instead
+    (source_selection.select_source_branches). A nonfinite
+    shift*final_time raises ApplicabilityError (``binary_exponent``).
     """
     if psd_recovery(shift, final_time) is not None:
         return 0
-    return int(floor(shift*final_time/_LN2))
+    return binary_exponent(shift*final_time)
 
 
 def psd_recovery_part(shift: float, elapsed: float, exponent: int) -> float:
@@ -268,7 +411,9 @@ def _numerical_psd_decision(
     shift = 0.0
     if lambda_min < -tolerance_window:
         if not make_l_psd:
-            raise ValueError(
+            from nwqlib.algorithms.protocol import ApplicabilityError
+
+            raise ApplicabilityError(
                 "L from the Cartesian decomposition has a negative eigenvalue "
                 f"({lambda_min}) below the numerical PSD tolerance window "
                 f"({tolerance_window})"
@@ -292,45 +437,56 @@ class LCHSApplicationRecord(FieldSerializedRecord):
         start_time: Time at which this application's input enters.
         elapsed_time: Evolution time T - start_time of this application.
         weight: Physical input norm times the magnitude of its Duhamel weight
-            (one for the initial state).
+            (one for the initial state), a float or a PhysicalScale.
         recovery_scale: exp(shift*elapsed_time), the PSD compensation this
-            application's propagator carries, or None when binary64 cannot
-            represent it. The weighted stages are then unknown.
-        synthesis_error_bound: Coefficient-weighted product-formula bound for
-            this application before weight and recovery_scale, None when
+            application's propagator carries, as a float or a PhysicalScale,
+            or None when shift*elapsed_time is not finite. The weighted
+            stages are then unknown.
+        synthesis_error_bound: Coefficient-weighted product-formula bound
+            sum_j |c_j|*e_j for this application before weight and
+            recovery_scale, a float or a PhysicalScale, None when
             unavailable. Backends without product-formula synthesis record zero
             here and report their synthesis through other stages.
     """
 
     start_time: float
     elapsed_time: float
-    weight: float
-    recovery_scale: float | None
-    synthesis_error_bound: float | None
+    weight: Any
+    recovery_scale: Any
+    synthesis_error_bound: Any
 
 def _build_lchs_application_record(
     quadrature: Mapping[str, Any],
     *,
     final_time: float,
     start_time: float,
-    weight: float,
-    input_norm: float,
+    weight: Any,
+    input_norm: Any,
     backend: str,
-    synthesis_error_bound: float | None,
+    synthesis_error_bound: Any,
 ) -> LCHSApplicationRecord:
-    """Build one application record from the shared quadrature frame."""
+    """Build one application record from the shared quadrature frame.
 
+    ``weight``, the magnitude of the quadrature weight, and ``input_norm``
+    are nonnegative floats or PhysicalScale values. Their product is
+    composed as a PhysicalScale (``_stage_product``), so a product outside
+    binary64 still reaches the stage products intact. The recovery
+    exp(psd_shift*elapsed) is a PhysicalScale (``scaled_exp``), equal to
+    the binary64 value whenever that value is normal. A product-formula
+    ``synthesis_error_bound`` is kept as given, a float or the PhysicalScale
+    of ``_trotter_budget_quadrature_terms``, so its positive value reaches
+    ``_weighted_synthesis_stage`` without a binary64 conversion.
+    """
     elapsed_time = float(final_time - start_time)
     recorded_synthesis = 0.0
     if backend in ("trotter", "trotter_error_budgeted"):
-        recorded_synthesis = (
-            None if synthesis_error_bound is None else float(synthesis_error_bound)
-        )
+        recorded_synthesis = synthesis_error_bound
+    recorded_weight = _stage_product("applications", weight, input_norm)
     return LCHSApplicationRecord(
         start_time=float(start_time),
         elapsed_time=elapsed_time,
-        weight=float(weight * input_norm),
-        recovery_scale=psd_recovery(float(quadrature["psd_shift"]), elapsed_time),
+        weight=recorded_weight,
+        recovery_scale=scaled_exp(float(quadrature["psd_shift"]) * elapsed_time),
         synthesis_error_bound=recorded_synthesis,
     )
 
@@ -358,55 +514,86 @@ def _stage_scalar(name: str, value: Any) -> float:
     return scalar
 
 
-def _stage_product(name: str, *factors: Any) -> float:
-    """Multiply validated factors, refusing overflow and underflow to zero.
+def _stage_factor(name: str, value: Any):
+    """Return a nonnegative stage factor as a PhysicalScale, or raise with the reason code.
 
-    A product of positive factors that rounds to zero would report a
-    mathematically positive bound as exact zero, so it is ``unusable_stage``.
+    A PhysicalScale is used as it is. A real value passes the checks of
+    ``_stage_scalar`` and becomes its exact binary mantissa and exponent.
     """
-    values = tuple(_stage_scalar(name, value) for value in factors)
-    result = 1.0
-    for value in values:
-        result *= value
-        if not isfinite(result):
-            raise _StageFailure(f"nonfinite_stage:{name}")
-    if result == 0.0 and all(value > 0.0 for value in values):
-        raise _StageFailure(f"unusable_stage:{name}")
-    return float(result)
+    from nwqlib.problems.inputs import PhysicalScale
+
+    if isinstance(value, PhysicalScale):
+        return value
+    mantissa, exponent = frexp(_stage_scalar(name, value))
+    return PhysicalScale(mantissa=mantissa, exponent=exponent if mantissa else 0)
+
+
+def _stage_product(name: str, *factors: Any):
+    """Multiply validated factors with integer exponents and return the product as a PhysicalScale.
+
+    No binary64 overflow or underflow can occur here. While every partial
+    product is a normal number, the mantissa products round exactly as the
+    binary64 products of the factors would. A zero factor gives the zero
+    scale, an exact zero.
+    """
+    from nwqlib.problems.inputs import PhysicalScale, compose_recovery
+
+    scales = tuple(_stage_factor(name, value) for value in factors)
+    if any(scale.mantissa == 0 for scale in scales):
+        return PhysicalScale(mantissa=0.0, exponent=0)
+    return compose_recovery(*scales)
+
+
+def application_weight(weight: float, input_norm) -> float | None:
+    """Return the descriptive application weight |weight|*input_norm in binary64, or None outside binary64.
+
+    The product is composed with integer exponents (``_stage_product``), so
+    it is exactly zero only for a zero factor, a positive subnormal value is
+    returned as it is, and a positive product below or above the binary64
+    range is None, never 0.0 or inf. The host's ``weight`` binding records
+    this value only when it is not None, and
+    selected_grid.host_applications forms the same value from the Plan's
+    saved weight and input PhysicalScale. Physical stages use the two
+    factors themselves, not this value.
+    """
+    return _stage_product("applications", abs(weight), input_norm).as_float()
+
+
+def _stage_value(name: str, scale) -> float:
+    """Convert a completed physical stage bound to binary64, once.
+
+    Only an exactly zero scale gives 0.0. A positive bound above the
+    binary64 range raises ``nonfinite_stage:<name>``. Below the normal range
+    ldexp rounds to the nearest subnormal number or to zero, so a rounded
+    value is replaced by the next binary64 number above it. That keeps an
+    upper bound that is never zero, at least 2**-1074.
+    """
+    if scale.mantissa == 0:
+        return 0.0
+    value = scale.as_float()
+    if value is None and scale.exponent > 0:
+        raise _StageFailure(f"nonfinite_stage:{name}")
+    value = value or 0.0
+    # Scaling back by 2**-exponent is exact, so it recovers the mantissa
+    # exactly when ldexp did not round.
+    if ldexp(value, -scale.exponent) != scale.mantissa:
+        value = nextafter(value, inf)
+    return value
 
 
 def _validate_applications(applications: Sequence[LCHSApplicationRecord]) -> None:
-    """Reject an empty, nonfinite or sign-violating set of applications.
+    """Reject a missing application set or a PSD recovery outside binary64.
 
-    Weighted stages multiply every application's weight and recovery scale,
-    so one invalid application would make every weighted stage meaningless.
+    Weighted stages multiply every application's weight and recovery scale.
+    _build_lchs_application_record forms the weight as a PhysicalScale and
+    the recovery exp(shift*elapsed) with scaled_exp, which is None when the
+    exponent itself is not finite, so that is the one recovery a stage
+    cannot use.
     """
     if not applications:
         raise _StageFailure("missing_stage:applications")
-    for application in applications:
-        if not isinstance(application, LCHSApplicationRecord):
-            raise TypeError("applications must contain LCHSApplicationRecord values")
-        if application.recovery_scale is None:
-            raise _StageFailure("unrepresentable_psd_recovery:applications")
-        values = (
-            application.start_time,
-            application.elapsed_time,
-            application.weight,
-            application.recovery_scale,
-        )
-        try:
-            finite = all(isfinite(float(value)) for value in values)
-        except (TypeError, ValueError, OverflowError):
-            finite = False
-        if not finite:
-            raise _StageFailure("nonfinite_stage:applications")
-        if (
-            application.start_time < 0.0
-            or application.elapsed_time < 0.0
-            or application.weight < 0.0
-            or application.recovery_scale <= 0.0
-        ):
-            raise _StageFailure("unusable_stage:applications")
+    if any(application.recovery_scale is None for application in applications):
+        raise _StageFailure("unrepresentable_psd_recovery:applications")
 
 
 def _weighted_raw_stage(
@@ -420,29 +607,28 @@ def _weighted_raw_stage(
     on time, and the quadrature conditions (the ATAP ISBN 978-1-61197-239-9
     ellipse bound and the Low-Somma arXiv:2508.19238v2 step condition) only
     relax as T*||L|| decreases, so the same grid keeps its recorded bounds
-    for every shorter Duhamel elapsed time T-s.
+    for every shorter Duhamel elapsed time T-s. The terms are added with a
+    common exponent (``scaled_sum``) and the sum is converted once, so a
+    sum of representable terms that exceeds binary64 is ``nonfinite_stage``.
     """
     value = _stage_scalar(name, raw_value)
-    terms = [
+    return _stage_value(name, scaled_sum([
         _stage_product(name, application.weight, application.recovery_scale, value)
         for application in applications
-    ]
-    total = float(fsum(terms))
-    if not isfinite(total):
-        raise _StageFailure(f"nonfinite_stage:{name}")
-    return total
+    ]))
 
 
 def _weighted_synthesis_stage(applications: Sequence[LCHSApplicationRecord]) -> float:
     """Return sum_a w_a*r_a*s_a with each application's own synthesis bound s_a.
 
     Unlike the kernel stages, s_a differs between applications because each
-    Duhamel application evolves for its own elapsed time.
+    Duhamel application evolves for its own elapsed time. The sum is formed
+    as in ``_weighted_raw_stage``.
     """
     name = "trotter_synthesis"
     if any(application.synthesis_error_bound is None for application in applications):
         raise _StageFailure("missing_stage:trotter_synthesis")
-    terms = [
+    return _stage_value(name, scaled_sum([
         _stage_product(
             name,
             application.weight,
@@ -450,11 +636,31 @@ def _weighted_synthesis_stage(applications: Sequence[LCHSApplicationRecord]) -> 
             application.synthesis_error_bound,
         )
         for application in applications
-    ]
-    total = float(fsum(terms))
-    if not isfinite(total):
-        raise _StageFailure(f"nonfinite_stage:{name}")
-    return total
+    ]))
+
+
+def pruning_stage(applications: Sequence[LCHSApplicationRecord], pruning_bounds, *, psd_premise_satisfied):
+    """Return (value, None) or (None, reason) for sum_a w_a*r_a*p_a, the fixed-step pruning component.
+
+    p_a is the application's operator bound
+    (time_independent_terms._trotter_pruning_bound), weighted once like the
+    synthesis stage. It is a known part of the error that a fixed step count
+    leaves unknown, so it is outside the stage manifest. A later fixed-step
+    certificate contains it inside trotter_synthesis, so analysis and
+    refinement never add it to the total (analysis.adds_to_total). The
+    premise and application failures suppress it as they do the other stages.
+    """
+    name = "trotter_pruning"
+    try:
+        if not psd_premise_satisfied:
+            raise _StageFailure("uncertified_psd_premise")
+        _validate_applications(applications)
+        return _stage_value(name, scaled_sum([
+            _stage_product(name, application.weight, application.recovery_scale, bound)
+            for application, bound in zip(applications, pruning_bounds, strict=True)
+        ])), None
+    except _StageFailure as failure:
+        return None, str(failure)
 
 
 def _stage_manifest(*, backend: str, inhomogeneous: bool, circuit: bool) -> tuple[str, ...]:
@@ -479,29 +685,6 @@ def _stage_manifest(*, backend: str, inhomogeneous: bool, circuit: bool) -> tupl
     return tuple(name for name in _STAGE_ORDER if name in present)
 
 
-def _unbudgeted_stages(raw_record):
-    """Map each stage outside an ``incomplete`` pair's budget to its reason.
-
-    The Low-Somma pair bounds its kernel and quadrature by Theorems 2-3
-    (arXiv:2508.19238v2) but does not budget the stages it lists. Each of
-    those stages is reported with the reason
-    ``unbudgeted_stage:PROFILE:STAGE`` instead of a value.
-    Other pairs return an empty mapping.
-    """
-    if raw_record.get("solution_error_certificate_status") != "incomplete":
-        return {}
-    stages = raw_record.get("unbudgeted_error_stages")
-    if not isinstance(stages, list) or not stages or not all(
-        isinstance(stage, str) and stage in _STAGE_ORDER for stage in stages
-    ):
-        raise ValueError("incomplete solution error certificate requires registered unbudgeted_error_stages")
-    selection = raw_record.get("kernel_parameter_selection")
-    profile = selection.get("profile") if isinstance(selection, Mapping) else None
-    if not isinstance(profile, str) or not profile:
-        raise ValueError("incomplete solution error certificate requires a named parameter profile")
-    return {name: f"unbudgeted_stage:{profile}:{name}" for name in stages}
-
-
 _APPLICATION_RAW_KEYS = {"kernel_approximation": "approximate_lchs_error_bound", "k_quadrature": "quadrature_error_bound"}
 
 
@@ -513,16 +696,21 @@ def application_stage_bounds(raw_record, *, applications, backend, psd_premise_s
     recovery scale r_a=exp(shift*elapsed_a). The kernel-approximation and k-quadrature stages are
     sum_a w_a*r_a*e with the recorded operator-level bound e, and
     trotter_synthesis is sum_a w_a*r_a*s_a with the application's recorded
-    synthesis bound s_a. A failed PSD or application assumption suppresses every
-    stage. Otherwise a missing, nonfinite, unusable, underflowed or unbudgeted
-    stage suppresses only its own value. Each stage maps to (value, None) or
-    (None, reason). The stages are not summed into a total bound.
+    synthesis bound s_a. Each sum is formed with integer exponents and
+    converted to binary64 once (module docstring), so a large recovery and a
+    small weight combine before either is converted. A failed PSD or
+    application assumption suppresses every stage. Otherwise a missing,
+    nonfinite or unusable stage suppresses only its own value. A pair's
+    ``incomplete`` certificate status says what its split of the tolerance
+    between kernel and k quadrature covers, and changes no stage
+    (``circuit_stage_bounds``). Each stage maps to
+    (value, None) or (None, reason). The stages are not summed into a total
+    bound.
     """
     manifest = _stage_manifest(backend=backend, inhomogeneous=False, circuit=False)
     unusable = set(unusable_stages)
     if unusable.difference(manifest):
         raise ValueError(f"unusable_stages contains off-path stages: {sorted(unusable.difference(manifest))!r}")
-    unbudgeted = _unbudgeted_stages(raw_record)
     try:
         if not psd_premise_satisfied:
             raise _StageFailure("uncertified_psd_premise")
@@ -532,8 +720,6 @@ def application_stage_bounds(raw_record, *, applications, backend, psd_premise_s
     stages = {}
     for name in manifest:
         try:
-            if name in unbudgeted:
-                raise _StageFailure(unbudgeted[name])
             if name in unusable:
                 raise _StageFailure(f"unusable_stage:{name}")
             value = (_weighted_raw_stage(name, raw_record.get(_APPLICATION_RAW_KEYS[name]), applications)
@@ -553,12 +739,12 @@ def _solution_stage_value(name, raw_record, *, applications, duhamel_quadrature_
     if name == "trotter_synthesis":
         return _weighted_synthesis_stage(applications)
     if name == "duhamel_quadrature":
-        return _stage_scalar(name, duhamel_quadrature_error_bound)
+        return _stage_value(name, _stage_factor(name, duhamel_quadrature_error_bound))
     if name == "qsp_synthesis":
-        return _stage_product(name, gamma, compensated_recovery_error_bound)
+        return _stage_value(name, _stage_product(name, gamma, compensated_recovery_error_bound))
     if name == "lcu_coefficient_preparation":
-        return _stage_product(name, 2.0, gamma, delta_lcu)
-    return _stage_scalar(name, input_preparation_output_error_bound)
+        return _stage_value(name, _stage_product(name, 2.0, gamma, delta_lcu))
+    return _stage_value(name, _stage_factor(name, input_preparation_output_error_bound))
 
 
 def circuit_stage_bounds(raw_record, *, applications, backend, inhomogeneous,
@@ -573,15 +759,32 @@ def circuit_stage_bounds(raw_record, *, applications, backend, inhomogeneous,
     2*gamma*delta_lcu (PREP and inverse PREP each contribute one state error
     delta_lcu) and qsp_synthesis is gamma times the compensated QSP
     recovery bound. The initial-state preparation and Duhamel stages are the
-    supplied bounds. A failed PSD or application assumption suppresses only the
-    application-weighted stages. This does not report a combined certificate
+    supplied bounds. gamma and the supplied bounds may be PhysicalScale
+    values, combined before the one binary64 conversion of each stage (module
+    docstring). A failed PSD or application assumption suppresses only the
+    application-weighted stages. A missing, nonfinite or unusable stage
+    suppresses only its own value. This does not report a combined certificate
     or perform a reference solve.
+
+    A pair's ``incomplete`` certificate status and its
+    ``unbudgeted_error_stages`` say that its split of the tolerance between
+    kernel and k quadrature does not cover those stages, as for the Low-Somma
+    pair (arXiv:2508.19238v2, Theorems 2-3). A route can still give such a stage
+    its own allowance (module docstring). They do not bear on a bound that the
+    planned route supplies for such a stage, so they suppress no value here. An
+    empty tuple does not certify that every stage has an allowance: the default
+    pair's is empty, yet its Duhamel stage receives none (module docstring).
+
+    The relations above are the triangle inequality on the finite sum for any
+    kernel: with a branch error at most e_aj, the coefficient-weighted synthesis
+    bound of application a is s_a = sum_j |c_j|*e_aj, already weighted by the raw
+    coefficients. A zero preparation stage is the ideal direct construction, which
+    claims nothing about native floating-point or execution error.
     """
     manifest = _stage_manifest(backend=backend, inhomogeneous=inhomogeneous, circuit=True)
     unusable = set(unusable_stages)
     if unusable.difference(manifest):
         raise ValueError("unusable circuit stages must belong to the selected path")
-    unbudgeted = _unbudgeted_stages(raw_record)
     application_failure = None
     try:
         if not psd_premise_satisfied:
@@ -594,8 +797,6 @@ def circuit_stage_bounds(raw_record, *, applications, backend, inhomogeneous,
         try:
             if application_failure is not None and name in {"kernel_approximation", "k_quadrature", "trotter_synthesis"}:
                 raise _StageFailure(application_failure)
-            if name in unbudgeted:
-                raise _StageFailure(unbudgeted[name])
             if name in unusable:
                 raise _StageFailure(f"unusable_stage:{name}")
             value = _solution_stage_value(name, raw_record, applications=applications,

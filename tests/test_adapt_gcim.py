@@ -197,6 +197,11 @@ def test_grouped_adapt_acquires_only_the_new_settings_of_each_stage(tmp_path, mo
             with monkeypatch.context() as patch:
                 patch.setattr(qiskit_aer, "_submit_aer_execution", lambda *a, **k: pytest.fail("reanalysis acquired"))
                 assert loaded.analyze(overlap_cutoff=1e-10).group_moments == result.group_moments
+            noise = result.overlap_noise  # one measured and one structural quadrature for each of the 15 pairs
+            assert (noise.measured_quadratures, noise.structural_zero_quadratures) == (15, 15)
+        elif request is laws[1][0]:  # both parts of the same 15 pairs are measured
+            noise = result.overlap_noise
+            assert (noise.measured_quadratures, noise.structural_zero_quadratures) == (30, 0)
         elif request is laws[2][0]:  # termwise Hadamard tests prepare no joint state
             assert result.pair_preparations == ()
             energies = [row.energy for row in result.history]
@@ -218,7 +223,7 @@ def test_grouped_adapt_acquires_only_the_new_settings_of_each_stage(tmp_path, mo
     assert (acquisition.requested, acquisition.matrix_measurement, acquisition.pair_preparation,
             acquisition.quadratures, acquisition.real_proof) == (request, None, None, None, None)
     result = solve(scalar, progress=False)
-    assert (result.eigenvalue, result.selected, result.stop_reason) == (0.75, (), "gradient_norm_floor")
+    assert (result.eigenvalue, result.selected, result.stop_reason) == (0.75, (), "constant_hamiltonian")
     assert not (result.data.trace.events or result.data.observations.chunks or result.data.receipts)
 
     # With PencilSampling the scalar Plan still measures nothing, and both stages have zero shots.
@@ -231,11 +236,20 @@ def test_grouped_adapt_acquires_only_the_new_settings_of_each_stage(tmp_path, mo
     assert (staged.eigenvalue, allocation.pilot_shots, allocation.main_shots, allocation.effective_fraction,
             allocation.pilot) == (.75, 0, 0, "not_applicable", None)
     assert not (staged.data.trace.events or staged.data.observations.chunks)
-    # Bounded Ritz growth on a scalar operator measures overlaps once its basis can hold more than the
-    # reference. Its final basis of b = 2 states has m = 1 real overlap setting, whose estimate v_s is zero
-    # because H0 = 0, so the main stage takes the uniform B - B_p = 48 - 12 = 36 shots, and only the
-    # main chunk forms the result.
-    bounded = solve(_real_adapt(terms=(("II", .75),), shots=4096, max_iterations=2,
+    # A multiple of the identity ends at once under bounded growth too, without measuring an overlap, so its Plan
+    # takes the sampling request whether or not it has shots.
+    for shots in (4096, None):
+        constant = solve(_real_adapt(terms=(("II", .75),), shots=shots, max_iterations=2,
+                                     basis_growth=BoundedRitzGrowth(max_chain_length=1),
+                                     sampling=PencilSampling(total_shots=48, pilot_fraction=.25)), progress=False)
+        assert (constant.eigenvalue, constant.value_basis, constant.stop_reason) == (.75, ((),), "constant_hamiltonian")
+        assert not constant.data.observations.chunks
+    # An explicit cutoff above the only nonidentity coefficient leaves a scalar processed Hamiltonian, for which
+    # bounded growth measures overlaps once its basis can hold more than the reference. Its final basis of
+    # b = 2 states has m = 1 real overlap setting, whose estimate v_s is zero because H0 = 0, so the main
+    # stage takes the uniform B - B_p = 48 - 12 = 36 shots, and only the main chunk forms the result.
+    bounded = solve(_real_adapt(terms=(("II", .75), ("ZZ", 1e-9)), shots=4096, max_iterations=2,
+                                pauli_coefficient_cutoff=1e-8,
                                 basis_growth=BoundedRitzGrowth(max_chain_length=1),
                                 sampling=PencilSampling(total_shots=48, pilot_fraction=.25)), progress=False)
     chunks = bounded.data.observations.chunks
@@ -367,6 +381,19 @@ def test_pencil_sampling_measures_the_final_basis_again_after_an_unchanged_selec
         assert allocation.main_counts == tuple(main_q + (k < main_r) for k in range(m))
     main = {c.content_id for c in chunks[n + m:]}
     assert set(result.contribution_ids) == main == {moment.contribution_id for moment in result.group_moments}
+    # The same data that chose the basis are one population, and an independent main stage is another. The bound
+    # stage of each chunk above is the witness, and the main value follows from those chunks' counts alone.
+    assert plain.overlap_noise.population == "adaptive_reuse"
+    assert "selection bias" in str(plain) and "without the pilot" in str(result)
+    noise = result.overlap_noise
+    assert noise.population == "main_after_pilot"
+    variances = []
+    for chunk in chunks[n + m:]:
+        if chunk.experiment == "pair" and bound(chunk)["group"] == 0:
+            total = sum(item.count for item in chunk.values)
+            mean = Fraction(sum(item.count * (-1) ** (int(item.bits, 2) & 1) for item in chunk.values), total)
+            variances.append((1 - mean**2) / (total - 1))
+    assert noise.frobenius_rms == pytest.approx(float(2 * sum(variances, Fraction(0))) ** .5, rel=1e-14, abs=0)
     assert len(result.group_moments) == m and result.eigenvalue == result.pencil.eigenvalues[0]
     # One main chunk per setting: each real overlap S_ij of the reported
     # pencil is the group-0 overlap mean of its main-stage moment.
@@ -426,6 +453,7 @@ def test_pencil_sampling_measures_the_final_basis_again_after_an_unchanged_selec
         again = source.analyze(overlap_cutoff=1e-6)
         assert again.shot_allocation == allocation and set(again.contribution_ids) == main
         assert again.pencil.overlap_cutoff == 1e-6
+        assert again.overlap_noise == noise
 
 
 def _contract(left, operator, right):
@@ -909,7 +937,7 @@ def test_grouped_vacuum_adapt_records_its_routes_and_reanalyzes_without_acquisit
     W_reference_pair = 2 W_ref + l(1 + B) + l(T_max + 1) + 8q + 7 = 135, so
     ``"vacuum_reference"`` declares max(W_reference_pair, W) = 223, and
     ``"vacuum_restore"`` declares W_restore = 2 W_ref + 3l(1 + B)
-    + 12288 l + 2l(T_max + 1) + 8q + 7 = 24917.
+    + 2l(T_max + 1) + 8q + 7 = 341.
     """
     import nwqlib
     from nwqlib.backends import qiskit_aer
@@ -919,8 +947,7 @@ def test_grouped_vacuum_adapt_records_its_routes_and_reanalyzes_without_acquisit
     slots = 6 * q * t_max
     old = 2 * w_ref + 2 * ell * (1 + slots) + 8 * q + 7
     reference_pair = 2 * w_ref + ell * (1 + slots) + ell * (t_max + 1) + 8 * q + 7
-    restore = 2 * w_ref + 3 * ell * (1 + slots) + 12288 * ell + 2 * ell * (t_max + 1) + 8 * q + 7
-    assert (old, reference_pair, restore) == (223, 135, 24917)
+    restore = 2 * w_ref + 3 * ell * (1 + slots) + 2 * ell * (t_max + 1) + 8 * q + 7
     assert {s.construction_work for s in plan.construction.selections} == {
         max(reference_pair, old) if rule == "vacuum_reference" else restore}
     result = nwqlib.solve(plan, progress=False)
@@ -938,6 +965,276 @@ def test_grouped_vacuum_adapt_records_its_routes_and_reanalyzes_without_acquisit
     monkeypatch.setattr(qiskit_aer, "_submit_aer_execution", lambda *a, **k: pytest.fail("reanalysis acquired"))
     again = loaded.analyze(overlap_cutoff=1e-10)
     assert (again.pair_preparations, again.group_moments) == (result.pair_preparations, result.group_moments)
+
+
+def _copied_instructions(gate):
+    """Return the instructions of the definitions of the distinct multi-controlled RY objects of ``gate``'s definition."""
+    from qiskit.circuit import ControlledGate
+
+    copied = {id(item.operation): item.operation for item in gate.definition.data
+              if type(item.operation) is ControlledGate}
+    return sum(len(operation.definition.data) for operation in copied.values())
+
+
+def test_vacuum_restore_adjoint_reports_its_definition_copies_once_per_saved_preparation():
+    """A 6-control RY adjoint is exact with its phase, and its copies are reported until a preparation saves them.
+
+    The forward gate holds RY(0.375) with six closed controls under global
+    phase 0.3125. The adjoint times the forward operator is the identity.
+    Building the adjoint reports the instructions of the control gate's
+    existing definition, read from the forward gate. The construction that
+    built it reuses it without another report. A later construction whose
+    predecessor's record was never saved builds and reports its own copy.
+    Withdrawing the predecessor leaves that newer entry in place, and once
+    the newer record is saved a third construction reuses it without a
+    report.
+    """
+    from types import SimpleNamespace
+    from qiskit import QuantumCircuit
+    from qiskit.circuit.library import RYGate
+    from qiskit.quantum_info import Operator
+    from nwqlib.blocks.lowering import _ConstructorContext
+
+    forward = QuantumCircuit(7, global_phase=.3125)
+    forward.append(RYGate(.375).control(6, annotated=False), range(7))
+    gate = forward.to_gate()
+    context = SimpleNamespace(adjoints={}, gates={(0, .375, False, False): gate})
+    expected = _copied_instructions(gate)
+    assert expected > 1
+
+    def build(lowering):
+        return adapt_acquisition._realized_adjoint(0, .375, inputs=None, compiler_plans=None, context=context,
+                                                   lowering=lowering)
+
+    failed, retried, later = (_ConstructorContext(None, commits) for commits in ([], [], []))
+    adjoint = build(failed)
+    assert build(failed) is adjoint and failed.copied_work == expected and len(failed._commits) == 1
+    assert np.allclose(Operator(adjoint).data @ Operator(gate).data, np.eye(2**7), rtol=0., atol=1e-12)
+    rebuilt = build(retried)
+    assert rebuilt is not adjoint and retried.copied_work == expected and _copied_instructions(rebuilt) == expected
+    for _, withdraw in failed._commits:
+        withdraw()
+    assert context.adjoints[(0, .375)][0] is rebuilt
+    for commit, _ in retried._commits:
+        commit()
+    assert build(later) is rebuilt and later.copied_work == 0 and not later._commits
+
+
+def _double_restore_plan(shots=None):
+    """Plan vacuum_restore ADAPT on H2 at 0.74 Å with single excitation couplings, pool spin_adapted_sd from |1100>.
+
+    The Hamiltonian is H2 as 15 Pauli words plus 0.05 (XZXI + YZYI) and
+    0.04 (IXZX + IYZY), and the pool holds the spin-adapted singles and
+    doubles of two spatial orbitals. ``shots=None`` reads exactly.
+    """
+    import nwqlib
+    from qiskit.quantum_info import SparsePauliOp
+    from nwqlib import Eigenproblem
+    from nwqlib.algorithms import PencilAcquisition
+    from nwqlib.problems import ingest_occupation
+
+    hamiltonian = SparsePauliOp.from_list([
+        ("IIII", -0.09706627), ("IIIZ", 0.17141283), ("IIZI", 0.17141283), ("IZII", -0.22343154),
+        ("ZIII", -0.22343154), ("IIZZ", 0.16868898), ("IZIZ", 0.12062523), ("ZIIZ", 0.16592785),
+        ("IZZI", 0.16592785), ("ZIZI", 0.12062523), ("ZZII", 0.17441288), ("XXYY", -0.04530262),
+        ("YYXX", -0.04530262), ("XYYX", 0.04530262), ("YXXY", 0.04530262), ("XZXI", .05), ("YZYI", .05),
+        ("IXZX", .04), ("IYZY", .04)])
+    return nwqlib.plan(Eigenproblem(A=hamiltonian), method=ADAPT(
+        initial_state=ingest_occupation("1100", num_qubits=4), pool="spin_adapted_sd", n_spatial_orbitals=2,
+        max_iterations=3, acquisition=PencilAcquisition(pair_preparation="vacuum_restore")),
+        execution="quantum", shots=shots, seed=7)
+
+
+def _prepare_single_chains(run):
+    """Prepare the pair ((), (i, 0.3)) of every pool member i and return ``(S, d, s1, s2, copies)``.
+
+    S is the static work that every such record holds, d the member whose
+    forward gate holds multi-controlled RY gates, s1 and s2 the two others,
+    and ``copies`` the instructions of the definitions of the distinct
+    multi-controlled RY gates of the forward gate of d.
+    """
+    from nwqlib._prepared_execution import prepare_experiment
+
+    context = run._method_context(adapt_acquisition.AdaptContext)
+    static, copies = [], []
+    for index in range(len(run.plan.reconstruction.pool)):
+        point = adapt_acquisition._point(run.plan, "pair", (), ((index, .3),))
+        static.append(prepare_experiment(point, run=run).record.construction_work_reserved)
+        copies.append(_copied_instructions(context.gates[(index, .3, False, False)]))
+    (work,) = set(static)
+    d = next(index for index, count in enumerate(copies) if count)
+    s1, s2 = (index for index, count in enumerate(copies) if not count)
+    return work, d, s1, s2, copies[d]
+
+
+def test_vacuum_restore_receipts_count_adjoint_copies_once_and_not_for_a_failed_preparation(monkeypatch):
+    """Preparation records add the adjoint's definition copies once, and a failed preparation adds nothing.
+
+    On ``_double_restore_plan`` each pair is prepared by restoration. The
+    pair ((), (d)) of a double d needs no adjoint, and its record gives the static work S of
+    every query of the construction. The backend then fails the pair
+    ((d), (d, s1)), whose construction built the adjoint of d, so no record
+    and no work are saved. The pair ((d), (d, s2)) builds the adjoint again
+    and its record holds S plus the copied definitions of the distinct
+    multi-controlled RY gates of the forward gate of d. The repeated pair
+    ((d), (d, s1)) then reuses the adjoint, and its record holds S. The
+    Run's total is the sum of the saved records.
+    """
+    from nwqlib.backends.connection import AerBackend
+    from nwqlib._prepared_execution import Run, prepare_experiment
+
+    plan = _double_restore_plan()
+    real = AerBackend.prepare
+    failures = []
+
+    def failing(self, *args, **kwargs):
+        if not failures:
+            failures.append(True)
+            raise RuntimeError("injected preparation failure")
+        return real(self, *args, **kwargs)
+
+    with Run(plan) as run:
+        context = run._method_context(adapt_acquisition.AdaptContext)
+        work, d, s1, s2, copies = _prepare_single_chains(run)
+        saved = len(run.prepared_artifacts)
+        assert run.trace.construction_work_reserved == saved * work
+        with monkeypatch.context() as patch:
+            patch.setattr(AerBackend, "prepare", failing)
+            with pytest.raises(RuntimeError, match="injected"):
+                prepare_experiment(adapt_acquisition._point(plan, "pair", ((d, .3),), ((d, .3), (s1, .6))), run=run)
+        assert len(run.prepared_artifacts) == saved and run.trace.construction_work_reserved == saved * work
+        assert not run._state["receipt_commits"]
+        retried = prepare_experiment(adapt_acquisition._point(plan, "pair", ((d, .3),), ((d, .3), (s2, .6))),
+                                     run=run).record
+        assert retried.logical.reserved_work == retried.construction_work_reserved == work + copies
+        assert _copied_instructions(context.adjoints[(d, .3)][0]) == copies
+        repeated = prepare_experiment(adapt_acquisition._point(plan, "pair", ((d, .3),), ((d, .3), (s1, .6))),
+                                      run=run).record
+        assert repeated.construction_work_reserved == work
+        assert run.trace.construction_work_reserved == (saved + 2) * work + copies
+
+
+@pytest.mark.parametrize("refusal", ["population", "stored data"])
+def test_preparation_refused_after_the_backend_leaves_its_copies_to_the_identical_retry(refusal, tmp_path):
+    """A preparation refused after the backend returned saves no copies, and its identical retry counts them once.
+
+    On ``_double_restore_plan`` the pair ((d), (d, s1)) builds the adjoint of
+    the double d. After the backend returns, the Run refuses its record,
+    either because the backend reports an unknown population for an
+    unconditional readout, or because a Run with a folder and an explicit
+    ``max_data_bytes`` cannot store the record, which a calibration Run with
+    the same preparations measures. The refusal leaves the Run's total
+    unchanged and no callback waiting. Retrying the same pair, after
+    ``extend_limits`` for the stored data, saves S plus the copied
+    definitions, and the next pair with that adjoint saves S. Closing the
+    Run leaves no callback.
+    """
+    from dataclasses import replace
+    from unittest.mock import patch
+    from nwqlib.backends.connection import AerBackend
+    from nwqlib.execution import ExecutionLimits
+    from nwqlib._prepared_execution import Run, prepare_experiment
+
+    plan = _double_restore_plan()
+
+    def prepare(run, right):
+        return prepare_experiment(adapt_acquisition._point(plan, "pair", ((d, .3),), ((d, .3), right)),
+                                  run=run).record
+
+    limits, folder = ExecutionLimits(), None
+    if refusal == "stored data":
+        with Run(plan, directory=tmp_path / "calibration") as run:
+            work, d, s1, s2, copies = _prepare_single_chains(run)
+            prepare(run, (s1, .6))
+            state = run._state
+            stored = (state["data_bytes"] + state["array_bytes"] + state["payload_bytes"] + state["external_bytes"]
+                      + sum(state["pending_output"].values()))
+        limits, folder = ExecutionLimits(max_data_bytes=stored - 1), tmp_path / "refused"
+    real = AerBackend.prepare
+
+    def unknown(self, *args, **kwargs):
+        return replace(real(self, *args, **kwargs), population="unknown")
+
+    run = Run(plan, limits=limits, directory=folder)
+    with run:
+        work, d, s1, s2, copies = _prepare_single_chains(run)
+        total = run.trace.construction_work_reserved
+        with patch.object(AerBackend, "prepare", unknown if refusal == "population" else real):
+            with pytest.raises(ValueError, match="unknown population" if refusal == "population" else "max_data_bytes"):
+                prepare(run, (s1, .6))
+        assert run.trace.construction_work_reserved == total and not run._state["receipt_commits"]
+        if refusal == "stored data":
+            run.extend_limits(max_data_bytes=10**9)
+        assert prepare(run, (s1, .6)).construction_work_reserved == work + copies
+        assert prepare(run, (s2, .6)).construction_work_reserved == work
+        assert run.trace.construction_work_reserved == total + 2 * work + copies
+    assert not run._state["receipt_commits"]
+
+
+@pytest.mark.parametrize(("failed", "status"), [(0, "failed"), (1, "failed"), (1, "cancelled")])
+def test_pending_remote_preparations_keep_their_specializations_until_a_record_is_saved(failed, status, tmp_path):
+    """Two identical pending remote preparations each count their copies, and the one that completes saves them.
+
+    On ``_double_restore_plan`` with 16 shots, a backend that compiles
+    remotely, imitated in memory from the Aer preparation, holds two
+    identical pairs ((d), (d, s1)) pending. Neither reuses the other's
+    gates, so both receipts hold S plus the copied definitions. One fails
+    or is cancelled, and the other completes, and the Run's total grows by
+    its record alone. The completed specializations then serve a third
+    identical pair, and the saved adjoint serves the pair ((d), (d, s2)),
+    whichever record was saved, so both receipts hold S. The pending ones
+    alone keep waiting entries until the Run closes.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from nwqlib.backends.connection import AerBackend, BackendRefresh
+    from nwqlib.execution import JobLocator
+    from nwqlib._prepared_execution import Run, prepare_experiment
+    from nwqlib._remote_preparation import refresh_preparation
+
+    plan = _double_restore_plan(shots=16)
+    native, prepared, outcomes = AerBackend.prepare, {}, {}
+
+    def prepare_local(self, circuit, **kwargs):
+        prepared[kwargs["snapshot"]] = native(self, circuit, **kwargs)
+        return SimpleNamespace(model_dump=lambda **_: {"snapshot": kwargs["snapshot"]})
+
+    def upload(self, data, *, preparation_id, run, acknowledge):
+        prepared[preparation_id] = prepared[data.model_dump()["snapshot"]]
+        acknowledge(preparation_id)
+        return '{"id": "local"}'
+
+    def start_compile(self, reference, *, preparation_id, run, acknowledge):
+        acknowledge(locator := JobLocator(provider="local", job_id=preparation_id))
+        return locator
+
+    def refresh_compile(self, locator, reference, load_data, *, run):
+        status = outcomes.get(locator.job_id, "compile_pending")
+        return prepared[locator.job_id] if status == "completed" else BackendRefresh(status=status,
+                                                                                   provider_status=status)
+
+    with Run(plan, directory=tmp_path / "run") as run:
+        work, d, s1, s2, copies = _prepare_single_chains(run)
+        point = adapt_acquisition._point(plan, "pair", ((d, .3),), ((d, .3), (s1, .6)))
+        total = run.trace.construction_work_reserved
+        with patch.multiple(AerBackend, create=True, prepare_local=prepare_local, upload=upload,
+                            start_compile=start_compile, refresh_compile=refresh_compile):
+            pending = [prepare_experiment(point, run=run) for _ in range(2)]
+            assert [p.status for p in pending] == ["compile_pending"] * 2
+            assert [p.logical.reserved_work for p in pending] == [work + copies] * 2
+            outcomes[pending[failed].preparation_id] = status
+            assert refresh_preparation(pending[failed].preparation_id, run=run).status == status
+            assert run.trace.construction_work_reserved == total
+            outcomes[pending[1 - failed].preparation_id] = "completed"
+            record = refresh_preparation(pending[1 - failed].preparation_id, run=run).record
+            assert record.construction_work_reserved == work + copies
+            assert run.trace.construction_work_reserved == total + work + copies
+            third = prepare_experiment(point, run=run)
+            other = prepare_experiment(adapt_acquisition._point(plan, "pair", ((d, .3),), ((d, .3), (s2, .6))),
+                                       run=run)
+            assert third.logical.reserved_work == other.logical.reserved_work == work
+        assert set(run._state["receipt_commits"]) == {third.preparation_id, other.preparation_id}
+    assert not run._state["receipt_commits"]
 
 
 def _four_shot_growth():
@@ -1035,9 +1332,8 @@ def test_grouped_stage_is_refused_before_its_first_acquisition():
     ``nwqlib.algorithms.gcim.fixed_basis.grouped_pass_requirements`` and of
     the docs/ENGINEERING_CONSTANTS.md row "Sampled FixedGCIM analysis
     admission", evaluated term by term here: n = 2, c = 3,
-    w = 1, L = 4, b = 6, C = M = 108 chunks and settings (each group in
-    b**2 = 36 of them) on P = 21 pairs, and o = 1 for ADAPT's oriented
-    view. Each of the 48 cached tables has the bins of its saved chunk and
+    w = 1, L = 4, b = 6, C = 108 chunks (each group in b**2 = 36 of them)
+    and o = 1 for ADAPT's oriented view. Each of the 48 cached tables has the bins of its saved chunk and
     the size of the group in its bindings, and each of the 60 others has 8.
     """
     from nwqlib._prepared_execution import Run
@@ -1056,11 +1352,41 @@ def test_grouped_stage_is_refused_before_its_first_acquisition():
     w = -(-c // 64)
     tables = [(size[g], len(chunk.values)) for g, chunk in zip(groups, cached, strict=True)]
     tables += [(size[g], min(plan.shots, 2**c)) for g in range(len(size)) for _ in range(b * b - groups.count(g))]
-    count, pairs, terms = len(tables), b * (b + 1) // 2, sum(s for s, _ in tables)
+    terms = sum(s for s, _ in tables)
     work = (sum(m * (c + 44 + (4 * w + 4) * s) + s * ((c - 1) * w + 1) for s, m in tables)
-            + len(rec.nonidentity_terms) * (n + 1) + 32 * b**2 + 16 * b**3
-            + (terms + 2 * count) + 23 * max(count, b * b * len(size)) + 22 * pairs)
+            + len(rec.nonidentity_terms) * (n + 1) + 32 * b**2 + 16 * b**3 + terms)
     assert str(refused.value) == f"action needs {work} scalar products, exceeding max_products=30000"
+
+
+def test_grouped_pass_is_admitted_once_before_acquisition_and_once_from_saved_counts(monkeypatch):
+    """Each grouped pass is checked once: before its first query when it acquires, from stored bins otherwise.
+
+    The sampled run of H = ZI + IZ + 0.5 XX on two qubits checks every pass
+    that acquires before its first missing query and not again after the
+    acquisition. Analyzing the saved Result at another overlap cutoff
+    acquires nothing and checks its pass once with the stored bins.
+    """
+    from nwqlib import solve
+
+    passes, checks = [], []
+    moments, law = adapt_acquisition._grouped_moments, adapt_acquisition.grouped_pass_requirements
+
+    def counted_pass(plan, basis, context, acquire=None, **kwargs):
+        passes.append(acquire is not None)
+        return moments(plan, basis, context, acquire, **kwargs)
+
+    def counted_law(*args, **kwargs):
+        checks.append(len(passes))
+        return law(*args, **kwargs)
+
+    monkeypatch.setattr(adapt_acquisition, "_grouped_moments", counted_pass)
+    monkeypatch.setattr(adapt_acquisition, "grouped_pass_requirements", counted_law)
+    result = solve(_real_adapt(), progress=False)
+    acquiring = passes.count(True)
+    assert acquiring >= 2 and checks == sorted(set(checks)) and len(checks) == len(passes)
+    del passes[:], checks[:]
+    result.analyze(overlap_cutoff=1e-6)
+    assert passes and not any(passes) and len(checks) == len(passes)
 
 
 def test_native_depth_limit_stops_adapt_on_its_last_solved_pencil(tmp_path, monkeypatch, ibm_runtime_spy):
@@ -1200,6 +1526,28 @@ def test_native_depth_limit_stops_adapt_on_its_last_solved_pencil(tmp_path, monk
         assert (run.result.stop_reason, run.result.eigenvalue) == ("native_depth_refused", result.eigenvalue)
         assert stopped[2] in label and (len(run.prepared_artifacts), len(run.trace.events)) == stopped[:2]
         assert len(spy.api.requests) == sent
+
+
+def test_bounded_growth_stops_at_its_basis_size_and_default_growth_has_no_basis_cap():
+    """The basis-size stop belongs to BoundedRitzGrowth, and the default growth plans any number of selections."""
+    import nwqlib
+    from nwqlib import Eigenproblem
+    from nwqlib.algorithms import BoundedRitzGrowth
+    from nwqlib.problems import ingest_occupation
+
+    terms = (("ZZ", .5), ("ZI", 1.0), ("IZ", .7), ("XX", .3), ("XI", .2))
+    pool = tuple(ingest_pauli(((p, 1j),), num_qubits=2) for p in ("YI", "IY", "XY"))
+    method = ADAPT(initial_state=ingest_occupation((0, 0), num_qubits=2), theta=pi / 8, max_iterations=3, pool=pool,
+                   basis_growth=BoundedRitzGrowth(max_chain_length=3, max_basis_size=2))
+    result = nwqlib.solve(Eigenproblem(A=ingest_pauli(terms, num_qubits=2)), method=method, execution="classical",
+                          seed=7, progress=False)
+    assert result.stop_reason == "max_basis_size" and len(result.basis) == 2
+    # 34 one-qubit members and 33 selections reach a listed basis of 66 states.
+    wide = tuple(ingest_pauli((("Y", 1j * (1 + k / 34)),), num_qubits=1) for k in range(34))
+    selected = nwqlib.plan(Eigenproblem(A=ingest_pauli((("Z", 1.0),), num_qubits=1)),
+                           method=ADAPT(initial_state=[1, 1], pool=wide, max_iterations=33), execution="classical",
+                           seed=7)
+    assert selected.reconstruction.max_selections == 33
 
 
 def _bounded_plan(**growth):
@@ -1814,3 +2162,67 @@ def test_eta_gradients_match_the_derivative_of_a_complex_perturbed_projection():
               + sum(u[0] * float(sp.re(x)) + u[1] * float(sp.im(x)) for u, x in zip(column, f)))
     assert abs(exact.imag) < 1e-25
     assert linear == pytest.approx(exact.real, rel=0, abs=2**-45)
+
+
+def test_depth_screening_builds_no_gate_and_keeps_no_plan_of_an_excluded_generator(monkeypatch):
+    """A generator that the depth limit always excludes is counted from its compiler plan alone.
+
+    Exact bounded growth on ``_bounded_plan`` with ``basis_depth_limit=0``:
+    exp(theta iXY) needs two CX, so every extension that contains it is
+    excluded with bound 2, and the one-qubit rotations are admitted. Its
+    CX count is read once from a compiler plan that the Run does not keep,
+    no gate of it is built, and the Run's compiler plans hold only the
+    admitted generators.
+    """
+    from nwqlib.execution import Run
+    from nwqlib.subroutines import fermionic_circuits
+
+    built, real = [], fermionic_circuits.build_generator_circuit
+
+    def recorded(generator, *args, **kwargs):
+        built.append(generator.pool_index)
+        return real(generator, *args, **kwargs)
+
+    monkeypatch.setattr(fermionic_circuits, "build_generator_circuit", recorded)
+    plan, _ = _bounded_plan(max_chain_length=2, basis_depth_limit=0)
+    with Run(plan) as run:
+        result = run.wait(timeout=30, poll_interval=0)
+    rows = [row for record in result.history for row in record.candidates if any(i == 2 for i, _ in row.chain)]
+    assert rows and {(row.reason, row.depth_bound) for row in rows} == {("above_depth_limit", 2)}
+    assert 2 not in built
+    assert {index for index, _ in plan._native["compiler_plans"].built()} == set(built) == {0, 1}
+
+
+def test_scored_candidates_keep_their_compiler_plans_through_a_reopened_run(tmp_path):
+    """A candidate whose rows were constructed and measured keeps its compiler plan, also when it is ranked.
+
+    Exact bounded growth with at most two basis states on H = 0.5 XX +
+    0.375 ZI + 0.625 IX + 0.25 XZ from |00>, pool iYI, iIY, iXY, theta =
+    0.31 and a depth limit of 2 that admits all three single extensions.
+    The one round scores (iYI) and (iIY) as ranked and (iXY) as accepted,
+    so each of the three generators had circuits constructed for its rows.
+    The Run saved on disk and reopened holds the compiler plans of all
+    three, the construction its recorded preparations used.
+    """
+    import nwqlib
+    from nwqlib.algorithms import BoundedRitzGrowth
+    from nwqlib.execution import Run
+    from nwqlib.problems import ingest_occupation
+
+    terms = (("XX", .5), ("ZI", .375), ("IX", .625), ("XZ", .25))
+    method = ADAPT(initial_state=ingest_occupation("00", num_qubits=2), theta=.31, max_iterations=2,
+                   pool=tuple(ingest_pauli(((p, 1j),), num_qubits=2) for p in ("YI", "IY", "XY")),
+                   basis_growth=BoundedRitzGrowth(max_chain_length=2, max_basis_size=2, candidates_per_round=3,
+                                                  basis_depth_limit=2))
+    plan = nwqlib.plan(nwqlib.Eigenproblem(A=ingest_pauli(terms, num_qubits=2)), method=method,
+                       execution="quantum", seed=9)
+    path = tmp_path / "run"
+    with Run(plan, directory=path) as run:
+        result = run.wait(timeout=30, poll_interval=0)
+    outcomes = [(tuple(index for index, _ in row.chain), row.reason) for record in result.history
+                for row in record.candidates]
+    assert outcomes == [((0,), "ranked"), ((1,), "ranked"), ((2,), "accepted")]
+    with nwqlib.load_run(path) as reopened:
+        plans = reopened._method_context(adapt_acquisition.AdaptContext).compiler_plans
+        saved = {row[0] for row in (plans.built() if hasattr(plans, "built") else plans)}
+    assert saved == {0, 1, 2}

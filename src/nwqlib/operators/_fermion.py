@@ -10,15 +10,23 @@ import sys
 
 import numpy as np
 
-from .access import DEFAULT_INPUT_BYTES, _check_bytes
+from nwqlib._limits import ResourceLimitError, byte_allowance, exceeds, memory_limit
+from nwqlib._validation import integer
+
+from .access import _check_bytes
 from ._pauli import PauliTerms, combine_terms
 
 
-def _count_product(a, b, limit):
-    """Return ``a * b``, raising before the multiplication when the product would exceed ``limit``."""
-    limit = min(limit, sys.maxsize)
-    if b and a > limit // b:
-        raise ValueError("operator expansion exceeds its finite size limit")
+def _count_product(a, b, max_bytes):
+    """Return ``a * b``, raising before the multiplication when the product would exceed ``max_bytes``.
+
+    ``max_bytes=None`` allows the physical memory, and sets no limit where
+    the platform does not report it.
+    """
+    limit = memory_limit(max_bytes)
+    if b and limit is not None and a > limit // b:
+        raise ResourceLimitError(f"operator expansion exceeds its finite size limit: {a} * {b} entries, above "
+                                 f"{byte_allowance(max_bytes)}")
     return a * b
 
 
@@ -84,7 +92,7 @@ class FermionTerms:
     def __len__(self):
         return len(self.coefficients)
 
-    def product(self, other, *, max_bytes=DEFAULT_INPUT_BYTES):
+    def product(self, other, *, max_bytes=None):
         """Return the ordered product table, every string of this table times every string of `other`.
 
         String `(i, j)` is string i of this table followed by string j of
@@ -94,8 +102,8 @@ class FermionTerms:
 
         Args:
             other (FermionTerms): Table with the same `num_modes`.
-            max_bytes (int): Byte limit, checked before the product is
-                formed. Default 10 GB (decimal, `10_000_000_000`).
+            max_bytes (int | None): Byte limit, checked before the product is
+                formed. Default `None`, the physical memory of this computer.
 
         Returns:
             table (FermionTerms): The product table.
@@ -132,7 +140,7 @@ class FermionTerms:
             raise ValueError("Fermion product coefficients must be finite")
         return self._snapshot(self.num_modes, offsets, modes, actions, coefficients)
 
-    def to_pauli(self, *, mapping, max_bytes=DEFAULT_INPUT_BYTES):
+    def to_pauli(self, *, mapping, max_bytes=None):
         """Map the strings to qubits and return the Pauli operator as an OperatorInput.
 
         Mode j goes to qubit j, with `|1>` meaning occupied. With
@@ -148,8 +156,8 @@ class FermionTerms:
 
         Args:
             mapping (str): `"jw"` or `"z_free"`.
-            max_bytes (int): Byte limit. Default 10 GB (decimal,
-                `10_000_000_000`).
+            max_bytes (int | None): Byte limit. Default `None`, the physical
+                memory of this computer.
 
         Returns:
             operator (OperatorInput): The Pauli operator on `num_modes`
@@ -193,7 +201,7 @@ class FermionTerms:
         return ingest_pauli_masks(xs, zs, coefficients, num_qubits=self.num_modes, max_bytes=max_bytes)
 
 
-def fermion_table(terms, *, num_modes, max_bytes=DEFAULT_INPUT_BYTES):
+def fermion_table(terms, *, num_modes, max_bytes=None):
     """Return the raw table of ordered fermionic strings, keeping duplicates, order and zeros.
 
     Each row is `(coefficient, ops)`, where `ops` lists `(mode, action)`
@@ -210,8 +218,8 @@ def fermion_table(terms, *, num_modes, max_bytes=DEFAULT_INPUT_BYTES):
         terms (Iterable[tuple[complex, Iterable[tuple[int, int]]]]): Rows of
             a finite coefficient and its ordered `(mode, action)` pairs.
         num_modes (int): Number of modes q, a nonnegative int64 value.
-        max_bytes (int): Byte limit. Default 10 GB (decimal,
-            `10_000_000_000`).
+        max_bytes (int | None): Byte limit. Default `None`, the physical
+            memory of this computer.
 
     Returns:
         table (FermionTerms): The raw table.
@@ -226,7 +234,11 @@ def fermion_table(terms, *, num_modes, max_bytes=DEFAULT_INPUT_BYTES):
     # reserves six layouts plus ceil((q+1)/8) dimension bytes for
     # conversion, snapshots and coalescing. Unsized rows and strings use one
     # lookahead and reject before storing or traversing an over-limit item.
-    if type(num_modes) is not int or not 0 <= num_modes <= np.iinfo(np.int64).max:
+    try:
+        num_modes = integer(num_modes, "num_modes", 0)
+    except ValueError:
+        raise ValueError("num_modes must be a nonnegative representable int64 width") from None
+    if num_modes > np.iinfo(np.int64).max:
         raise ValueError("num_modes must be a nonnegative representable int64 width")
     _check(max_bytes, _fermion_law(0, 0, num_modes))
     if isinstance(terms, Sized):
@@ -244,9 +256,17 @@ def fermion_table(terms, *, num_modes, max_bytes=DEFAULT_INPUT_BYTES):
             _check(max_bytes, _fermion_law(m, len(modes) + len(ops), num_modes))
         for mode, action in ops:
             _check(max_bytes, _fermion_law(m, len(modes) + 1, num_modes))
-            if type(mode) is not int or not 0 <= mode < num_modes:
+            try:
+                mode = integer(mode, "mode", 0)
+            except ValueError:
+                raise ValueError("Fermion mode must lie within num_modes") from None
+            if mode >= num_modes:
                 raise ValueError("Fermion mode must lie within num_modes")
-            if type(action) is not int or action not in (0, 1):
+            try:
+                action = integer(action, "action", 0)
+            except ValueError:
+                raise ValueError("Fermion action must be 0 or 1") from None
+            if action > 1:
                 raise ValueError("Fermion action must be 0 or 1")
             modes.append(mode)
             actions.append(action)
@@ -257,7 +277,7 @@ def fermion_table(terms, *, num_modes, max_bytes=DEFAULT_INPUT_BYTES):
                                  np.array(coefficients, dtype=np.complex128))
 
 
-def _coalesced_fermion(table, *, max_bytes=DEFAULT_INPUT_BYTES):
+def _coalesced_fermion(table, *, max_bytes=None):
     """Return the OperatorInput of a fermionic table after summing identical complete strings.
 
     Only strings with the same ordered ``(mode, action)`` sequence combine,
@@ -280,7 +300,7 @@ def _coalesced_fermion(table, *, max_bytes=DEFAULT_INPUT_BYTES):
     return OperatorInput._from_admitted(manifest, "general", data)
 
 
-def ingest_fermion(terms, *, num_modes, max_bytes=DEFAULT_INPUT_BYTES):
+def ingest_fermion(terms, *, num_modes, max_bytes=None):
     """Return an OperatorInput for a fermionic operator given as ordered ladder strings.
 
     Rows are read as in [`fermion_table`][nwqlib.operators._fermion.fermion_table].
@@ -294,8 +314,8 @@ def ingest_fermion(terms, *, num_modes, max_bytes=DEFAULT_INPUT_BYTES):
         terms (Iterable[tuple[complex, Iterable[tuple[int, int]]]]): Rows of
             a finite coefficient and its ordered `(mode, action)` pairs.
         num_modes (int): Number of modes q.
-        max_bytes (int): Byte limit. Default 10 GB (decimal,
-            `10_000_000_000`).
+        max_bytes (int | None): Byte limit. Default `None`, the physical
+            memory of this computer.
 
     Returns:
         operator (OperatorInput): The summed fermionic operator.
@@ -307,13 +327,14 @@ def ingest_fermion(terms, *, num_modes, max_bytes=DEFAULT_INPUT_BYTES):
     return _coalesced_fermion(fermion_table(terms, num_modes=num_modes, max_bytes=max_bytes), max_bytes=max_bytes)
 
 
-def mapping_requirements(lengths, *, num_modes, max_bytes=DEFAULT_INPUT_BYTES, labels=False):
+def mapping_requirements(lengths, *, num_modes, max_bytes=None, labels=False):
     """Return the cumulative ``(items, bytes, work)`` law of mapping strings with ``lengths`` ladder operators to Pauli rows, checked against ``max_bytes`` after each string.
 
     The counts cover the raw table and the final conversion.
 
-    Before any shift or array allocation, the count arithmetic is capped by
-    the largest intp value and by the data bytes. The counts and scalar
+    Before any shift or array allocation, the counts are checked against the
+    byte limit, when one applies, and each cumulative law against the
+    largest intp value. The counts and scalar
     visits are cost formulas, not measurements. Each single-operator image
     reserves 4L bytes (two rows plus their immutable copies), and each
     product reserves 2*N*L+32W. The final arrays, scaling and summation of
@@ -330,25 +351,34 @@ def mapping_requirements(lengths, *, num_modes, max_bytes=DEFAULT_INPUT_BYTES, l
     left-to-right products of one string have ``4, 8, ..., 2**p`` rows, so a
     string with ``p >= 2`` forms ``N = 2**(p+1) - 4`` intermediate rows.
     """
-    if type(num_modes) is not int or not 1 <= num_modes <= sys.maxsize:
+    try:
+        num_modes = integer(num_modes, "num_modes", 1)
+    except ValueError:
+        raise ValueError("mapping requires a positive representable width") from None
+    if num_modes > sys.maxsize:
         raise ValueError("mapping requires a positive representable width")
     _check_bytes((num_modes + 8) // 8, max_bytes, "mapping width metadata")
-    cap = min(sys.maxsize, max_bytes)
+
+    # max_bytes=None allows the physical memory, or no byte cap when the platform does not report it.
+    limit = memory_limit(max_bytes)
     from .inputs import _pauli_identity_bytes
     w, m, p_total, rows, payload, work = (num_modes + 63) // 64, 0, 0, 0, 0, 0
     layout = 16 * w + 16
     final = 6 * layout + _pauli_identity_bytes(num_modes)
     for p in lengths:
-        if type(p) is not int or p < 0:
-            raise ValueError("operator lengths must be nonnegative integers")
+        try:
+            p = integer(p, "operator length", 0)
+        except ValueError:
+            raise ValueError("operator lengths must be nonnegative integers") from None
         m += 1
         p_total += p
-        if m + p_total > cap or p >= cap.bit_length():
-            raise ValueError("mapping exceeds max_bytes")
+        if exceeds(m + p_total, limit) or (limit is not None and p >= limit.bit_length()):
+            raise ResourceLimitError(f"mapping exceeds {byte_allowance(max_bytes)}: {m} terms hold {p_total} operators, "
+                                     f"and the last of them maps to 2**{p} Pauli rows")
         count = 1 << p
         rows += count
-        if rows > cap:
-            raise ValueError("mapping exceeds max_bytes")
+        if exceeds(rows, limit):
+            raise ResourceLimitError(f"mapping exceeds {byte_allowance(max_bytes)}: {m} terms map to {rows} Pauli rows")
         payload += 4 * p * layout
         work += 2 * p * (w + 1)
         if p == 0:

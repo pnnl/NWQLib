@@ -20,10 +20,38 @@ from nwqlib._prepared_execution import (
 )
 
 
+def template_row_outcome(values, width, register):
+    """The outcome that the synthetic service returns in every shot of one binding row.
+
+    It is a function of the row's parameter values only, so an experiment's
+    saved counts show which row of values produced them.
+    """
+    from hashlib import sha256
+
+    digest = sha256(np.asarray(values, dtype=np.float64).tobytes() + bytes([register])).digest()
+    return int.from_bytes(digest[:8], "little") % (1 << width)
+
+
+def template_rows_data(pub):
+    """Array-shaped register data of a parameterized PUB: each row repeats ``template_row_outcome``."""
+    from qiskit.primitives.containers import BitArray
+
+    rows = pub.parameter_values.as_array()
+    data = {}
+    for register_index, register in enumerate(pub.circuit.cregs):
+        bits = np.zeros((rows.shape[0], pub.shots, register.size), dtype=bool)
+        for row, values in enumerate(rows):
+            outcome = template_row_outcome(values, register.size, register_index)
+            bits[row, :, :] = [bool(outcome >> (register.size - 1 - bit) & 1) for bit in range(register.size)]
+        data[register.name] = BitArray.from_bool_array(bits, order="big")
+    return data
+
+
 @pytest.fixture
 def runtime_api(monkeypatch):
     """Use real SDK containers with a synthetic service and reversed PUB order to test
-    acquisition association offline.
+    acquisition association offline. A parameterized PUB returns one array row per
+    binding row (``template_rows_data``).
     """
     from qiskit.primitives.containers import BitArray, DataBin, PrimitiveResult, PubResult, SamplerPubResult
     from qiskit_ibm_runtime import IBMBackend, IBMQuantumComputeService, RuntimeEncoder
@@ -100,12 +128,13 @@ def runtime_api(monkeypatch):
                         )
                     )
                     continue
-                bits = ["0", "0", "0", "1"] if index == 0 else ["0", "1", "1", "1"]
+                if pub.parameter_values.shape:
+                    data = DataBin(**template_rows_data(pub), shape=pub.parameter_values.shape)
+                else:
+                    bits = ["0", "0", "0", "1"] if index == 0 else ["0", "1", "1", "1"]
+                    data = DataBin(readout=BitArray.from_samples(bits))
                 result.append(
-                    SamplerPubResult(
-                        DataBin(readout=BitArray.from_samples(bits)),
-                        metadata={"circuit_metadata": pub.circuit.metadata, "shots": 4},
-                    )
+                    SamplerPubResult(data, metadata={"circuit_metadata": pub.circuit.metadata, "shots": 4})
                 )
             output = PrimitiveResult(result[::-1], metadata=self.result_metadata)
             if self.transform_result is not None:
@@ -127,7 +156,7 @@ def runtime_api(monkeypatch):
     service._create_backend_obj = lambda name, **kwargs: backend
     monkeypatch.setattr(IBMRuntimeBackend, "_new_service", lambda self: service)
     connection = IBMRuntimeBackend(
-        device=backend.name, instance=instance, max_input_bytes=65536, initial_layout=(2,)
+        device=backend.name, instance=instance, initial_layout=(2,)
     )
     return SimpleNamespace(
         connection=connection, api=api, service=service, backend=backend, requests=requests
@@ -553,14 +582,14 @@ def test_sampler_joint_registers_preserve_shot_alignment_and_logical_bit_order(r
 @pytest.mark.parametrize(
     ("widths", "shots", "charge"),
     [
-        pytest.param((4, 5), 4096, 147456, id="pair-packing-two-registers"),
-        pytest.param((65,), 16, 2576, id="wide-join-padded-repack"),
+        pytest.param((4, 5), 4096, 241664, id="pair-packing-two-registers"),
+        pytest.param((65,), 16, 2848, id="wide-join-padded-repack"),
     ],
 )
 def test_sampler_decode_admits_the_join_and_pair_array_bound(
     runtime_api, tmp_path, monkeypatch, widths, shots, charge
 ):
-    """Admit the live-array law derived in sampler_decode_bytes before joining."""
+    """Check the byte estimate S*(9*Q + w + 32) of sampler_decode_bytes once, before joining."""
     from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister
     from qiskit.primitives.containers import BitArray, DataBin, PrimitiveResult, SamplerPubResult
 
@@ -984,3 +1013,914 @@ def test_isa_preparation_uses_exact_dense_synthesis_below_level_two(runtime_api,
     assert error <= 1e-13
     assert prepared.transformation.startswith("exact dense-unitary synthesis")
     assert prepared.probability_window_exclusions is None
+
+
+def fractional_device(runtime_api):
+    """Make the synthetic service open the SDK's fake fractional backend (rx and rzz in its target).
+
+    Returns the device and the list of keyword arguments with which it was opened.
+    """
+    from qiskit_ibm_runtime import IBMBackend
+    from qiskit_ibm_runtime.fake_provider import FakeFractionalBackend
+
+    fake = FakeFractionalBackend()
+    configuration = fake.configuration()
+    configuration.backend_name = "ibm_supplied"
+    device = IBMBackend(configuration, service=runtime_api.service, api_client=runtime_api.api,
+                        instance=runtime_api.connection.instance)
+    device._target, device._properties = (fake.target, fake.properties())
+    opened = []
+    runtime_api.service.backend = lambda name, **kwargs: (opened.append(kwargs), device)[1]
+    runtime_api.service._create_backend_obj = lambda name, **kwargs: device
+    return device, opened
+
+
+def sampled_lchs_plan(time=.7, **options):
+    """Eight sampled-pair LCHS rows of two shots on one system qubit, with a source, so rows mix
+    initial and source inputs and carry branch phases."""
+    from nwqlib import LinearDynamics
+    from nwqlib.algorithms.lchs import LCHS
+    from nwqlib.operators import ingest_pauli
+    from nwqlib.problems.records import QuadraticForm
+
+    linear = LinearDynamics(A=ingest_pauli([("I", .3+.1j), ("X", .25), ("Z", .2j), ("Y", -.15j)], num_qubits=1),
+                            initial_state=[.6, .8j], source=[.3, -.4j], time=time)
+    return nwqlib.plan(linear, method=LCHS(observable_estimator="sampled_pairs", pair_repeats=2,
+                                           hamiltonian_evolution_backend="trotter", trotter_steps=2, **options),
+                       output=QuadraticForm(observable=ingest_pauli([("X", .7), ("Z", -.45)], num_qubits=1)),
+                       shots=16, seed=11)
+
+
+def row_key(realization):
+    """The static point key ``pairs[row=i]`` of a sampled-pair row's Realization."""
+    return "pairs[row=%d]" % next(int(item.value) for item in realization.bindings if item.parameter == "row")
+
+
+def logical_row_operator(plan, realization, width):
+    """The unitary of the point ``realization``'s own lowered logical circuit, identity on ``width`` minus its qubits."""
+    from qiskit.quantum_info import Operator
+    from nwqlib.blocks.lowering import lower_qiskit
+
+    _, construction = realization._selected_construction(plan)
+    selected = {record.content_id for record in construction.selections}
+    circuit = lower_qiskit(construction, blocks=tuple(block for block in plan.blocks
+                                                      if block.record.content_id in selected)).circuit
+    circuit.remove_final_measurements()
+    return np.kron(np.eye(2 ** (width - circuit.num_qubits)), Operator(circuit).data)
+
+
+@pytest.mark.parametrize("options", [
+    dict(hamiltonian_evolution_backend="trotter", trotter_steps=2, pair_product_formula="richardson"),
+    dict(hamiltonian_evolution_backend="trotter", trotter_steps=2, pair_product_formula="mpf"),
+    dict(hamiltonian_evolution_backend="trotter_error_budgeted", trotter_order=1, pair_product_formula="ptsc",
+         pair_pf_allowance=1e-2, pair_mu_cap=1.5, pair_taylor_cutoff=8)], ids=["richardson", "mpf", "ptsc"])
+def test_product_formula_recipe_row_templates_bind_to_each_row_circuit(options, monkeypatch):
+    """Each recipe row's template, bound to that row's values, is the row's own pair circuit.
+
+    The oracle is the row builder `construct_pair`, compared as a unitary without global-phase alignment.
+    Recipe rows apply several weighted product-formula words, so their gate sequences differ from plain rows.
+    Every experiment belongs to exactly one template, and where a template holds rows with different values,
+    binding another row's values gives a different unitary, so a template that ignored its parameters fails.
+    Grouping the rows walks no SELECT occurrence; only building each template does.
+    """
+    from qiskit.quantum_info import Operator
+    from nwqlib import LinearDynamics
+    from nwqlib.algorithms.lchs import LCHS, sampled_native
+    from nwqlib.algorithms.lchs.sampled_plan import construct_pair, point_row
+    from nwqlib.operators import ingest_pauli
+    from nwqlib.problems.records import QuadraticForm
+
+    linear = LinearDynamics(A=ingest_pauli([("I", .3+.1j), ("X", .25), ("Z", .2j), ("Y", -.15j)], num_qubits=1),
+                            initial_state=[.6, .8j], source=[.3, -.4j], time=.7)
+    chosen = nwqlib.plan(linear, method=LCHS(observable_estimator="sampled_pairs", pair_repeats=2, **options),
+                         output=QuadraticForm(observable=ingest_pauli([("X", .7), ("Z", -.45)], num_qubits=1)),
+                         shots=16, seed=11)
+    block = next(item for item in chosen.blocks if item.record.signature.name == "lchs_pair")
+    points = tuple(chosen._static_points())
+    rows_of = {point.key: point_row(point) for point in points}
+    walks, building = {"grouping": 0, "template": 0}, [False]
+    walk_select, build_template = sampled_native._walk_select, sampled_native.build_pair_template
+
+    def counted_walk(*args, **kwargs):
+        walks["template" if building[0] else "grouping"] += 1
+        return walk_select(*args, **kwargs)
+
+    def counted_build(*args, **kwargs):
+        building[0] = True
+        try:
+            return build_template(*args, **kwargs)
+        finally:
+            building[0] = False
+
+    checks, check_table = [], sampled_native._real_pauli_table
+
+    def counted_check(*args, **kwargs):
+        checks.append(args[1])
+        return check_table(*args, **kwargs)
+
+    monkeypatch.setattr(sampled_native, "_walk_select", counted_walk)
+    monkeypatch.setattr(sampled_native, "build_pair_template", counted_build)
+    monkeypatch.setattr(sampled_native, "_real_pauli_table", counted_check)
+    templates = chosen.method.row_templates(chosen, points)
+    # Grouping walks no repeated SELECT, and each template walks it when its circuit is read.
+    assert walks == {"grouping": 0, "template": 0}
+    assert all(template.circuit.data for template in templates)
+    monkeypatch.undo()
+    assert walks["grouping"] == 0 and walks["template"] >= len(templates)
+    # The Plan's L_c and H_c tables are checked once for all rows, when the first row needs them.
+    assert len(checks) <= 2 < len(points)
+    assert sorted(key for template in templates for key, _ in template.rows) == sorted(rows_of)
+    for template in templates:
+        for key, values in template.rows:
+            bound = template.circuit.assign_parameters(dict(zip(template.parameters, values)))
+            expected = Operator(construct_pair(block, (("row", rows_of[key]),), None)).data
+            assert np.max(np.abs(Operator(bound).data - expected)) <= 1e-12
+            other = next((v for _, v in template.rows if v != values), None)
+            if other is not None:
+                wrong = template.circuit.assign_parameters(dict(zip(template.parameters, other)))
+                assert np.max(np.abs(Operator(wrong).data - expected)) > 1e-6
+
+
+@pytest.mark.parametrize("fractional", [False, True], ids=["standard", "fractional"])
+def test_sampled_lchs_rows_share_compiled_templates_in_one_job_and_resume_by_row(tmp_path, monkeypatch, runtime_api,
+                                                                                  fractional):
+    """Rows of one gate sequence share one compiled template, bound per row in one job.
+
+    `prepare` compiles the first row's template, and closing the Run, which `prepared` still
+    references, releases that compiled circuit. The reopened Run uses its saved circuits
+    without compiling it again and compiles each other template once. On the fractional target
+    the structured SELECT's CRZ compiles to RZZ gates with parameterized angles, which each row
+    folds into IBM's [0, pi/2]: the rows of one correction class share one circuit built from
+    their compiled template, whose QPY is saved once, so one template can give several circuits
+    and PUBs. The problem time 2.0 makes the first row's correction differ from another row's of
+    its template, so the reopened Run builds that class from the saved compiled template. Each
+    saved circuit is read at most once. Every row keeps its preparation record, attempt and two
+    shots. Each bound ISA circuit equals the experiment's own lowered row circuit without
+    global-phase alignment. The service returns the PUBs in reverse order, and each binding row's
+    outcome is a function of that row's values (`template_row_outcome`), so each experiment's
+    counts must carry the outcome of its own saved values. PUB 0 is invalid on the first read:
+    the other rows are saved, and the reopened Run decodes only PUB 0's rows, without planning,
+    drawing rows, compiling, folding, launching or reading a saved circuit, and its Result is
+    analyzed again unchanged.
+    """
+    import gc
+    import weakref
+    from collections import Counter
+    from qiskit import qpy
+    from qiskit.primitives.containers import BitArray, DataBin, PrimitiveResult, SamplerPubResult
+    from qiskit.quantum_info import Operator
+    from nwqlib._run_journal import LocalJournal
+    from nwqlib.algorithms.lchs import sampled_rows
+
+    selected = sampled_lchs_plan(time=2.0 if fractional else .7, lcu_select_implementation="structured",
+                                 pair_control_copies=2)
+    points = tuple(selected._static_points())
+    names = tuple(point.key for point in points)
+    templates = selected.method.row_templates(selected, points)
+    assert 1 < len(templates) < len(names)
+    connection, api = runtime_api.connection.revise(initial_layout=None, use_fractional_gates=fractional), runtime_api.api
+    if fractional:
+        fractional_device(runtime_api)
+    compiled, compiled_circuits, loads, reads = [], [], [], []
+    prepare_isa, load, read = IBMRuntimeBackend.prepare, qpy.load, LocalJournal.read_payload
+
+    def compile_isa(self, circuit, **options):
+        compiled.append(circuit.num_parameters)
+        preparation = prepare_isa(self, circuit, **options)
+        compiled_circuits.append(weakref.ref(preparation.native.circuit))
+        return preparation
+
+    monkeypatch.setattr(IBMRuntimeBackend, "prepare", compile_isa)
+    monkeypatch.setattr(qpy, "load", lambda *args, **kwargs: (loads.append(1), load(*args, **kwargs))[1])
+    monkeypatch.setattr(LocalJournal, "read_payload", lambda self, reference: (
+        reads.append(reference.content_id), read(self, reference))[1])
+    directory = tmp_path / "sampled-lchs"
+    prepared = nwqlib.prepare(selected, backend=connection, directory=directory)
+    (first,) = prepared.run.prepared_artifacts
+    prepared.run.close()
+    assert len(compiled) == 1 and compiled[0] > 0
+    # Closing frees the compiled circuit although `prepared` still references the Run. On the
+    # fractional target only the Run's template cache held it, since the first row runs a
+    # circuit folded from it.
+    gc.collect()
+    assert compiled_circuits[0]() is None
+    # Fixture premise: on the fractional target the first row runs a folded circuit that needs
+    # correction gates, and its compiled template is saved apart from that circuit.
+    assert (first.template.correction is not None) == fractional
+    if fractional:
+        assert set(first.template.correction) - {"0"} and first.template.base not in (None, first.payload)
+    later = len(next(t for t in templates if row_key(first.realization) in dict(t.rows)).rows) > 1
+    with load_run(directory, backend=connection) as run:
+        run.resume()
+        assert run.result is None and run.trace.jobs == 1 and len(runtime_api.requests) == 1
+        pubs = runtime_api.requests[0]["params"]["pubs"]
+        records = run.prepared_artifacts
+        assert len(records) == run.trace.preparations == len(names)
+        # One compilation per logical template; one circuit, snapshot, saved QPY and PUB per
+        # correction class (the template itself without folding).
+        assert len(compiled) == len(templates) and all(compiled)
+        assert sum(record.template.compiled for record in records) == len(templates)
+        snapshots = Counter(record.snapshot for record in records)
+        classes = {(record.template.key, record.template.correction) for record in records}
+        assert len(snapshots) == len(classes) == len({record.payload.content_id for record in records}) == len(pubs)
+        assert sorted(pub.parameter_values.shape[0] for pub in pubs) == sorted(snapshots.values())
+        bases = {record.template.key: record.template.base for record in records}
+        assert all(record.template.base == bases[record.template.key] for record in records)
+        assert all((base is not None) == fractional for base in bases.values())
+        assert not set(bases.values()) & {record.payload for record in records}
+        # The reopened Run reads the first row's circuit, and the compiled template from which
+        # the other rows of its template are folded, once each.
+        assert len(reads) == len(set(reads)) == len(loads)
+        assert set(reads) == {first.payload.content_id} | (
+            {first.template.base.content_id} if fractional and later else set())
+        assert all(record.construction_work_reserved == 0 for record in records if not record.template.compiled)
+        assert [event.shots for event in run.trace.events] == [2] * len(names)
+        for record in records:
+            bound = run._state["handles"][record.content_id].inspect_circuit()
+            bound.remove_final_measurements()
+            expected = logical_row_operator(selected, record.realization, bound.num_qubits)
+            assert np.max(np.abs(Operator.from_circuit(bound).data - expected)) <= 1e-10
+        first = {"read": True}
+
+        def invalid_pub_zero(result):
+            pubs = []
+            for pub in result:
+                metadata = pub.metadata["circuit_metadata"]
+                if first["read"] and metadata["nwqlib_pub"] == 0:
+                    rows = len(metadata["nwqlib_items"])
+                    pub = SamplerPubResult(DataBin(**{name: BitArray.from_bool_array(
+                        np.zeros((rows, 5, array.num_bits), bool)) for name, array in pub.data.items()},
+                        shape=(rows,)), metadata=pub.metadata)
+                pubs.append(pub)
+            return PrimitiveResult(pubs, metadata=result.metadata)
+
+        api.status, api.transform_result = "COMPLETED", invalid_pub_zero
+        with pytest.raises(ValueError, match="template rows or shot cap"):
+            run.resume()
+        missing = len(pubs[0].circuit.metadata["nwqlib_items"])
+        assert sum(event.status == "completed" for event in run.trace.events) == len(names) - missing
+        assert run.result is None and api.reads == 1
+    first["read"] = False
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("reopened Run planned, drew rows, compiled, folded, launched or read a saved circuit")
+
+    for owner, attribute in ((type(selected.method), "plan"), (sampled_rows, "draw_pair_rows"),
+                             (IBMRuntimeBackend, "prepare"), (IBMRuntimeBackend, "fold_template"),
+                             (IBMRuntimeBackend, "template_class"), (IBMRuntimeBackend, "launch"),
+                             (LocalJournal, "read_payload"), (qpy, "load")):
+        monkeypatch.setattr(owner, attribute, forbidden)
+    joined = []
+    concatenate = BitArray.concatenate_bits
+    monkeypatch.setattr(BitArray, "concatenate_bits", staticmethod(lambda arrays: (
+        joined.append(1), concatenate(arrays))[1]))
+    with load_run(directory, backend=connection) as run:
+        run.resume()
+        assert run.result is not None and len(joined) == missing and api.reads == 2
+        assert run.trace.jobs == 1 and len(runtime_api.requests) == 1
+        assert sum(event.shots for event in run.trace.events) == selected.shots
+        for chunk in run.observations.chunks:
+            record = run.prepared_artifact(chunk.prepared_id)
+            positions = {register.name: register.bits for register in record.classical_layout}
+            outcome = 0
+            for index, register in enumerate(record.native_classical_layout):
+                value = template_row_outcome(record.template.values, len(register.bits), index)
+                outcome |= sum(((value >> bit) & 1) << position
+                               for bit, position in enumerate(positions[register.name]))
+            histogram = chunk.histogram()
+            assert dict(zip(histogram.index_list(), histogram.weights.tolist())) == {outcome: 2}
+        again = run.result.analyze()
+        assert (again.model_dump(exclude={"origin", "content_id"})
+                == run.result.model_dump(exclude={"origin", "content_id"}))
+
+
+def test_fractional_gates_open_the_device_fold_bound_rzz_and_check_template_rows(tmp_path, runtime_api):
+    """The device is opened with use_fractional_gates=True and the SDK's fake fractional target.
+    A bound RZZ(-0.3) is compiled into IBM's [0, pi/2] with the same unitary (no global-phase
+    alignment). A parameterized RZZ keeps its parameter through compilation, and each row of
+    values is folded into [0, pi/2]. The rows cover both signs, exact 0 and pi/2, both sides of
+    pi/2 and of pi, and a 2*pi shift. Each folded circuit, bound to its row, must equal the
+    analytic RZZ diagonal times the template's nonzero, parameter-dependent global phase without
+    phase alignment, and pass the SDK's ISA check, and one job of all rows passes the SDK's RZZ
+    check. pi/4 and 2*pi+pi/4 need the same correction gates, so only the folded global phase
+    gives the opposite sign of the second. The compiled template bound to -0.4 without folding is
+    refused before a job could be recorded, and a direct launch of it is refused by the primitive
+    before its request. Options that IBM documents as unsupported with
+    fractional gates are refused, and measurement twirling is accepted."""
+    from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister
+    from qiskit.circuit import Parameter
+    from qiskit.quantum_info import Operator
+    from qiskit_ibm_runtime.utils import validate_isa_circuits
+
+    device, opened = fractional_device(runtime_api)
+    connection = runtime_api.connection.revise(initial_layout=None, use_fractional_gates=True)
+    run = Run(counts_selection(), backend=connection, directory=tmp_path / str(uuid4()))
+    try:
+        def prepare(circuit, snapshot):
+            return connection.prepare(circuit, observation=ObservationSpec(kind="counts", shots=4),
+                runtime=RuntimeOptions(seed=7), position=len(circuit.data), source_definitions=(), run=run,
+                snapshot=snapshot)
+
+        circuit = QuantumCircuit(QuantumRegister(2, "q"), ClassicalRegister(2, "readout"))
+        circuit.h(0)
+        circuit.rzz(-0.3, 0, 1)
+        circuit.rx(0.7, 1)
+        unitary = Operator(circuit).data
+        circuit.measure([0, 1], [0, 1])
+        prepared = prepare(circuit, "bound-rzz")
+        assert opened and all(kwargs["use_fractional_gates"] is True for kwargs in opened)
+        assert "fractional gates enabled" in prepared.target.domain and {"rx", "rzz"} <= set(prepared.native_basis)
+        angles = [float(item.operation.params[0]) for item in prepared.native.circuit.data
+                  if item.operation.name == "rzz"]
+        assert angles and all(0 <= angle <= np.pi / 2 for angle in angles)
+        body = prepared.native.circuit.remove_final_measurements(inplace=False)
+        expected = np.kron(np.eye(2 ** (body.num_qubits - 2)), unitary)
+        assert np.max(np.abs(Operator.from_circuit(body).data - expected)) <= 1e-10
+        connection.admit_batch((prepared.native,))
+
+        theta = Parameter("theta")
+        template = QuantumCircuit(QuantumRegister(2, "q"), ClassicalRegister(2, "readout"))
+        template.rzz(theta, 0, 1)
+        # theta then remains in each folded circuit only through this phase.
+        template.global_phase = 0.3 + theta / 4
+        template.measure([0, 1], [0, 1])
+        compiled = prepare(template, "template-rzz").native
+        assert compiled.parameters == ("theta",)
+        # The crossing displacement 2**-20 is far above binary64 roundoff at these angles.
+        step = 2.0 ** -20
+        angles = (-np.pi / 4, np.pi / 4, 3 * np.pi / 4, -3 * np.pi / 4, 0.0, np.pi / 2, np.pi / 2 - step,
+                  np.pi / 2 + step, np.pi - step, np.pi + step, 2 * np.pi + np.pi / 4)
+        folded = connection.fold_template(compiled, [{"theta": angle} for angle in angles])
+        assert folded[1][0] == folded[-1][0]
+        classes, rows = {}, []
+        for angle, (correction, columns) in zip(angles, folded, strict=True):
+            if correction not in classes:
+                classes[correction] = connection.template_class(compiled, correction, snapshot=f"class-{correction}",
+                                                                run=run)[0]
+                validate_isa_circuits([classes[correction].circuit], device.target)
+            circuit = classes[correction].circuit
+            rows.append(connection.bind_template(classes[correction], tuple(columns[parameter.name]
+                                                                           for parameter in circuit.parameters),
+                                                 runtime=None)[0])
+            body = circuit.assign_parameters({parameter: columns[parameter.name] for parameter in circuit.parameters})
+            body.remove_final_measurements()
+            # RZZ(theta) = exp(-i theta Z0 Z1 / 2) is diagonal with Z0 Z1 = (1, -1, -1, 1).
+            expected = np.exp(1j * (0.3 + angle / 4)) * np.diag(np.exp(-0.5j * angle * np.array([1, -1, -1, 1])))
+            difference = Operator.from_circuit(body).data - np.kron(np.eye(2 ** (body.num_qubits - 2)), expected)
+            assert np.max(np.abs(difference)) <= 1e-10, angle
+        connection.admit_batch(tuple(rows))
+        # The SDK's RZZ check still runs before a job is recorded.
+        with pytest.raises(ValueError, match=r"RZZ angle outside \[0, pi/2\]"):
+            connection.admit_batch((connection.bind_template(compiled, (-0.4,), runtime=None)[0],))
+        # A direct launch checks the job it sends: the primitive refuses the same angle before its request.
+        with pytest.raises(ValueError, match=r"rzz is supported only for angles in the range \[0, pi/2\]"):
+            connection.launch((connection.bind_template(compiled, (-0.4,), runtime=None)[0],),
+                              submission_id=str(uuid4()), run=run)
+        assert not runtime_api.requests
+
+        connection.revise(options_json='{"twirling": {"enable_measure": true}}')._options(run, "counts")
+        with pytest.raises(ValueError, match="gate twirling"):
+            connection.revise(options_json='{"twirling": {"enable_gates": true}}')._options(run, "counts")
+        for options, reason in (('{"resilience_level": 2}', "gate twirling"),
+                                ('{"resilience": {"pec_mitigation": true}}', "probabilistic error cancellation"),
+                                ('{"resilience": {"zne_mitigation": true, "zne": {"amplifier": "pea"}}}', "PEA")):
+            with pytest.raises(ValueError, match=reason):
+                connection.revise(options_json=options)._options(run, "estimated_observable")
+        connection.revise(options_json='{"resilience_level": 1}')._options(run, "estimated_observable")
+    finally:
+        run.close()
+
+
+def test_interrupted_template_preparation_never_compiles_a_template_twice(tmp_path, monkeypatch, runtime_api):
+    """An interruption between a compilation's charge and its record, or before a later row's record, costs no recompile.
+
+    The sampled LCHS Plan of `sampled_lchs_plan` at time 2.0 runs on the fractional target with the structured
+    SELECT, so rows are folded into correction classes, and row 7 shares the first row's template but needs a
+    class first built after reopening (checked below). First, the journal commit that would record the first
+    compilation fails after the compilation was charged: the reopened Run has the charge without a record and
+    refuses with PreparationNotRebuilt, compiling nothing and submitting nothing. With the explicit request, that
+    one row, whose template no record holds, compiles once more, each other template compiles once, every row runs
+    in one job and the count grows by one. Second, a Run that holds no charge without a record gets the request in
+    every call below, which changes nothing there. Prepare records the
+    first row, and the commit that would prepare another row of its template fails: that row keeps no charge
+    or record. The next reopened Run loads the saved compiled template, builds row 7's class again without
+    compiling and compiles each other logical template once; its job is then refused at admission, so every row
+    is prepared and none is submitted. The last reopened Run restores every row from its own saved class circuit,
+    with no compilation, class build or template load, and sends one job. Each restored circuit, bound to its
+    record's values, equals its experiment's own lowered row circuit without global-phase alignment, so a row
+    restored with another class circuit of its template, whose RZZ fold correction differs, fails there.
+    """
+    from qiskit.quantum_info import Operator
+    from nwqlib._prepared_execution import PreparationNotRebuilt
+    from nwqlib._run_journal import LocalJournal
+    from nwqlib.algorithms.protocol import _DeferredRowTemplate
+
+    calls = {"prepare": [], "template_class": [], "restore_template": []}
+    for attribute in calls:
+        original = getattr(IBMRuntimeBackend, attribute)
+
+        def counted(self, *args, _original=original, _calls=calls[attribute], **kwargs):
+            _calls.append(args[1] if _original.__name__ == "template_class" else 1)
+            return _original(self, *args, **kwargs)
+        monkeypatch.setattr(IBMRuntimeBackend, attribute, counted)
+    commit = LocalJournal.commit
+
+    def fail_commit(condition):
+        armed = [True]
+
+        def failing(self, records=(), **kwargs):
+            if armed[0] and any(kind == "prepared" and condition(value) for kind, _, value in records):
+                armed[0] = False
+                raise OSError("injected interruption before the preparation commit")
+            return commit(self, records, **kwargs)
+        monkeypatch.setattr(LocalJournal, "commit", failing)
+        return armed
+
+    fractional_device(runtime_api)
+    connection = runtime_api.connection.revise(initial_layout=None, use_fractional_gates=True)
+    selected = sampled_lchs_plan(time=2.0, lcu_select_implementation="structured")
+    points = tuple(selected._static_points())
+    names = tuple(point.key for point in points)
+    templates = selected.method.row_templates(selected, points)
+
+    armed = fail_commit(lambda record: True)
+    with pytest.raises(OSError, match="injected interruption"):
+        nwqlib.prepare(selected, backend=connection, directory=tmp_path / "first")
+    assert not armed[0] and len(calls["prepare"]) == 1
+    with load_run(tmp_path / "first", backend=connection) as run:
+        assert run.prepared_artifacts == () and run.trace.preparations == 1
+        with pytest.raises(PreparationNotRebuilt):
+            run.resume()
+    assert len(calls["prepare"]) == 1 and not runtime_api.requests
+
+    monkeypatch.setattr(LocalJournal, "commit", commit)
+    calls["prepare"].clear()
+    with load_run(tmp_path / "first", backend=connection) as run:
+        run.resume(rebuild_preparations=True)
+        assert len(calls["prepare"]) == len(templates) and len(runtime_api.requests) == 1
+        assert run.trace.preparations == len(names) + 1 and run.trace.jobs == 1
+        for record in run.prepared_artifacts:
+            bound = run._state["handles"][record.content_id].inspect_circuit()
+            bound.remove_final_measurements()
+            expected = logical_row_operator(selected, record.realization, bound.num_qubits)
+            assert np.max(np.abs(Operator.from_circuit(bound).data - expected)) <= 1e-10
+    runtime_api.requests.clear()
+    for counted_calls in calls.values():
+        counted_calls.clear()
+    prepared = nwqlib.prepare(selected, backend=connection, directory=tmp_path / "later")
+    (first,) = prepared.run.prepared_artifacts
+    prepared.run.close()
+    assert "pairs[row=7]" in dict(next(t for t in templates if row_key(first.realization) in dict(t.rows)).rows)
+    # From here each template builds when asked, so the rows of a compiled template, folded here, must not ask.
+    ordinary, read = type(selected.method).row_templates, []
+
+    def deferred(self, plan, requested):
+        return tuple(_DeferredRowTemplate(key=t.key, block_id=t.block_id, parameters=t.parameters, rows=t.rows,
+                                          build=lambda t=t: read.append(t.key) or t.circuit)
+                     for t in ordinary(self, plan, requested))
+
+    monkeypatch.setattr(type(selected.method), "row_templates", deferred)
+    armed = fail_commit(lambda record: record.template.key == first.template.key)
+    with load_run(tmp_path / "later", backend=connection) as run:
+        with pytest.raises(OSError, match="injected interruption"):
+            run.resume(rebuild_preparations=True)
+    assert not armed[0] and not runtime_api.requests and not read
+    built = [correction for correction in calls["template_class"] if correction != first.template.correction]
+    admit = IBMRuntimeBackend.admit_batch
+
+    def refuse(self, natives):
+        raise ValueError("injected admission refusal")
+    monkeypatch.setattr(IBMRuntimeBackend, "admit_batch", refuse)
+    with load_run(tmp_path / "later", backend=connection) as run:
+        item = run._state["workflow_items"].get("pairs[row=7]")
+        assert item is None or (item.preparation_id is None and item.prepared_id is None)
+        with pytest.raises(ValueError, match="injected admission refusal"):
+            run.resume(rebuild_preparations=True)
+        assert len(calls["prepare"]) == len(templates) and len(calls["restore_template"]) == 2
+        assert sorted(read) == sorted(t.key for t in templates if t.key != first.template.key)
+        later = next(record for record in run.prepared_artifacts if row_key(record.realization) == "pairs[row=7]")
+        assert later.template.correction in built and not later.template.compiled
+        assert calls["template_class"].count(later.template.correction) == 2
+        assert len(run.prepared_artifacts) == len(names) and not run.trace.submissions and not runtime_api.requests
+    monkeypatch.setattr(IBMRuntimeBackend, "admit_batch", admit)
+    for counted_calls in calls.values():
+        counted_calls.clear()
+    with load_run(tmp_path / "later", backend=connection) as run:
+        run.resume(rebuild_preparations=True)
+        assert not any(calls.values())
+        assert run.trace.jobs == 1 and len(runtime_api.requests) == 1
+        for record in run.prepared_artifacts:
+            bound = run._state["handles"][record.content_id].inspect_circuit()
+            bound.remove_final_measurements()
+            expected = logical_row_operator(selected, record.realization, bound.num_qubits)
+            assert np.max(np.abs(Operator.from_circuit(bound).data - expected)) <= 1e-10
+
+
+def three_setting_counts():
+    """A Plan with three settings, each one job on IBM: ZZZ, XXX and YYY need three measurement bases.
+
+    The three-qubit state compiles to enough gates that a QPY copy dwarfs what a readout reserves.
+    """
+    from nwqlib.operators import ingest_pauli
+    from nwqlib.problems import Expectation
+
+    return nwqlib.plan(Expectation(state=np.arange(1., 9.),
+                                   observable=ingest_pauli((("ZZZ", 1.), ("XXX", .5), ("YYY", .25)), num_qubits=3)),
+                       method=ExpectationMethod(), shots=8, seed=7)
+
+
+def test_a_data_limit_inside_a_circuit_copy_leaves_a_run_that_an_explicit_rebuild_finishes(tmp_path, ibm_runtime_spy):
+    """One job has run when max_data_bytes stops the second circuit's QPY copy, which leaves it charged without a record.
+
+    The limit comes from an uninterrupted Run's own counts, half way through that copy. No job is sent again and each
+    committed charge adds one preparation, a failed one included. A rebuild under the same limit fails again, so a new
+    preparation has no way around the limit and a second failure needs a second request. Raising the limit leads past
+    it. The synthetic counts make the values equal only as a check of the associations, and the seeds are the
+    uninterrupted Run's.
+    """
+    from nwqlib.execution import ExecutionLimits
+    from nwqlib._prepared_execution import PreparationNotRebuilt
+
+    chosen, backend, requests = three_setting_counts(), ibm_runtime_spy.connection, ibm_runtime_spy.api.requests
+    counted, holder = [], {}
+
+    def observe(stage, done, total):
+        if stage == "prepare" and done is None and holder:
+            counted.append(holder["run"].trace.data_bytes)
+
+    prepared = nwqlib.prepare(chosen, backend=backend, directory=tmp_path / "whole", progress=observe)
+    holder["run"] = prepared.run
+    with prepared.run as run:
+        nwqlib.submit(prepared)
+        value = run.wait(timeout=30, poll_interval=0).value
+        records = run.prepared_artifacts
+        seeds = {record.realization_id: record.runtime.seed for record in records}
+    limit = counted[0] + records[1].payload.bytes // 2
+    requests.clear()
+    prepared = nwqlib.prepare(chosen, backend=backend, directory=tmp_path / "run", progress=False,
+                              limits=ExecutionLimits(max_data_bytes=limit))
+    with prepared.run as run, pytest.raises(ValueError, match="max_data_bytes"):
+        nwqlib.submit(prepared)
+        run.wait(timeout=30, poll_interval=0)
+    assert len(requests) == 1
+    with load_run(tmp_path / "run", backend=backend) as run:
+        assert run.trace.preparations == 2 and len(run.prepared_artifacts) == 1
+        with pytest.raises(PreparationNotRebuilt):
+            run.resume()
+        with pytest.raises(ValueError, match="max_data_bytes"):
+            run.resume(rebuild_preparations=True)
+        assert run.trace.preparations == 3 and len(requests) == 1
+        with pytest.raises(PreparationNotRebuilt):
+            run.resume()
+        run.extend_limits(max_data_bytes=None)
+        run.resume(rebuild_preparations=True)
+        assert run.trace.preparations == 4 and len(run.prepared_artifacts) == 2
+        result = run.wait(timeout=30, poll_interval=0)
+        assert result.value == value and run.trace.preparations == 5 and run.trace.jobs == 3 and len(requests) == 3
+        assert {record.realization_id: record.runtime.seed for record in run.prepared_artifacts} == seeds
+
+
+def circuit_and_qpy_size():
+    """A circuit and the length of its QPY copy dumped to a plain stream, the oracle for the size b of the copy."""
+    from io import BytesIO
+    from qiskit import QuantumCircuit, qpy
+
+    circuit = QuantumCircuit(2)
+    for angle in np.linspace(.1, 3., 30):
+        circuit.rz(angle, 0)
+        circuit.cx(0, 1)
+    stream = BytesIO()
+    qpy.dump(circuit, stream)
+    return circuit, len(stream.getvalue())
+
+
+def test_the_qpy_copy_is_compared_with_the_stored_data_left_under_ample_memory(tmp_path, ibm_runtime_spy):
+    """A copy of b bytes needs b bytes of max_data_bytes, whatever the memory allows, before the buffer takes them.
+
+    The two limits stand b/2 below and 2b above what the new Run has counted, so the few bytes that the limit's own
+    digits add to its saved row cannot decide the outcome.
+    """
+    from nwqlib._limits import ResourceLimitError
+    from nwqlib.execution import ExecutionLimits
+
+    circuit, size = circuit_and_qpy_size()
+    backend = ibm_runtime_spy.connection
+
+    def copy(extra_bytes, name, counted=0):
+        with Run(counts_selection(), backend=backend, directory=tmp_path / name, progress=False,
+                 limits=ExecutionLimits(max_data_bytes=counted + extra_bytes)) as run:
+            left = run._available_data_bytes()
+            return backend._qpy(circuit, run), counted + extra_bytes - left
+
+    _, counted = copy(1 << 30, "sizing")
+    assert len(copy(2 * size, "fits", counted)[0]) == size
+    with pytest.raises(ValueError, match="max_data_bytes") as refused:
+        copy(size // 2, "half", counted)
+    assert not isinstance(refused.value, ResourceLimitError)
+
+
+@pytest.mark.parametrize("source", ("max_bytes", "physical memory"))
+def test_the_qpy_copy_is_compared_with_the_memory_limit_as_it_grows_without_a_data_limit(tmp_path, monkeypatch, ibm_runtime_spy,
+                                                                                          source):
+    """A QPY copy of b bytes is held twice, so 2b is the size that the memory limit admits, with max_data_bytes=None.
+
+    The oracle for b is the length of the same circuit dumped to a plain stream. A limit of 2b admits the copy and
+    2b - 1 refuses it. A limit of b refuses with at most half the copy in the buffer, so the comparison comes before
+    the buffer takes the bytes.
+    """
+    import nwqlib._limits as limits
+    from nwqlib._limits import ResourceLimitError
+    from nwqlib.backends._qpy_buffer import QpyBuffer
+
+    circuit, size = circuit_and_qpy_size()
+    offsets, write = [], QpyBuffer.write
+
+    def writes(self, data):
+        written = write(self, data)
+        offsets.append(self.tell())
+        return written
+
+    monkeypatch.setattr(QpyBuffer, "write", writes)
+
+    def copy(limit, name):
+        offsets.clear()
+        if source == "physical memory":
+            monkeypatch.setattr(limits, "physical_memory_bytes", lambda: limit)
+        method = ExpectationMethod(max_bytes=limit if source == "max_bytes" else None)
+        with Run(nwqlib.plan(problem(), method=method, shots=4, seed=7), backend=ibm_runtime_spy.connection,
+                 directory=tmp_path / name, progress=False) as run:
+            return ibm_runtime_spy.connection._qpy(circuit, run)
+
+    assert len(copy(2 * size, "fits")) == size and max(offsets) == size
+    with pytest.raises(ResourceLimitError, match="as QPY"):
+        copy(2 * size - 1, "one less")
+    with pytest.raises(ResourceLimitError, match="as QPY"):
+        copy(size, "half")
+    assert max(offsets, default=0) <= size // 2
+
+
+@pytest.mark.parametrize("mode", ("batch", "session"))
+def test_an_existing_container_opens_the_device_with_the_prepared_fractional_gates(tmp_path, runtime_api, mode):
+    """Eight sampled LCHS rows prepared with fractional gates run in an existing Batch or Session container.
+
+    The device is opened with ``use_fractional_gates=True`` for preparation and again for the
+    container, so the SDK checks the circuits against the target they were compiled for and one job
+    is acknowledged. A device opened without fractional gates lacks ``rzz`` and ``rx``.
+    """
+    from copy import copy
+    from qiskit_ibm_runtime.utils.backend_converter import convert_to_target
+
+    enabled, _ = fractional_device(runtime_api)
+    disabled = copy(enabled)
+    disabled._target = convert_to_target(enabled.configuration(), enabled.properties(), include_fractional_gates=False)
+    assert "rzz" not in disabled.target.operation_names
+    opened = []
+
+    def device(name, *, use_fractional_gates=False, **kwargs):
+        opened.append(use_fractional_gates)
+        return enabled if use_fractional_gates else disabled
+
+    runtime_api.service.backend = device
+    runtime_api.api.container_mode = "batch" if mode == "batch" else "dedicated"
+    connection = runtime_api.connection.revise(mode=mode, container_id="original-container", initial_layout=None,
+                                               use_fractional_gates=True)
+    with Run(sampled_lchs_plan(), backend=connection, directory=tmp_path / "run", progress=False) as run:
+        run.resume()
+        assert opened == [True, True] and len(runtime_api.requests) == 1
+        assert [submission.status for submission in run.trace.submissions] == ["acknowledged"]
+
+
+@pytest.mark.parametrize("reopen", (False, True))
+def test_template_rows_refused_by_the_data_budget_keep_their_seeds_for_a_retry(tmp_path, monkeypatch, runtime_api,
+                                                                               reopen):
+    """The rows of eight sampled LCHS points on IBM are refused by max_data_bytes before any is saved.
+
+    Raising the limit with ``run.extend_limits``, on the same Run or after reopening it, gives every
+    row the seed of a Run whose budget was ample from the start. A stand-in stops each resume before
+    template compilation, so nothing is prepared or sent.
+    """
+    import nwqlib._prepared_execution as execution
+    from nwqlib.execution import ExecutionLimits
+
+    class BeforeCompilation(Exception):
+        pass
+
+    monkeypatch.setattr(execution, "_bind_template", lambda *args, **kwargs: (_ for _ in ()).throw(BeforeCompilation()))
+    connection = runtime_api.connection.revise(initial_layout=None)
+    selected = sampled_lchs_plan()
+    with Run(selected, backend=connection, directory=tmp_path / "size", progress=False) as sizing:
+        created = sum(sizing._state[key] for key in ("data_bytes", "array_bytes", "payload_bytes", "external_bytes"))
+
+    def seeds(folder, budget):
+        run = Run(selected, backend=connection, directory=folder, progress=False,
+                  limits=ExecutionLimits(max_data_bytes=budget))
+        try:
+            if budget < 2_000_000:
+                with pytest.raises(ValueError, match="max_data_bytes"):
+                    run.resume()
+                assert not run._state["workflow_items"] and run.trace.preparations == 0
+                if reopen:
+                    run.close()
+                    run = load_run(folder, backend=connection, progress=False)
+                run.extend_limits(max_data_bytes=2_000_000)
+            with pytest.raises(BeforeCompilation):
+                run.resume()
+            return {key: item.runtime.seed for key, item in run._state["workflow_items"].items()}
+        finally:
+            run.close()
+
+    ample = seeds(tmp_path / "ample", 2_000_000)
+    assert len(ample) == 8 and seeds(tmp_path / "retry", created + 1536) == ample
+    assert not runtime_api.requests
+
+
+def test_an_estimate_reserves_its_known_fields_before_submission(tmp_path, runtime_api):
+    """A provider estimate's identity, value, uncertainty fields and options text are known before submission.
+
+    The Run reserves them with the declaration. The estimate saves the effective options text a second time, so
+    a longer request raises the reservation by exactly the JSON size of the added text. The submission is
+    written with that reservation, so a limit 64 bytes below the prepared Run's bytes plus the reservation is
+    refused before the request, while a limit 64 bytes above a submitted Run's bytes plus the reservation
+    submits. The margins cover the few bytes by which saved timing fields vary between Runs.
+    """
+    from nwqlib.execution import ExecutionLimits
+    runtime_api.api.status = "QUEUED"
+    chosen, large = estimate_selection(), ExecutionLimits(max_data_bytes=4_000_000)
+
+    def reservation(options, directory):
+        backend = runtime_api.connection.revise(options_json=options)
+        with Run(chosen, backend=backend, directory=tmp_path / directory, limits=large, progress=False) as run:
+            run.resume()
+            return run.trace.data_bytes, run.trace.data_bytes_reserved, backend
+    short_text, long_text = '{"resilience_level":0}', '{"max_execution_time":300,"resilience_level":0}'
+    stored, reserved, backend = reservation("{}", "default")
+    _, longer, _ = reservation('{"max_execution_time": 300}', "longer")
+    assert longer - reserved == len(json.dumps(long_text)) - len(json.dumps(short_text))
+    with nwqlib.prepare(chosen, backend=backend, directory=tmp_path / "prepared", limits=large,
+                        progress=False).run as run:
+        prepared = run.trace.data_bytes
+    assert len(runtime_api.requests) == 2
+    with Run(chosen, backend=backend, directory=tmp_path / "short", progress=False,
+             limits=ExecutionLimits(max_data_bytes=prepared + reserved - 64)) as run:
+        with pytest.raises(ValueError, match=f"max_data_bytes={prepared + reserved - 64} cannot admit"):
+            run.resume()
+    assert len(runtime_api.requests) == 2
+    with Run(chosen, backend=backend, directory=tmp_path / "enough", progress=False,
+             limits=ExecutionLimits(max_data_bytes=stored + reserved + 64)) as run:
+        run.resume()
+    assert len(runtime_api.requests) == 3
+
+
+def test_large_provider_metadata_of_a_paid_estimate_is_saved_after_one_fetch(tmp_path, runtime_api):
+    """The provider metadata of an admitted estimate is saved at its actual size, with no limit on its encoding.
+
+    73,728 characters of job metadata exceed max_data_bytes = 65,536. The first wait saves the estimate 0.75 with
+    all of its metadata and then refuses the derived result row, naming extend_limits. After the limit is
+    raised the result is read from the saved estimate, so the job is submitted and fetched once.
+    """
+    from nwqlib.execution import ExecutionLimits
+    api = runtime_api.api
+    api.estimate, api.status = 0.75, "QUEUED"
+    backend = runtime_api.connection.revise(options_json="{}")
+    directory = tmp_path / "estimate"
+    with Run(estimate_selection(), backend=backend, directory=directory,
+             limits=ExecutionLimits(max_data_bytes=65536), progress=False) as run:
+        run.resume()
+        locator = run.trace.submissions[0].locator
+    api.status, api.result_metadata = "COMPLETED", {"provider_detail": "x" * 73728}
+    with load_run(directory, backend=backend) as run:
+        with pytest.raises(ValueError, match="extend_limits"):
+            run.wait(timeout=1, poll_interval=0)
+        estimate, = run.observations.chunks[0].values
+        assert estimate.value == 0.75
+        assert json.loads(estimate.provider_metadata_json)["primitive"]["provider_detail"] == "x" * 73728
+    with load_run(directory, backend=backend) as run:
+        run.extend_limits(max_data_bytes=4_000_000)
+        assert run.wait(timeout=1, poll_interval=0).value == 0.75
+        assert run.trace.submissions[0].locator == locator
+    assert len(runtime_api.requests) == api.reads == 1
+
+
+def test_sampler_decode_arrays_are_admitted_before_submission(tmp_path, runtime_api):
+    """The requested shots bound the Sampler decode, so preparation can refuse before IBM receives a job."""
+    from nwqlib.backends.ibm_runtime import sampler_decode_bytes
+    from nwqlib.execution import ExecutionLimits
+    decode_bytes = sampler_decode_bytes((1,), 30000)
+    chosen = nwqlib.plan(problem((("I", 1.), ("Z", 1.))), method=ExpectationMethod(), shots=30000, seed=7)
+    with Run(chosen, backend=runtime_api.connection, directory=tmp_path / "run",
+             limits=ExecutionLimits(max_data_bytes=200000), progress=False) as run:
+        with pytest.raises(ValueError, match=rf"{decode_bytes} bytes exceeds this Run's max_data_bytes=200000"):
+            run.resume()
+    assert not runtime_api.requests
+
+
+def test_each_point_of_an_estimator_batch_is_checked_before_the_first_preparation(tmp_path, monkeypatch,
+                                                                                    runtime_api):
+    """A Method that specializes each point's estimate has every point checked against the target first.
+
+    The second point's coefficients (0, 0) make a zero observable, which IBM's Estimator refuses, so
+    ``prepare`` refuses with that point's key before any preparation or request.
+    """
+    import nwqlib._prepared_execution as execution
+    from nwqlib.core.planning import ReadoutDetails
+    from test_selected_runtime import AxisToy, axis_plan
+
+    class PointEstimate(AxisToy):
+        def specialize_experiment(self, plan, experiment, bindings):
+            estimate = experiment.readout.estimate.revise(coefficients=(0.0, 1.0 - bindings["row"]))
+            return experiment.revise(readout=experiment.readout.revise(estimate=estimate))
+
+    chosen = axis_plan(2, method=PointEstimate())
+    program = chosen.construction.program
+    definitions = []
+    for definition in program.definitions:
+        if definition.id == "axis":
+            definition = definition.revise(node=definition.node.revise(observation_kind="estimated_observable",
+                                                                       repetitions=1))
+        elif definition.id == "body":
+            definition = definition.revise(node=definition.node.revise(children=("allocate", "release")))
+        elif definition.id == "measure":
+            continue
+        definitions.append(definition)
+    estimate = estimate_selection().experiments[0].observation.estimate
+    chosen = chosen.revise(
+        construction=chosen.construction.revise(program=program.revise(classical=(), definitions=tuple(definitions))),
+        experiments=(chosen.experiments[0].revise(readout=ReadoutDetails(estimate=estimate)),))
+    prepared = []
+    original = execution._prepare_static_item
+    monkeypatch.setattr(execution, "_prepare_static_item",
+                        lambda *args, **kwargs: prepared.append(1) or original(*args, **kwargs))
+    with pytest.raises(ValueError, match=r"Experiment 'series\[row=1\]' requests readout kind "
+                                         r"'estimated_observable': IBM Estimator does not accept a zero observable"):
+        nwqlib.prepare(chosen, backend=runtime_api.connection.revise(initial_layout=None),
+                       directory=tmp_path / "run", progress=False)
+    assert prepared == [] and not runtime_api.requests
+
+
+@pytest.mark.parametrize("fractional", [False, True], ids=["compiled-template", "folded-classes"])
+def test_template_experiments_record_the_depth_of_their_bound_class_circuit(runtime_api, tmp_path, monkeypatch,
+                                                                             fractional):
+    """Each template experiment records the qualified depth of its class circuit, scanned once per class.
+
+    Every experiment of a class runs the same gates on the same qubits with its own values, so the record equals
+    the depth of each experiment's bound circuit. Folding RZZ angles adds only one-qubit gates, so the classes
+    share their two-qubit depth. Gate twirling, which IBM allows without fractional gates, leaves the depth
+    unqualified with the option as the reason. Only qiskit-ibm-runtime 0.49.0 was checked, so under another
+    installed version no depth is qualified.
+    """
+    import importlib.metadata
+    from nwqlib.backends import inspection
+
+    checked = importlib.metadata.version("qiskit-ibm-runtime") == "0.49.0"
+    target = fractional_device(runtime_api)[0].target if fractional else runtime_api.backend.target
+    connection = runtime_api.connection.revise(initial_layout=None, use_fractional_gates=fractional)
+    selected = sampled_lchs_plan(time=2.0, lcu_select_implementation="structured")
+    scans, scan = [], inspection.inspect_native_depth
+    monkeypatch.setattr(inspection, "inspect_native_depth",
+                        lambda circuit, *args, **kwargs: (scans.append(circuit.num_parameters),
+                                                          scan(circuit, *args, **kwargs))[1])
+    monkeypatch.setattr(IBMRuntimeBackend, "admit_batch", lambda self, natives: (_ for _ in ()).throw(
+        ValueError("prepare every row without submitting")))
+
+    def prepared_rows(backend, directory):
+        """Prepare every row of the Plan, refusing the job at admission, and return the open Run."""
+        nwqlib.prepare(selected, backend=backend, directory=directory).run.close()
+        run = load_run(directory, backend=backend)
+        with pytest.raises(ValueError, match="without submitting"):
+            run.resume()
+        assert not run.trace.submissions and not runtime_api.requests
+        return run
+
+    run = prepared_rows(connection, tmp_path / "depth")
+    classes = {}
+    try:
+        for record in run.prepared_artifacts:
+            circuit = run._state["handles"][record.content_id]._native.circuit
+            values = dict(zip(record.template.parameters, record.template.values, strict=True))
+            bound = circuit.assign_parameters({parameter: values[parameter.name] for parameter in circuit.parameters})
+            assert record.native_depth.qualified is checked
+            assert not checked or record.native_depth == scan(bound, target)
+            classes.setdefault((record.template.key, record.template.correction), set()).add(record.native_depth)
+    finally:
+        run.close()
+    assert all(len(depths) == 1 for depths in classes.values())
+    # One scan per class, of its bound circuit, and none of an unbound template. An unqualified depth needs no scan.
+    assert scans == [0] * (len(classes) if checked else 0) and len(run.prepared_artifacts) > len(classes)
+    scans.clear()
+    with load_run(tmp_path / "depth", backend=connection) as reopened:
+        assert [record.native_depth for record in reopened.prepared_artifacts] == [
+            record.native_depth for record in run.prepared_artifacts]
+    assert not scans
+    if fractional:
+        by_key = {}
+        for (key, _), (depth,) in classes.items():
+            by_key.setdefault(key, set()).add(depth.native_two_qubit_depth)
+        assert len(classes) > len(by_key) and all(len(depths) == 1 for depths in by_key.values())
+    if not fractional:
+        # IBM refuses gate twirling with fractional gates, so this check uses the compiled template.
+        run = prepared_rows(connection.revise(options_json='{"twirling":{"enable_gates":true}}'), tmp_path / "twirled")
+        try:
+            reasons = {record.native_depth.reason for record in run.prepared_artifacts}
+        finally:
+            run.close()
+        assert len(reasons) == 1 and "twirling.enable_gates=True" in reasons.pop()

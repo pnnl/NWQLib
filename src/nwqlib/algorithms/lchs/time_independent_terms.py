@@ -28,12 +28,12 @@ bound the product-formula steps.
 
 from __future__ import annotations
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from nwqlib._limits import ResourceLimitError, exceeds, optional_limit
 
 from dataclasses import dataclass, replace
 from functools import cached_property
 from itertools import cycle, islice
-from math import fsum, isfinite
+from math import isfinite
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
@@ -54,11 +54,14 @@ from nwqlib.algorithms.lchs.solution_error_budget import (
     psd_recovery,
     psd_recovery_exponent,
     psd_recovery_part,
+    scaled_sum,
+    signed_shift,
 )
 from nwqlib.algorithms.lchs.providers import (
     LCHSCoefficientPlan,
     LCHSProblemContext,
     _resolve_coefficient_context,
+    lifted_magnitudes,
 )
 
 if TYPE_CHECKING:
@@ -97,13 +100,43 @@ def _adopt_read_only(array: np.ndarray) -> np.ndarray:
     return array
 
 
+def _hermitian_endpoints(l_part: np.ndarray, *, real: bool, max_spectral_work: int | None) -> tuple[float, float]:
+    """Return (lambda_min, lambda_max) of the Hermitian part L, from its exact structure or one eigensolve.
+
+    One count of the nonzero entries of L and of its diagonal decides,
+    without a tolerance, whether L is zero or diagonal. A zero L has the
+    endpoints (0, 0). A diagonal L has the smallest and largest diagonal
+    entry: the diagonal (a + conj(a))/2 of L = (A + A†)/2 is exactly real, so
+    these endpoints are exact. Any other L takes one eigenvalues-only solve,
+    admitted first as d**3 work units against max_spectral_work. With
+    ``real`` (A was real) L is real symmetric and its real part goes to the
+    real symmetric solver. Both solvers are backward stable, so the
+    endpoints are eigensolver values within rounding
+    (solution_error_budget._numerical_psd_decision).
+    """
+    diagonal = np.diagonal(l_part)
+    nonzero = np.count_nonzero(l_part)
+    if nonzero == np.count_nonzero(diagonal):
+        if not nonzero:
+            return 0.0, 0.0
+        values = diagonal.real
+        return float(values.min()), float(values.max())
+    d = l_part.shape[0]
+    if exceeds(d**3, max_spectral_work):
+        raise ResourceLimitError(
+            f"LCHS eigensolve exceeds max_spectral_work: it needs {d**3} work units (d**3 with d={d}), "
+            f"max_spectral_work={max_spectral_work}. Raise max_spectral_work to at least {d**3}.")
+    eigenvalues = np.linalg.eigvalsh(l_part.real if real and np.iscomplexobj(l_part) else l_part)
+    return float(eigenvalues[0]), float(eigenvalues[-1])
+
+
 def cartesian_decomposition(
     matrix: Any,
     *,
     eigcheck: bool = True,
     psd_tolerance: float = DEFAULT_PSD_TOLERANCE,
-    max_bytes=DEFAULT_MAX_BYTES,
-    max_spectral_work=100_000_000,
+    max_bytes=None,
+    max_spectral_work=None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return the Hermitian parts `(L, H)` of `A = L + iH` used by LCHS.
 
@@ -121,13 +154,17 @@ def cartesian_decomposition(
         psd_tolerance (float): Default `1e-12`. Relative window of the
             check. An eigenvalue of L at or above `-psd_tolerance*||L||_2`
             passes.
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+        max_bytes (int | None): Default `None`, the physical memory of this computer.
             Upper limit on the arrays of the check, `64 d**2 + 16 d` bytes
             for dimension d, tested before they are formed. The count covers
             the known NumPy arrays, not the eigensolver's own LAPACK
             workspace.
-        max_spectral_work (int): Upper limit on the eigenvalue check of a
-            nonzero L, counted as `d**3` work units, which are not timings.
+        max_spectral_work (int | None): Default `None`, no limit. Upper
+            limit on the eigenvalue check, counted as `d**3` work units,
+            which are not timings, only when L is neither zero nor
+            diagonal. The endpoints of a zero or diagonal L are read from
+            its diagonal, and for an A of real dtype they come from the
+            real symmetric L.
 
     Returns:
         parts (tuple[numpy.ndarray, numpy.ndarray]): L and H as complex
@@ -142,15 +179,21 @@ def cartesian_decomposition(
 
     # Form the Cartesian parts L=(A+A†)/2 and H=(A−A†)/(2i) from one
     # conjugate-transpose workspace (_cartesian_parts). With A live, the parts
-    # hold 48 d**2 bytes. The eigenvalue check of a nonzero L is admitted
-    # first: its known NumPy arrays, A, L, H, the solver's internal d-square
-    # copy and the internal and public eigenvalue vectors, are
+    # hold 48 d**2 bytes. The eigenvalue check of an L that is neither zero
+    # nor diagonal (_hermitian_endpoints) is admitted first: its known NumPy
+    # arrays, A, L, H, the solver's internal d-square copy and the internal
+    # and public eigenvalue vectors, are
     # B_cartesian = 64 d**2 + 16 d bytes, and its work is d**3 against
     # max_spectral_work. The eigensolver's queried LAPACK workspace
     # Q_N(d) = 16 l_N + 8 r_N + I i_N (JOBZ=N) is not charged: this is a
     # declared known-array logical workspace, not a complete workspace cap.
     # These units are admission proxies, not timings or equal-cost CPU
     # operations.
+    if eigcheck:
+        # Read the input once in its own dtype: a real dtype gives a real
+        # symmetric L for the eigenvalue check.
+        matrix = np.asarray(matrix)
+        real = not np.iscomplexobj(matrix)
     array = as_square_matrix(matrix)
     d = array.shape[0]
     if eigcheck:
@@ -158,16 +201,8 @@ def cartesian_decomposition(
     l_part, h_part = _cartesian_parts(array)
 
     if eigcheck:
-        if np.any(l_part):
-            spectral_cap = integer(max_spectral_work, "max_spectral_work", 1)
-            if d**3 > spectral_cap:
-                raise ValueError(
-                    f"LCHS eigensolve exceeds max_spectral_work: it needs {d**3} work units (d**3 with d={d}), "
-                    f"max_spectral_work={spectral_cap}. Raise max_spectral_work to at least {d**3}.")
-            eigenvalues = np.linalg.eigvalsh(l_part)
-            lower, upper = float(eigenvalues[0].real), float(eigenvalues[-1].real)
-        else:
-            lower = upper = 0.0
+        lower, upper = _hermitian_endpoints(l_part, real=real,
+            max_spectral_work=optional_limit(max_spectral_work, "max_spectral_work"))
         _numerical_psd_decision(
             lambda_min=lower,
             lambda_max=upper,
@@ -336,8 +371,12 @@ def _spectral_branch_requirements(dimension, *, eigensystems, branches):
     return eigensystems*(8*D**3 + 34*D**2) + branches*(D**3 + 2*D**2 + 3*D), 64*D*D + 24*D
 
 
-# Absolute pruning and imaginary-residue cutoff for the combined H + k*L Pauli
-# coefficients. Registered in ENGINEERING_CONSTANTS with its revisit condition.
+# Absolute imaginary-residue window of the product-formula census only, the
+# window of its operator validation (error_budget._validated_terms). Pruning
+# and every other check of a combined node read that node's relative cutoff
+# (combine_aligned). A node above unit scale can therefore pass its own
+# cutoff and still be refused by the census. Registered in
+# ENGINEERING_CONSTANTS with its revisit condition.
 _PAULI_COEFFICIENT_ATOL = 1.0e-12
 
 
@@ -395,12 +434,13 @@ class _CombinedTrotterTerms:
     identity_coefficient is the real coefficient c_I of the identity label,
     applied as the branch phase exp(-i*t*c_I). traceless_terms are the kept
     non-identity (label, coefficient) pairs in sorted label order.
-    pruned_labels records the labels removed by _PAULI_COEFFICIENT_ATOL, and
-    pruned_l1_mass is a finite binary64 upper bound d_up on the summed
-    moduli of their coefficients (error_budget.upper_dropped_mass), from
-    which each application reports its own pruning bound.
-    kept_indices and pruned_indices are the positions of the kept and
-    dropped rows in the decomposition's aligned union
+    pruned_labels records the labels removed by the node's coefficient_cutoff
+    (combine_aligned), and pruned_l1_mass is a finite binary64 upper bound
+    d_up on the summed moduli of their coefficients
+    (error_budget.upper_dropped_mass), from which each application reports
+    its own pruning bound. The cutoff is also the node's imaginary-residue
+    window. kept_indices and pruned_indices are the positions of the kept
+    and dropped rows in the decomposition's aligned union
     (_TrotterPauliDecomposition.aligned_rows), recorded while the rows are
     combined, so the saved node table needs no label hashing.
     """
@@ -411,6 +451,7 @@ class _CombinedTrotterTerms:
     pruned_l1_mass: float
     kept_indices: tuple[int, ...] = ()
     pruned_indices: tuple[int, ...] = ()
+    coefficient_cutoff: float = 0.0
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -421,9 +462,9 @@ class _LCHSTrotterNodeRecord:
     exp(-i*t*(k*L+H)), before the node's LCU coefficient, the physical input
     norm and the PSD recovery are applied.
 
-    A pf_bound_value computed from the census (the shared Pauli commutation
-    table of anticommuting pairs and nested-commutator triples in
-    error_budget) uses a coefficient evaluated with
+    A pf_bound_value computed from the census (the anticommuting Pauli pairs
+    and nested commutation indicators of error_budget.coefficient_up) uses a
+    coefficient evaluated with
     scaled binary64 products and sums rounded upward, followed by exact
     rational rescaling. bound_variant identifies the expression being
     enclosed.
@@ -574,7 +615,7 @@ def _pauli_decomposition_requirements(dimension):
     With q = log2(d), N = d**2 and h = q//2, the half-label widths are (h,)
     for even q and (h, q-h) for odd q. The work is (34*q+28)*N + 2*H and the
     peak bytes (104+2*q)*N + T, with T the sum of j*4**j and H the sum of
-    (j+1)*4**j over those widths. At the default max_select_work=1_000_000_000,
+    (j+1)*4**j over those widths. Under an explicit max_select_work=1_000_000_000,
     the decomposition stage accepts d = 1024 (q = 10), with 385,888,256
     work units and 130,028,544 bytes. At d = 2048 (q = 11), its
     1,686,179,840 work units exceed that limit. Later SELECT stages set
@@ -593,8 +634,8 @@ def _pauli_decomposition_requirements(dimension):
     return work, peak_bytes
 
 
-def _admit_pauli_decomposition(dimension: int, *, max_bytes, max_select_work) -> int:
-    """Check both dense Pauli transforms against the limits and return the SELECT work remaining.
+def _admit_pauli_decomposition(dimension: int, *, max_bytes, max_select_work) -> tuple[int, int | None]:
+    """Check both dense Pauli transforms against the limits and return their work and the SELECT work remaining.
 
     The inputs are already allocated complex128 matrices of power-of-two
     order d. Put q = log2(d), N = d**2 and h = q//2. The half-label table
@@ -630,7 +671,7 @@ def _admit_pauli_decomposition(dimension: int, *, max_bytes, max_select_work) ->
     operators._pauli.pauli_coefficients counted by
     _pauli_decomposition_requirements.
 
-    The default max_select_work=1_000_000_000 accepts this stage through
+    An explicit max_select_work=1_000_000_000 accepts this stage through
     d = 1024 (385,888,256 work units and 130,028,544 bytes), while d = 2048
     needs 1,686,179,840 work units. This is a decomposition-stage boundary, not
     a guarantee that a complete dense Plan at q = 10 fits every limit.
@@ -641,19 +682,20 @@ def _admit_pauli_decomposition(dimension: int, *, max_bytes, max_select_work) ->
         max_select_work: Shared decomposition and SELECT work limit.
 
     Returns:
-        The work limit minus the work set aside for the two transforms and
-        the extraction. Work and bytes equal to their limits are accepted.
+        ``(work, remaining)``: the work set aside for the two transforms and
+        the extraction, and the limit minus it, or None without a limit.
+        Work and bytes equal to their limits are accepted.
     """
     from nwqlib.operators.access import _check_bytes
     work, peak_bytes = _pauli_decomposition_requirements(dimension)
     _check_bytes(peak_bytes, max_bytes, "LCHS Pauli decomposition")
-    max_select_work = integer(max_select_work, "max_select_work", 1)
-    if work > max_select_work:
-        raise ValueError(
+    max_select_work = optional_limit(max_select_work, "max_select_work")
+    if exceeds(work, max_select_work):
+        raise ResourceLimitError(
             f"LCHS Pauli decomposition needs {work} units of max_select_work, above the limit "
-            f"{max_select_work}; it is the first stage charged to LCHS(max_select_work=...), "
-            f"so this stage needs that field to be at least {work}")
-    return max_select_work - work
+            f"{max_select_work}; it is the first stage charged to max_select_work, "
+            f"so this stage needs that limit to be at least {work}")
+    return work, None if max_select_work is None else max_select_work - work
 
 
 # This serves LCHS only. QPE's controlled powers make their own identity and
@@ -669,46 +711,61 @@ def _combined_trotter_terms(
     exp(-i*t*c_I) differs between branches. It is a relative phase inside
     the LCU sum, not a global phase, and it is kept as a per-branch phase.
     Pauli coefficients of the Hermitian L and H are real up to decomposition
-    rounding. An identity coefficient whose imaginary part exceeds
-    _PAULI_COEFFICIENT_ATOL raises here. Other labels are checked where their
-    rotation angles are formed.
+    rounding. An identity coefficient whose imaginary part exceeds the
+    node's cutoff raises here. Other labels are checked where their rotation
+    angles are formed.
 
     This function computes the node's dropped mass. The cutoff test runs before
     the identity is separated, so an identity coefficient it drops belongs
     in the mass. The mass is a finite binary64 upper bound on the sum of
     abs(real(c)) + abs(imag(c)) over precisely the dropped
-    coefficients, accumulated upward (error_budget.upper_dropped_mass). That
+    coefficients, their correctly rounded sum moved up two units in the last
+    place when more than one is nonzero (error_budget.upper_dropped_mass). That
     sum bounds the sum of their moduli. It is not the exact sum of complex
     magnitudes.
     """
-    return combine_aligned(decomposition.aligned_rows, k_value, _PAULI_COEFFICIENT_ATOL)
+    return combine_aligned(decomposition.aligned_rows, k_value)
 
 
-def combine_aligned(rows, k, cutoff) -> _CombinedTrotterTerms:
+def combine_aligned(rows, k) -> _CombinedTrotterTerms:
     """Combine and prune one k-node from the aligned L/H rows, in their lexical order.
 
     For each (label, h, l, has_l, is_identity) row the value is
     complex(h + k*l) when L has the label and complex(h) otherwise, the
     original operand order, so an H-only row is not multiplied by an
-    artificial zero and an L-only row keeps the addition to 0.0. A value
-    whose modulus is at most the cutoff is dropped. A kept identity is the
-    real branch phase coefficient. Other kept values are the traceless
+    artificial zero and an L-only row keeps the addition to 0.0.
+
+    One cutoff serves the whole node, PAULI_COEFFICIENT_RTOL times the node's
+    operand scale max_l max(|h_l|, |k*l_l|) over all its labels, the identity
+    included, and 0 for an all-zero node. It is homogeneous,
+    cutoff(s*H, s*L, k) = s*cutoff(H, L, k), so a change of unit A -> s*A,
+    T -> T/s keeps the same terms. Taking the operands, not |h + k*l|, keeps
+    the roundoff residual of an exact cancellation below the cutoff. It can
+    still remove a real small term beside a large one, including a rotation
+    beside a large identity, so a fixed-step route reports the mass it dropped
+    (_trotter_pruning_bound) and a budgeted route charges it to its allowance.
+
+    A value whose modulus is at most the cutoff is dropped. A kept identity
+    is the real branch phase coefficient. Other kept values are the traceless
     terms. The kept coefficients and their order equal those of combining
     the dictionaries and sorting the union. The dropped values are passed one
     by one to error_budget.upper_dropped_mass, whose result is a certified
     upper bound on the summed moduli of exactly the dropped coefficients.
 
-    Work per node, in scalar visits (_coefficient_preparation_work): two
-    arithmetic visits per L row, at most six conversion, comparison,
-    output and reduction visits per union row, one tuple-copy visit per
-    output row and four scalar identity checks, 2*m_L + 7*u + 4, plus the
-    mass stream's 16*u + 4. These units are proxies for the limit checks, not timings
-    or equal-cost CPU operations.
+    Work per node, in scalar visits (_coefficient_preparation_work): one
+    visit per union row for the operand scale, two arithmetic visits per L
+    row, at most six conversion, comparison, output and reduction visits per
+    union row, one tuple-copy visit per output row and four scalar identity
+    checks, 2*m_L + 8*u + 4, plus the mass stream's 10*u + 5. These units are
+    proxies for the limit checks, not timings or equal-cost CPU operations.
     """
+    from nwqlib.subroutines.pauli_decomposition import PAULI_COEFFICIENT_RTOL
     from nwqlib.subroutines.trotterization.error_budget import upper_dropped_mass
 
     kept, pruned, kept_indices, pruned_indices = [], [], [], []
     identity = 0.0
+    cutoff = PAULI_COEFFICIENT_RTOL*max(
+        (max(abs(h), abs(k*l_value) if has_l else 0.0) for _, h, l_value, has_l, _ in rows), default=0.0)
 
     def dropped_values():
         nonlocal identity
@@ -740,6 +797,7 @@ def combine_aligned(rows, k, cutoff) -> _CombinedTrotterTerms:
         pruned_l1_mass=mass_up,
         kept_indices=tuple(kept_indices),
         pruned_indices=tuple(pruned_indices),
+        coefficient_cutoff=cutoff,
     )
 
 
@@ -747,15 +805,16 @@ def _coefficient_preparation_work(q, m_l, m_h, union, nodes):
     """Return (W_align, W_nodes): alignment once and combination of ``nodes`` distinct k-nodes.
 
     With s = m_L + m_H and u the union size including identity,
-    W_align = (q+4)*s + (q+2)*u and each node costs 2*m_L + 7*u + 4
-    combination visits plus 16*u + 4 for its streamed upper dropped mass
-    (upper_dropped_mass, at most 16 visits per dropped coefficient and four
-    per node), so W_nodes = K*(2*m_L + 23*u + 8). Classical planning counts
+    W_align = (q+4)*s + (q+2)*u and each node costs 2*m_L + 8*u + 4
+    combination visits, including its operand-scale scan (combine_aligned),
+    plus 10*u + 5 for its streamed upper dropped mass (upper_dropped_mass, at
+    most 10 visits per dropped coefficient and five per node), so
+    W_nodes = K*(2*m_L + 18*u + 9). Classical planning counts
     W_coeff = W_dec + W_align + W_nodes. Zero nodes add no node work. These
     units are proxies for the limit checks, not timings or equal-cost CPU operations.
     """
     s = m_l + m_h
-    return (q + 4)*s + (q + 2)*union, nodes*(2*m_l + 23*union + 8)
+    return (q + 4)*s + (q + 2)*union, nodes*(2*m_l + 18*union + 9)
 
 
 def _node_key(k_value) -> str:
@@ -850,7 +909,12 @@ def _selected_node_table(decomposition, combined_nodes, k_values) -> LCHSProduct
     Each node's arrays are formed from the kept and dropped row positions
     that combine_aligned recorded, in their recorded order, and made
     read-only. The labels are the decomposition's aligned union. Every grid
-    position must name a combined node.
+    position must name a combined node. The kept Pauli coefficients of the
+    Hermitian L and H are real up to decomposition rounding, and an
+    imaginary residue above the node's own cutoff (combine_aligned) is
+    refused here, once per node, so the rotations formed from the table at
+    each application (host_pf._rotation_sequence) read their real parts
+    directly.
     """
     labels = tuple(row[0] for row in decomposition.aligned_rows)
     grid_keys = tuple(_node_key(k) for k in k_values)
@@ -865,9 +929,12 @@ def _selected_node_table(decomposition, combined_nodes, k_values) -> LCHSProduct
     nodes = []
     for key in keys:
         combined = combined_nodes[key]
+        coefficients = frozen([value for _, value in combined.traceless_terms], np.complex128)
+        if np.any(np.abs(coefficients.imag) > combined.coefficient_cutoff):
+            raise ValueError("Hamiltonian coefficients must be real for Pauli rotations")
         nodes.append(MappingProxyType(dict(
             union_indices=frozen(combined.kept_indices, np.int64),
-            coefficients=frozen([value for _, value in combined.traceless_terms], np.complex128),
+            coefficients=coefficients,
             identity_coefficient=float(combined.identity_coefficient),
             pruned_l1_mass=float(combined.pruned_l1_mass),
             pruned_indices=frozen(combined.pruned_indices, np.int64),
@@ -952,164 +1019,6 @@ def stored_pf_nodes(data) -> LCHSProductFormulaNodes:
     return table
 
 
-def _lchs_census_choice(p, q, nodes, E, N, *, order, max_work, max_bytes, census_held,
-                        limit_owner, work_field, field_work_offset=0,
-                        linear_and_other_work=0, work_used=0):
-    """Choose the shared census variant and block for ``nodes`` node contractions, or refuse.
-
-    One ordered structure over the p shared nonidentity labels serves every
-    distinct active k-node. With w = ceil(q/64), P = p(p-1)/2, E pairs, N
-    nested tests and F <= N triples,
-
-        G = wP + 1_D*wN,   V = E (order 1), 2p+4E (order 2, relaxed_prefix),
-                               E+F (order 2, exact_census),
-
-    and the shared work is G + K_n*V, because census_work counts one
-    structural scan plus one node contraction and each further node adds V. The
-    structure bytes are census_bytes with F_cap = J before pairs or N after
-    pairs for exact_census at order 2 and zero otherwise, and census_held
-    counts the other LCHS arrays held in memory together with the census,
-    never the census's own buffers. exact_census is chosen when its complete work and
-    storage fit, otherwise relaxed_prefix at order 2. The result is
-    (variant, block, need_work, census bytes). linear_and_other_work
-    carries the preparation work and the later work set aside under the same
-    limit, and work_used the prior noncensus work. These units are
-    proxies for the limit checks, not timings or equal-cost CPU operations.
-
-    Node restriction bytes (_node_bound_coefficients). With E, F the shared
-    pair/triple counts, E', F' a node's counts and b the block used, the
-    shared formula (error_budget.census_bytes) is
-
-        B0 = B_held + 80p + 16pw + 32E + 48F + H_chunks + max(R_row, C_contract),
-        w = ceil(q/64),  H_chunks = 384[p+1+I_exact2(E+1)],
-        R_row = 32pw+64p+32w+65536,
-        C_contract = 56p+64b+48H(b)+65536 (order one or exact_census),
-                     72p+96b+48H(b)+65536 (order two, relaxed_prefix).
-
-    H(b) is ceil(E/b) at order one, ceil(E/b)+ceil(F/b) for full order two,
-    and 2 ceil(E/b) for relaxed order two. The extra 16p of the relaxed
-    variant covers the node-specific degree vector and its upward-rounded
-    output, and 32b covers the bounded endpoint gathers, remainder, union
-    and minimum. Writing the degree output releases its raw buffer, and every
-    degree gather is limited by the block size.
-
-    32E+48F already covers the builders' overlapping partial arrays and
-    concatenated tables. After the builders finish only 16E+24F of shared
-    table data remains. Boolean selection of rows from a two-dimensional
-    array also creates an intp index array, 8E' or 8F' bytes on the checked
-    64-bit NumPy stack, in addition to the selected output. A pair-mask
-    expression can transiently hold three E-byte Boolean arrays, a
-    triple-mask expression three F-byte arrays, and the mask remains while
-    the row-index array and selected output coexist. The table and
-    selection bytes held at the same time are 16E+24F for an all-kept node, and for a
-    partial node 16E+24F+max(3E, E+24E') at pair selection,
-    16E+24F+16E'+max(3F, F+32F') at triple selection and at most
-    16E+24F+16E'+24F' plus the contraction formula at remap/contraction. The
-    pair stage is at most 41E+24F, the triple stage at most 32E+57F and the
-    contraction at most 32E+48F. For the pair stage the excess over
-    32E+48F is at most 9E-24F <= 9E, for the triple stage at most 9F, and
-    the stages are sequential, hence the maximum. A simple sufficient
-    addition to the complete B0, reusing the double-table storage that B0
-    already covers, is
-
-        R_restrict = 9 max(E, F),   B_LCHS = B0 + R_restrict.
-
-    It is a sufficient bound, not the smallest possible allocation formula.
-    Nodes are sequential, so the maximum over nodes applies, never their
-    sum. The choice has only E and the cap F_cap = N before the triple
-    census, so it adds 9*max(E, F_cap) to census_held for every variant
-    tried, refused variants included. For E = F = 0 it adds zero. Position
-    construction, the kept mask and the magnitude arrays fit the existing
-    80p input and 56p/72p contraction allowances, and the remap's iterator
-    overhead belongs to H0.
-
-    Block. The largest fitting block of choose_census_block is replaced by
-    65536 when it exceeds 65536 and the complete byte bound at 65536 also
-    fits, and the recomputed byte bound at 65536 is returned. Lowering b
-    reduces 64b or 96b but can increase 48H(b), so the clamp checks the
-    entire formula. The block changes how the upward-rounded partial sums are
-    grouped. W_up remains an upper bound under the arithmetic assumptions of
-    coefficient_up but need not be
-    bitwise equal to the result at another block, and a separate node
-    census agrees at the same b because filtering preserves row order. On
-    F = N label sets (two commuting classes that anticommute across, every
-    nested test succeeding) with two nodes contracted under max_bytes =
-    10**10, the bytes accepted by the check at q = 6, 7, 8 were 6,412,128, 28,330,064
-    and 190,055,472 at blocks 48,640, 65,536 and 65,536, against traced
-    peaks of 3,194,384, 19,435,392 and 153,234,976 with every label kept
-    and 4,246,451, 22,177,139 and 178,333,379 when the first node omits the
-    first label and the second node the last (CPython 3.12.14, NumPy
-    2.5.2). This qualifies the implementation on the checked
-    CPython/NumPy stack with the shared H0 convention. It is not a
-    process-RSS bound or a qualification of another NumPy implementation.
-
-    A refusal names the limit that governs it as ``limit_owner(work_field=...)``
-    and ``limit_owner(max_bytes=...)``. field_work_offset is the work of
-    that field counted before ``max_work`` was handed here (the field's
-    value is max_work + field_work_offset), so each stated requirement is a
-    value of the field itself.
-    """
-    from nwqlib.subroutines.trotterization.error_budget import (
-        census_bytes, census_sizes, census_work, choose_census_block,
-    )
-
-    if nodes < 1:
-        raise ValueError("no active nodes need a census")
-    P, _ = census_sizes(p)
-    word_count = (q+63)//64
-    variants = ("exact_census",) if order == 1 else ("exact_census", "relaxed_prefix")
-    rejected = []
-    for variant in variants:
-        exact2 = order == 2 and variant == "exact_census"
-        F_cap = N if exact2 else 0
-        G = word_count*(P+(N if exact2 else 0))
-        first = census_work(p, q, order=order, variant=variant,
-                            pairs=E, nested=N if exact2 else 0, triples=F_cap)
-        V = first-G
-        need_work = work_used + linear_and_other_work + first + (nodes-1)*V
-        # One node's Boolean selection (masks, intp row index, selected
-        # rows) beyond the double-table reserve of census_bytes.
-        reserve = 9*max(E, F_cap)
-        held = census_held + reserve
-        fit = choose_census_block(p, q, E, F_cap, max_bytes,
-                                  order=order, variant=variant, held=held)
-        if need_work <= max_work and fit is not None:
-            block, size = fit
-            clamped = census_bytes(p, q, E, F_cap, 65536, order=order,
-                                   variant=variant, held=held)
-            if block > 65536 and clamped <= max_bytes:
-                block, size = 65536, clamped
-            return variant, block, need_work, size
-        rejected.append(_census_refusal_part(
-            variant, need_work, max_work, fit is not None,
-            census_bytes(p, q, E, F_cap, 1, order=order, variant=variant, held=held),
-            max_bytes, census_held, reserve, limit_owner, work_field, field_work_offset))
-    raise ValueError(
-        "LCHS census has no admitted variant: " + "; ".join(rejected) + ". These numbers "
-        "admit the census stage only; later LCHS stages are admitted separately"
-    )
-
-
-def _census_refusal_part(variant, need_work, max_work, bytes_fit, block1_bytes, max_bytes,
-                         census_held, reserve, limit_owner, work_field, field_work_offset):
-    """Return the requirement of one refused census variant in the Method fields that limit it.
-
-    The byte figure is the block-1 bound, one of the block sizes that
-    choose_census_block checks, not the smallest bound over those block sizes.
-    """
-    reasons = []
-    if need_work > max_work:
-        reasons.append(f"raise {limit_owner}({work_field}=...) to at least "
-                       f"{need_work+field_work_offset} (now {max_work+field_work_offset})")
-    if not bytes_fit:
-        held = f"{census_held} bytes held by LCHS"
-        if reserve:
-            held += f" and a {reserve}-byte node restriction reserve"
-        reasons.append(f"no checked contraction block fits {limit_owner}(max_bytes={max_bytes}), "
-                       f"and the checked block-1 envelope is {block1_bytes} bytes including {held}")
-    return f"{variant}: " + " and ".join(reasons)
-
-
 def _union_nonidentity_labels(decomposition: _TrotterPauliDecomposition) -> tuple[str, ...]:
     """Return the sorted union of the nonidentity labels of L and H."""
     return tuple(sorted(
@@ -1125,8 +1034,8 @@ def _node_bound_coefficients(
     keys: Sequence[str],
     *,
     order: int,
-    max_work: int,
-    max_bytes: int,
+    max_work: int | None,
+    max_bytes: int | None,
     census_held: int,
     limit_owner: str = "LCHS",
     work_field: str = "max_select_work",
@@ -1140,162 +1049,130 @@ def _node_bound_coefficients(
     labels of L and H (_union_nonidentity_labels), and node_terms maps each
     key to its kept (label, coefficient) rows in that order: a combined
     node's traceless_terms, or the rows of a saved node table read in place
-    (_BorrowedRows). Deleting zero-magnitude (pruned) labels preserves the relative order
-    of the remaining labels, so restricting the union's pair and triple rows
-    to a node's kept labels evaluates the same expression as a separate
-    census on that node's kept terms (CSTWZ doi:10.1103/PhysRevX.11.011020,
-    Eqs. (120)-(121), via error_budget.coefficient_up). The restriction
-    keeps row order, so the upward-rounded reductions are those of that separate
-    census at the same block.
+    (_BorrowedRows). The K listed nodes form a K x p magnitude matrix over
+    the union, with exact zeros at the labels a node omits.
+    error_budget.coefficient_up contracts every row against one ordered pair
+    structure. A zero magnitude removes its label's contributions exactly,
+    so each row's exact coefficient is that of a separate census on the
+    node's kept terms in their order with the same expression (CSTWZ
+    doi:10.1103/PhysRevX.11.011020, Eqs. (120)-(121)). Its outward W_up can
+    differ from a separate census in the last bits, because the rounding
+    factors and reduction trees include the zero entries.
 
-    For relaxed_prefix, coefficient_up rebuilds D_v from this node's
-    restricted pair rows and magnitudes, then uses
-    U_ij = min(sum_{k>i}|c_k|, D_i+D_j-|c_i|). The degree vector is not
-    shared across nodes with different weights or pruned supports.
+    Selection. The pair scan of the union counts N(A) = sum_i e_i (p-i-1)
+    and chooses the expression once for all K nodes from N(A)*max(w, K),
+    w = ceil(q/64) (error_budget.census_structure with weightings=K):
+    "exact_census" at most error_budget.EXACT_CENSUS_WORD_TESTS,
+    "relaxed_prefix" above it. The nested masks of the exact expression
+    are formed once per tile of pairs and reused by the K node
+    contractions, which make K*N(A) weight products beside the w*N(A)
+    word tests, so the count is the larger of the two. All K nodes take the
+    same expression. No node is contracted to choose, and the limits never
+    choose the expression.
 
-    The limit check (_lchs_census_choice) runs before any packing, and the
-    complete conservative variants use E = P and N = J. If neither fits,
-    the pair-only stage is checked with the order-one pair formula and
-    refused before packing if even that fails. After the pairs exist, the
-    computed E and N = nested_test_count choose exact_census or relaxed_prefix before
-    any triple test, against the work of all K_n node contractions and the
-    bytes of the cached combined nodes in census_held. The shared pairs and
-    triples are released after the last contraction.
+    Limits. Before the scan, the label packing p*q and the w*p(p-1)/2 pair
+    tests, with the caller's prior and other work, are checked against
+    ``max_work``, and the masks with ``census_held`` against ``max_bytes``
+    (None: the physical memory). After the scan and before any nested test,
+    the work G + K*V of the chosen expression (error_budget.census_work with
+    nodes=K) and its error_budget.census_bytes with nodes=K plus
+    ``census_held`` are checked. ``census_held`` counts the other LCHS
+    arrays held together with the census, never its own buffers. A refusal
+    names ``limit_owner(work_field=...)`` or ``limit_owner(max_bytes=...)``
+    and the value it needs (LCHS(max_select_work=...), the default, for
+    SELECT selection and the classical actions of host_pf,
+    LCHSRefinement(max_structural_work=...) for fixed-step refinement).
+    field_work_offset is the work of that field counted before ``max_work``
+    was handed here, so each stated requirement is a value of the field.
 
-    Restriction. A node keeping every label reads the shared pair and
-    triple tables in place. Otherwise its rows are the Boolean-masked copies of the
-    shared rows, remapped in place with
-    ``np.take(position, sub, out=sub, mode="clip")``. NumPy's default
-    ``mode="raise"`` buffers the full output even with ``out`` (7,200,328
-    temporary bytes for a 7,200,000-byte ``sub`` on NumPy 2.5.2, against
-    232 bytes with ``mode="clip"``). Clipping changes no
-    index here because the masks select only kept labels, so every selected
-    old index lies in [0, p) and position[old_index] lies in the new node
-    range. The node's copies are deleted after its evaluation is recorded,
-    so the previous node's copies are not in memory while the next node's
-    are built. _lchs_census_choice counts the selection arrays as
-    9*max(E, F) bytes on top of the shared census formula, reusing the
-    double-table allowance of that formula.
-
-    This count assumes no Boolean temporary elision. The gathered masks are
-    owning, writable, C-contiguous one-byte `np.bool_` arrays. NumPy 2.5.2's
-    release-build elision threshold is 262,144 bytes, with 32 bytes in a
-    `Py_DEBUG` build. Reuse also requires an exact uniquely referenced array,
-    compatible shape and casting, and approval of the interpreter call stack.
-    Reaching the size threshold alone does not guarantee reuse. The remap uses
-    matching native eight-byte integer arrays and `mode="clip"` on indices
-    already proved in range.
-
-    Refusals name ``limit_owner(work_field=...)`` and
-    ``limit_owner(max_bytes=...)``, the limits that govern this census
-    (LCHS(max_select_work=...), the default, for SELECT selection and the
-    classical actions of host_pf, LCHSRefinement(
-    max_structural_work=...) for fixed-step refinement). field_work_offset
-    is the work of that field counted before ``max_work`` was handed here.
-
-    Work: p*q label packing plus G + K_n*V, returned as ledger["work"]. The
+    Work: p*q label packing plus G + K*V, returned as ledger["work"]. The
     caller adds its own preparation and application work. The first listed
     node's evaluation carries the structure's pair and nested tests, the
-    others zero. These units are proxies for the limit checks, not timings or
-    equal-cost CPU operations.
+    others zero. These units are proxies for the limit checks, not timings
+    or equal-cost CPU operations.
 
     Returns:
         ({key: _BoundCoefficientEvaluation}, ledger) with ledger keys
-        ``work``, ``bytes``, ``variant``, ``block``, ``pair_checks``,
-        ``nested_checks``, ``structures`` and ``contractions``.
+        ``work``, ``bytes``, ``variant``, ``pair_checks``,
+        ``nested_checks``, ``word_tests``, ``selection_count``,
+        ``structures`` and ``contractions``. ``word_tests`` is the w*N(A)
+        logical nested word tests, ``selection_count`` the N(A)*max(w, K)
+        that chose the expression, and ``nested_checks`` the nested tests
+        made, zero for "relaxed_prefix".
     """
+    from nwqlib._limits import exceeds, memory_limit
     from nwqlib.subroutines.trotterization import error_budget as eb
 
     keys = tuple(keys)
-    ledger = dict(work=0, bytes=0, variant=None, block=None, pair_checks=0, nested_checks=0,
-                  structures=0, contractions=0)
+    ledger = dict(work=0, bytes=0, variant=None, pair_checks=0, nested_checks=0, word_tests=0,
+                  selection_count=0, structures=0, contractions=0)
     if not keys:
         return {}, ledger
     labels = tuple(labels)
-    p, q = len(labels), num_qubits
-    packing = p*q
-    P, J = eb.census_sizes(p)
-    try:
-        _lchs_census_choice(p, q, len(keys), P, J, order=order, max_work=max_work,
-                            max_bytes=max_bytes, census_held=census_held, limit_owner=limit_owner,
-                            work_field=work_field, field_work_offset=field_work_offset,
-                            linear_and_other_work=linear_and_other_work+packing, work_used=work_used)
-    except ValueError:
-        # Pair-only stage: masks and the complete pair scan, priced by the
-        # order-one census law with E = P.
-        pair_work = (work_used + linear_and_other_work + packing
-                     + eb.census_work(p, q, order=1, variant="exact_census", pairs=P))
-        pair_fit = eb.choose_census_block(p, q, P, 0, max_bytes, order=1,
-                                          variant="exact_census", held=census_held)
-        if pair_work > max_work or pair_fit is None:
-            block1 = eb.census_bytes(p, q, P, 0, 1, order=1, variant="exact_census",
-                                     held=census_held)
-            requirement = _census_refusal_part(
-                "pair stage", pair_work, max_work, pair_fit is not None, block1, max_bytes,
-                census_held, 0, limit_owner, work_field, field_work_offset)
-            raise ValueError(
-                f"LCHS census exceeds its allowance at the {requirement}. These figures admit "
-                "the pair stage only; the complete census and later LCHS stages are admitted "
-                "separately"
-            ) from None
-    x, z = eb.pack_labels(labels, q)
-    pairs, pair_checks = eb.pair_structure(x, z)
-    nested = eb.nested_test_count(pairs, p) if order == 2 else 0
-    variant, block, need_work, need_bytes = _lchs_census_choice(
-        p, q, len(keys), len(pairs), nested, order=order, max_work=max_work, max_bytes=max_bytes,
-        census_held=census_held, limit_owner=limit_owner, work_field=work_field,
-        field_work_offset=field_work_offset, linear_and_other_work=linear_and_other_work+packing,
-        work_used=work_used)
-    triples, nested_checks = None, 0
-    if order == 2 and variant == "exact_census":
-        triples, nested_checks = eb.triple_structure(x, z, pairs)
-    del x, z
+    p, q, nodes = len(labels), num_qubits, len(keys)
+    words = (q + 63) // 64
+    prior = work_used + linear_and_other_work + p * q
+    limit = memory_limit(max_bytes)
+
+    def admit(stage, work, size):
+        reasons = []
+        if exceeds(work, max_work):
+            reasons.append(f"{limit_owner}({work_field}=...) to at least {work + field_work_offset} "
+                           f"(now {max_work + field_work_offset})")
+        if exceeds(size, limit):
+            reasons.append(f"{limit_owner}(max_bytes=...) to at least {size} (now {max_bytes})"
+                           if max_bytes is not None else
+                           f"memory: it needs {size} bytes, above the physical memory ({limit} bytes)")
+        if reasons:
+            raise ResourceLimitError(
+                f"LCHS census {stage} exceeds its allowance. Raise " + " and ".join(reasons)
+                + f". The bytes include {census_held} bytes held by LCHS. These figures admit the "
+                "census only. Later LCHS stages are admitted separately")
+
+    admit("pair scan", prior + words * (p * (p - 1) // 2),
+          census_held + eb.census_bytes(p, q, 0, order=1, variant="exact_census"))
+    census = eb.census_structure(labels, q, order, weightings=nodes, max_bytes=max_bytes)
+    exact2 = order == 2 and census.variant == "exact_census"
+    need_work = prior + eb.census_work(p, q, order=order, variant=census.variant, pairs=census.pairs,
+                                       nested=census.nested_tests if exact2 else 0, nodes=nodes)
+    need_bytes = census_held + eb.census_bytes(p, q, census.pairs, order=order, variant=census.variant,
+                                               nodes=nodes, tile=census.nested_tile)
+    admit(f"({census.variant}, {nodes} nodes)", need_work, need_bytes)
     index = {label: position for position, label in enumerate(labels)}
-    evaluations: dict[str, Any] = {}
-    first = True
-    for key in keys:
-        rows = node_terms[key]
-        kept = np.zeros(p, dtype=bool)
-        magnitudes = np.zeros(p, dtype=np.float64)
-        for label, coefficient in rows:
+    magnitudes = np.zeros((nodes, p), dtype=np.float64)
+    for row, key in zip(magnitudes, keys, strict=True):
+        for label, coefficient in node_terms[key]:
             value = complex(coefficient)
             # Same absolute imaginary-residue admission as the census's
-            # operator validation (error_budget._validated_terms).
+            # operator validation (error_budget._validated_terms), not the
+            # node's relative cutoff (see _PAULI_COEFFICIENT_ATOL).
             if abs(value.imag) > _PAULI_COEFFICIENT_ATOL:
                 raise ValueError(
                     "Hamiltonian coefficients must be real for Trotter error bounds; "
                     f"term {label!r} has coefficient {value} (build the operator from "
                     "real coefficients or simplify away numerical imaginary parts)"
                 )
-            kept[index[label]] = True
-            magnitudes[index[label]] = abs(value.real)
-        node_pairs, node_triples = pairs, triples
-        if not kept.all():
-            position = np.cumsum(kept, dtype=np.intp) - 1
-            node_pairs = pairs[kept[pairs[:, 0]] & kept[pairs[:, 1]]]
-            # Every selected index is a kept label, so clip changes none and
-            # avoids take's full output buffer of mode="raise".
-            np.take(position, node_pairs, out=node_pairs, mode="clip")
-            if triples is not None:
-                node_triples = triples[
-                    kept[triples[:, 0]] & kept[triples[:, 1]] & kept[triples[:, 2]]
-                ]
-                np.take(position, node_triples, out=node_triples, mode="clip")
-            del position
-        coefficient = eb.coefficient_up(magnitudes[kept], node_pairs, order=order, variant=variant,
-                                        triples=node_triples, block=block)
-        evaluations[key] = eb._BoundCoefficientEvaluation(
+            row[index[label]] = abs(value.real)
+    coefficients = eb.coefficient_up(magnitudes, census.rows, order=order, variant=census.variant,
+                                     x=census.x, z=census.z)
+    del magnitudes
+    nested_checks = census.nested_tests if exact2 else 0
+    evaluations = {
+        key: eb._BoundCoefficientEvaluation(
             coefficient=coefficient,
-            pauli_term_count=len(rows),
-            pair_commutation_checks=pair_checks if first else 0,
+            pauli_term_count=len(node_terms[key]),
+            pair_commutation_checks=census.pair_tests if first else 0,
             nested_commutation_checks=nested_checks if first else 0,
-            bound_variant=variant,
+            bound_variant=census.variant,
+            nested_word_tests=census.word_tests,
         )
-        first = False
-        del node_pairs, node_triples
+        for first, (key, coefficient) in zip((True,) + (False,) * (nodes - 1),
+                                             zip(keys, coefficients, strict=True), strict=True)
+    }
     ledger.update(work=need_work - work_used - linear_and_other_work, bytes=need_bytes,
-                  variant=variant, block=block, pair_checks=pair_checks,
-                  nested_checks=nested_checks, structures=1, contractions=len(keys))
+                  variant=census.variant, pair_checks=census.pair_tests, nested_checks=nested_checks,
+                  word_tests=census.word_tests, selection_count=census.selection_count, structures=1,
+                  contractions=nodes)
     return evaluations, ledger
 
 
@@ -1433,10 +1310,10 @@ def _fixed_trotter_certificate_records(
     applications: Sequence[tuple[float, Sequence[int]]],
     method: LCHS,
     dense_validation: bool = False,
-    max_bytes=DEFAULT_MAX_BYTES,
-    max_dense_work=100_000_000,
-    max_structural_work=1_000_000_000,
-    max_steps=100_000,
+    max_bytes=None,
+    max_dense_work=None,
+    max_structural_work=None,
+    max_steps=None,
     counts=None,
     held_bytes: int = 0,
 ) -> tuple[list[_LCHSTrotterNodeRecord], ...]:
@@ -1470,20 +1347,19 @@ def _fixed_trotter_certificate_records(
     steps are kept, so T may exceed a requested allowance.
 
     Structural work, with p_k a node's kept count, K distinct nodes and M
-    applications: W_read + p*q + G + sum_nodes(16*p_k*(q+1) + V_k)
-    + 16*M*K. The 16*p_k*(q+1) term is this function's conservative
+    applications: W_read + p*q + G + K*V + sum_nodes(16*p_k*(q+1))
+    + 16*M*K, with G and V of error_budget.census_work. The 16*p_k*(q+1) term is this function's conservative
     preparation allowance for the census magnitudes and labels, once per
     node. It is not a decomposition or a second read of the saved rows.
     Bytes: the data already held and the saved table, plus the census
-    structure (_lchs_census_choice). No decomposition is counted here. These units
+    (_node_bound_coefficients). No decomposition is counted here. These units
     are proxies for the limit checks, not timings or equal-cost CPU operations. All
     node work accumulates in the supplied counters, and first evaluations
     carry the census tests.
 
-    The default max_structural_work is 1_000_000_000 logical visits,
-    matching the scale of building the node table. It governs this
-    explicitly requested structural refinement independently of
-    max_dense_work, whose default is 100_000_000.
+    max_structural_work governs this explicitly requested structural
+    refinement independently of max_dense_work. Each limit set to None
+    sets no limit, and max_bytes=None uses the physical memory.
 
     Returns:
         One record list per application, in quadrature-position order.
@@ -1493,9 +1369,9 @@ def _fixed_trotter_certificate_records(
 
     from nwqlib._linalg_laws import singular_values_work
     from nwqlib.operators.access import _check_bytes
-    max_dense_work = integer(max_dense_work, "max_dense_work", 1)
-    max_structural_work = integer(max_structural_work, "max_structural_work", 1)
-    max_steps = integer(max_steps, "max_steps", 1)
+    max_dense_work = optional_limit(max_dense_work, "max_dense_work")
+    max_structural_work = optional_limit(max_structural_work, "max_structural_work")
+    max_steps = optional_limit(max_steps, "max_steps")
     counts = {} if counts is None else counts
     for name in ("structural_work", "stored_node_read_work", "dense_work", "known_peak_bytes",
                  "structural_bound_attempts", "structural_bound_completed", "pair_commutation_checks",
@@ -1512,7 +1388,7 @@ def _fixed_trotter_certificate_records(
         if len(step_counts) != len(grid):
             raise ValueError("fixed certificate schedule must match the k-node count")
         steps = tuple(integer(step, "fixed certificate step", 0) for step in step_counts)
-        if any(step > max_steps for step in steps):
+        if any(exceeds(step, max_steps) for step in steps):
             raise ValueError("fixed certificate steps exceed max_steps")
         schedules.append((elapsed_time, steps))
     q = nodes.num_qubits
@@ -1520,7 +1396,7 @@ def _fixed_trotter_certificate_records(
     table = dict(zip(nodes.keys, nodes.nodes, strict=True))
     # Work: one acquisition of each distinct node's stored rows and scalars.
     read_work = stored_node_read_work(len(node["union_indices"]) for node in nodes.nodes)
-    if counts["structural_work"]+read_work > max_structural_work:
+    if exceeds(counts["structural_work"]+read_work, max_structural_work):
         raise ValueError("fixed certificate exceeds max_structural_work before reading its node table")
     # Bytes: the borrowed table stays in the held payload of this phase.
     held = held_bytes+_stored_node_table_bytes(nodes)
@@ -1536,7 +1412,7 @@ def _fixed_trotter_certificate_records(
                         and any(elapsed_time for elapsed_time, _ in schedules))
     label_work = sum(16*len(rows[key])*(q+1) for key in census_keys)
     scalar_work = 16*len(schedules)*len(nodes.keys)
-    if counts["structural_work"]+label_work+scalar_work > max_structural_work:
+    if exceeds(counts["structural_work"]+label_work+scalar_work, max_structural_work):
         raise ValueError("fixed certificate exceeds max_structural_work before Pauli commutators")
     evaluations, ledger = _node_bound_coefficients(
         shared, q, rows, census_keys, order=order,
@@ -1558,9 +1434,12 @@ def _fixed_trotter_certificate_records(
         d = 1 << q
         for key in census_keys:
             p = len(rows[key])
-            # Bytes: 24 complex128 d-by-d arrays per term (term matrices,
-            # partial sums and commutator products).
-            peak = 384*p*d*d
+            # Bytes: 12 complex128 d-by-d arrays, whatever p. The dense pass
+            # forms one term matrix at a time, beside the suffix sum, the
+            # commutator products of that term and the copy that its spectral
+            # norm factors (error_budget._tail_commutator_norms). Its traced
+            # NumPy peak was 5.7 such arrays for q = 7 and 10 or 40 terms.
+            peak = 192*d*d
             # Work per term: 2 matrix products and 1 spectral norm (order 1) or
             # 6 products and 2 norms (order 2), d**3 per product, plus 24*d**2
             # entrywise operations. Each norm is np.linalg.norm(ord=2) in
@@ -1570,7 +1449,7 @@ def _fixed_trotter_certificate_records(
             products = 2 if order == 1 else 6
             work = products*p*d**3+order*p*singular_values_work(d)+24*p*d*d
             _check_bytes(held+peak, max_bytes, "fixed PF dense commutator arrays")
-            if counts["dense_work"]+work > max_dense_work:
+            if exceeds(counts["dense_work"]+work, max_dense_work):
                 raise ValueError("fixed certificate exceeds max_dense_work before dense commutators")
             counts["dense_work"] += work
             counts["known_peak_bytes"] = max(counts["known_peak_bytes"], held+peak)
@@ -1673,6 +1552,35 @@ def _unusable_kernel_stage_names(quadrature: Mapping[str, Any]) -> tuple[str, ..
     )
 
 
+def _coefficient_weighted_bound(coefficients: np.ndarray, node_bounds):
+    """Return sum_j |c_j|*e_j as a PhysicalScale, over the raw coefficients (_trotter_budget_quadrature_terms)."""
+    from nwqlib.problems.inputs import PhysicalScale, compose_recovery
+    magnitudes, lift = lifted_magnitudes(coefficients)
+    unlift = PhysicalScale(mantissa=0.5, exponent=1 - lift)
+    return scaled_sum([
+        compose_recovery(float(magnitude), unlift, bound)
+        for magnitude, bound in zip(magnitudes, node_bounds, strict=True)
+        if magnitude > 0 and bound > 0
+    ])
+
+
+def _trotter_pruning_bound(dropped_masses, *, coefficients: np.ndarray, elapsed_time: float):
+    """Return sum_j |c_j|*|t|*d_j, one application's operator bound on its deleted Pauli terms.
+
+    Deleting a term set of coefficient mass d_j from a node generator G_j
+    changes its evolution by ||exp(-i*t*G_j) - exp(-i*t*(G_j - D_j))|| <= |t|*d_j
+    (Duhamel, with ||D_j|| <= d_j), and the identity counts because it can be
+    a relative phase between LCU branches. The triangle inequality over the
+    LCU sum then gives this value. solution_error_budget.pruning_stage applies
+    the application's |w|*||v||*exp(shift*t) once, in place of any gamma, and t
+    is the application's own elapsed time, not always T. It bounds pruning
+    alone: a fixed step count leaves the product-formula error unknown, so
+    this is not a bound on the total error.
+    """
+    from nwqlib.subroutines.trotterization.error_budget import upper_pruning_error
+    return _coefficient_weighted_bound(coefficients, [upper_pruning_error(elapsed_time, mass) for mass in dropped_masses])
+
+
 def _trotter_budget_quadrature_terms(
     selections: list[_LCHSTrotterNodeRecord | TrotterStepSelection],
     *,
@@ -1686,9 +1594,16 @@ def _trotter_budget_quadrature_terms(
     SELECT plan, the classical Pauli actions and explicit refinement pass
     their per-node records here, so equal node records give equal values.
     The synthesis bound sum_j |c_j|*e_j is the triangle inequality over the
-    LCU sum, with e_j the node's PF plus pruning bound. It is an operator-norm
-    bound on the ideal finite sum before physical input and PSD recovery
-    weighting, which solution_error_budget applies once.
+    LCU sum, with e_j the node's PF plus pruning bound and c_j the supplied
+    coefficients, the raw stored ones for the solution bound. It is an
+    operator-norm bound on the ideal finite sum before physical input and
+    PSD recovery weighting, which solution_error_budget applies once. It is
+    recorded as a PhysicalScale: each term composes the lifted magnitude
+    2**k*|c_j| of ``providers.lifted_magnitudes``, the inverse lift 2**-k
+    and e_j, and ``scaled_sum`` adds the terms, so a positive term below
+    the binary64 range stays positive instead of rounding to zero, and the
+    lifted one-norm never stands in for the raw one. Readers compose it
+    with the physical factors before any binary64 conversion.
 
     trotter_bound_variants lists every Pauli-triangle expression the records
     used. trotter_algebraic_work_counts sums the records' newly performed
@@ -1717,21 +1632,7 @@ def _trotter_budget_quadrature_terms(
     evaluated = all(bound is not None for bound in bound_values)
     dense_bound_values = [record.dense_bound_value for record in records]
     dense_evaluated = all(bound is not None for bound in dense_bound_values)
-    trotter_synthesis_error_bound = (
-        float(
-            fsum(
-                abs(coefficient) * bound
-                for coefficient, bound in zip(
-                    coefficients,
-                    bound_values,
-                    strict=True,
-                )
-                if bound is not None
-            )
-        )
-        if evaluated
-        else None
-    )
+    trotter_synthesis_error_bound = _coefficient_weighted_bound(coefficients, bound_values) if evaluated else None
     work_counts = [record.algebraic_work_counts for record in records]
     terms = {
         "trotter_formula_order": int(method.trotter_order),
@@ -1810,39 +1711,40 @@ def _prepare_decomposition(
 ) -> _PreparedDecomposition:
     """Return an LCHS-ready matrix decomposition and PSD conversion metadata.
 
-    With ``parts=False`` only the coefficient endpoints are needed: one
-    adjoint and L are formed, the adjoint is released before the solve, no
-    H, padded or shifted array is formed, and l_part and h_evolution are
-    None. The endpoints, padding zero and PSD rule are the same.
+    With ``parts=False`` only the coefficient endpoints are needed: L is
+    formed without H, a padded or a shifted array, and l_part and
+    h_evolution are None. The endpoints, padding zero and PSD rule are the
+    same.
 
-    One Hermitian eigensolve of L supplies both endpoints. The numerical PSD
-    rule (solution_error_budget._numerical_psd_decision) either accepts L, or
+    The endpoints of L (_hermitian_endpoints) come in one of three ways. A
+    zero or diagonal L gives them exactly from its diagonal, with no
+    eigensolve. A real A gives a real symmetric L, solved by the real
+    symmetric eigensolver. Any other L takes one complex Hermitian
+    eigensolve. The numerical PSD rule
+    (solution_error_budget._numerical_psd_decision) either accepts L, or
     shifts it by s = -lambda_min + window, or raises when make_l_psd is False.
     Because L is Hermitian, max(|lambda_min|, |lambda_max|) after the shift is
     its spectral norm up to eigensolver rounding, and it is the ||L|| used to
     choose the quadrature. Callers restore the physical growth exp(s*T).
     """
 
-    array = as_square_matrix(matrix)
+    # matrix is the admitted dense input: ingest_dense checked it square and
+    # finite, froze it and kept a real matrix in float64.
+    real = not np.iscomplexobj(matrix)
     if parts:
-        l_part, h_evolution = _cartesian_parts(array)
+        l_part, h_evolution = _cartesian_parts(np.asarray(matrix, dtype=complex))
+    elif real:
+        l_part = np.add(matrix, matrix.T)
+        l_part *= 0.5
+        h_evolution = None
     else:
-        adjoint = np.conjugate(array.T, order="C")
-        l_part = np.add(array, adjoint)
+        adjoint = np.conjugate(matrix.T, order="C")
+        l_part = np.add(matrix, adjoint)
         del adjoint
         l_part *= 0.5
         h_evolution = None
-    if not np.any(l_part):
-        min_l_eigenvalue = max_l_eigenvalue = 0.0
-    else:
-        if max_spectral_work is not None and matrix.shape[0]**3 > max_spectral_work:
-            raise ValueError(
-                f"LCHS eigensolve exceeds max_spectral_work: it needs {matrix.shape[0]**3} work units "
-                f"(d**3 with d={matrix.shape[0]}), max_spectral_work={max_spectral_work}. "
-                f"Raise max_spectral_work to at least {matrix.shape[0]**3}.")
-        eigenvalues = np.linalg.eigvalsh(l_part)
-        min_l_eigenvalue = float(eigenvalues[0].real)
-        max_l_eigenvalue = float(eigenvalues[-1].real)
+    min_l_eigenvalue, max_l_eigenvalue = _hermitian_endpoints(l_part, real=real,
+                                                              max_spectral_work=max_spectral_work)
     dimension = matrix.shape[0]
     target_dimension = dimension if padded_dimension is None else integer(
         padded_dimension, "padded_dimension", dimension)
@@ -1887,11 +1789,16 @@ def _prepare_decomposition(
     min_l_eigenvalue_after = float(min_l_eigenvalue + psd_shift)
     max_l_eigenvalue_after = float(max_l_eigenvalue + psd_shift)
     l_norm = max(abs(min_l_eigenvalue_after), abs(max_l_eigenvalue_after))
+    # The numerical PSD rule only adds a nonnegative shift. It does not take
+    # a positive smallest eigenvalue out as known scalar decay, so the dense
+    # recipe records scalar_decay = 0 and keeps its original grid.
     conversion = {
         "min_l_eigenvalue_before_psd_conversion": min_l_eigenvalue,
         "min_l_eigenvalue_after_psd_conversion": min_l_eigenvalue_after,
         "psd_correction_applied": psd_shift > 0.0,
         "psd_shift": float(psd_shift),
+        "scalar_decay": 0.0,
+        "psd_premise_evidence": "numerical",
         "make_l_psd": method.make_l_psd,
         "psd_tolerance": float(method.psd_tolerance),
     }
@@ -1907,19 +1814,27 @@ def _prepare_decomposition(
 
 @dataclass(frozen=True, kw_only=True)
 class LCHSQuadratureData:
-    """Quadrature-plan scalars shared by dense terms and representative sampling.
+    """Quadrature-plan scalars that every LCHS recipe shares, without system arrays.
 
-    This carries everything that building the dense terms needs except the
-    term matrices, so planning and representative resource sampling can reuse the
-    node grid and counts (``M``, ``Q``, interval counts) without constructing
-    all ``M`` matrices.
+    It carries the node grid, the coefficients and their counts (``M``,
+    ``Q``, interval counts) and the PSD facts of the processed L. It holds no
+    array of the system dimension, so a compact generator and a dense one
+    use the same record. The dense recipe keeps its padded L and H in
+    ``selection.DenseLCHSInputs``.
 
     Attributes:
-        l_part: N-by-N Hermitian L after the PSD conversion and any
-            dimension padding, used in the node generator k*L+H.
-        h_part: Matching Hermitian H used in exp(-i*T*(k*L+H)).
-        conversion: Decomposition, dimension and PSD-shift metadata. The original
-            physical propagator requires exp(shift*T) compensation when shift is positive.
+        conversion: PSD-shift metadata. ``psd_shift`` is the nonnegative
+            shift s_+ and ``scalar_decay`` the nonnegative known decay c
+            (``solution_error_budget.signed_shift``), so the signed shift is s = s_+ - c and the original
+            physical propagator is exp(s*t) times the propagator of A + s*I.
+            ``psd_premise_evidence`` names the evidence for the PSD premise
+            of L + s*I, which is ``"numerical"`` (the dense eigensolve rule),
+            ``"certified_bound"`` (exact structural bounds of a compact
+            input) or ``"user_assertion"`` (a supplied encoding, or a lower bound
+            of L stated to ``ingest_cartesian`` that improves on the structural
+            one). The dense
+            recipe adds the computed smallest eigenvalue before and after the
+            shift, the compact recipe the lower and upper bounds it used.
         h1: Gauss panel width in k, or None for a non-Gauss/unitary rule.
         range_k: Cutoff K of the rule as built and of its available
             component bounds, or the maximum node magnitude for a signed-binary
@@ -1933,19 +1848,19 @@ class LCHSQuadratureData:
         k_nodes: Real array of shape (M,) in the node order of the quadrature rule.
         coefficients: Complex array of shape (M,) before physical PSD-shift compensation.
         coefficient_l1_norm: Sum of these uncompensated coefficient magnitudes.
-        l_norm: Numerical spectral-norm estimate of the prepared L used to select the
-            grid. No additional eigensolve is implied by reading it.
-        lambda_min_before_psd_conversion: Computed smallest Hermitian-L eigenvalue before
-            the shift, so it carries the original dissipativity information.
-        numerical_psd_premise_satisfied: Outcome of the numerical PSD check for the
-            prepared matrix under its scale-aware tolerance, not a formal PSD certificate.
+        l_norm: Bound on ||L + s*I|| used to select the grid: the dense
+            recipe's numerical spectral-norm estimate, or the compact recipe's
+            structural bound ``operators.cartesian.ScalarCompensation.processed_norm``.
+            No additional eigensolve is implied by reading it.
+        psd_premise_satisfied: Whether L + s*I is known to be positive
+            semidefinite, by the evidence ``conversion["psd_premise_evidence"]``
+            names. The numerical rule's outcome is not a formal PSD
+            certificate.
         coefficient_plan: The LCHSCoefficientPlan from which these arrays were
             taken, with its kernel and quadrature configuration, nodes, weights, coefficients
             and component bounds.
     """
 
-    l_part: np.ndarray
-    h_part: np.ndarray
     conversion: Mapping[str, Any]
     h1: float | None
     range_k: float
@@ -1956,41 +1871,58 @@ class LCHSQuadratureData:
     coefficients: np.ndarray
     coefficient_l1_norm: float
     l_norm: float
-    lambda_min_before_psd_conversion: float
-    numerical_psd_premise_satisfied: bool
+    psd_premise_satisfied: bool
     coefficient_plan: LCHSCoefficientPlan
 
 
 def _quadrature_data_from_plan(
     *,
-    prepared: _PreparedDecomposition,
+    l_norm: float,
+    conversion: Mapping[str, Any],
+    psd_premise_satisfied: bool,
     final_time: float,
     method: LCHS,
-    max_bytes=DEFAULT_MAX_BYTES,
-    max_quadrature_work=100_000_000,
+    max_bytes=None,
+    max_quadrature_work=None,
+    providers=None,
+    work_ledger=None,
+    dense_select_slot_limit=None,
 ) -> LCHSQuadratureData:
-    """Assemble quadrature data from its resolved decomposition and coefficient plan."""
+    """Assemble quadrature data from the processed-L norm bound, the PSD facts and the coefficient plan.
 
-    if prepared.l_norm == 0.:
+    A zero ``l_norm`` means L + s*I is exactly zero, so the unitary reduction
+    of a single node replaces the k integral. ``providers`` is a
+    ``selection.ProviderEntry`` of the coherent provider frontier, whose
+    kernel, quadrature and private seams (``free_half_width``,
+    ``strip_margin``) are used; None uses the Method's pair. A supplied
+    ``work_ledger`` receives the admitted quadrature work, and
+    ``dense_select_slot_limit`` is the slot limit of a quantum dense_exact route
+    (``providers._resolve_coefficient_context``).
+    """
+
+    if l_norm == 0.:
         from .providers import _unitary_coefficient_plan
         coefficient_plan = _unitary_coefficient_plan(method)
     else:
+        seams = {} if providers is None else dict(free_half_width=providers.free_half_width,
+                                                  strip_margin=providers.strip_margin)
         coefficient_plan = _resolve_coefficient_context(
-        lchs_kernel=method.lchs_kernel,
-        k_quadrature=method.k_quadrature,
+        lchs_kernel=method.lchs_kernel if providers is None else providers.lchs_kernel,
+        k_quadrature=method.k_quadrature if providers is None else providers.k_quadrature,
+        **seams,
+        work_ledger=work_ledger,
+        dense_select_slot_limit=dense_select_slot_limit,
         problem_context=LCHSProblemContext(
             final_time=float(final_time),
             epsilon=float(method.approximation_tolerance),
-            l_norm=prepared.l_norm,
+            l_norm=l_norm,
         ),
         max_bytes=max_bytes,
         max_quadrature_work=max_quadrature_work,
         )
     quadrature_plan = coefficient_plan.quadrature
     return LCHSQuadratureData(
-        l_part=prepared.l_part,
-        h_part=prepared.h_evolution,
-        conversion=prepared.conversion,
+        conversion=conversion,
         h1=quadrature_plan.h1,
         range_k=quadrature_plan.range_k,
         interval_count_each_side=quadrature_plan.interval_count_each_side,
@@ -1999,57 +1931,9 @@ def _quadrature_data_from_plan(
         k_nodes=np.asarray(coefficient_plan.nodes, dtype=float),
         coefficients=np.asarray(coefficient_plan.coefficients, dtype=complex),
         coefficient_l1_norm=coefficient_plan.coefficient_l1_norm,
-        l_norm=prepared.l_norm,
-        lambda_min_before_psd_conversion=prepared.lambda_min_before,
-        numerical_psd_premise_satisfied=prepared.numerical_psd_premise_satisfied,
+        l_norm=l_norm,
+        psd_premise_satisfied=psd_premise_satisfied,
         coefficient_plan=coefficient_plan,
-    )
-
-
-def generate_lchs_quadrature(
-    *,
-    matrix: np.ndarray,
-    final_time: float,
-    method: LCHS,
-    max_bytes=DEFAULT_MAX_BYTES,
-    padded_dimension=None,
-    max_spectral_work=100_000_000,
-    max_quadrature_work=100_000_000,
-) -> LCHSQuadratureData:
-    """Generate the homogeneous LCHS quadrature plan without term unitaries.
-
-    Steps: A = L + iH (ACL arXiv:2312.03916v2, Eqs. (3)-(4)), optional zero
-    padding to padded_dimension, the numerical PSD decision and shift, then
-    the kernel-quadrature pair's nodes and coefficients for T and ||L||. No
-    exp(-i*T*(k*L+H)) is formed. The returned coefficients do not yet
-    include exp(shift*T).
-    """
-
-    from nwqlib.operators.access import _check_bytes
-    dimension = matrix.shape[0]
-    target_dimension = dimension if padded_dimension is None else integer(
-        padded_dimension, "padded_dimension", dimension)
-    # Enclosing law 64*D**2 + 128*D: A, L and the conjugate reused as H hold
-    # at most 48 d**2 bytes, sequential padding peaks at 48 d**2 + 16 D**2
-    # and then 32 d**2 + 32 D**2, and the eigenvalues-only solve on the
-    # original dimension adds its d-square working copy, so four complex
-    # D-square arrays bound the known arrays. 128*D covers the O(D) diagonal
-    # and spectral vectors. The queried eigensolver workspace Q_N(d) is not
-    # charged (a declared known-array workspace, not a complete cap).
-    _check_bytes(64*target_dimension**2 + 128*target_dimension, max_bytes, "LCHS Cartesian/PSD arrays")
-    max_spectral_work = integer(max_spectral_work, "max_spectral_work", 1)
-    prepared = _prepare_decomposition(
-        matrix=matrix,
-        method=method,
-        padded_dimension=target_dimension,
-        max_spectral_work=max_spectral_work,
-    )
-    return _quadrature_data_from_plan(
-        prepared=prepared,
-        final_time=final_time,
-        method=method,
-        max_bytes=max_bytes,
-        max_quadrature_work=max_quadrature_work,
     )
 
 
@@ -2325,16 +2209,27 @@ def _build_product_formula_select_plan(
     method: LCHS,
     address_structure: Mapping[str, Any],
     max_steps: int | None = None,
-    max_bytes=DEFAULT_MAX_BYTES,
-    max_select_work=1_000_000_000,
+    max_bytes=None,
+    max_select_work=None,
+    charged_before: int = 0,
     grid_k_values: Sequence[float] | None = None,
     work_ledger: dict | None = None,
+    coefficient_phases: Sequence[float] | None = None,
 ) -> tuple[LCHSProductFormulaSelectPlan, tuple[_LCHSTrotterNodeRecord, ...], LCHSProductFormulaNodes]:
     """Build the shared homogeneous/inhomogeneous product-formula plan.
 
-    A supplied ``work_ledger`` mapping receives, under ``"work"``, the
-    max_select_work that this selection counted (its selection, census and
-    angle-table work), so the caller can carry the remainder to later stages.
+    The coefficient phase of each address slot is arg(coefficient), or the
+    supplied ``coefficient_phases``: the raw coefficient arguments of the
+    homogeneous plan, or the phases of a source layout, whose coefficient
+    state is kept as amplitudes and phases (source_selection).
+
+    ``max_select_work`` is what remains of the caller's limit after the
+    ``charged_before`` work it already counted (the Pauli decomposition), so
+    a refusal states the value that limit needs and its current value,
+    ``max_select_work + charged_before``. A supplied ``work_ledger`` mapping
+    receives, under ``"work"``, the max_select_work that this selection
+    counted (its selection, census and angle-table work), so the caller can
+    carry the remainder to later stages.
 
     The plan tables cover the power-of-two SELECT address slots. The returned
     records follow the supplied address-slot tables one-to-one, so callers
@@ -2347,11 +2242,14 @@ def _build_product_formula_select_plan(
 
     For B compressed repetition blocks, W template occurrences and S padded
     address slots, the float64 angle table contains E = B*W*S entries. The fill loop
-    checks each angle for finiteness and canonicalizes signed zero. A private
+    forms one S-entry row at a time, checks each angle for finiteness and
+    canonicalizes signed zero. A private
     ownership transfer makes the filled buffer read-only without copying it,
     so table construction and storage each require 8*E data bytes
-    beside selection_bytes. Optional affine validation adds at most three
-    float64 S-entry row arrays, giving 8*E + 24*S for that phase. These are
+    beside selection_bytes, and the fill adds at most 48*S bytes of row
+    scratch. Optional affine validation adds at most three
+    float64 S-entry row arrays, giving 8*E + 24*S for that phase. The check
+    counts both allowances. These are
     known array-data terms, not a process RSS bound.
 
     Each address slot j evolves k_j*L + H for its elapsed time t_j with r_j
@@ -2409,32 +2307,26 @@ def _build_product_formula_select_plan(
     # All node coefficient combinations and the shared census precede the
     # compact occurrence/angle table. Work, with u = terms the union label
     # count including identity, K distinct nodes and S padded slots: the
-    # one-time support alignment W_align, sum_nodes((q+1)*u + 16*u + 4) for
-    # each node's combination allowance and streamed upper dropped mass
-    # (_coefficient_preparation_work) and 16*S before the census, then
-    # p*q + G + K_n*V for the admitted shared census when budgeted
+    # one-time support alignment W_align, sum_nodes((q+2)*u + 10*u + 5) for
+    # each node's combination allowance, operand-scale scan and streamed upper
+    # dropped mass (_coefficient_preparation_work) and 16*S before the census,
+    # then p*q + G + K_n*V for the admitted shared census when budgeted
     # (_node_bound_coefficients). These units are admission proxies, not
     # timings or equal-cost CPU operations.
     align_work, _ = _coefficient_preparation_work(
         q, len(decomposition.l_coefficients), len(decomposition.h_coefficients), terms, 0)
-    selection_work = (align_work + len(distinct)*((q+1)*terms + 16*terms + 4)
+    selection_work = (align_work + len(distinct)*((q+2)*terms + 10*terms + 5)
                       + 16*padded_node_count)
     # Zero is a legal budget here. It is what _admit_pauli_decomposition
     # leaves when the decomposition used the whole limit, and every selection
     # then exceeds it.
-    max_select_work = integer(max_select_work, "max_select_work", 0)
-    # Planning hands this builder the remainder of method.max_select_work
-    # after the Pauli decomposition (parameters.py and
-    # generate_lchs_product_formula_select_plan), so the difference is the
-    # field's work charged before this selection. A direct call with an
-    # unrelated limit gets figures relative to that limit.
-    charged_before = method.max_select_work - max_select_work
-    if selection_work > max_select_work:
-        raise ValueError(
+    max_select_work = None if max_select_work is None else integer(max_select_work, "max_select_work", 0)
+    if exceeds(selection_work, max_select_work):
+        raise ResourceLimitError(
             f"product-formula branch selection needs {selection_work} units of max_select_work, "
             f"above the {max_select_work} left after {charged_before} already charged; this stage "
-            f"needs LCHS(max_select_work=...) to be at least {selection_work+charged_before} "
-            f"(now {method.max_select_work})")
+            f"needs max_select_work to be at least {selection_work+charged_before} "
+            f"(now {max_select_work+charged_before})")
     # Bytes: the combined node cache once per distinct node (_node_cache_bytes),
     # the padded k/time/coefficient tables at 32 bytes per slot, and a fixed
     # 8192-byte envelope for each slot's node record and step selection
@@ -2448,6 +2340,9 @@ def _build_product_formula_select_plan(
     padded_k[:slot_count] = k_table
     padded_times[:slot_count] = time_table
     padded_coefficients[:slot_count] = coefficient_table
+    padded_phases = (np.angle(padded_coefficients) if coefficient_phases is None
+                     else np.concatenate((np.asarray(coefficient_phases, dtype=float),
+                                          np.zeros(padded_node_count-slot_count))))
 
     pauli_labels = tuple(
         label
@@ -2470,10 +2365,13 @@ def _build_product_formula_select_plan(
     node_table = _selected_node_table(decomposition, combined_nodes, grid_k)
     evaluations: dict[str, Any] = {}
     if budgeted:
-        census_keys = tuple(dict.fromkeys(
-            key for key, elapsed_time in zip(node_keys, padded_times, strict=True)
-            if key is not None and elapsed_time != 0.0 and combined_nodes[key].traceless_terms
-        ))
+        # Every stored node with kept nonidentity terms is weighted once any elapsed time is
+        # nonzero, the population that the classical plan (host_pf) and the
+        # refinement of the saved table (_fixed_trotter_certificate_records)
+        # weight, so all three choose the expression from the same K.
+        moving = any(key is not None and elapsed_time != 0.0
+                     for key, elapsed_time in zip(node_keys, padded_times, strict=True))
+        census_keys = tuple(key for key in distinct if moving and combined_nodes[key].traceless_terms)
         # The census coexists with the cached nodes, the padded tables, the
         # decomposition's logical label/coefficient tables and the live dense
         # L and H (32*d**2 bytes).
@@ -2522,7 +2420,8 @@ def _build_product_formula_select_plan(
                 selection=None,
             )
         if max_steps is not None and record.step_count > max_steps:
-            raise ValueError("selected product-formula steps exceed the declared circuit envelope")
+            raise ResourceLimitError(f"a product-formula node needs {record.step_count} steps, above the step limit "
+                                     f"{max_steps} (LCHS.max_trotter_steps)")
         slot_records.append(record)
 
     branch_step_counts = tuple(record.step_count for record in slot_records)
@@ -2534,9 +2433,13 @@ def _build_product_formula_select_plan(
     # Selection stores W*B*S angles (W template occurrences, B blocks, S
     # padded slots) in one float64 array, 8 bytes per stored angle. Emitting the W*R
     # occurrences of all R repetitions happens later, at lowering. The table
-    # is frozen by ownership transfer, so construction and storage both hold
-    # 8 bytes per angle. Affine row checking adds three S-entry float64 rows.
-    angle_peak_bytes = 8 * table_entries
+    # is frozen by ownership transfer (FrozenArray._from_owned_canonical_array,
+    # which states what that leaves writable). A copy into protected bytes
+    # storage would hold 16 bytes per angle at the handoff. Construction and storage both hold
+    # 8 bytes per angle. The fill forms one table row at a time with at most
+    # 48 bytes of row scratch per slot (a complex coefficient row and float64
+    # and mask rows). Affine row checking adds three S-entry float64 rows.
+    angle_peak_bytes = 8 * table_entries + (48 * padded_node_count if table_entries else 0)
     if (
         table_entries
         and he_backend == "trotter"
@@ -2550,39 +2453,42 @@ def _build_product_formula_select_plan(
         "product-formula angle tables",
     )
     table_work = selection_work+8*table_entries+len(occurrence_template)*padded_node_count
-    if table_work > max_select_work:
-        raise ValueError(
+    if exceeds(table_work, max_select_work):
+        raise ResourceLimitError(
             f"product-formula angle-table selection needs {table_work} units of max_select_work, "
             f"above the {max_select_work} left after {charged_before} already charged; this stage "
-            f"needs LCHS(max_select_work=...) to be at least {table_work+charged_before} "
-            f"(now {method.max_select_work})")
+            f"needs max_select_work to be at least {table_work+charged_before} "
+            f"(now {max_select_work+charged_before})")
     angle_tables = np.zeros(
         (len(block_starts) * len(occurrence_template), padded_node_count),
         dtype="<f8",
     )
+    # One row of S slot angles at a time, in the order (repetition block,
+    # occurrence, slot): angle = multiplier*t*c.real/steps on an active slot
+    # and 0.0 otherwise, evaluated left to right as in the scalar formula.
+    # The first slot that fails a check raises its own error, the
+    # imaginary-coefficient check before the finite-angle check.
+    steps = np.array(branch_step_counts, dtype=float)
+    slot_cutoffs = np.array([combined.coefficient_cutoff for combined in combined_terms])
     row = 0
     for repetition in block_starts:
+        active = (repetition < steps) & (steps > 0)
         for label, multiplier in occurrence_template:
-            for slot, (coefficients_by_label, elapsed_time, steps) in enumerate(zip(
-                term_coefficients,
-                padded_times,
-                branch_step_counts,
-                strict=True,
-            )):
-                coefficient = complex(coefficients_by_label.get(label, 0.0))
-                if abs(coefficient.imag) > _PAULI_COEFFICIENT_ATOL:
+            coefficient = np.array([by_label.get(label, 0.0) for by_label in term_coefficients], dtype=complex)
+            imaginary = np.abs(coefficient.imag) > slot_cutoffs
+            angle = np.zeros(padded_node_count)
+            with np.errstate(over="ignore", invalid="ignore"):
+                np.divide(multiplier * padded_times * coefficient.real, steps, out=angle, where=active)
+            failed = imaginary | ~np.isfinite(angle)
+            if failed.any():
+                slot = int(np.flatnonzero(failed)[0])
+                if imaginary[slot]:
                     raise ValueError(
                         "Hamiltonian coefficients must be real for product-formula "
-                        f"synthesis; term {label!r} has coefficient {coefficient}"
+                        f"synthesis; term {label!r} has coefficient {complex(coefficient[slot])}"
                     )
-                angle = (
-                    multiplier * elapsed_time * coefficient.real / steps
-                    if repetition < steps and steps > 0
-                    else 0.0
-                )
-                if not isfinite(angle):
-                    raise ValueError("FrozenArray float64 elements must be finite")
-                angle_tables[row, slot] = angle + 0.0
+                raise ValueError("FrozenArray float64 elements must be finite")
+            angle_tables[row] = angle + 0.0
             row += 1
     angle_tables = FrozenArray._from_owned_canonical_array(angle_tables)
     plan = LCHSProductFormulaSelectPlan(
@@ -2600,7 +2506,7 @@ def _build_product_formula_select_plan(
                 strict=True,
             )
         ),
-        coefficient_phases=tuple(float(np.angle(value)) for value in padded_coefficients),
+        coefficient_phases=tuple(float(value) for value in padded_phases),
         physical_node_count=sum(node is not None for node in padded_branch_to_node),
         padded_node_count=padded_node_count,
         branch_to_node=padded_branch_to_node,
@@ -2641,24 +2547,31 @@ def _build_product_formula_select_plan(
 def generate_lchs_product_formula_select_plan(
     *,
     quadrature: LCHSQuadratureData,
+    parts: tuple[np.ndarray, np.ndarray],
     final_time: float,
     method: LCHS,
     max_steps: int | None = None,
-    max_bytes=DEFAULT_MAX_BYTES,
-    max_select_work=1_000_000_000,
+    max_bytes=None,
+    max_select_work=None,
     work_ledger: dict | None = None,
 ) -> LCHSProductFormulaSelectData:
-    """Build one common product-formula SELECT plan for a homogeneous circuit.
+    """Build one common product-formula SELECT plan for a homogeneous circuit of a dense A.
 
     A supplied ``work_ledger`` mapping receives, under ``"work"``, the
     max_select_work counted by the Pauli decomposition and the selection.
 
     Every k-node evolves for the full time T. The LCU coefficients returned
-    include exp(shift*T), divided by 2**psd_recovery_exponent(shift, T) when
-    that factor exceeds binary64. The recorded synthesis bound weights each
-    node's bound by the uncompensated |c_j|, because solution_error_budget
-    applies the PSD recovery once per application. The encoded L and H of
-    the ``quadrature`` plan give the dimension.
+    include exp(s*T) for the signed shift s, divided by
+    2**psd_recovery_exponent(s, T) when that factor is outside the normal
+    binary64 range. The SELECT coefficient phases are the arguments of the
+    raw c_j, because the positive factor does not change them and a
+    subnormal part multiplied by it can round by up to order one. The
+    recorded synthesis bound weights each node's bound by the uncompensated
+    |c_j|, because solution_error_budget applies the PSD recovery once per
+    application. ``quadrature`` and ``parts``, the padded L (after the
+    shift) and H whose order gives the dimension, are those of the dense
+    recipe, ``selection.select_dense(method, problem, backend=...)``, as
+    its ``quadrature`` and ``dense.l_part``, ``dense.h_part``.
     """
 
     he_backend = method.hamiltonian_evolution_backend
@@ -2668,24 +2581,20 @@ def generate_lchs_product_formula_select_plan(
             "product-formula SELECT planning serves the product-formula "
             f"backends ('trotter', 'trotter_error_budgeted'); got {he_backend!r}"
         )
-    dimension = quadrature.l_part.shape[0]
+    l_part, h_part = parts
+    dimension = l_part.shape[0]
     selection = {}
-    remaining_work = _admit_pauli_decomposition(dimension, max_bytes=max_bytes,
-                                                max_select_work=max_select_work)
-    decomposition = _trotter_pauli_decomposition(
-        quadrature.l_part,
-        quadrature.h_part,
-    )
-    shift = quadrature.conversion["psd_shift"]
+    charged, remaining_work = _admit_pauli_decomposition(dimension, max_bytes=max_bytes,
+                                                         max_select_work=max_select_work)
+    decomposition = _trotter_pauli_decomposition(l_part, h_part)
+    shift = signed_shift(quadrature.conversion)
     operator_scale = (
         psd_recovery_part(shift, final_time, psd_recovery_exponent(shift, final_time))
-        if shift > 0.0
+        if shift != 0.0
         else 1.0
     )
-    coefficients = operator_scale * np.asarray(
-        quadrature.coefficients,
-        dtype=complex,
-    )
+    raw = np.asarray(quadrature.coefficients, dtype=complex)
+    coefficients = operator_scale * raw
     plan, slot_records, node_table = _build_product_formula_select_plan(
         decomposition=decomposition,
         k_values=np.asarray(quadrature.k_nodes, dtype=float),
@@ -2694,10 +2603,11 @@ def generate_lchs_product_formula_select_plan(
         branch_to_node=tuple(range(quadrature.total_node_count)),
         method=method,
         address_structure=quadrature.coefficient_plan.quadrature.address_structure,
-        max_steps=max_steps,max_bytes=max_bytes,max_select_work=remaining_work,work_ledger=selection,
+        max_steps=max_steps,max_bytes=max_bytes,max_select_work=remaining_work,charged_before=charged,
+        work_ledger=selection,coefficient_phases=np.angle(raw),
     )
     if work_ledger is not None:
-        work_ledger["work"] = max_select_work-remaining_work+selection["work"]
+        work_ledger["work"] = charged+selection["work"]
     summary = {
         **lchs_quadrature_summary(
             quadrature,
@@ -2715,7 +2625,7 @@ def generate_lchs_product_formula_select_plan(
         coefficients=coefficients,
         plan=plan,
         quadrature=summary,
-        numerical_psd_premise_satisfied=(quadrature.numerical_psd_premise_satisfied),
+        numerical_psd_premise_satisfied=quadrature.psd_premise_satisfied,
         nodes=node_table,
     )
 
@@ -2725,6 +2635,5 @@ __all__ = [
     "LCHSQuadratureData",
     "cartesian_decomposition",
     "generate_lchs_product_formula_select_plan",
-    "generate_lchs_quadrature",
     "lchs_quadrature_summary",
 ]

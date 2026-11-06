@@ -30,6 +30,16 @@ def lchs_quadrature_options() -> dict[str, object]:
     }
 
 
+def lchs_dense_quadrature(matrix, final_time, method):
+    """Return the selected quadrature and padded (L, H) of a dense A, as LCHS planning selects them."""
+    from nwqlib import LinearDynamics
+    from nwqlib.algorithms.lchs.selection import select_dense
+
+    problem = LinearDynamics(A=matrix, initial_state=np.eye(len(matrix))[0], time=final_time)
+    data = select_dense(method, problem, backend=method.hamiltonian_evolution_backend)
+    return data.quadrature, data.dense.l_part, data.dense.h_part
+
+
 def dense_evolution_copy(circuit: QuantumCircuit) -> QuantumCircuit:
     """Copy with each raw PauliEvolutionGate replaced by its exact unitary.
 
@@ -108,7 +118,7 @@ def prepared_stubs(monkeypatch):
                 offset += reg.width
         circuit = SimpleNamespace(data=[SimpleNamespace(operation="logical operation")], cregs=registers, qregs=quantum,
                                   num_qubits=width, find_bit=lambda bit: SimpleNamespace(index=bit),
-                                  has_control_flow_op=lambda: False)
+                                  has_control_flow_op=lambda: False, parameters=())
         return lowering.LogicalCircuit(
             construction_id=construction.content_id, circuit=circuit,
             quantum_layout=tuple((reg.name, tuple(reg)) for reg in quantum),
@@ -200,5 +210,5 @@ def ibm_runtime_spy(monkeypatch):
     service.backend = lambda name, **kwargs: backend
     service._create_backend_obj = lambda name, **kwargs: backend
     monkeypatch.setattr(IBMRuntimeBackend, "_new_service", lambda self: service)
-    connection = IBMRuntimeBackend(device=backend.name, instance=instance, max_input_bytes=65536)
+    connection = IBMRuntimeBackend(device=backend.name, instance=instance)
     return SimpleNamespace(connection=connection, api=api)

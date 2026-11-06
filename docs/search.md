@@ -33,7 +33,7 @@ Each objective is minimized:
 
 ## Read the ranking
 
-A row whose values are all available is nondominated when no other such row is at least as good on every listed objective and strictly better on at least one, within this supplied set. Equal rows all remain. `selection.incomparable` lists the indices of rows with an unavailable value. Their reasons are the `ObjectiveValue.reason` fields in `selection.values`, and unavailable values are not ranked as zero. With a profile, the comparison also keeps all five assessment fields when available ([applicability, capability, capacity, time and accuracy](profiles.md#independent-axes-and-original-associations)), including for infeasible rows. The nondominated set (the Pareto front of this set) is neither a feasibility filter nor a global optimum. `select(index)` returns any original row, including a dominated row that you choose deliberately. Execution rejects a row without a Plan before preparation.
+A row whose values are all available is nondominated when no other such row is at least as good on every listed objective and strictly better on at least one, within this supplied set. Equal rows all remain. `selection.incomparable` lists the indices of rows with an unavailable value. Their reasons are the `ObjectiveValue.reason` fields in `selection.values`, and unavailable values are not ranked as zero. `ObjectiveValue.resource_limited` is `True` for a row whose planning stopped at a memory or work limit, default or explicit, which a higher limit may plan, and `False` for a row whose Method does not support the problem. A numerical or accuracy failure in planning raises from `compare`, so it gives no row to rank. With a profile, the comparison also keeps all five assessment fields when available ([applicability, capability, capacity, time and accuracy](profiles.md#independent-axes-and-original-associations)), including for infeasible rows. The nondominated set (the Pareto front of this set) is neither a feasibility filter nor a global optimum. `select(index)` returns any original row, including a dominated row that you choose deliberately. Execution rejects a row without a Plan before preparation.
 
 ## Run a selected row
 
@@ -41,21 +41,11 @@ Passing a selected row to `prepare` or `solve` keeps its original `PlanEstimate`
 
 ## Rescore a comparison
 
-Rescore an existing comparison with `scan(search.comparison, objectives=...)`. It reads the resource quantities and forecasts already held in the comparison rows and rejects a new profile, context or assessment time. It runs no planning, resource summation, model evaluation, backend call or reference computation. Rows without a Plan keep their Method, reason and Allocation, with no Plan made up for them. `SearchSelection.model_validate_json(...)` checks a saved selection, recomputing its nondominated and incomparable rows from its objective values, and `validate_comparison(comparison)` checks that the selection belongs to that comparison. Neither restores missing numerical data or circuits.
+Rescore an existing comparison with `scan(search.comparison, objectives=...)`. It reads the resource quantities and forecasts already held in the comparison rows and rejects a new profile, context or assessment time. It runs no planning, resource summation, model evaluation, backend call or reference computation. Rows without a Plan keep their Method, reason, `resource_limited` value and Allocation, with no Plan made up for them. `SearchSelection.model_validate_json(...)` checks a saved selection, recomputing its nondominated and incomparable rows from its objective values, and `validate_comparison(comparison)` checks that the selection belongs to that comparison. Neither restores missing numerical data or circuits.
 
 ## Limits
 
-These limits bound the operations of one `scan` call, not CPU time or process memory ([engineering constants](ENGINEERING_CONSTANTS.md#finite-search-frontier-envelope)):
-
-| Control | Default | What it bounds |
-| --- | --- | --- |
-| `max_candidates` | 256 | Rows ranked |
-| `max_values` | 4096 | Row-objective values |
-| `max_assessments` | 4096 | Assessment and prediction records |
-| `max_pair_comparisons` | 1000000 | Coordinate comparisons for the nondominated set |
-| `max_integer_bits` | 4096 | Integer size in exact rational arithmetic |
-
-The complete set of new forecasts is checked before any model is evaluated. Reading the forecasts held in a Comparison is also counted against `max_assessments`, and identical objects are shared instead of copied. For N rows and k objectives, the nondominated set needs at most `N*(N-1)*k` coordinate comparisons, which are checked against the limit before it is computed. Counts must be integer rationals, and conditional predicted seconds may be fractional.
+Shot and width counts are summed and compared as exact integers, so counts above 2**53 stay distinct. Predicted seconds are the correctly rounded binary64 sum (`math.fsum`) of the matching forecasts. Two rows whose exact sums round to the same binary64 number therefore tie on this objective. A time model is not accurate to one unit in the last place. A sum beyond the largest binary64 number is unavailable with its reason, and its row is listed in `incomparable`. A saved selection must hold integer counts. The number of Plans, objectives and forecasts is the one you supply. For N rows and k objectives, the nondominated set takes `N*(N-1)*k` coordinate comparisons ([engineering constants](ENGINEERING_CONSTANTS.md#finite-search-frontier-envelope)). Reading the forecasts held in a Comparison shares identical objects instead of copying them.
 
 Within one call, identical forecasts and resource totals are computed once and reused. `SearchWork` records the evaluations and reuses of the scan separately from supplied prior work and from execution estimates. It does not infer factorization, synthesis or measurement costs that were never recorded.
 

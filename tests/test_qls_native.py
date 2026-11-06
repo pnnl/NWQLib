@@ -1,58 +1,22 @@
-"""Saved independent polynomial inputs, actual native QLS acquisitions, Q<=8.
+"""Actual native QLS selection, canonical phase synthesis and acquisitions, Q<=8.
 
-The 2e-10 comparison floor is numerical headroom, not a vendor certificate.
-These tests compare actual circuits with independent polynomial recurrences.
+Planning runs the closed-form polynomial selection and the canonical Wx
+phase synthesis. The 2e-10 comparison floor is numerical headroom, not a
+vendor certificate. These tests compare actual circuits with independent
+polynomial recurrences on the recorded coefficients.
 """
 
-import json
 import math
-from pathlib import Path
-from types import SimpleNamespace
 import numpy as np
 import pytest
 import nwqlib
-from nwqlib.algorithms.qls import QLS, method as owner
-from nwqlib.algorithms.qls.primary_records import InversePolynomial, ReflectionPolynomial
+from nwqlib.algorithms.qls import QLS
 from nwqlib.operators import ingest_pauli
 from nwqlib.problems import LinearSystem, QuadraticForm, Solution, StateVector
 from nwqlib.problems.inputs import ingest_occupation, ingest_product
-from nwqlib.subroutines.qsp import phases
 
 NUMERICAL_FLOOR = 2e-10
-SELECTED = json.loads((Path(__file__).parent / "data" / "qls_native_selected.json").read_text())
-
-
-@pytest.fixture(autouse=True)
-def fixed_selection(monkeypatch):
-    def polynomial(options, kappa):
-        assert options.epsilon_inv == SELECTED["epsilon"] and kappa in (2.0, 4.0)
-        key = f"inverse{int(kappa)}" if options.solver == "qsvt_inverse" else "reflection2"
-        assert options.solver == "qsvt_inverse" or kappa == 2.0
-        table = SELECTED["tables"][key]
-        fields = {
-            name: value
-            for name, value in table.items()
-            if name not in ("phases", "phase_error")
-        }
-        record = InversePolynomial if options.solver == "qsvt_inverse" else ReflectionPolynomial
-        return record(**fields)
-
-    def phase(coefficients, **kwargs):
-        table = next(
-            table
-            for table in SELECTED["tables"].values()
-            if tuple(value / table["rescale"] for value in table["coefficients"])
-            == tuple(coefficients)
-        )
-        return SimpleNamespace(
-            phases=tuple(table["phases"]),
-            residual_sup_bound=table["phase_error"],
-            evaluations=0,
-        )
-
-    monkeypatch.setattr(owner, "select_polynomial", polynomial)
-    monkeypatch.setattr(phases, "solve_symmetric_qsp_phases", phase)
-    return []
+EPSILON = 0.1
 
 
 def native_choice(
@@ -96,7 +60,7 @@ def native_choice(
             solver=method,
             alpha=alpha,
             kappa=kappa,
-            epsilon_inv=SELECTED["epsilon"],
+            epsilon_inv=EPSILON,
             block_encoding_implementation=encoding or ("banded" if quadratic else "dense_dilation"),
             encoded_solution_norm_estimate=None if inverse else 1.5,
         ),
@@ -131,7 +95,7 @@ def chebyshev_action(matrix, coefficients, vector):
 
 
 @pytest.mark.parametrize("case", ["inverse", "embedded", "tiny_positive_auto"])
-def test_native_inverse_polynomial_action_and_physical_recovery(fixed_selection, case):
+def test_native_inverse_polynomial_action_and_physical_recovery(case):
     embedded = case == "embedded"
     factor = 1e-13 if case == "tiny_positive_auto" else 1.
     sign = 1. if case == "tiny_positive_auto" else -1.
@@ -162,13 +126,66 @@ def test_native_inverse_polynomial_action_and_physical_recovery(fixed_selection,
     # Hand inverses preserve the physical sign/complex phase and selected half.
     target = np.array([1.0 - 0.5j, 0.5j]) if embedded else np.array([1.0, sign*0.5j])
     allowance = (
-        np.linalg.norm(rhs) * kappa / alpha * (SELECTED["epsilon"] + rec.polynomial.rescale * delta)
+        np.linalg.norm(rhs) * kappa / alpha * (EPSILON + rec.polynomial.rescale * delta)
     )
     assert np.linalg.norm(actual - target) <= allowance + NUMERICAL_FLOOR
     assert chosen.reconstruction.width == (5 if embedded else 4)
 
 
-def test_native_shortcut_pair_preserves_right_singular_unit_action(fixed_selection):
+def test_phase_residual_reaches_the_executed_inverse_through_k_s_and_the_solution_norm():
+    """A phase residual far above rounding enters the physical output as ``k s delta/||y||``.
+
+    For ``A = diag(1, .1)``, alpha = 1 and k = 10, the eigenvector b's give ``||y||`` of 1 and 10. Recovery multiplies the
+    executed polynomial ``P/s + r``, ``|r| <= delta``, by ``k s``, so the relative error of x against a dense solve is at
+    most ``e + k s delta/||y||``, with e the polynomial's check value. The explicit target 1e-3 leaves delta about 9e-4, so
+    its worst case ``e + k s delta`` exceeds ``epsilon_inv`` while the computation is valid: the summary must show that
+    value, and it must not read as a passed accuracy check. The executed action differs from the exact polynomial by
+    more than rounding and at most ``||b|| k s delta/alpha``, which shows delta in the frame the relation claims.
+    """
+    from nwqlib.algorithms.qls.verification import QLSVerification
+
+    matrix = np.diag([1.0, 0.1])
+    for rhs, norm in (([1.0, 0.0], 1.0), ([0.0, 1.0], 10.0)):
+        chosen = nwqlib.plan(LinearSystem(A=matrix, b=np.array(rhs, dtype=complex)), output=Solution(), seed=7,
+                             method=QLS(alpha=1.0, kappa=10.0, phase_residual_tolerance=1e-3,
+                                        block_encoding_implementation="dense_dilation"))
+        result = nwqlib.solve(chosen)
+        actual = result.value
+        rec = chosen.reconstruction
+        e, k, s, delta = (rec.polynomial.residual_check_value, rec.polynomial_kappa, rec.polynomial.rescale,
+                          rec.phase_error)
+        assert 1e-5 < delta <= 1e-3 and k == 10.0 and s > 1
+        expected = np.linalg.solve(matrix, rhs)
+        assert np.linalg.norm(expected) == pytest.approx(norm, rel=1e-15, abs=0)
+        error = np.linalg.norm(actual - expected) / norm
+        allowance = e + k * s * delta / norm
+        assert error <= allowance + NUMERICAL_FLOOR
+        receipt = result.verify(checks=QLSVerification(comparisons=("inverse_relative_error",)))[0]
+        facts = {f.fact.quantity: f.fact.value.value for f in receipt.applications[0].facts}
+        assert facts["reference.inverse_relative_error.method_allowance"] == pytest.approx(allowance, rel=1e-13, abs=0)
+        assert facts["reference.inverse_relative_error.raw_relative_error"] == pytest.approx(error, rel=1e-9, abs=0)
+        selected = chebyshev_action(matrix, np.array(rec.polynomial.coefficients) / s, np.array(rhs, dtype=float))
+        phase_effect = np.linalg.norm(actual - k * s * selected)
+        assert 1e-7 < phase_effect <= k * s * delta + NUMERICAL_FLOOR
+        worst = e + k * s * delta
+        text = str(result)
+        assert worst > chosen.method.epsilon_inv and f"{worst:.3g}" in text
+        assert f"{delta:.3g}" in text and f"{rec.phase_tolerance:.3g}" in text
+        assert text.endswith("accuracy not assessed") and "PASS" not in text
+
+
+def test_classical_summary_gives_the_polynomial_check_without_a_phase_component():
+    """Classical execution has no phases, so an explicit target changes neither its polynomial nor its record."""
+    problem = LinearSystem(A=np.diag([1.0, 0.5]), b=np.array([1.0, 1.0]))
+    baseline = nwqlib.plan(problem, method=QLS(), execution="classical", seed=7)
+    chosen = nwqlib.plan(problem, method=QLS(phase_residual_tolerance=1e-3), execution="classical", seed=7)
+    assert chosen.reconstruction.polynomial == baseline.reconstruction.polynomial
+    assert chosen.reconstruction.phase_tolerance is None and chosen.reconstruction.phase_error is None
+    text = str(nwqlib.solve(chosen))
+    assert f"{chosen.reconstruction.polynomial.residual_check_value:.3g}" in text and "not applicable" in text
+
+
+def test_native_shortcut_pair_preserves_right_singular_unit_action():
     """Right singular vectors and a separate Hermitian-dilation action independently check both
     shortcut realizations.
     """
@@ -201,6 +218,14 @@ def test_native_shortcut_pair_preserves_right_singular_unit_action(fixed_selecti
         delta = rec.phase_error
         tolerance = 2 * delta / norm + NUMERICAL_FLOOR
         assert np.linalg.norm(aligned - expected) <= tolerance
+        # Dalzell arXiv:2406.12086v2, Appendix C, Theorem 1 over ||y|| in [1, k] gives the unrescaled
+        # success lower bound L in the summary's unit-direction relation, so its term 2 s delta/sqrt(L)
+        # must cover this realized 2 delta/m, for m the rescaled norm of the selected vector.
+        kappa, s, t, eta = rec.polynomial_kappa, rec.polynomial.rescale, rec.t, rec.polynomial.eta
+        center = min(4 * t**2 * n**2 / (t**2 + n**2)**2 for n in (1.0, kappa))
+        lower = center * ((1 - eta) / (1 + eta))**2
+        assert math.sqrt(lower) / s <= norm
+        assert f"{2 * s * delta / math.sqrt(lower):.3g}" in str(result)
         assert (
             abs(result.algorithm_success_mass - norm**2)
             <= (2 * norm + delta) * delta + NUMERICAL_FLOOR
@@ -213,7 +238,7 @@ def test_native_shortcut_pair_preserves_right_singular_unit_action(fixed_selecti
     assert widths == [7, 8]
 
 
-def test_native_banded_quadratic_form_preserves_physical_scale(fixed_selection):
+def test_native_banded_quadratic_form_preserves_physical_scale():
     matrix = np.array([[2.0, -1.0], [-1.0, 2.0]])
     rhs = np.array([1.0, 0.0])
     chosen = native_choice(matrix, rhs, alpha=3.0, kappa=4.0, quadratic=True, compact=True)

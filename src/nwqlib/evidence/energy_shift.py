@@ -16,7 +16,7 @@ stays an open assumption of the check. This comparison is NWQLib's own design.
 """
 
 import math
-from itertools import repeat
+from fractions import Fraction
 from typing import ClassVar, Literal
 
 from pydantic import model_validator
@@ -24,6 +24,7 @@ from pydantic import model_validator
 from nwqlib.core.records import (
     Basis,
     ContentID,
+    FrozenArray,
     Nonnegative,
     PositiveInt,
     Real,
@@ -32,24 +33,25 @@ from nwqlib.core.records import (
     Text,
     Unit,
 )
-from nwqlib.operators.access import Count, _check_bytes
-from ._work import BOOKKEEPING_BYTES, DEFAULT_MAX_INTEGER_BITS, ExactArithmetic
+from nwqlib.operators.access import _check_bytes
 from .error_model import CheckDomain, CheckSpec, ErrorFrame
 from .verification import _publish
-
-# Longest JSON text of a finite binary64 value. json writes float repr, the
-# shortest round-trip form, with at most 17 significant digits, a sign, a
-# decimal point and an exponent such as e-308, as in -1.2345678901234567e-308.
-_FLOAT_JSON_CHARACTERS = 24
 
 
 class EnergyEndpoint(Record):
     """Energy of one Result with the operator table and preparations it was computed from.
 
-    It holds exactly one operator table, either the Pauli terms or the
-    distinct nonzero (row, column, real, imag) matrix entries in original
-    coordinates. subspace_rule and order name the trial-space rule and its
-    size, for Lanczos the Chebyshev rule and the Krylov dimension.
+    The operator table holds the Result's operator in its original
+    coordinates. With ``table="pauli_terms"`` or ``"matrix_entries"`` it has
+    one row for each stored Pauli word or nonzero matrix entry. A row of the
+    int64 array ``table_keys`` holds the word's X and then Z mask words, or
+    the entry's row and column, and the corresponding row of the float64
+    array ``table_values`` holds the real and imaginary parts of its
+    coefficient or entry. With ``table="dense_matrix"``, ``table_keys`` is
+    None and ``table_values`` has one row for every entry of the D-by-D
+    matrix in row-major order. subspace_rule and order name the trial-space
+    rule and its size, for Lanczos the Chebyshev rule and the Krylov
+    dimension.
     """
 
     plan_id: ContentID
@@ -63,154 +65,107 @@ class EnergyEndpoint(Record):
     order: PositiveInt
     sector: Text | None
     frame: ErrorFrame
-    terms: tuple[tuple[Text, Real], ...] | None = None
-    matrix_entries: tuple[tuple[Count, Count, Real, Real], ...] | None = None
+    table: Literal["pauli_terms", "matrix_entries", "dense_matrix"]
+    table_keys: FrozenArray | None
+    table_values: FrozenArray
     value: Real | None
     analyzer: Source | None
 
     @model_validator(mode="after")
-    def _coordinates(self):
-        """Require preparations and exactly one operator table in the endpoint's own coordinates.
+    def _table(self):
+        """Require preparations and an operator table in the endpoint's own coordinates.
 
-        Pauli labels must have one IXYZ character per qubit of a power-of-two
-        basis. Matrix entries must be distinct, nonzero and inside the
-        dimension, so each coordinate appears once in the exact comparison.
+        A Pauli key has the ``2*ceil(q/64)`` mask words of a ``2**q``
+        basis, a matrix key a row and a column inside the dimension, and a
+        dense table one row per entry of the matrix.
         """
+        values = self.table_values.array
         dimension = self.basis.dimension
-        width = dimension.bit_length() - 1
-        if not self.preparations or (self.terms is None) == (self.matrix_entries is None):
-            raise ValueError(
-                "energy endpoint needs preparations and exactly one actual operator payload"
-            )
-        if self.terms is not None:
-            if (
-                dimension < 2
-                or dimension.bit_count() != 1
-                or any(len(label) != width or set(label) - set("IXYZ") for label, _ in self.terms)
-            ):
-                raise ValueError("Pauli energy endpoint requires actual qubit coordinates")
+        if self.table == "dense_matrix":
+            rows, width, keys = dimension * dimension, None, None
         else:
-            seen = set()
-            for row, column, real, imag in self.matrix_entries:
-                if (
-                    row >= dimension
-                    or column >= dimension
-                    or (row, column) in seen
-                    or real == imag == 0
-                ):
-                    raise ValueError(
-                        "matrix endpoint entries must be distinct nonzero original coordinates"
-                    )
-                seen.add((row, column))
+            keys = None if self.table_keys is None else self.table_keys.array
+            if self.table == "pauli_terms" and (dimension < 2 or dimension.bit_count() != 1):
+                raise ValueError("Pauli energy endpoint requires actual qubit coordinates")
+            width = 2 * -(-(dimension.bit_length() - 1) // 64) if self.table == "pauli_terms" else 2
+            rows = None if keys is None or keys.ndim != 2 else keys.shape[0]
+        if (
+            not self.preparations
+            or (keys is None) != (self.table == "dense_matrix")
+            or keys is not None and (keys.dtype.kind != "i" or keys.ndim != 2 or keys.shape[1] != width)
+            or values.dtype.kind != "f"
+            or values.shape != (rows, 2)
+            or self.table == "matrix_entries" and keys.size and (keys.min() < 0 or keys.max() >= dimension)
+        ):
+            raise ValueError(
+                "energy endpoint needs preparations and one (real, imag) row per operator entry "
+                "in its own coordinates"
+            )
         return self
 
 
-def _operator_payload(operator, *, max_bytes):
-    """Return the endpoint's operator table, ``terms`` for Pauli input or ``matrix_entries`` for a dense or compressed matrix, after a byte check.
+def _operator_table(operator, *, max_bytes):
+    """Return the endpoint's operator table fields, read from the operator's stored arrays after a byte check.
 
     It is computed only for the explicit energy-shift check, never by an
-    ordinary solve or analysis, and is not cached.
+    ordinary solve or analysis, and is not cached. A Pauli operator gives
+    the rows of its packed table, and a CSR or CSC matrix its stored nonzero
+    entries in compressed-major order. A dense matrix gives all of its
+    entries when at least half of them are nonzero, the smaller table, and
+    otherwise its nonzero entries in row-major order. No operator is
+    converted, and no Pauli transform or reference solve is performed.
 
-    Dense scans visit stored entries, and CSR/CSC scans visit only nnz. The record holds
-    one table of nonzero entries within a known bound on its scalar and index bytes,
-    which does not bound Python's resident memory (RSS).
-    No new operator is constructed, and no Pauli transform or reference solve is performed.
-
-    The byte check covers the returned table, the EnergyEndpoint record that
-    both callers (the Lanczos and FixedGCIM ``energy_endpoint``) build from it
-    immediately, and the table's share of the identity of any record that
-    holds the endpoint. ``Record.content_id`` keeps the table's scalars with
-    the JSON text of the table and its UTF-8 bytes, because ``model_dump``
-    shares the scalar objects. The check counts the borrowed operator
-    storage, the scalars and label characters of the table and the table's
-    part of those two JSON copies. The record's fixed fields, which do not
-    grow with the operator, are not counted. This byte check leaves tuple,
-    list and set slots out of the logical bytes it counts for the table and
-    its JSON text. ENGINEERING_CONSTANTS.md, "Eigen input conversion and
-    classical preparation", records both formulas.
-
-    The byte check also counts coordinate expansion, zero filtering and
-    gathered values in addition to the tuple and JSON bytes. Extraction
-    preserves the input representation's established entry order. For a
-    matrix, let n be the scanned count, including explicit compressed zeros,
-    or D^2 for dense input. The counted bytes, with F = 24, are
-
-        B_operator + n {32 + 2[6 + 2 digits(D-1) + 2F]} + 4 + 41n + 24D + H0.
-
-    The added ``B_extraction = 41n + 24D + H0`` counts the new coordinate
-    arrays. For CSR/CSC, arange(D), diff(indptr) and a possible intp
-    repeat-count conversion need at most 24D bytes. The repeated
-    major-coordinate vector is 8n, its keep mask n, and gathered row,
-    column and values at most 32n. Their sum gives 41n+24D without assuming
-    early collection. Values are gathered once in their existing float64 or
-    complex128 dtype, and each scalar's real and imaginary parts are read
-    when its tuple is built. Dense input needs at most D^2 mask bytes plus
-    32 times its surviving count, covered by 41D^2, and omits 24D. Empty
-    compressed rows still contribute index preparation, explicit zeros are
-    counted before filtering, and dense zero matrices scan D^2 entries. No
-    flattened row*D+column key is formed. Dense nonzero coordinates keep
-    row-major order. Compressed extraction keeps its compressed-major order,
-    including CSC. The extraction arrays are released before the table's
-    JSON is serialized. The 32 bytes per tuple count its logical fields,
-    not Python object storage. H0 is ``BOOKKEEPING_BYTES``.
+    The byte check is a coarse estimate of the dominant arrays, 6T bytes
+    for a table of T bytes plus one mask byte per entry of a dense matrix.
+    A dense matrix table has at most 16 bytes per entry. 6T covers the
+    gathered arrays, the record's copies and the base64 JSON text that the
+    identity of a record holding the endpoint writes.
+    ENGINEERING_CONSTANTS.md, "Eigen input conversion and classical
+    preparation", records it.
     """
-    if "pauli_terms" in operator.manifest.access:
-        m, q = operator.manifest.shape[0], operator.basis.dimension.bit_length() - 1
-        # Per term, the largest of three peaks. PauliTerms.labels materializes
-        # q characters and a 16-byte complex coefficient, and the table adds an
-        # 8-byte binary64 real part, q + 24 bytes. EnergyEndpoint validation
-        # copies each label while the table is kept, 2q + 8 bytes. An identity
-        # hash keeps the record's label and real part (q + 8) with two copies
-        # of the term's JSON text ["label",real], of at most
-        # q + 6 + _FLOAT_JSON_CHARACTERS = q + 30 bytes each counting its
-        # separator, 3q + 68 bytes, the largest of the three for every q. The
-        # table's enclosing brackets add at most 2 bytes to each JSON copy.
-        _check_bytes(
-            operator.manifest.payload_bytes + m * (3 * q + 68) + 4,
-            max_bytes,
-            "explicit energy endpoint terms",
-        )
-        return dict(
-            terms=tuple(
-                (p, float(c.real)) for p, c in operator.pauli_terms().labels(max_bytes=max_bytes)
-            )
-        )
-    sparse = operator.reference.representation in ("csr", "csc")
-    if not sparse and operator.reference.representation != "dense":
-        raise ValueError("energy endpoint requires existing Pauli or matrix entry access")
-    d = operator.basis.dimension
-    count = operator._data.nnz if sparse else d * d
-    # Per scanned entry, 32 bytes for the two integer indices and two binary64
-    # parts of the (row, column, real, imag) tuple, which EnergyEndpoint
-    # validation and model_dump share, plus two copies of its identity JSON
-    # text [row,column,real,imag]. That text has 6 punctuation characters,
-    # counting the separator, two indices of at most len(str(d - 1)) digits
-    # and two binary64 reprs of at most _FLOAT_JSON_CHARACTERS characters. The
-    # table's enclosing brackets add at most 2 bytes to each JSON copy.
-    digits = len(str(d - 1))
-    # Tuple and JSON payload (first line), then B_extraction of the docstring.
-    _check_bytes(
-        operator.manifest.payload_bytes + count * (32 + 2 * (6 + 2 * digits + 2 * _FLOAT_JSON_CHARACTERS)) + 4
-        + 41 * count + (24 * d if sparse else 0) + BOOKKEEPING_BYTES,
-        max_bytes,
-        "explicit energy endpoint entries",
-    )
     import numpy as np
 
-    if sparse:
-        data, indices, indptr = operator.sparse_entries(max_bytes=max_bytes)
-        major = np.repeat(np.arange(d, dtype=np.intp), np.subtract(indptr[1:], indptr[:-1], dtype=np.intp))
-        keep = data != 0
-        major, minor, values = major[keep], indices[keep], data[keep]
-        rows, columns = (major, minor) if operator.reference.representation == "csr" else (minor, major)
-    else:
+    keys = None
+    if "pauli_terms" in operator.manifest.access:
+        terms = operator.pauli_terms()
+        rows, words = terms.x.shape
+        _check_bytes(6 * rows * (16 * words + 16), max_bytes, "explicit energy endpoint terms")
+        keys = np.hstack((terms.x, terms.z)).view(np.int64)
+        values = terms.coefficients
+        table = "pauli_terms"
+    elif operator.reference.representation == "dense":
+        d = operator.basis.dimension
+        _check_bytes(6 * 16 * d * d + d * d, max_bytes, "explicit energy endpoint entries")
         dense = operator.dense_array()
-        rows, columns = np.nonzero(dense)
-        values = dense[rows, columns]
-    # A real array's .imag would allocate a zero copy. Its imaginary parts are 0.0.
-    imag = values.imag.tolist() if values.dtype.kind == "c" else repeat(0.0, values.size)
-    entries = tuple(zip(rows.tolist(), columns.tolist(), values.real.tolist(), imag))
-    return dict(matrix_entries=entries)
+        if 2 * np.count_nonzero(dense) >= d * d:
+            values, table = dense.ravel(), "dense_matrix"
+        else:
+            rows, columns = np.nonzero(dense)
+            keys, values, table = np.column_stack((rows, columns)), dense[rows, columns], "matrix_entries"
+    elif operator.reference.representation in ("csr", "csc"):
+        _check_bytes(6 * 32 * operator._data.nnz, max_bytes, "explicit energy endpoint entries")
+        data, indices, indptr = operator.sparse_entries(max_bytes=max_bytes)
+        keep = data != 0
+        major = np.repeat(np.arange(operator.basis.dimension), np.diff(indptr))[keep]
+        minor, values = indices[keep], data[keep]
+        keys = np.column_stack((major, minor) if operator.reference.representation == "csr" else (minor, major))
+        table = "matrix_entries"
+    else:
+        raise ValueError("energy endpoint requires existing Pauli or matrix entry access")
+    parts = np.column_stack((values.real, values.imag)).astype(np.float64, copy=False)
+    return dict(table=table, table_keys=None if keys is None else FrozenArray(keys.astype(np.int64, copy=False)),
+                table_values=FrozenArray(parts))
+
+
+def _rows(endpoint):
+    """Return the keys and (real, imag) values of an endpoint's stored rows, the nonzero entries of a dense table."""
+    import numpy as np
+
+    values = endpoint.table_values.array
+    if endpoint.table != "dense_matrix":
+        return endpoint.table_keys.array, values
+    index = np.flatnonzero(values.any(axis=1))
+    return np.column_stack(np.divmod(index, endpoint.basis.dimension)), values[index]
 
 
 _SOURCE = Source(
@@ -312,7 +267,7 @@ class EnergyShiftOptions(Record):
         """
         endpoint = _endpoint(result)
         choices.setdefault(
-            "relation", "pauli_table" if endpoint.terms is not None else "matrix_entries"
+            "relation", "pauli_table" if endpoint.table == "pauli_terms" else "matrix_entries"
         )
         return cls(baseline=endpoint, **choices)
 
@@ -429,219 +384,82 @@ def _triple_zero(t, b, c):
         return False  # Three finite operands with zero exact sum cannot overflow.
 
 
-def _relation_bytes(base_count, target_count, *, pauli_width=None):
-    """Return the bytes of the exact relation's workspace, checked against the limit before allocation.
+def _relation(baseline, target, shift, table, *, max_bytes):
+    """Establish ``H_target - H_baseline = shift * I`` exactly from two endpoint tables, Pauli or matrix by ``table``.
 
-    The count covers the linear coordinate, value, grouping and NumPy sort
-    workspace. Missing matrix diagonals are counted without materializing
-    them. Existing endpoint objects belong to B_held and are not counted
-    here.
+    Missing entries denote zero, and a dense table contributes its nonzero
+    entries. The rows of both tables are merged by a lexicographic sort of
+    their keys, and each table may hold a key once. Imaginary parts must be
+    equal on every key, and real parts on every key that the identity does
+    not touch. The identity touches the Pauli word with zero masks, or every
+    diagonal matrix key. On each such key the real parts must satisfy
+    ``_triple_zero(target_real, baseline_real, shift)``. With a nonzero shift
+    the union must therefore hold the identity word or all D diagonal keys,
+    because a key absent from both tables has difference zero. Missing
+    diagonals are counted without materializing them. Under the supported
+    IEEE arithmetic model every decision equals that of exact rational
+    arithmetic on the recorded binary64 values, and the comparison uses no
+    tolerance.
 
-    Matrix relations, ``U = N_base + N_target``, where ``N_base`` and
-    ``N_target`` count the stored entries of the two endpoints:
-    ``B_matrix = 192U + H0 + B_coord_objects``. Here H0 is
-    ``BOOKKEEPING_BYTES`` and ``B_coord_objects`` counts newly boxed coordinate
-    integers. The 160U logical bound covers converted coordinates and
-    values (32U), concatenated coordinates (16U), sorted coordinates (16U),
-    the returned permutation (8U), starts and group maps (17U), base and
-    target union arrays (at most 32U) and masks and gathered comparison
-    operands (at most 39U). 32U more covers sorting scratch and buffer
-    growth. NumPy 2.5.2 PyArray_LexSort sorts its two keys sequentially by
-    stable indirect sort. Its copy branch uses 8U value bytes and 8U index
-    bytes, and the int64/intp and object indirect Timsort keep a merge
-    buffer of at most U/2 indices whose realloc can overlap old and new
-    buffers (8U), so 16U copy buffers plus 8U merge buffers fit the extra
-    32U. Fixed run stacks and headers belong to H0, and there is no
-    ``U*log(U)`` auxiliary array
-    (https://github.com/numpy/numpy/blob/v2.5.2/numpy/_core/src/multiarray/item_selection.c,
-    https://github.com/numpy/numpy/blob/v2.5.2/numpy/_core/src/npysort/npysort_methods.cpp,
-    https://github.com/numpy/numpy/blob/v2.5.2/numpy/_core/src/npysort/timsort.hpp,
-    https://github.com/numpy/numpy/blob/v2.5.2/numpy/_core/src/npysort/timsort_generic.cpp).
-    Coordinates beyond int64 use eight-byte object pointers to the
-    endpoint's existing Python integers, which are borrowed, so this
-    implementation boxes no coordinate objects and ``B_coord_objects = 0``.
-    A conversion that boxed them would add ``2U*L(bit_length(D-1))``, where
-    D is the matrix dimension and L is ``integer_object_bytes``.
-
-    Pauli relations, N = N_base + N_target + 1 including the identity-shift
-    contribution and q the label width: ``B_Pauli = [16 max(1,q) + 256]N +
-    H0``. Four Unicode arrays (original labels, unique's flattened
-    copy, the permuted copy and the returned unique labels) take at most
-    4*max(1,q)*N bytes each. 256N covers values, inverse, count, group and
-    index arrays, temporary list references, grouped values, masks, gathers
-    and sort workspace
-    (https://github.com/numpy/numpy/blob/v2.5.2/numpy/lib/_arraysetops_impl.py).
-    H0 is ``BOOKKEEPING_BYTES``.
-    """
-    count = base_count + target_count
-    if pauli_width is not None:
-        return (16 * max(1, pauli_width) + 256) * (count + 1) + BOOKKEEPING_BYTES
-    return 192 * count + BOOKKEEPING_BYTES
-
-
-def _pauli_relation(baseline, target, shift, *, max_bytes):
-    """Establish ``H_target - H_baseline = shift * I`` exactly from the two Pauli tables.
-
-    Missing entries denote zero.
-
-    Every public Pauli ``OperatorInput`` is merged by
-    ``operators/inputs.py::_coalesced_input``, which combines identical
-    words. The ``energy_endpoint`` methods of Lanczos and FixedGCIM read that
-    table through ``_operator_payload``, and a reopened Plan restores the
-    saved merged tables. Thus each endpoint has at most one coefficient per
-    word.
-
-    The relation groups the baseline coefficient with a minus sign, the
-    target coefficient and the negative identity shift. A nonidentity
-    group has at most two contributions and the identity group at most
-    three. Singletons are compared with zero, pairs with exact negation,
-    and triples with ``_triple_zero`` under its stated CPython and IEEE
-    assumptions. These tests decide equality of the represented binary64
-    operators without a tolerance. Pauli words are linearly independent,
-    so these conditions are equivalent to
-    ``H_target - H_baseline = shift * I``, where ``H_target`` and ``H_baseline``
-    are the two operators and I is the identity. With q the label width
-    and ``N_base`` and ``N_target`` the two stored term counts, the Pauli
-    workspace is
-    ``[16*max(1,q)+256]*(N_base+N_target+1)+BOOKKEEPING_BYTES`` bytes.
-
-    The comment above ``_triple_zero`` gives the exact-zero argument under
-    the stated CPython and IEEE assumptions. Its docstring explains why an
-    intermediate overflow implies a nonzero exact three-term sum. The
-    contributions are grouped by label with
-    ``np.unique(..., return_inverse=True, return_counts=True)`` and a
-    stable argsort. The exact relation concerns the merged binary64
-    operators, not exact sums of the user's original decimal or duplicate
-    coefficient stream before ingestion rounded it.
+    The byte check is a coarse estimate of the merge arrays, ``(16k + 96)``
+    bytes for each of the U rows of both tables, whose keys have k int64
+    words, counting every entry of a dense table.
     """
     _matched_coordinates(baseline, target)
-    if baseline.terms is None or target.terms is None:
-        raise ValueError("Pauli relation requires two actual Pauli endpoint tables")
-    width = target.basis.dimension.bit_length() - 1
-    _check_bytes(_relation_bytes(len(baseline.terms), len(target.terms), pauli_width=width),
-                 max_bytes, "explicit Pauli relation entries")
+    pauli = table == "pauli_terms"
+    kinds = {"pauli_terms"} if pauli else {"matrix_entries", "dense_matrix"}
+    if baseline.table not in kinds or target.table not in kinds:
+        raise ValueError(f"the {table} relation requires two endpoint tables of that kind")
     import numpy as np
 
-    label_type = f"<U{max(1, width)}"
-    labels = np.concatenate((
-        np.fromiter((label for label, _ in baseline.terms), dtype=label_type, count=len(baseline.terms)),
-        np.fromiter((label for label, _ in target.terms), dtype=label_type, count=len(target.terms)),
-        np.array(["I" * width], dtype=label_type)))
-    values = np.concatenate((
-        -np.fromiter((value for _, value in baseline.terms), dtype=np.float64, count=len(baseline.terms)),
-        np.fromiter((value for _, value in target.terms), dtype=np.float64, count=len(target.terms)),
-        np.array([-float(shift)])))
-    _, inverse, counts = np.unique(labels, return_inverse=True, return_counts=True)
-    ordered = values[np.argsort(inverse, kind="stable")]
-    starts = np.concatenate(([0], np.cumsum(counts)[:-1]))
-    one = starts[counts == 1]
-    two = starts[counts == 2]
-    valid = not (np.any(ordered[one] != 0) or np.any(ordered[two] != -ordered[two + 1]))
-    for index in np.flatnonzero(counts == 3) if valid else ():
-        entries = ordered[starts[index]:starts[index] + 3]
-        valid = _triple_zero(entries[0], -entries[1], -entries[2])
-        if not valid:
-            break
-    if not valid:
-        raise ValueError("recorded Pauli tables do not establish the selected exact H+cI relation")
-
-
-def _coordinates(entries, position, dimension):
-    """Gather one coordinate column as int64, or as the endpoint's own Python integers beyond int64."""
-    import numpy as np
-
-    dtype = np.int64 if dimension - 1 <= np.iinfo(np.int64).max else object
-    return np.fromiter((entry[position] for entry in entries), dtype=dtype, count=len(entries))
-
-
-def _matrix_relation(baseline, target, shift, *, max_bytes):
-    """Establish ``H_target - H_baseline = shift * I`` exactly from the two entry tables.
-
-    Missing entries denote zero. Equal nonidentity and
-    off-diagonal entries are compared directly, while each diagonal or
-    identity shift is checked by an exact-zero sum under the supported IEEE
-    arithmetic model. Matrix coordinates are merged without materializing
-    missing diagonal entries. The comparison uses no tolerance.
-
-    The union of stored coordinates is merged with ``np.lexsort((column,
-    row))``, where column and row are the coordinate vectors. No flattened
-    ``row*D+column`` key is formed, since it can overflow for a very large
-    sparse dimension D. The absent side of a union key is zero. Imaginary
-    parts must be equal on every union key and real parts equal off the
-    diagonal. Each diagonal key must satisfy
-    ``_triple_zero(target_real, base_real, shift)``, where ``target_real`` and
-    ``base_real`` are the real entries at that key. If shift is zero these
-    real tests reduce to vector equality. If shift is nonzero and the union
-    holds fewer than D distinct diagonal coordinates, some diagonal is
-    absent on both sides with difference zero, so the relation fails. This
-    counts missing diagonals without allocating D entries. Empty tables
-    establish only shift zero. For ``U = N_base + N_target``, where ``N_base``
-    and ``N_target`` count the two endpoints' stored entries, the merge uses
-    O(U log U) coordinate comparisons and O(U) array entries of working
-    storage. These counts do not grow with D. Python-integer coordinate
-    comparisons can depend on coordinate bit length. The workspace formula is
-    ``_relation_bytes``.
-    Under the supported IEEE arithmetic model, every decision equals that of
-    exact rational arithmetic on the recorded binary64 values, and the only
-    refusal for lack of resources comes from the workspace formula.
-    """
-    _matched_coordinates(baseline, target)
-    if baseline.matrix_entries is None or target.matrix_entries is None:
-        raise ValueError("matrix relation requires two actual matrix endpoint tables")
-    base, other = baseline.matrix_entries, target.matrix_entries
-    _check_bytes(_relation_bytes(len(base), len(other)), max_bytes, "explicit matrix relation entries")
-    if not base and not other:
-        valid = shift == 0
+    # Matched bases give both tables the same key width.
+    width = target.table_keys.shape[1] if pauli else 2
+    count = baseline.table_values.shape[0] + target.table_values.shape[0]
+    _check_bytes((16 * width + 96) * count, max_bytes, "explicit H+cI relation")
+    (base_keys, base_values), (target_keys, target_values) = _rows(baseline), _rows(target)
+    keys = np.concatenate((base_keys, target_keys))
+    count, split = keys.shape[0], base_keys.shape[0]
+    order = np.lexsort(keys.T[::-1])
+    ordered = keys[order]
+    starts = np.ones(count, dtype=bool)
+    starts[1:] = np.any(ordered[1:] != ordered[:-1], axis=1)
+    group = np.empty(count, dtype=np.intp)
+    group[order] = np.cumsum(starts) - 1
+    size = int(np.count_nonzero(starts))
+    for part in (group[:split], group[split:]):
+        if part.size and np.bincount(part, minlength=size).max() > 1:
+            raise ValueError("an energy endpoint table repeats a key")
+    base, other = np.zeros((size, 2)), np.zeros((size, 2))
+    base[group[:split]] = base_values
+    other[group[split:]] = target_values
+    unique = ordered[starts]
+    shifted = ~unique.any(axis=1) if pauli else unique[:, 0] == unique[:, 1]
+    if np.any(base[:, 1] != other[:, 1]) or np.any(base[~shifted, 0] != other[~shifted, 0]):
+        valid = False
+    elif shift == 0:
+        valid = bool(np.all(base[:, 0] == other[:, 0]))
+    elif np.count_nonzero(shifted) != (1 if pauli else target.basis.dimension):
+        valid = False
     else:
-        import numpy as np
-
-        dimension = target.basis.dimension
-        rows = np.concatenate((_coordinates(base, 0, dimension), _coordinates(other, 0, dimension)))
-        columns = np.concatenate((_coordinates(base, 1, dimension), _coordinates(other, 1, dimension)))
-        order = np.lexsort((columns, rows))
-        sorted_rows, sorted_columns = rows[order], columns[order]
-        starts = np.concatenate(([True], (sorted_rows[1:] != sorted_rows[:-1])
-                                 | (sorted_columns[1:] != sorted_columns[:-1])))
-        group_sorted = np.cumsum(starts) - 1
-        group = np.empty(order.size, dtype=np.intp)
-        group[order] = group_sorted
-        size = int(group_sorted[-1]) + 1
-        base_values, target_values = np.zeros(size, dtype=np.complex128), np.zeros(size, dtype=np.complex128)
-        base_values[group[:len(base)]] = np.fromiter(
-            (complex(entry[2], entry[3]) for entry in base), dtype=np.complex128, count=len(base))
-        target_values[group[len(base):]] = np.fromiter(
-            (complex(entry[2], entry[3]) for entry in other), dtype=np.complex128, count=len(other))
-        diagonal = sorted_rows[starts] == sorted_columns[starts]
-        if np.any(base_values.imag != target_values.imag) or np.any(
-                base_values.real[~diagonal] != target_values.real[~diagonal]):
-            valid = False
-        elif shift == 0:
-            valid = bool(np.all(base_values.real == target_values.real))
-        elif np.count_nonzero(diagonal) != dimension:
-            valid = False
-        else:
-            valid = all(_triple_zero(t, b, shift) for t, b in zip(
-                target_values.real[diagonal].tolist(), base_values.real[diagonal].tolist()))
+        valid = all(_triple_zero(t, b, shift) for t, b in zip(other[shifted, 0].tolist(), base[shifted, 0].tolist()))
     if not valid:
-        raise ValueError("recorded matrix entries do not establish the selected exact H+cI relation")
+        recorded = "Pauli tables" if pauli else "matrix entries"
+        raise ValueError(f"recorded {recorded} do not establish the selected exact H+cI relation")
 
 
-def verify_energy_shift(
-    result, *, options: EnergyShiftOptions, max_integer_bits=DEFAULT_MAX_INTEGER_BITS
-):
+def verify_energy_shift(result, *, options: EnergyShiftOptions):
     """Run the energy-shift check of a target Result against the baseline in `options`, running neither method again.
 
     `result.verify(checks=options)` calls this for Lanczos and FixedGCIM.
     The target's saved energy, operator table and preparations are read
     once. The exact operator relation is checked first, and the discrepancy
-    `abs(E_target - E_baseline - c)` is computed in exact arithmetic.
+    `abs(E_target - E_baseline - c)` is computed in exact rational
+    arithmetic.
 
     Args:
         result (Result): The target Lanczos or FixedGCIM Result, with its
             Plan.
         options (EnergyShiftOptions): The baseline, shift and tolerance.
-        max_integer_bits (int): Bit limit of the exact arithmetic. Default
-            4096.
 
     Returns:
         verification (tuple): `(receipt, facts)`: the `VerificationReceipt`
@@ -654,27 +472,17 @@ def verify_energy_shift(
         TypeError: If `options` is not an `EnergyShiftOptions`, or the
             Result has no saved energy endpoint.
         ValueError: If the Results differ in frame or sector, basis, unit,
-            preparations or subspace rule, the saved tables do not
-            establish the relation exactly, or an exact intermediate value
-            needs more than `max_integer_bits` bits.
+            preparations or subspace rule, or the saved tables do not
+            establish the relation exactly.
     """
     if type(options) is not EnergyShiftOptions:
         raise TypeError("energy comparison requires concrete selected options")
     target = _endpoint(result)
     checks = options._checks(result, target)
-    arithmetic = ExactArithmetic(max_integer_bits=max_integer_bits)
-    if options.relation == "pauli_table":
-        _pauli_relation(options.baseline, target, options.shift, max_bytes=result.plan.method.max_bytes)
-    elif options.relation == "matrix_entries":
-        _matrix_relation(options.baseline, target, options.shift, max_bytes=result.plan.method.max_bytes)
+    if options.relation != "asserted":
+        table = "pauli_terms" if options.relation == "pauli_table" else "matrix_entries"
+        _relation(options.baseline, target, options.shift, table, max_bytes=result.plan.method.max_bytes)
     value = None
     if target.value is not None and options.baseline.value is not None:
-        value = arithmetic.absolute(
-            arithmetic.subtract(
-                arithmetic.subtract(
-                    arithmetic.fraction(target.value), arithmetic.fraction(options.baseline.value)
-                ),
-                arithmetic.fraction(options.shift),
-            )
-        )
-    return _publish(result, options, checks, (value,), max_integer_bits=max_integer_bits)
+        value = abs(Fraction(target.value) - Fraction(options.baseline.value) - Fraction(options.shift))
+    return _publish(result, options, checks, (value,))

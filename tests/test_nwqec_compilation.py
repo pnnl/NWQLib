@@ -32,9 +32,7 @@ def lowered_preparation(state, repetitions=1):
         ),
     )
     construction = SelectedConstruction(program=program, selections=(block.record,))
-    return lower_qiskit(
-        construction, blocks=(block,), max_operations=20, max_qubits=1, max_clbits=0
-    )
+    return lower_qiskit(construction, blocks=(block,))
 
 
 def lowered_h_twice():
@@ -100,6 +98,26 @@ def test_actual_lowering_before_and_after_fusion_and_stored_readback(tmp_path, m
     full.save(tmp_path / "compiled.json")
     restored = LogicalCompilation.load(tmp_path / "compiled.json")
     assert restored.content_id == full.content_id
+    # The default byte limit is the physical memory, read when the compilation runs, and the
+    # record keeps None, so a reopened record names no machine-specific value.
+    assert counts.max_bytes is None and full.max_bytes is None and restored.max_bytes is None
+    assert restored.max_operations is None and restored.timeout_seconds is None
+
+
+def test_clifford_reduction_gives_no_t_count_because_its_output_writes_t_as_a_rotation():
+    """RZ(pi/4) is T up to phase, so clifford_t counts one T. clifford_reduction writes the same gate
+    as rx(pi/4), which counting t and tdg would read as zero T."""
+    require_native()
+    native = lowered_rotation(np.pi / 4)
+    known = compile_logical(native, target="clifford_t")
+    assert next(q for q in known.quantities if q.metric == "t").fact.value.numerator == 1
+    reduced = compile_logical(native, target="clifford_reduction")
+    assert dict(reduced.raw_counts).get("rx(pi/4)") == 1 and "t" not in dict(reduced.raw_counts)
+    t = next(q for q in reduced.quantities if q.metric == "t")
+    assert t.fact.availability == "unknown" and t.interpretation == "unavailable"
+    assert "rx(pi/4)" in t.fact.reason and "clifford_t" in t.fact.reason
+    cx = next(q for q in reduced.quantities if q.metric == "cx")
+    assert cx.fact.value.numerator == 0 and cx.interpretation == "exact"
 
 
 def test_released_rotation_compilation_keeps_requested_precision():
@@ -203,7 +221,117 @@ def test_auxiliary_timeout_or_capture_limit_reaps_child(noisy, monkeypatch):
     assert len(children) == 1 and children[0].poll() is not None
 
 
-def test_child_forwards_exact_external_options_and_admits_output_before_qasm(monkeypatch, tmp_path):
+# The real Popen, before any test replaces it, so that one test can script several children.
+_REAL_POPEN = subprocess.Popen
+
+
+def _scripted_child(monkeypatch, *, stdout=b"", stderr=b"", result=b"{}", code=0):
+    """Replace the auxiliary child with a real Python child that writes these bytes, and return the commands.
+
+    The child writes ``result`` to the call's ``result.json``, then ``stdout``
+    and ``stderr`` to its two pipes, and exits with ``code``.
+    """
+    from nwqlib.backends import _auxiliary_process
+
+    commands = []
+    program = ("import os, sys; from pathlib import Path; "
+               "Path(sys.argv[1], 'result.json').write_bytes(bytes.fromhex(sys.argv[2])); "
+               "os.write(1, bytes.fromhex(sys.argv[3])); os.write(2, bytes.fromhex(sys.argv[4])); "
+               "sys.exit(int(sys.argv[5]))")
+
+    def fixture_process(command, **kwargs):
+        commands.append(command)
+        return _REAL_POPEN([sys.executable, "-c", program, command[-2], result.hex(), stdout.hex(),
+                           stderr.hex(), str(code)], **kwargs)
+
+    monkeypatch.setattr(_auxiliary_process.subprocess, "Popen", fixture_process)
+    monkeypatch.setattr(_auxiliary_process, "find_spec", lambda package: object())
+    return commands
+
+
+# With max_bytes=8192 and the 3-byte request "{}\n", the capture may hold (1 + k) n <= 8189
+# bytes, k = 1 for ASCII, 2 without a byte of 0xF0 or more, and 4 otherwise.
+_CAPTURE_CASES = [
+    ("ascii", b"a" * 4094, 1),
+    ("bmp", b"a" * 2726 + "€".encode(), 2),
+    ("supplementary", b"a" * 1633 + "😀".encode(), 4),
+    ("invalid", b"\xff" + b"a" * 1636, 4),
+]
+
+
+@pytest.mark.parametrize("declared", [8192, None])
+@pytest.mark.parametrize("name, admitted, width", _CAPTURE_CASES, ids=[case[0] for case in _CAPTURE_CASES])
+def test_auxiliary_capture_counts_its_decoded_text_by_byte_class(monkeypatch, declared, name, admitted, width):
+    """The largest admitted output decodes completely, and one more byte is refused before it is decoded.
+
+    An explicit cap and the physical memory (mocked at 8192 bytes) give the
+    same boundary, and the refusal names the one that applied. Invalid UTF-8
+    decodes with U+FFFD. The child receives the resolved limit.
+    """
+    from nwqlib import _limits
+    from nwqlib.backends import _auxiliary_process
+
+    monkeypatch.setattr(_limits, "physical_memory_bytes", lambda: 8192)
+    assert (1 + width) * len(admitted) <= 8189 < (1 + width) * (len(admitted) + 1)
+    commands = _scripted_child(monkeypatch, stdout=admitted)
+    result, _ = _auxiliary_process.run_auxiliary("nwqec", {}, max_bytes=declared, timeout_seconds=30)
+    assert result["diagnostics"] == admitted.decode("utf-8", errors="replace")
+    assert ("�" in result["diagnostics"]) == (name == "invalid") and commands[0][-1] == "8192"
+    refused = b"a" + admitted
+    source = "max_bytes=8192" if declared is not None else r"the physical memory \(8192 bytes\)"
+    _scripted_child(monkeypatch, stdout=refused)
+    with pytest.raises(ValueError, match=rf"diagnostics of {len(refused)} bytes need "
+                                         rf"{(1 + width) * len(refused)} bytes .* beyond the 8189 bytes that {source}"):
+        _auxiliary_process.run_auxiliary("nwqec", {}, max_bytes=declared, timeout_seconds=30)
+
+
+def test_auxiliary_capture_counts_both_pipes_together(monkeypatch):
+    """Output split between stdout and stderr counts as one capture against the same limit."""
+    from nwqlib.backends import _auxiliary_process
+
+    _scripted_child(monkeypatch, stdout=b"a" * 2047, stderr=b"b" * 2047)
+    result, _ = _auxiliary_process.run_auxiliary("nwqec", {}, max_bytes=8192, timeout_seconds=30)
+    diagnostics = result["diagnostics"]
+    assert len(diagnostics) == 4094 and diagnostics.count("a") == diagnostics.count("b") == 2047
+    _scripted_child(monkeypatch, stdout=b"a" * 2048, stderr=b"b" * 2048)
+    with pytest.raises(ValueError, match="diagnostics of 4096 bytes need 8192 bytes"):
+        _auxiliary_process.run_auxiliary("nwqec", {}, max_bytes=8192, timeout_seconds=30)
+
+
+def test_auxiliary_result_needs_four_copies_in_what_the_diagnostics_leave(monkeypatch):
+    """After 4094 ASCII bytes of diagnostics, 4095 bytes remain, so a result file of 1023 bytes is read and 1024 is not."""
+    from nwqlib.backends import _auxiliary_process
+
+    def result(size):
+        return b'{"x":"' + b"y" * (size - 8) + b'"}'
+
+    _scripted_child(monkeypatch, stdout=b"a" * 4094, result=result(1023))
+    read, _ = _auxiliary_process.run_auxiliary("nwqec", {}, max_bytes=8192, timeout_seconds=30)
+    assert read["x"] == "y" * 1015 and read["diagnostics"] == "a" * 4094
+    _scripted_child(monkeypatch, stdout=b"a" * 4094, result=result(1024))
+    with pytest.raises(ValueError, match="result of 1024 bytes needs 4096 bytes for its copies, beyond the 4095 bytes"):
+        _auxiliary_process.run_auxiliary("nwqec", {}, max_bytes=8192, timeout_seconds=30)
+
+
+def test_auxiliary_child_failure_keeps_its_complete_diagnostics(monkeypatch):
+    """A nonzero exit raises RuntimeError with the complete decoded diagnostics after the exit status.
+
+    Diagnostics beyond the limit are refused while they are captured, before
+    any decoding, under the same count.
+    """
+    from nwqlib.backends import _auxiliary_process
+
+    text = "warning: é\n" + "x" * 1000
+    _scripted_child(monkeypatch, stderr=text.encode(), code=3)
+    with pytest.raises(RuntimeError) as failed:
+        _auxiliary_process.run_auxiliary("nwqec", {}, max_bytes=8192, timeout_seconds=30)
+    assert str(failed.value) == f"nwqec child failed (3): {text}"
+    _scripted_child(monkeypatch, stderr=b"x" * 4095, code=3)
+    with pytest.raises(ValueError, match="diagnostics of 4095 bytes need 8190 bytes"):
+        _auxiliary_process.run_auxiliary("nwqec", {}, max_bytes=8192, timeout_seconds=30)
+
+
+def test_child_forwards_exact_external_options_and_checks_four_copies_of_the_output_text(monkeypatch, tmp_path):
     from types import SimpleNamespace
     from nwqlib.backends._auxiliary_process import _compile_nwqec
 
@@ -245,15 +373,14 @@ def test_child_forwards_exact_external_options_and_admits_output_before_qasm(mon
         ("clifford_reduction", False, "reduction", {}),
     ]
     for target, count_only, name, options in cases:
-        request = dict(
-            target=target,
-            count_only=count_only,
-            max_operations=2,
-            **common,
-        )
-        _compile_nwqec(request, tmp_path)
+        request = dict(target=target, count_only=count_only, **common)
+        _compile_nwqec(request, tmp_path, 4096)
         assert calls[-1] == (name, {**common, **options})
-    artifact.to_qasm = lambda: pytest.fail("oversized compiled output was serialized")
-    request.update(target="clifford_t", count_only=False, max_operations=1)
-    with pytest.raises(ValueError, match="output exceeds"):
-        _compile_nwqec(request, tmp_path)
+    text = artifact.to_qasm()
+    request = dict(target="clifford_t", count_only=False, **common)
+    assert _compile_nwqec(request, tmp_path, 4 * len(text))["qasm"] == text
+    with pytest.raises(ValueError, match="copies"):
+        _compile_nwqec(request, tmp_path, 4 * len(text) - 1)
+    # A count-only result is a short count table and has no output check.
+    request.update(count_only=True)
+    assert _compile_nwqec(request, tmp_path, 1)["counts"] == {"t": 2}

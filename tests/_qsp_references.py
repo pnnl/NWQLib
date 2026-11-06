@@ -1,8 +1,9 @@
-"""Independent ``1/x`` polynomial references for the QLS inverse fit.
+"""Independent references for the QLS inverse polynomial.
 
-The fitted polynomial approximates ``1/(kappa_be x)`` on
-``D(a) = {x : a <= |x| <= 1}`` with ``a = 1/kappa_be``. These references
-approximate ``1/x``; divide them by ``kappa_be`` to compare with the fit.
+The inverse polynomial approximates ``1/(kappa x)`` on
+``D(a) = {x : a <= |x| <= 1}`` with ``a = 1/kappa``. The [CKS] reference
+approximates ``1/x``, so divide it by ``kappa`` to compare. The restricted
+residual bound evaluates a stored table in exact rational arithmetic.
 
 [CKS] is Childs, Kothari, and Somma, arXiv:1511.02306v2, whose Lemmas 17-19
 give the ``1/x`` expansion and the ``d = O(kappa log(kappa/eps))`` degree
@@ -13,6 +14,7 @@ parameterization used below. Numbers refer to these arXiv versions.
 
 from __future__ import annotations
 
+from fractions import Fraction
 from math import ceil, log
 
 import numpy as np
@@ -58,3 +60,44 @@ def cks_inverse_coefficients(kappa_be: float, epsilon_inv: float) -> np.ndarray:
         magnitude = np.exp(log_sum - 2.0 * b_smoothing * log(2.0))
         coefficients[2 * j + 1] = 4.0 * ((-1.0) ** j) * magnitude
     return coefficients
+
+
+def restricted_inverse_residual_bound(odd: list[Fraction], kappa: Fraction) -> Fraction:
+    """Exact upper bound on ``max |kappa x P(x) - 1|`` over ``1/kappa <= |x| <= 1``.
+
+    ``odd`` holds the coefficients ``c_1, c_3, ..., c_{2m-1}`` of
+    ``P = sum_j c_{2j-1} T_{2j-1}`` as exact rationals. With ``s = 2x^2 - 1``,
+    ``x T_{2j-1}(x) = (T_j(s) + T_{j-1}(s))/2``, so the residual is a degree-m
+    Chebyshev series in ``s``. On the domain ``s = alpha + beta z`` with
+    ``alpha = 1/kappa^2``, ``beta = 1 - alpha`` and ``|z| <= 1``. Each
+    ``T_j(alpha + beta z)`` is expanded in Chebyshev polynomials of ``z`` by
+    the three-term recurrence, and the sum of the absolute coefficients bounds
+    the residual. The work is ``O(m^2)`` rational operations.
+    """
+    m = len(odd)
+    residual = [Fraction(0)] * (m + 1)
+    residual[0] = Fraction(-1)
+    for j, value in enumerate(odd, 1):
+        residual[j] += kappa * value / 2
+        residual[j - 1] += kappa * value / 2
+    alpha = 1 / kappa**2
+    beta = 1 - alpha
+    in_z = [Fraction(0)] * (m + 1)
+    previous, current = [], [Fraction(1)]
+    for j in range(m + 1):
+        for i, value in enumerate(current):
+            in_z[i] += residual[j] * value
+        if j == m:
+            break
+        following = [Fraction(0)] * (j + 2)
+        for i, value in enumerate(current):
+            following[i] += 2 * alpha * value
+            # 2 z T_0 = 2 T_1 and 2 z T_i = T_{i-1} + T_{i+1} for i > 0.
+            following[i + 1] += beta * value if i else 2 * beta * value
+            if i:
+                following[i - 1] += beta * value
+        for i, value in enumerate(previous):
+            following[i] -= value
+        # T_1(s) = s T_0, half of the recurrence's 2 s T_0.
+        previous, current = current, following if j else [value / 2 for value in following]
+    return sum(abs(value) for value in in_z)

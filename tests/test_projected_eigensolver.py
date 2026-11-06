@@ -93,6 +93,21 @@ def test_identity_shift_reports_the_pencil_that_contains_it():
         pencil.revise(offset_free_eigenvalues=(.25,))
 
 
+def test_backward_error_is_unavailable_and_an_overflowing_hermitian_part_is_refused():
+    import pytest
+    from nwqlib._projected_eigensolver import _eigenpair_backward_error, _hermitian_part
+
+    # 0.125 / ((2 + 0.5 * 4) * 1) = 1/32 exactly.
+    assert _eigenpair_backward_error(0.125, 2., 4., 1., 0.5) == 0.03125
+    # |E| ||S||_F = 1e309 has no binary64 value.
+    assert _eigenpair_backward_error(1., 1e200, 1e200, 1., 1e109) is None
+    tiny = np.nextafter(0., 1.)
+    np.testing.assert_array_equal(_hermitian_part(np.array([[1., .125], [.25, tiny]])),
+                                  [[1., .1875], [.1875, tiny]])
+    with pytest.raises(ValueError, match="binary64 range"):
+        _solve_projected_pencil(np.diag([1.5e308, 1.]), np.eye(2))
+
+
 def test_gram_formation_allowance_admits_roundoff_and_still_refuses_a_non_gram_matrix():
     from nwqlib._projected_eigensolver import gram_formation_allowance
 
@@ -106,3 +121,28 @@ def test_gram_formation_allowance_admits_roundoff_and_still_refuses_a_non_gram_m
         result, _, failure, _ = _solve_projected_pencil(
             np.eye(3), overlap, overlap_input_tolerance=gram_formation_allowance(2**14, 3.))
         assert (failure == "negative_deterministic_overlap_eigenvalue") == refused
+
+
+def test_entrywise_gram_allowance_is_the_least_float_above_the_largest_exact_row_sum():
+    # The reference sums each row exactly in rationals and rounds the largest sum upward. Rows that round down,
+    # sum exactly, mix subnormal and normal entries, or exceed the binary64 range all give the reference value.
+    from fractions import Fraction
+    from math import inf, nextafter
+
+    from nwqlib._projected_eigensolver import entrywise_gram_allowance
+
+    def reference(errors):
+        largest = max((sum((Fraction(float(v)) for v in row), Fraction(0)) for row in errors), default=Fraction(0))
+        try:
+            value = float(largest)
+        except OverflowError:
+            return inf
+        return nextafter(value, inf) if value < inf and Fraction(value) < largest else value
+
+    rng = np.random.default_rng(17)
+    big = np.finfo(float).max
+    cases = [np.zeros((0, 0)), np.zeros((3, 3)), np.full((4, 4), 0.1), np.array([[1.0, 2.0**-53], [2.0**-53, 1.0]]),
+             np.array([[5e-324, 1.0, 2.0**-60]]), np.array([[big, big * 2.0**-53]]), np.array([[big / 2, big / 2]]),
+             np.array([[big, big]]), *(rng.random((n, n)) * 10.0 ** rng.integers(-300, 300) for n in (2, 5, 9))]
+    for errors in cases:
+        assert entrywise_gram_allowance(errors) == reference(errors)

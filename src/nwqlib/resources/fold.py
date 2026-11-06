@@ -15,7 +15,7 @@ bookkeeping") describes how the fold combines these costs.
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 
-from nwqlib.core.records import Float64, Rational, Scope, Source, Symbol, Unit
+from nwqlib.core.records import STORABLE_INTEGER_BOUND, Float64, Rational, Scope, Source, Symbol, Unit
 from nwqlib.evidence import Evidence, Fact
 from nwqlib.blocks.records import SelectedConstruction
 from nwqlib.ir import (
@@ -23,9 +23,9 @@ from nwqlib.ir import (
     Measure, MeasurementBatch, Parallel, Release, Repeat, Reset, Sequence,
 )
 from nwqlib.ir.expressions import Binary, Constant, ExprRef, Expression, ParameterRef, number
-from nwqlib.ir.validation import _Admission
-from .records import (CLIFFORD_ANGLES, COUNTS, DEPTHS, FOLD_WORK_PER_ADMISSION_STEP, GATES, T_ANGLES,
-                      ResourceContext, ResourceQuantity, WorkloadEstimate)
+from nwqlib.ir.validation import UNSTORABLE_INTEGER, _Admission
+from .records import (CLIFFORD_ANGLES, COUNTS, DEPTHS, GATES, T_ANGLES,
+                      TYPICAL_ROTATION_SYNTHESIS, ResourceContext, ResourceQuantity, WorkloadEstimate)
 
 FOLD_SOURCE = Source(name="selected_resource_fold", version="2", domain="selected logical construction",
                      reference="nwqlib.resources.fold; serial sum, explicit parallel max, lifetime peaks")
@@ -80,6 +80,36 @@ def _unknown(reason):
     return _Value(None, reasons=frozenset((reason,)))
 
 
+def _same_footprint(a, b):
+    """Whether two footprints state one number: equal values, with neither only a ceiling or a conditional value.
+
+    Declared sizes are estimates (``Workspace``), and the same declared bytes on
+    both sides are one footprint just as equal exact ones are.
+    """
+    return a.value == b.value and not {a.interpretation, b.interpretation} & {"upper_bound", "conditional"}
+
+
+def typical_rotation_t(epsilon):
+    """``ceil(3*log2(1/epsilon))`` and at least 0, the T count of one rotation under ``TYPICAL_ROTATION_SYNTHESIS``.
+
+    It is the smallest integer m with ``2**m * epsilon**3 >= 1``, found in
+    exact rational arithmetic from the binary64 ``epsilon``, so no rounded
+    logarithm can move it across an integer. ``m`` is at most 3222, for the
+    smallest subnormal ``2**-1074``.
+    """
+    from fractions import Fraction
+
+    cube = Fraction(epsilon) ** 3
+    if cube >= 1:
+        return 0
+    # With k the difference of the bit lengths, 2**(k - 1) < 1/cube < 2**(k + 1),
+    # so the search starts at k - 1 and takes at most two steps.
+    m = max(cube.denominator.bit_length() - cube.numerator.bit_length() - 1, 0)
+    while cube.numerator << m < cube.denominator:
+        m += 1
+    return m
+
+
 # The exact, source-free zero. It is the only additive identity. An unknown,
 # estimated or evidence-bearing zero still participates in combination.
 _EMPTY = _Value()
@@ -96,7 +126,8 @@ class _Fold:
       depth. Parallel adds work and takes the maximum depth. Repeat
       multiplies the body cost by its count without unrolling. A Branch
       takes the per-metric maximum of its arms as an upper bound, with no
-      probability model. An adaptive body without a declared per-round upper
+      probability model, except that a metric with the same exact value on
+      both arms stays exact. An adaptive body without a declared per-round upper
       bound has unknown costs.
     - Block costs. A BlockCall costs what its SelectedDefinition declares: an
       exact gate decomposition, applicable ResourceLaw summaries, or one of
@@ -115,11 +146,7 @@ class _Fold:
     The fold first runs Program admission, the full structural check that
     accepts or rejects the Program, in its own admission instance and then
     continues on that instance, reusing its node tables, exact integer and
-    depth limits and work counter. Its work limit is
-    ``max(max_steps, FOLD_WORK_PER_ADMISSION_STEP * a)``, where ``a`` is the
-    admission work just measured (ENGINEERING_CONSTANTS.md, "Shared Program
-    admission limits"). A fold proportional to its Program is accepted, and
-    one that grows faster is rejected. Node visits are cached per
+    depth limits and work counter. Node visits are cached per
     (node, binding, live footprint, classical availability) and cost-rule
     lookups per (selection content hash, cost parameters).
 
@@ -152,18 +179,21 @@ class _Fold:
         fold_evidence: The fold's own proved-relation Evidence record.
         fold_id: Content hash of ``fold_evidence``, attached to counts taken
             from gate decompositions.
+        rotation_t: T count of one arbitrary single-qubit phase when the
+            context selects ``TYPICAL_ROTATION_SYNTHESIS`` with a precision
+            in the clifford_t basis (``typical_rotation_t``), otherwise None.
         catalog: The reason that the Program is a catalog of query templates
             (``estimate``), or None.
     """
 
     def __init__(self, construction, context, catalog=None):
-        """Check the Program, set the fold's work limit and create empty tables.
+        """Check the Program and create empty tables.
 
-        The full Program admission runs first, and its measured work sets
-        ``step_limit``. The selected definitions, classical routines and
+        The full Program admission runs first, and the fold continues its work
+        count. The selected definitions, classical routines and
         context are then walked under the same rule, which counts work before
-        copying, and every integer in them is checked against
-        ``max_integer_bits``, before their content hashes are computed or the
+        copying, and every integer in them is checked to be one that a saved
+        record can hold, before their content hashes are computed or the
         fold traverses them.
         """
         self.construction = construction
@@ -171,10 +201,6 @@ class _Fold:
         self.catalog = catalog
         self.admission = _Admission(construction.program)
         self.readiness = self.admission.admitted()
-        # The fold work limit is proportional to the admission work just measured,
-        # and never below the Program's own step limit.
-        self.admission.step_limit = max(construction.program.limits.max_steps,
-                                        FOLD_WORK_PER_ADMISSION_STEP * self.admission.steps)
         self.program = construction.program
         self.selected = {item.signature.name: item for item in construction.selections}
         self.kernels = {item.name: item for item in construction.kernels}
@@ -201,6 +227,9 @@ class _Fold:
             self.identities[item.signature.name] = item.content_id
         self.fold_evidence = Evidence(kind="proved_relation", source=FOLD_SOURCE)
         self.fold_id = self.source(self.fold_evidence)
+        self.rotation_t = (typical_rotation_t(context.precision.value)
+                           if context.basis == "clifford_t" and context.precision is not None
+                           and context.synthesis == TYPICAL_ROTATION_SYNTHESIS else None)
 
     def source(self, evidence):
         """Add one evidence record to the shared source table and return its content hash."""
@@ -240,9 +269,8 @@ class _Fold:
         round. Identities with 0 and 1 are applied before a node is built, so
         combining a symbolic cost with 0 or 1 creates no node. As in Program
         admission, an integer product is rejected before it is formed when the
-        operand bit lengths prove that it exceeds ``max_integer_bits``. A sum
-        or product only one bit over the limit can be formed and is then
-        rejected by ``bounded``.
+        operand bit lengths prove that a saved record cannot hold it. Any other
+        sum or product is formed and then checked by ``bounded``.
         """
         self.admission.tick()
         if op == "multiply" and (left == 0 or right == 0):
@@ -257,8 +285,8 @@ class _Fold:
             return self.expression(Binary(op=op, left=self.operand(left), right=self.operand(right)))
         if op == "multiply":
             if (type(left) is int and type(right) is int and left and right
-                    and left.bit_length() + right.bit_length() - 1 > self.admission.limits.max_integer_bits):
-                raise ValueError("resource integer growth exceeds max_integer_bits")
+                    and left.bit_length() + right.bit_length() - 1 > STORABLE_INTEGER_BOUND.bit_length()):
+                raise ValueError("resource " + UNSTORABLE_INTEGER)
             value = left * right
         elif op == "add":
             value = left + right
@@ -364,6 +392,16 @@ class _Fold:
         the basis makes the gate metrics unknown (the arbitrary-rotation
         count is kept), because no synthesis is invented here. Without a gate
         decomposition every gate metric is unknown.
+
+        The one registered synthesis rule is ``TYPICAL_ROTATION_SYNTHESIS``
+        in the ``clifford_t`` basis with a precision (``rotation_t``). It
+        applies only to an arbitrary phase on one qubit, the controlled
+        global phase, which is a Z rotation up to global phase. When the
+        decomposition has no other gate outside the basis, the T count is
+        the exact T gates plus ``rotation_t`` per such phase, an
+        ``estimate``. The arbitrary-rotation count is kept, and every other
+        gate metric is unknown, because the synthesized Clifford gates are
+        not counted. A phase on more qubits stays outside the basis.
         """
         if selected.decomposition is None:
             return {metric: _unknown(f"{selected.signature.name}: no selected {metric} law/decomposition") for metric in GATES}
@@ -371,6 +409,7 @@ class _Fold:
         counts = dict.fromkeys(GATES, 0)
         unknown_t = False
         basis_supported = True
+        synthesized = 0
         for operation in selected.decomposition:
             self.admission.tick()
             gate, width = operation.gate, len(operation.qubits)
@@ -403,15 +442,27 @@ class _Fold:
                 counts["non_clifford_depth"] += 1
                 unknown_t |= not t_phase
             if self.context.basis == "clifford_t" and not (clifford or t_phase):
-                basis_supported = False
+                if self.rotation_t is not None and phase and width == 1:
+                    synthesized += 1
+                else:
+                    basis_supported = False
             if self.context.basis == "cx" and not (width == 1 or gate in {"x", "cx"} and width == 2):
                 basis_supported = False
         if self.context.basis in {"clifford_t", "cx"}:
             # No implicit synthesis of controlled H, CCZ, or other nonbasis gates.
-            if not basis_supported:
-                result = {metric: _unknown(f"{selected.signature.name}: selected recipe needs a {self.context.basis} synthesis law") for metric in GATES}
+            if not basis_supported or synthesized:
+                reason = ("selected recipe needs a {} synthesis law" if not basis_supported else
+                          "the rotation synthesis estimate counts only T gates")
+                result = {metric: _unknown(f"{selected.signature.name}: " + reason.format(self.context.basis))
+                          for metric in GATES}
                 if counts["arbitrary_rotations"]:
                     result["arbitrary_rotations"] = _Value(counts["arbitrary_rotations"], sources=frozenset((self.fold_id,)))
+                if basis_supported:
+                    rule = self.source(Evidence(kind="empirical_prediction", source=TYPICAL_ROTATION_SYNTHESIS))
+                    result["t"] = _Value(counts["t"] + synthesized * self.rotation_t, "estimate",
+                                         sources=frozenset((self.fold_id, rule)), assumptions=frozenset((
+                                             f"ceil(3 log2(1/eps)) = {self.rotation_t} T per arbitrary single-qubit "
+                                             "rotation, the typical Ross-Selinger leading term, not an upper bound",)))
                 return result
         for metric, value in counts.items():
             result[metric] = _Value(value, sources=frozenset((self.fold_id,)))
@@ -446,18 +497,26 @@ class _Fold:
         expected = {"num_qubits", "multiplicity"} if name.startswith("direct") else {"index_qubits", "system_qubits"}
         if set(bindings) != expected or any(type(value) is not int or value < 0 for value in bindings.values()):
             return None
-        # Reject huge shifts before calling the established law owner.
+        if name.startswith("direct") and selected.controlled != (name == "direct_preparation_controlled_cx_bound"):
+            return None
         exponent = bindings.get("num_qubits", bindings.get("index_qubits", 0))
         factor = bindings.get("multiplicity", bindings.get("system_qubits", 0))
-        # All four registered envelopes are <= 32*max(1,factor)*2**exponent:
-        # controlled SELECT has leading coefficient 24*q+8 <= 32*max(1,q),
-        # controlled direct PREP <= 16*2**q (including its uniform fast path).
-        # Reserve the upper bound's bit length before any native power or product.
-        if exponent + max(1, factor).bit_length() + 5 > self.admission.limits.max_integer_bits:
-            raise ValueError("CX law integer growth exceeds max_integer_bits")
-        if name.startswith("direct"):
-            if selected.controlled != (name == "direct_preparation_controlled_cx_bound"):
-                return None
+        # A zero multiplicity, or a Pauli readout without system qubits, has
+        # zero CX whatever the exponent, so its law is not evaluated.
+        zero = factor == 0 and name != "signed_pauli_cx_bound"
+        # For an exponent e >= 2 each registered law, when nonzero, lies in
+        # [max(1, f) * 2**(e-1), 32 * max(1, f) * 2**e) for the factor f, the
+        # widest being controlled SELECT, 24*q*L - 20*q + 8*L - 14 with L = 2**e.
+        # When the lower end reaches 2**bit_length(STORABLE_INTEGER_BOUND),
+        # no saved record can hold the count, and it is refused before any
+        # power is formed. Otherwise the count has at most six bits more than
+        # the bound, and the exact check below decides.
+        if (not zero and exponent >= 2
+                and max(1, factor).bit_length() + exponent - 2 >= STORABLE_INTEGER_BOUND.bit_length()):
+            raise ValueError("CX law " + UNSTORABLE_INTEGER)
+        if zero:
+            value = 0
+        elif name.startswith("direct"):
             law = direct_preparation_controlled_cx_bound if selected.controlled else direct_preparation_cx_bound
             value = self.arithmetic("multiply", bindings["multiplicity"], law(bindings["num_qubits"]))
         else:
@@ -570,7 +629,10 @@ class _Fold:
         result = {}
         for metric in COUNTS:
             op = "max" if branch or parallel and metric in DEPTHS else "add"
-            result[metric] = self.combine(left[metric], right[metric], op, bound=branch)
+            a, b = left[metric], right[metric]
+            # As for peaks, a count equal and exact on both arms of a branch stays exact.
+            invariant = branch and a.value == b.value and a.interpretation == b.interpretation == "exact"
+            result[metric] = self.combine(a, b, op, bound=branch and not invariant)
         return result
 
     def scale_cost(self, costs, multiplicity, *, bound=False, assumption=None):
@@ -646,9 +708,11 @@ class _Fold:
                 add(("classical_bits", "host"), _Value(self.scalar(value.width, bindings), kind))
         for item in self.context.resident + tuple(workspace):
             self.admission.tick()
+            # A declared size is not an observed allocation, so it and every peak it
+            # enters are estimates (Workspace).
             value = _unknown(f"{item.location}: unknown {item.purpose} workspace "
                 f"({item.source.name}: {item.source.domain})") if item.bytes is None else _Value(
-                item.bytes, sources=frozenset((self.source(Evidence(kind="external_specification", source=item.source)),)))
+                item.bytes, "estimate", sources=frozenset((self.source(Evidence(kind="external_specification", source=item.source)),)))
             add(("memory", item.location), value)
             if item.bytes is not None:
                 add(("known_memory", item.location), value)
@@ -662,13 +726,14 @@ class _Fold:
         """Take the per-location maximum of two footprints.
 
         With ``bound=True`` (exclusive branch paths) a differing entry becomes
-        an upper bound. An entry equal and exact on both sides stays exact.
+        an upper bound. The same footprint on both sides keeps its meaning and
+        takes no assumption about the paths.
         """
         self.admission.tick(len(left) + len(right))
         result = {}
         for key in left.keys() | right.keys():
             a, b = left.get(key, _Value()), right.get(key, _Value())
-            invariant = a.value == b.value and a.interpretation == b.interpretation == "exact"
+            invariant = _same_footprint(a, b)
             value = self.combine(a, b, "max", bound=bound and not invariant)
             if assumption and not invariant:
                 value = replace(value, assumptions=value.assumptions | {assumption})
@@ -676,18 +741,16 @@ class _Fold:
         return result
 
     def batch_peaks(self, peaks, bindings):
-        """Mark each peak that differs from the exact resident footprint as requiring a serial schedule.
+        """Mark each peak that differs from the resident footprint as requiring a serial schedule.
 
         Per-job reuse of space holds only under a serial schedule. A peak
-        equal to the exact resident footprint stays unmarked.
+        that is the resident footprint stays unmarked.
         """
         resident = self.snapshot((), frozenset(), bindings)
         result = {}
         for key, value in peaks.items():
             self.admission.tick()
-            base = resident.get(key, _Value())
-            invariant = value.value == base.value and value.interpretation == base.interpretation == "exact"
-            result[key] = value if invariant else replace(value, requires_serial=True)
+            result[key] = value if _same_footprint(value, resident.get(key, _Value())) else replace(value, requires_serial=True)
         return result
 
     def call_workspace(self, call):
@@ -998,7 +1061,9 @@ class _Fold:
             interpretation = "unavailable"
         else:
             interpretation = value.interpretation
-            if required_schedule is not None and self.context.batch_schedule == "unspecified":
+            # An estimate is already the weakest meaning. Its schedule stays in required_schedule.
+            if (required_schedule is not None and self.context.batch_schedule == "unspecified"
+                    and interpretation != "estimate"):
                 interpretation = "conditional"
             # Only authoritative inputs determine the derived evidence kind.
             # Observed data used in the value keep it a prediction even when
@@ -1101,6 +1166,15 @@ class _Fold:
                              assumptions=frozenset(("potential terminal point union over unresolved control/repetition",)))
         costs["unique_settings"] = unique
         costs.update(self.root_populations)
+        # Depths add along a Sequence, even for operations on disjoint wires that can
+        # run together (two H on two qubits: 2, circuit depth 1), so a nonzero depth is
+        # an upper bound on the circuit's depth. A zero is exact, since depth cannot be
+        # negative. Gate counts do not depend on the schedule.
+        for metric in DEPTHS:
+            value = costs[metric]
+            if value.interpretation == "exact" and value.value not in (None, 0):
+                costs[metric] = replace(value, interpretation="upper_bound", assumptions=value.assumptions | {
+                    "serial schedule of the Program order; a dependency schedule can be shallower"})
         if self.catalog is not None:
             zeros = self.catalog_zeros()
             self.admission.tick(len(costs))
@@ -1114,6 +1188,11 @@ class _Fold:
             "unique_settings": "distinct potentially reached terminal setting points",
             "root_setting_declarations": "Program-root MeasurementBatch setting declarations",
             "root_repetitions": "Program-root MeasurementBatch body repetitions",
+            # Both count what the Program declares. A Method's controller and analysis
+            # outside the Program, such as the Gaussian update of quantum RWPE between
+            # its circuits, are in neither total.
+            "adaptive_rounds": "declared Program AdaptiveLoop rounds; excludes a Method's controller outside the Program",
+            "classical_work": "declared Program classical stages and kernels; excludes a Method's controller and analysis outside the Program",
         }
         quantities = [self.quantity(metric, value,
                        population=populations.get(metric, "workload schedule envelope" if metric in DEPTHS and value.interpretation == "upper_bound" else "dynamic workload"))
@@ -1138,7 +1217,7 @@ class _Fold:
             quantities=quantities, expressions=tuple(self.expr.values()), parameters=self.program.parameters,
             sources=tuple(self.evidence.values()), defined_selections=tuple(sorted(self.defined)),
             work_units=self.admission.steps, evaluated_contexts=len(self.memo) + len(self.leaves), limits=self.program.limits,
-            assumptions=self.program.premises + self.readiness.blockers + ("logical dependency schedule; no physical QEC/routing/factory projection",)
+            assumptions=self.program.premises + self.readiness.blockers + ("serial schedule of the Program order; no physical QEC/routing/factory projection",)
             + (() if self.catalog is None else (self.catalog,)))
 
 
@@ -1151,10 +1230,15 @@ def estimate(construction: SelectedConstruction, *, context: ResourceContext | N
     circuit description once per distinct context and keeps symbolic costs
     in a compact expression table. It reads no numerical input data,
     synthesizes no gates and does not unroll repeated parts. Its bookkeeping
-    work is at most ``24 * limits.max_steps`` work units,
-    reported as `WorkloadEstimate.work_units`, where `limits` is
-    `construction.program.limits` ([engineering
-    constants](../ENGINEERING_CONSTANTS.md#shared-program-admission-limits)).
+    work is reported as `WorkloadEstimate.work_units`.
+
+    The totals count what the circuit description declares. `adaptive_rounds`
+    counts the rounds of its `AdaptiveLoop` nodes, and `classical_work` its
+    classical stages and kernels. A Method's controller and analysis outside the
+    description are not counted, so a zero in either does not mean that the
+    Method uses no feedback or host computation. Quantum RWPE, for example,
+    updates its Gaussian state between circuits outside its description, so both
+    are exact zeros beside its counted circuits and shots.
 
     The result depends only on the construction, the context and `catalog`.
     A caller that estimates several points of one Plan can pass one `memo`
@@ -1210,8 +1294,8 @@ def estimate(construction: SelectedConstruction, *, context: ResourceContext | N
             gives, is present as unavailable, not as zero.
 
     Raises:
-        ValueError: If an exact count needs more integer bits than
-            `construction.program.limits.max_integer_bits`, two applicable
+        ValueError: If an exact count is an integer that a saved record
+            cannot hold, outside -10**4299 < value < 10**4300, two applicable
             cost rules of a block conflict, a block's declared cost rule
             contradicts its exact gate list, or its bookkeeping work would
             exceed the limit stated above.

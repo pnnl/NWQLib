@@ -8,12 +8,11 @@ from nwqlib.blocks import SelectedConstruction
 from nwqlib.blocks.records import SelectedKernel
 from nwqlib.core.planning import Experiment, ObservationSpec, Realization
 from nwqlib.ir import ClassicalStage, Definition, Program
-from nwqlib.ir.validation import admitted_program
 from nwqlib.evidence.error_model import ErrorModel, ErrorTerm, FramedFact
 from nwqlib.evidence.records import Fact
 
 
-def host_construction(source, inputs, labels, *, work, description, frames=None, admission=None):
+def host_construction(source, inputs, labels, *, work, description, frames=None):
     """Declare one classical routine and the one Experiment that runs it.
 
     Classical execution of Lanczos, FixedGCIM and Expectation has no quantum
@@ -28,9 +27,6 @@ def host_construction(source, inputs, labels, *, work, description, frames=None,
         work: Declared work of one call, stored as the routine's invocation_work.
         description: Short statement of what the routine computes, stored in the observation's ``padding`` field.
         frames: Scalar frame per label, ``unit`` for every label when None.
-        admission: ``(option, max_steps)`` of a Method that sets the planning-work
-            limit of its Programs, such as ``("FixedGCIM.max_admission_steps", 10_000_000)``.
-            None uses the shared ``AdmissionLimits`` default.
 
     Returns:
         (construction, experiments): the SelectedConstruction and a
@@ -58,8 +54,7 @@ def host_construction(source, inputs, labels, *, work, description, frames=None,
             ),
         ),
     )
-    program = Program(**fields) if admission is None else admitted_program(*admission, **fields)
-    construction = SelectedConstruction(program=program, selections=(), kernels=(kernel,))
+    construction = SelectedConstruction(program=Program(**fields), selections=(), kernels=(kernel,))
     return construction, (
         Experiment(
             name="acquisition",

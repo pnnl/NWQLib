@@ -32,16 +32,15 @@ def remap_counts(states, counts, sources):
     Classical bit ``b`` takes backend bit ``sources[b]``, and a ``None`` source
     leaves it zero. Bit zero is the least significant bit on both sides, so an
     outcome integer ``j`` is the bit string ``format(j, f"0{len(sources)}b")``
-    (rightmost character bit zero). Each count must be an integer other than
-    a ``bool`` (any ``numbers.Integral``, NumPy integers included), and its
-    Python ``int`` value must lie in ``[0, MAX_COUNT]``
-    (``execution.MAX_COUNT``), checked before the cast to int64. Their exact Python total must not exceed
-    ``MAX_COUNT`` either, so no int64 sum of equal outcomes can wrap.
+    (rightmost character bit zero). The caller reads the provider's counts
+    and checks them first. They are nonnegative integers whose total is at
+    most ``execution.MAX_COUNT``, as ``IonQBackend._decode`` checks against
+    the job's shots, so their int64 sums cannot wrap.
 
     Args:
         states: Backend outcome integers, one per count, each below ``2**64``
             (a sequence or a ``uint64`` array).
-        counts: Nonnegative integer counts.
+        counts: The checked nonnegative integer counts (Python or NumPy integers).
         sources: Backend bit of each classical bit, in classical order, at most
             64 classical bits.
 
@@ -52,21 +51,11 @@ def remap_counts(states, counts, sources):
         The identity map (``sources == range(len(sources))``) keeps the backend
         integers and skips the bit gather.
     """
-    import numbers
     import numpy as np
-    from nwqlib.execution import MAX_COUNT
-    if any(isinstance(count, bool) or not isinstance(count, numbers.Integral) for count in counts):
-        raise ValueError(f"counts must be integers in [0, {MAX_COUNT}]")
-    # Python integers keep the range check and the total exact, where a NumPy sum could wrap.
-    counts = [int(count) for count in counts]
-    if any(not 0 <= count <= MAX_COUNT for count in counts):
-        raise ValueError(f"counts must be integers in [0, {MAX_COUNT}]")
-    if sum(counts) > MAX_COUNT:
-        raise ValueError(f"the counts sum to more than {MAX_COUNT}")
     indices, inverse = np.unique(gather_bits(np.asarray(states, dtype=np.uint64), sources),
                                  return_inverse=True)
     totals = np.zeros(len(indices), dtype=np.int64)
-    np.add.at(totals, inverse, np.fromiter(counts, dtype=np.int64, count=len(counts)))
+    np.add.at(totals, inverse, np.asarray(counts, dtype=np.int64))
     keep = totals > 0
     return indices[keep], totals[keep]
 

@@ -34,6 +34,8 @@ from math import asin, e, floor, gcd, isfinite, log, pi, sqrt
 import numpy as np
 from scipy.linalg import schur
 from scipy.linalg.lapack import dsyevd, zheevd
+from nwqlib._limits import ResourceLimitError, exceeds
+from nwqlib._linalg_laws import complex_schur_work, hermitian_eigensystem_work
 from .records import QCELSFit
 
 
@@ -183,8 +185,8 @@ def qcels_schedule_size(options, tau):
         maximum = floor(ratio)
     if maximum < 1:
         raise ValueError("QCELS max_time must admit at least one positive integer power")
-    if maximum > options.max_power:
-        raise ValueError(f"selected QPE power {maximum} exceeds max_power={options.max_power}")
+    if exceeds(maximum, options.max_power):
+        raise ResourceLimitError(f"selected QPE power {maximum} exceeds max_power={options.max_power}")
     return min(maximum, options.num_times), maximum
 
 
@@ -897,6 +899,16 @@ def nominal_eigensystem(matrix, *, kind):
     return values, vectors
 
 
+def nominal_eigensystem_work(dimension, *, kind):
+    """Return the work units of ``nominal_eigensystem`` on a ``dimension``-square matrix of this ``kind``.
+
+    A unitary costs its complex Schur decomposition
+    (``_linalg_laws.complex_schur_work``), a Hamiltonian its Hermitian
+    eigendecomposition (``_linalg_laws.hermitian_eigensystem_work``).
+    """
+    return complex_schur_work(dimension) if kind == "unitary" else hermitian_eigensystem_work(dimension)
+
+
 def spectral_weights(vectors, state, *, occupation=None):
     """Return the spectral weights w_j = |<v_j|psi>|**2, shape (D,).
 
@@ -913,9 +925,14 @@ def overlap(values, weights, power, tau):
     """Ideal Hadamard-test signal z_p = <psi|U^p|psi> from the spectral weights.
 
     For a Hamiltonian z_p = sum_j w_j exp(-i*E_j*tau*p). For unitary input
-    z_p = sum_j w_j lambda_j**p with eigenvalues lambda_j. Power 0 is exactly 1.
+    z_p = sum_j w_j exp(i*p*theta_j) with theta_j the angle of the eigenvalue
+    lambda_j. A computed lambda_j = (1 + eta_j) exp(i*theta_j) of a unitary has
+    no meaningful modulus error to keep, and lambda_j**p would carry it as
+    (1 + eta_j)**p, about p*eta_j. Using the angle gives |z_p| <= 1 for
+    w_j >= 0 and sum_j w_j = 1. Rounding of the weight sum, of the phases and of
+    the off-diagonal part of the Schur form is not removed. Power 0 is exactly 1.
     """
     if power == 0:
         return 1.+0j
-    phases = values**power if tau is None else np.exp(-1j*values*tau*power)
+    phases = np.exp(1j*power*np.angle(values)) if tau is None else np.exp(-1j*values*tau*power)
     return complex(np.dot(weights, phases))

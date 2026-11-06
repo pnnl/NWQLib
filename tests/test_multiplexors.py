@@ -102,6 +102,43 @@ def test_constant_unitary_tables_keep_the_declared_unsimplified_cx_law(control_q
     assert _recursive_operation_counts(circuit)["cx"] == 3*((1 << control_qubits)-1)
 
 
+def test_ucgate_table_checks_each_distinct_entry(monkeypatch):
+    """A 64-entry table of four signed Pauli matrices is checked four times and equals Qiskit's UCGate.
+
+    The gate matches UCGate(table, up_to_diagonal=False, mux_simp=False) in type, name, parameters,
+    flags and operator, and a non-unitary entry is refused as by that constructor.
+    """
+    from qiskit.circuit.library import UCGate
+    from qiskit.exceptions import QiskitError
+    from nwqlib.subroutines import _multiplexors
+
+    paulis = [np.array([[0, 1], [1, 0]], dtype=complex), np.array([[1, 0], [0, -1]], dtype=complex),
+              -np.array([[0, -1j], [1j, 0]]), np.eye(2, dtype=complex)]
+    table = [paulis[(5 * i) % 4] for i in range(64)]
+    checked = []
+    import qiskit.quantum_info.operators.predicates as predicates
+    original = predicates.is_unitary_matrix
+
+    def counted(matrix, *args, **kwargs):
+        checked.append(matrix)
+        return original(matrix, *args, **kwargs)
+
+    monkeypatch.setattr(predicates, "is_unitary_matrix", counted)
+    circuit = QuantumCircuit(7)
+    gate = append_uniformly_controlled_unitaries(circuit, circuit.qubits[0], circuit.qubits[1:], table)
+    assert len(checked) == 4
+    monkeypatch.undo()
+    reference = UCGate(table, up_to_diagonal=False, mux_simp=False)
+    assert type(gate) is UCGate and (gate.name, gate.num_qubits) == (reference.name, reference.num_qubits)
+    assert all(np.array_equal(a, b) for a, b in zip(gate.params, reference.params, strict=True))
+    assert (gate.up_to_diagonal, gate.simp_contr) == (reference.up_to_diagonal, reference.simp_contr)
+    assert Operator(gate) == Operator(reference)
+    with pytest.raises(QiskitError, match="not unitary"):
+        single = QuantumCircuit(1)
+        append_uniformly_controlled_unitaries(single, single.qubits[0], [], [np.diag([1, 2])])
+    assert _multiplexors._UCGATE_UNITARITY_TOLERANCE == 1e-10
+
+
 @pytest.mark.parametrize("control_qubits", (3,))
 @pytest.mark.parametrize("axis", ("y", "z"))
 def test_uniformly_controlled_rotations_match_independent_dense_blocks(

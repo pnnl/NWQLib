@@ -11,8 +11,6 @@ failures and censored timings stay visible. docs/profiles.md, "Compare
 forecasts with measured times", defines these rules.
 """
 
-from math import isfinite
-
 from pydantic import model_validator
 
 from nwqlib.backends.assessment import ProfileAssessment, TimePrediction
@@ -463,9 +461,6 @@ def align_telemetry(
                 residual = None
                 if not excluded:
                     residual = timing.seconds - prediction.seconds.value
-                    if not isfinite(residual):
-                        residual = None
-                        excluded.append("residual exceeds finite binary64 range")
                 comparisons.append(
                     TimingComparison(
                         prediction_id=prediction.content_id,

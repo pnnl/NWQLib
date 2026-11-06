@@ -22,7 +22,7 @@ from nwqlib.ir.expressions import Binding, number
 from nwqlib.operators.access import Count
 from nwqlib.problems.records import Accuracy
 from .records import Evidence, Fact
-from ._work import DEFAULT_MAX_INTEGER_BITS, ExactArithmetic
+from ._work import exact
 
 ClaimStatus = Literal["PASS", "INCONCLUSIVE", "NOT_APPLICABLE"]
 CheckStatus = Literal["PASS", "FAIL", "NOT_RUN", "INCONCLUSIVE", "NOT_APPLICABLE"]
@@ -283,7 +283,7 @@ def _keep_premises(statement, conditions, inputs, context):
     return FramedFact(**fields)
 
 
-def scalar(statement: FramedFact, arithmetic: ExactArithmetic) -> Fraction | None:
+def scalar(statement: FramedFact) -> Fraction | None:
     """Return the exact value of a concrete real scalar fact, or None when it is not concrete.
 
     Booleans and complex values are rejected, because they are not error
@@ -293,7 +293,7 @@ def scalar(statement: FramedFact, arithmetic: ExactArithmetic) -> Fraction | Non
     if fact.availability != "concrete":
         return None
     if isinstance(fact.value, (Rational, Float64)):
-        return arithmetic.fraction(fact.value)
+        return exact(fact.value)
     raise ValueError("error quantities require real scalar facts")
 
 
@@ -557,7 +557,7 @@ class ErrorModel(Record):
                 raise ValueError("additive terms require a common target frame; supply justified propagation first")
         return self
 
-    def assess(self, accuracy, *, context, facts=(), reference=None, absolute_fallback=None, max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
+    def assess(self, accuracy, *, context, facts=(), reference=None, absolute_fallback=None):
         """Assess an accuracy criterion against the model's bounds at an existing parameter point, measuring nothing.
 
         Most callers use `Result.assess`, which supplies the context and the
@@ -601,8 +601,6 @@ class ErrorModel(Record):
             absolute_fallback (float | None): Positive absolute tolerance
                 used only when the relative scale cannot be established.
                 Requires a relative criterion.
-            max_integer_bits (int): Bit limit of the exact arithmetic.
-                Default 4096.
 
         Returns:
             assessment (ClaimAssessment): The status with its threshold,
@@ -616,8 +614,7 @@ class ErrorModel(Record):
                 description, a supplied fact names no source or repeats one,
                 a bound does not apply in its frame or is a negative
                 additive bound, `absolute_fallback` is not positive or
-                lacks a relative criterion, or an exact intermediate value
-                needs more than `max_integer_bits` bits.
+                lacks a relative criterion.
         """
         if type(accuracy) is not Accuracy or type(context) is not AssessmentContext:
             raise TypeError("assessment requires Accuracy and its actual AssessmentContext")
@@ -625,9 +622,8 @@ class ErrorModel(Record):
             raise ValueError("model and assessment belong to different scientific inputs or construction")
         if reference is not None and type(reference) is not TargetReference:
             raise TypeError("relative reference requires an explicit TargetReference relation")
-        arithmetic = ExactArithmetic(max_integer_bits=max_integer_bits)
         if absolute_fallback is not None:
-            if accuracy.relative_tolerance is None or arithmetic.fraction(absolute_fallback) <= 0:
+            if accuracy.relative_tolerance is None or exact(absolute_fallback) <= 0:
                 raise ValueError("absolute_fallback must be positive and requires an explicit relative assessment")
         supplied = {f.fact.quantity: f for f in facts}
         if len(supplied) != len(facts) or not supplied.keys() <= {t.name for t in self.terms}:
@@ -637,7 +633,7 @@ class ErrorModel(Record):
         for term in self.terms:
             statement = supplied.get(term.name, term.fact)
             applicable(statement, frame=term.fact.frame, context=context)
-            value = scalar(statement, arithmetic)
+            value = scalar(statement)
             if value is not None and value < 0 and term.role == "additive_bound":
                 raise ValueError("supplied additive bound is negative")
         # A component criterion reads only its own term. It can never cover
@@ -651,12 +647,12 @@ class ErrorModel(Record):
             reasons.append("sampling: this error model declares no sampling source")
         if not context.admitted and context.bindings:
             reasons.append("parameter point is proposed; Plan admission is required")
-        total, failure = arithmetic.fraction(0), arithmetic.fraction(0)
+        total, failure = exact(0), exact(0)
         failure_known = True
         for term in terms:
             statement = supplied.get(term.name, term.fact)
             matches = applicable(statement, frame=term.fact.frame, context=context)
-            value = scalar(statement, arithmetic)
+            value = scalar(statement)
             conditions = tuple(predicate_value(c, frame=term.fact.frame, context=context) for c in term.conditions)
             inputs = tuple(supported(c, frame=c.frame, context=context) for c in term.inputs)
             if term.role != "additive_bound" or value is None:
@@ -675,7 +671,7 @@ class ErrorModel(Record):
             used.append(kept)
             # Triangle inequality. The ErrorModel validator already requires
             # every additive term to share this output frame.
-            total = arithmetic.add(total, value)
+            total = total + value
             covered.append(term.name)
             if not (matches and supported(statement, frame=self.frame, context=context)
                     and all(v is True for v in conditions) and all(inputs)):
@@ -689,25 +685,25 @@ class ErrorModel(Record):
             if probability is None:
                 failure_known = False
             else:
-                failure = arithmetic.add(failure, arithmetic.fraction(probability))
+                failure = failure + exact(probability)
         remaining.extend(sorted(needed - {t.name for t in terms}))
         # A source without a bound has no stated failure probability either.
         failure_known &= not remaining
         threshold, reference_reasons, reference_failure = accuracy_threshold(accuracy,
-            frame=self.frame, reference=reference, context=context, arithmetic=arithmetic,
+            frame=self.frame, reference=reference, context=context,
             absolute_fallback=absolute_fallback)
         reasons.extend(reference_reasons)
         # A relative threshold holds only when the reference bound holds, so
         # its failure probability joins the same union.
-        failure = arithmetic.add(failure, reference_failure)
-        requested_failure = arithmetic.subtract(arithmetic.fraction(1), arithmetic.fraction(accuracy.confidence))
-        if not failure_known or not arithmetic.le(failure, requested_failure):
+        failure = failure + reference_failure
+        requested_failure = exact(1) - exact(accuracy.confidence)
+        if not failure_known or not (failure <= requested_failure):
             reasons.append("required failure probability is unsupported")
-        within = threshold is not None and arithmetic.le(total, threshold)
+        within = threshold is not None and total <= threshold
         if threshold is not None and not within:
             reasons.append("covered upper bound exceeds the sufficient accuracy threshold")
-        one = arithmetic.fraction(1)
-        bounded_failure = failure if arithmetic.le(failure, one) else one
+        one = exact(1)
+        bounded_failure = failure if failure <= one else one
         return ClaimAssessment(model_id=self.content_id, accuracy=accuracy, absolute_fallback=absolute_fallback,
             output_id=self.output_id, context=context, frame=self.frame,
             method="triangle inequality in the selected output component; union bound on declared failures",
@@ -718,7 +714,7 @@ class ErrorModel(Record):
             failure_probability=_rational(bounded_failure) if failure_known else None, facts=tuple(used))
 
 
-def accuracy_threshold(accuracy, *, frame, reference, context, arithmetic, absolute_fallback=None):
+def accuracy_threshold(accuracy, *, frame, reference, context, absolute_fallback=None):
     """Return ``(threshold, reasons, reference_failure)`` for the criterion.
 
     An absolute tolerance is used as given. Otherwise a supported reference
@@ -730,21 +726,21 @@ def accuracy_threshold(accuracy, *, frame, reference, context, arithmetic, absol
     An explicitly selected absolute fallback is a separate post-run criterion
     used only when that relative scale cannot be established.
     """
-    zero = arithmetic.fraction(0)
+    zero = exact(0)
     if reference is not None:
         applicable(reference.fact, frame=frame, context=context)
     if accuracy.absolute_tolerance is not None:
-        return arithmetic.fraction(accuracy.absolute_tolerance), (), zero
+        return exact(accuracy.absolute_tolerance), (), zero
     if reference is not None:
-        target = scalar(reference.fact, arithmetic)
+        target = scalar(reference.fact)
         if (target is not None and reference.failure_probability is not None
                 and supported(reference.fact, frame=frame, context=context)
                 and (reference.relation == "exact_target" and target != 0
                      or reference.relation == "magnitude_lower_bound" and target > 0)):
-            threshold = arithmetic.multiply(arithmetic.fraction(accuracy.relative_tolerance), arithmetic.absolute(target))
-            return threshold, (), arithmetic.fraction(reference.failure_probability)
+            threshold = exact(accuracy.relative_tolerance) * abs(target)
+            return threshold, (), exact(reference.failure_probability)
     if absolute_fallback is not None:
-        return arithmetic.fraction(absolute_fallback), (), zero
+        return exact(absolute_fallback), (), zero
     return None, ("relative reference relation and its nonzero domain are not established",), zero
 
 
@@ -839,7 +835,7 @@ def result_context(result):
 
 def assess_result(result, *, accuracy=None, absolute_tolerance=None, relative_tolerance=None,
                   confidence=.95, component="total", facts=(), reference=None,
-                  absolute_fallback=None, max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
+                  absolute_fallback=None):
     """Assess a new explicit criterion on an existing Result.
 
     Nothing is measured.
@@ -860,7 +856,7 @@ def assess_result(result, *, accuracy=None, absolute_tolerance=None, relative_to
         raise ValueError("supplied error facts require distinct source names")
     by_name.update((fact.fact.quantity, fact) for fact in facts)
     return plan.error_model.assess(accuracy, context=result_context(result), facts=tuple(by_name.values()),
-        reference=reference, absolute_fallback=absolute_fallback, max_integer_bits=max_integer_bits)
+        reference=reference, absolute_fallback=absolute_fallback)
 
 
 class CheckDomain(Record):
@@ -978,7 +974,7 @@ class CheckAssessment(Record):
     reason: Text
 
 
-def assemble_check(check: CheckSpec, *, artifact_id: str, fact: FramedFact | None = None, max_integer_bits=DEFAULT_MAX_INTEGER_BITS) -> CheckAssessment:
+def assemble_check(check: CheckSpec, *, artifact_id: str, fact: FramedFact | None = None) -> CheckAssessment:
     """Decide one check from a supplied fact, outside a Certificate.
 
     The status is decided as in
@@ -995,8 +991,6 @@ def assemble_check(check: CheckSpec, *, artifact_id: str, fact: FramedFact | Non
         artifact_id (str): Content hash of the Result the check concerns.
         fact (FramedFact | None): The value, or `None`, which gives
             `NOT_RUN`.
-        max_integer_bits (int): Bit limit of the exact arithmetic. Default
-            4096.
 
     Returns:
         outcome (CheckAssessment): The status and reason.
@@ -1004,13 +998,12 @@ def assemble_check(check: CheckSpec, *, artifact_id: str, fact: FramedFact | Non
     Raises:
         ValueError: If the fact names another quantity or frame, was
             produced by other options or for another check, lies outside
-            the check's domain, or an exact intermediate value needs more
-            than `max_integer_bits` bits.
+            the check's domain.
     """
-    return _assemble_check(check, artifact_id=artifact_id, fact=fact, context=None, max_integer_bits=max_integer_bits)
+    return _assemble_check(check, artifact_id=artifact_id, fact=fact, context=None)
 
 
-def _admit_check_value(check, value, arithmetic):
+def _admit_check_value(check, value):
     """Apply the check's domain to a value before any evidence or status decision.
 
     Return the value, moved to the domain endpoint when it lies outside by
@@ -1023,16 +1016,16 @@ def _admit_check_value(check, value, arithmetic):
     domain = check.domain
     if domain.integer and value.denominator != 1:
         raise ValueError("check value must be an integer in its mathematical domain")
-    tolerance = arithmetic.fraction(domain.roundoff_tolerance)
+    tolerance = exact(domain.roundoff_tolerance)
     adjusted = ""
     for endpoint, below in ((domain.lower, True), (domain.upper, False)):
         if endpoint is None:
             continue
-        bound = arithmetic.fraction(endpoint)
-        violates = not arithmetic.le(bound, value) if below else not arithmetic.le(value, bound)
+        bound = exact(endpoint)
+        violates = not (bound <= value) if below else not (value <= bound)
         if violates:
-            distance = arithmetic.subtract(bound, value) if below else arithmetic.subtract(value, bound)
-            if not arithmetic.le(distance, tolerance):
+            distance = bound - value if below else value - bound
+            if not (distance <= tolerance):
                 description = "nonnegative" if below and bound == 0 else "within its mathematical domain"
                 raise ValueError(f"{check.frame.metric} must be {description}; supplied value violates the selected endpoint")
             value = bound
@@ -1042,7 +1035,7 @@ def _admit_check_value(check, value, arithmetic):
     return value, adjusted
 
 
-def _assemble_check(check, *, artifact_id, fact, context=None, max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
+def _assemble_check(check, *, artifact_id, fact, context=None):
     """Evaluate one check: match frame and content hashes, apply the domain, then decide the status.
 
     A fact produced for another options record or CheckSpec raises before
@@ -1050,7 +1043,6 @@ def _assemble_check(check, *, artifact_id, fact, context=None, max_integer_bits=
     a value outside the quantity's definition before any status is decided,
     so an impossible value raises instead of becoming INCONCLUSIVE or FAIL.
     """
-    arithmetic = ExactArithmetic(max_integer_bits=max_integer_bits)
     status, reason = "NOT_RUN", "no check evidence supplied"
     if context is not None and context.result_id != artifact_id:
         raise ValueError("check context belongs to another actual result")
@@ -1070,7 +1062,7 @@ def _assemble_check(check, *, artifact_id, fact, context=None, max_integer_bits=
                 and evidence.check_id != check.content_id):
             raise ValueError("verification fact answers another check. A check revised after verification, for "
                              "example with another threshold, needs verify again with options that select it")
-        value, adjustment = _admit_check_value(check, scalar(fact, arithmetic), arithmetic)
+        value, adjustment = _admit_check_value(check, scalar(fact))
         if fact.fact.availability == "not_applicable":
             status, reason = "NOT_APPLICABLE", fact.fact.reason
         else:
@@ -1083,8 +1075,8 @@ def _assemble_check(check, *, artifact_id, fact, context=None, max_integer_bits=
                                "user_assertion", "external_specification", "observed"})):
                 status, reason = "INCONCLUSIVE", "check value or applicable artifact-bound premises unavailable"
             else:
-                threshold = arithmetic.fraction(check.threshold)
-                status = "PASS" if arithmetic.le(value, threshold) else "FAIL"
+                threshold = exact(check.threshold)
+                status = "PASS" if value <= threshold else "FAIL"
                 reason = "supplied scalar check criterion only; evidence kind is unchanged"
             reason += adjustment
     fields = dict(check_id=check.content_id, artifact_id=artifact_id, status=status, fact=fact, reason=reason)
@@ -1122,7 +1114,7 @@ class Certificate(Record):
     assessment: ClaimAssessment
     checks: tuple[CheckAssessment, ...]
 
-    def with_verification(self, result, *, options, evidence, max_integer_bits=DEFAULT_MAX_INTEGER_BITS):
+    def with_verification(self, result, *, options, evidence):
         """Return a new Certificate with the `facts` of a completed verification attached as checks.
 
         Nothing is verified or assessed again. Each fact from a verification
@@ -1139,17 +1131,14 @@ class Certificate(Record):
             options (object): The options record passed to `Result.verify`.
             evidence (tuple[FramedFact, ...]): The `facts` that
                 `Result.verify` returned.
-            max_integer_bits (int): Bit limit of the exact arithmetic.
-                Default 4096.
 
         Returns:
             certificate (Certificate): A revision with the checks attached.
 
         Raises:
             ValueError: If `result` is not the certified Result, a fact names
-                no check of `options` or repeats one, a fact was produced by
-                other options or for another check, or an exact intermediate
-                value needs more than `max_integer_bits` bits.
+                no check of `options` or repeats one, or a fact was produced
+                by other options or for another check.
         """
         plan = result.plan
         if self.plan_id != plan.content_id or self.result_id != result.content_id:
@@ -1161,7 +1150,7 @@ class Certificate(Record):
         if len(supplied) != len(evidence) or not supplied.keys() <= names:
             raise ValueError("verification facts must name distinct selected criteria")
         replacements = {check.content_id: _assemble_check(check, artifact_id=result.content_id,
-            fact=supplied.get(check.name), context=self.assessment.context, max_integer_bits=max_integer_bits) for check in specs}
+            fact=supplied.get(check.name), context=self.assessment.context) for check in specs}
         checks = tuple(replacements.pop(check.check_id, check) for check in self.checks) + tuple(replacements.values())
         return self.revise(checks=checks)
 

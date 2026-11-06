@@ -21,8 +21,9 @@ def select_experiment(admission, batch_id, setting_index, axis_values, *, bindin
         setting_index: Index of the kept setting.
         axis_values: Exactly one integer per range axis of that batch, each on the axis grid.
         bindings: Complete effective bindings of the point, or None to merge the
-            Program's bindings with the setting's bindings and the axis values,
-            which take precedence over the Program's.
+            Program's bindings with the setting's bindings, which take
+            precedence over the Program's, and the axis values, which the
+            Program never binds.
         parent_id: Content hash recorded as the new Program's parent, or None
             for the source Program's content hash.
 
@@ -80,14 +81,8 @@ def select_experiment(admission, batch_id, setting_index, axis_values, *, bindin
     # direct expression references. Preserve them before normal validation.
     parameters = set(item.parameter for item in bindings)
     pending = []
-    slots = 0
-    def reserve(amount):
-        nonlocal slots
-        slots += amount
-        if slots > program.limits.max_steps:
-            raise ValueError("selected dependency inventory exceeds max_steps")
     for source in (tuple(definitions.values()), signatures, program.registers, program.classical, program.constraints):
-        for value in walk_kept(source, reserve):
+        for value in walk_kept(source, lambda amount: None):
             if isinstance(value, ExprRef):
                 pending.append(value.expression)
             elif isinstance(value, (Binding, RangeAxis)):

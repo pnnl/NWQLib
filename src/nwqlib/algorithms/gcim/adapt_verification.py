@@ -1,6 +1,6 @@
 """Explicit ADAPT state, sector and scalar checks and their verification records."""
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from nwqlib._limits import check_memory, exceeds
 
 from math import isfinite
 from typing import Annotated, Literal
@@ -8,7 +8,7 @@ import numpy as np
 from pydantic import Field, model_validator
 from nwqlib._numerics import normalize_state_vector, stable_vector_norm
 from nwqlib.core.records import Float64, Rational, Record, Source, Text, Real, PositiveInt, Unit
-from nwqlib.evidence._work import ExactArithmetic
+from nwqlib.evidence._work import exact
 from nwqlib.evidence.error_model import FramedFact, CheckSpec, CheckDomain, ErrorFrame, _same_scope
 from nwqlib.evidence.records import Evidence, Fact
 from nwqlib.execution import (
@@ -24,7 +24,7 @@ from nwqlib.operators.inputs import _matvec_requirements
 from .adapt_actions import action_sizes, packed_exponential
 from .adapt_acquisition import AdaptContext, _native_generator, _ritz_state, basis_chains
 from .adapt_records import _exponential_action_work
-from .sector import _sector_work, sector_expectations
+from .sector import _sector_expectations, _sector_work
 
 
 class AdaptVerificationOptions(Record):
@@ -45,9 +45,16 @@ class AdaptVerificationOptions(Record):
         name: Required. Prefix for the check names of these options.
         comparisons: Required. Distinct nonempty tuple of `"residual"`,
             `"sector"` and `"supplied_reference_energy"`.
-        residual_tolerance: Default `1.6e-3`, positive. Residual threshold in
-            the problem's energy unit for the non-sampled
-            `residual_threshold_met` classification.
+        residual_tolerance: Default `None`. Positive absolute tolerance on the
+            residual norm, in the problem's energy unit, so convert it when you
+            change the unit. A non-sampled residual check always reports the
+            residual norm and its interval. It reports the flags
+            `residual_threshold_met`, `pool_limited` and `stalled` only with
+            this tolerance, and otherwise reports them as unavailable with a
+            reason that names this option. Sampled results leave the three
+            flags unavailable in either case. `pool_limited` and `stalled` are
+            labels derived from the recorded stop reason when the tolerance is
+            not met, and do not show that the pool cannot improve the answer.
         reference_spin: Default `0.0`. Spin quantum number s, a nonnegative
             integer or half-integer, whose `s(s+1)` defines the spin
             contamination.
@@ -59,11 +66,11 @@ class AdaptVerificationOptions(Record):
         reference_tolerance: Default `None`. Positive absolute comparison
             threshold for that energy, required by
             `"supplied_reference_energy"`.
-        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
-            the known bytes of the verification workspace.
-        max_products: Default `1_000_000_000`. Limit on the counted state and
-            operator work of the verification, including the exact synthesis
-            of the dense unitaries in a supplied reference circuit.
+        max_bytes: Default `None`, the physical memory of this computer.
+            Limit on the known bytes of the verification workspace.
+        max_products: Default `None`, no limit. Optional limit on the counted
+            state and operator work of the verification, including the exact
+            synthesis of the dense unitaries in a supplied reference circuit.
 
     Raises:
         ValueError: If `comparisons` is empty or repeats a check, if
@@ -76,13 +83,12 @@ class AdaptVerificationOptions(Record):
 
     name: Text
     comparisons: tuple[Literal["residual", "sector", "supplied_reference_energy"], ...]
-    residual_tolerance: Annotated[Real, Field(gt=0)] = 1.6e-3
+    residual_tolerance: Annotated[Real, Field(gt=0)] | None = None
     reference_spin: Annotated[Real, Field(ge=0)] = 0.0
     reference_energy: FramedFact | None = None
     reference_tolerance: Annotated[Real, Field(gt=0)] | None = None
-    max_bytes: PositiveInt = DEFAULT_MAX_BYTES
-    # Untuned verification workload ceiling (docs/ENGINEERING_CONSTANTS.md).
-    max_products: PositiveInt = 1_000_000_000
+    max_bytes: PositiveInt | None = None
+    max_products: PositiveInt | None = None
 
     def verification_checks(self, result):
         return tuple(CheckSpec(**fields) for fields in self._check_fields(result.plan))
@@ -149,8 +155,9 @@ class AdaptVerificationOptions(Record):
         belong to the options that produced them"). Domains encode what each
         scalar can mathematically be. Sector bounds follow from ``q/2`` spatial
         orbitals, each with spin at most 1/2, so ``S_max = q/4``. Only the
-        non-sampled residual norm has a threshold, because sampled results
-        claim no deterministic spectral interval.
+        non-sampled residual norm can have a threshold, the supplied
+        ``residual_tolerance``, because sampled results claim no deterministic
+        spectral interval.
         """
         energy = plan.output.unit or plan.problem.evidence_unit
         dimensionless = Unit(symbol="1", dimension="dimensionless")
@@ -279,10 +286,19 @@ def _binary64_square(value):
 def _residual_metrics(sigma, energy, eigenvalues, options, mode, stop_reason):
     """Return the residual metrics of a Ritz pair: the norm, its square with overflow and underflow flags and, for non-sampled results, the nearness interval, the threshold classification and the heuristic Kato-Temple endpoint.
 
-    For a unit vector ``psi`` and real ``E``, ``||(H - E) psi|| >= min_i |lambda_i - E|``,
+    For a unit vector ``psi`` and any real ``E``, ``||(H - E) psi|| >= min_i |lambda_i - E|``,
     so some eigenvalue of H lies in ``[E - sigma, E + sigma]``. This gives the
     ``spectral_nearness`` endpoints, which say nothing about which eigenvalue
-    it is. The Kato-Temple bound ``lambda_1 >= E - sigma**2 / (eta - E)``
+    it is: an exact excited eigenstate has sigma = 0. This is a conditional
+    exact-mathematics interpretation of the computed number, not a rigorously
+    rounded enclosure. H here is the processed operator, and the original
+    operator's interval needs ``sigma + delta_H`` with the removed mass
+    ``delta_H``. The three flags compare sigma with the caller's absolute
+    ``residual_tolerance``, the same value as the check's threshold, and stay
+    None without one, which the Result reports as unavailable. ``pool_limited``
+    and ``stalled`` are labels derived from the stop reason when the tolerance
+    is not met, not proofs that the pool cannot improve the answer. The
+    Kato-Temple bound ``lambda_1 >= E - sigma**2 / (eta - E)``
     needs ``E`` to be the Rayleigh quotient of ``psi`` and an independently
     established ``eta`` with ``E < eta <= lambda_2``. The second Ritz value
     is an upper bound on ``lambda_2``, so ``kato_heuristic_lower`` is a heuristic
@@ -305,15 +321,15 @@ def _residual_metrics(sigma, energy, eigenvalues, options, mode, stop_reason):
     )
     if mode is ExecutionMode.SHOTS:
         return metrics
-    met = sigma <= options.residual_tolerance
-    pool_limited = not met and stop_reason in ("gradient_norm_floor", "pool_exhausted")
-    metrics.update(
-        spectral_nearness_lower=energy - sigma,
-        spectral_nearness_upper=energy + sigma,
-        residual_threshold_met=float(met),
-        pool_limited=float(pool_limited),
-        stalled=float(not met and not pool_limited),
-    )
+    metrics.update(spectral_nearness_lower=energy - sigma, spectral_nearness_upper=energy + sigma)
+    if options.residual_tolerance is not None:
+        met = sigma <= options.residual_tolerance
+        pool_limited = not met and stop_reason in ("gradient_norm_floor", "pool_exhausted")
+        metrics.update(
+            residual_threshold_met=float(met),
+            pool_limited=float(pool_limited),
+            stalled=float(not met and not pool_limited),
+        )
     if len(eigenvalues) > 1:
         second = eigenvalues[1]
         gap = second - energy
@@ -332,10 +348,13 @@ def _lowered_native_circuits(plan, context, selected, counts, *, max_work, max_b
     state. Each suffix applies the uncontrolled Qiskit gate of one selected
     generator, built by the same factory and cache key as the query gates
     (``_native_generator``). Every circuit is decomposed as for Aer execution
-    (``AER_EXECUTION_DECOMPOSE_REPS``). A supplied reference circuit can hold
+    (``AER_EXECUTION_DECOMPOSE_REPS``). The direct tree of a vector reference
+    is checked against ``max_bytes`` before decomposition builds it
+    (``direct.direct_tree_bytes``). A supplied reference circuit can hold
     a dense ``UnitaryGate``, which Aer applies as its matrix but ``decompose``
     would expand through Qiskit's inexact synthesis, so it is first replaced
-    by its exact synthesis. That synthesis is checked against ``max_work``
+    by its exact synthesis. That synthesis is checked against ``max_work``,
+    the rest of ``AdaptVerificationOptions.max_products`` or None for no limit,
     and ``max_bytes`` before it starts, and ``synthesis_work`` is its work
     formula (``_dense_synthesis.dense_synthesis_size``), which the caller adds
     to its total. No state is simulated here, so the verification work
@@ -347,10 +366,16 @@ def _lowered_native_circuits(plan, context, selected, counts, *, max_work, max_b
     from nwqlib.subroutines._dense_synthesis import admit_dense_syntheses, dense_synthesis_size
     from nwqlib.subroutines.qiskit_compat import dense_synthesis_widths, exact_dense_unitaries
 
-    reference = prepare_qiskit(plan._native["reference"], max_bytes=plan.method.max_bytes).circuit
+    state = plan._native["reference"]
+    if state.preparation.implementation == "qiskit.direct":
+        # Decomposition builds the direct tree of a vector reference.
+        from nwqlib.subroutines.state_preparation.direct import direct_tree_bytes
+        check_memory(direct_tree_bytes(state.basis.dimension.bit_length() - 1), max_bytes,
+                     "ADAPT explicit verification reference preparation")
+    reference = prepare_qiskit(state, max_bytes=plan.method.max_bytes).circuit
     widths = dense_synthesis_widths(reference)
     synthesis_work = sum(dense_synthesis_size(width)[0] for width in widths)
-    if synthesis_work > max_work:
+    if exceeds(synthesis_work, max_work):
         raise ValueError(f"ADAPT explicit verification needs {synthesis_work} work units for the exact synthesis "
                          "of its supplied reference circuit, beyond the rest of "
                          "AdaptVerificationOptions.max_products. Raise max_products to run this check.")
@@ -524,10 +549,9 @@ def verify(plan, result, *, options):
     )
     metrics = {}
     if "supplied_reference_energy" in options.comparisons:
-        arithmetic = ExactArithmetic()
         difference = abs(
-            arithmetic.fraction(result.eigenvalue)
-            - arithmetic.fraction(options.reference_energy.fact.value)
+            exact(result.eigenvalue)
+            - exact(options.reference_energy.fact.value)
         )
         metrics["supplied_reference_energy"] = Rational(
             numerator=difference.numerator, denominator=difference.denominator
@@ -545,12 +569,15 @@ def verify(plan, result, *, options):
         # Known-buffer admission of the streamed state checks, before any
         # circuit is lowered or state built: B_states +
         # reference_action_bytes + B_gate + B_other_action_metadata, with
-        # B_states = 16 d max{F(l), 8 [residual], 32 [sector]} + d. The
-        # residual allowance holds the Ritz state, H@state, the scalar
-        # product/subtraction arrays and the input and output of the H action.
-        # The 32-vector sector allowance covers sector_expectations' normalized copy and probabilities,
-        # apply_spin_squared's diagonals and index temporaries, both
-        # sequential ladder actions and the final products. Each applicable
+        # B_states = 16 d max{F(l), 8 [residual]} + d, or B_sector + d when
+        # larger. The residual allowance holds the Ritz state, H@state, the
+        # scalar product/subtraction arrays and the input and output of the H
+        # action. The sector checks run once the Ritz state exists: B_sector
+        # is that state and, after a residual check, its 16d residual, both
+        # still held, the 16d normalized copy and 8d probabilities of
+        # sector_expectations, and the arrays that apply_spin_squared holds
+        # beside them (fermionic_pool._spin_squared_requirements), which its
+        # own check counts without the caller's arrays. Each applicable
         # action adds its shared allowance less the 32d of its input and
         # output, max_A(B_A - 32d) (adapt_actions.action_sizes): on a
         # classical Plan over its packed generator and H actions, beside
@@ -561,8 +588,15 @@ def verify(plan, result, *, options):
         # (conservatively, whether or not the Ritz state uses them). The native gate term B_gate joins
         # after the lowered-instruction census below, and the reference
         # synthesis keeps its own admission.
-        allowance = max(_state_frontier(l), 8 * ("residual" in options.comparisons),
-                        32 * ("sector" in options.comparisons))
+        with_residual = "residual" in options.comparisons
+        states = 16 * d * max(_state_frontier(l), 8 * with_residual)
+        if "sector" in options.comparisons:
+            from nwqlib.subroutines.fermionic_pool import _spin_ladder_product, _spin_squared_requirements
+            # The same ladder product serves this count, the action's own
+            # count and the action, so this verification maps it once.
+            ladder = _spin_ladder_product(rec.num_qubits)
+            states = max(states, 16 * d * (1 + with_residual) + 24 * d
+                         + _spin_squared_requirements(rec.num_qubits, ladder)[0])
         inputs = plan._native["inputs"]
         if plan.execution == "classical":
             other_bytes = inputs.cache["action_tables"]["resident_bytes"] + max(
@@ -576,7 +610,7 @@ def verify(plan, result, *, options):
             for name in ("vectors", "h_columns"):
                 for array in saved[name].values():
                     owned.setdefault(id(array), array.nbytes)
-        known_bytes = 16 * d * allowance + d + rec.reference_action_bytes + other_bytes + sum(owned.values())
+        known_bytes = states + d + rec.reference_action_bytes + other_bytes + sum(owned.values())
         _check_bytes(known_bytes, options.max_bytes, "ADAPT explicit verification")
         # Work, in the units of _exponential_action_work: for _ritz_state, one
         # zero fill, then a scaling and an addition for each basis state (2l
@@ -600,9 +634,9 @@ def verify(plan, result, *, options):
             # circuits are built and lowered here, before any state exists,
             # so the law charges the instructions they actually contain.
             # Building them is checked only in part. prepare_qiskit checks the
-            # reference payload against the Method's max_bytes and a direct
-            # vector preparation against the default max_direct_amplitudes of
-            # 2**16 amplitudes. The at most l generator circuits come from
+            # reference payload against the Method's max_bytes, and the tree of a
+            # direct vector reference is checked against max_bytes before it is
+            # built. The at most l generator circuits come from
             # compiler plans that were checked against the Method's max_bytes
             # and max_products when their generators were first selected, and
             # they stay within the family-level slot envelope that the Plan's
@@ -617,7 +651,8 @@ def verify(plan, result, *, options):
                 # selections lacks. Adopting them compiles no generator again.
                 plan._native["compiler_plans"].restore(saved["compiler_plans"])
             lowered, synthesis = _lowered_native_circuits(
-                plan, context, selected, counts, max_work=options.max_products - work, max_bytes=options.max_bytes)
+                plan, context, selected, counts, max_bytes=options.max_bytes,
+                max_work=None if options.max_products is None else options.max_products - work)
             work += synthesis
             evolution = {key: _statevector_evolution_work(c, d) for key, c in lowered.items()}
             largest_gate = max(_largest_evolved_gate(c) for c in lowered.values())
@@ -631,7 +666,7 @@ def verify(plan, result, *, options):
             work += rec.hamiltonian_action_work + 3 * d
         if "sector" in options.comparisons:
             work += _sector_work(rec.num_qubits)
-        if work > options.max_products:
+        if exceeds(work, options.max_products):
             raise ValueError(
                 f"ADAPT explicit verification needs {work} scalar operations on "
                 f"{rec.num_qubits}-qubit states, exceeding "
@@ -713,8 +748,9 @@ def verify(plan, result, *, options):
             )
         if "sector" in options.comparisons:
             counts["sector_bundles"] += 1
-            sector = sector_expectations(
-                state, num_qubits=rec.num_qubits, reference_spin=options.reference_spin
+            sector = _sector_expectations(
+                state, num_qubits=rec.num_qubits, reference_spin=options.reference_spin,
+                max_bytes=options.max_bytes, max_products=options.max_products, ladder=ladder,
             )
             metrics.update(
                 (name, sector[name])
@@ -724,7 +760,8 @@ def verify(plan, result, *, options):
     # explicit. A small Ritz residual does not identify the ground eigenspace.
     raw = []
     for check in checks:
-        value = metrics.get(check.name.removeprefix(options.name + "."))
+        name = check.name.removeprefix(options.name + ".")
+        value = metrics.get(name)
         fields = dict(
             quantity=check.name,
             unit=check.frame.unit,
@@ -735,9 +772,14 @@ def verify(plan, result, *, options):
             ),
         )
         if value is None or not isinstance(value, Rational) and not isfinite(value):
+            # A missing target is a missing input to one classification, not a defect of the result.
+            unset = (name in ("residual_threshold_met", "pool_limited", "stalled")
+                     and options.residual_tolerance is None and plan.shots is None)
             fields.update(
                 availability="unknown",
-                reason="selected diagnostic lacks joint evidence or finite representation",
+                reason="this classification needs AdaptVerificationOptions.residual_tolerance in the energy unit"
+                if unset
+                else "selected diagnostic lacks joint evidence or finite representation",
             )
         else:
             fields.update(

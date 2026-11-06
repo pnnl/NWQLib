@@ -23,20 +23,18 @@ class IO:
         self.calls = []
         self.synthesis_work = 0
         self._state = dict(submissions={}, by_attempt={}, backend_context={}, synthesis_cache={},
-                           synthesis_preparation="preparation")
+                           synthesis_cache_kept=0, synthesis_preparation="preparation")
 
     def check_data(self, size):
         if size > self.limits.max_data_bytes:
             raise ValueError("data exceeds max_data_bytes")
         self.calls.append(size)
 
-    def _charge_synthesis(self, work, operation):
-        # The Run's cumulative check, without its journal.
-        if self.synthesis_work + work > self.limits.max_synthesis_work:
-            raise ValueError(f"{operation} exceeds max_synthesis_work")
+    def _record_synthesis(self, work):
+        # The Run's count of the preparation in progress, without its charge.
         self.synthesis_work += work
 
-    # The Run's synthesis cache during a preparation, charged through the check above.
+    # The Run's synthesis cache during a preparation, counted through the method above.
     _exact_dense_unitaries = Run._exact_dense_unitaries
 
 

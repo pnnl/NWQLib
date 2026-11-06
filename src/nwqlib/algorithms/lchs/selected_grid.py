@@ -1,17 +1,16 @@
 """The saved data of an LCHS Plan and its exact physical application schedule."""
 
-from collections.abc import Mapping
-from dataclasses import dataclass, fields, is_dataclass
-from fractions import Fraction
+from nwqlib._limits import exceeds
+from dataclasses import dataclass
 from math import isfinite
 
 import numpy as np
 
 from nwqlib.blocks.selection import SelectedBlock
-from nwqlib.core.records import Float64, FrozenArray
+from nwqlib.core.records import Float64
 from nwqlib.operators.access import _check_bytes
 from .references import dense_work
-from .solution_error_budget import psd_recovery, psd_recovery_exponent, psd_recovery_part
+from .solution_error_budget import application_weight, psd_recovery, psd_recovery_exponent, psd_recovery_part
 
 
 @dataclass(frozen=True)
@@ -27,6 +26,9 @@ class GridApplication:
         source: Whether the input is the constant source.
         input_norm: Physical norm of the input, or None when not representable.
         slots: SELECT address slots of this application in a quantum layout.
+        omitted: Set of k-node indices of this application whose nonzero
+            slots planning omitted under ``source_drop_allowance``, so its
+            circuit never applies them.
     """
 
     start: float
@@ -37,15 +39,18 @@ class GridApplication:
     source: bool = False
     input_norm: float | None = None
     slots: tuple[int, ...] = ()
+    omitted: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True)
 class SelectedGrid:
     """Saved L, H, k-nodes and coefficients with the Result's application schedule.
 
-    Every field is read from the Plan's own LCHSData and checked against its
-    reconstruction, so references and refinement evaluate the finite sum
-    that was executed.
+    Every field is read from the LCHSData that the Plan's own selected block
+    or kernel carries (selected_payload), and a classical Result's
+    application records are checked against the Plan's schedule
+    (host_applications), so references and refinement evaluate the finite
+    sum that was executed.
     """
 
     l_part: object
@@ -67,7 +72,14 @@ def selected_payload(plan):
         raise ValueError("this LCHS Plan has no saved selected numerical data")
     if plan.execution == "quantum":
         selected = {record.content_id:record for record in plan.construction.selections}
-        if type(data) is LCHSData:
+        if type(data) is LCHSData and data.selected_select == "coherent_lcu":
+            # The coherent LCU body carries the shared payload itself.
+            matches = [block for block in plan.blocks if type(block) is SelectedBlock
+                       and block.record.signature.target.name == "lchs.coherent_lcu"]
+            if (len(matches) != 1 or selected.get(matches[0].record.content_id) != matches[0].record
+                    or matches[0]._payload is not data):
+                raise ValueError("selected-grid requires the exact coherent LCU block and shared numerical payload")
+        elif type(data) is LCHSData:
             matches = [block for block in plan.blocks if type(block) is SelectedBlock
                        and block.record.signature.target.name == "lchs.select"]
             if (len(matches) != 1 or selected.get(matches[0].record.content_id) != matches[0].record
@@ -84,14 +96,6 @@ def selected_payload(plan):
         if (type(data) is not LCHSData or len(plan.blocks) != 1 or type(plan.blocks[0]) is not BoundKernel
                 or plan.blocks[0].plan_id != plan.content_id or plan.blocks[0].record != plan.construction.kernels[0]):
             raise ValueError("selected-grid requires the original bound classical kernel")
-    if type(data) is LCHSData:
-        d = plan.reconstruction.encoded_dimension
-        if (data.quadrature.l_part.shape != (d,d)
-                or data.quadrature.h_part.shape != (d,d) or data.initial.shape != (d,)
-                or (data.source is None) != (plan.problem.source is None)
-                or data.source is not None and data.source.shape != (d,)
-                or data.method != plan.method):
-            raise ValueError("selected numerical data differs from its encoded dimensions or Method")
     return data
 
 
@@ -100,14 +104,16 @@ def _specifications(plan, data):
 
     Each entry is (is_source, start, elapsed, weight, padded input vector,
     input norm). The initial state comes first when it is nonzero, then one
-    entry per Duhamel node when the source is nonzero.
+    entry per Duhamel node when the source is nonzero. Only the dense recipe
+    has padded input vectors.
     """
     rec = plan.reconstruction
+    dense = data.dense_inputs()
     specs = []
     if rec.initial_scale.mantissa != 0:
-        specs.append((False, 0., rec.elapsed_time, 1., data.initial, rec.initial_scale.as_float()))
-    if data.source is not None and rec.source_scale.mantissa != 0:
-        specs.extend((True, start, rec.elapsed_time-start, weight, data.source, rec.source_scale.as_float())
+        specs.append((False, 0., rec.elapsed_time, 1., dense.initial, rec.initial_scale.as_float()))
+    if dense.source is not None and rec.source_scale.mantissa != 0:
+        specs.extend((True, start, rec.elapsed_time-start, weight, dense.source, rec.source_scale.as_float())
                      for start, weight in zip(rec.source_nodes, rec.source_weights, strict=True))
     return specs
 
@@ -118,19 +124,19 @@ def host_applications(plan, result, data):
     Each record must name the Plan's application at its position, with the
     same start and elapsed time, source role, weight and recovery scale, so
     source roles are validated before any reference or component
-    propagation. Per-node product-formula step counts come from the Plan's
+    propagation. The weight is formed again from the Plan's saved weight
+    and input PhysicalScale (``solution_error_budget.application_weight``):
+    a record must bind that value when binary64 represents it and must
+    omit the weight otherwise. Per-node product-formula step counts come from the Plan's
     classical actions, the choice that execution applied. The records do not
     repeat them.
     """
-    rec, n = plan.reconstruction, len(data.quadrature.k_nodes)
+    rec = plan.reconstruction
     specs = _specifications(plan, data)
     if len(result.applications) != len(specs):
         raise ValueError("selected-grid application count differs from its saved source schedule")
     pf = plan.method.hamiltonian_evolution_backend in {"trotter", "trotter_error_budgeted"}
-    actions = data.host_actions["applications"] if pf and data.host_actions is not None else None
-    if pf and (actions is None or len(actions) != len(specs)
-               or any(len(action["positions"]) != n for action in actions)):
-        raise ValueError("selected-grid PF schedule needs the Plan's host action for every application and node")
+    actions = data.host_actions["applications"] if pf else None
     applications = []
     for index, (application, spec) in enumerate(zip(result.applications, specs, strict=True)):
         source, start, elapsed, weight, vector, norm = spec
@@ -138,7 +144,8 @@ def host_applications(plan, result, data):
                 for entry in application.arguments}
         if (application.name != f"application_{index}" or application.implementation != plan.construction.kernels[0].implementation
                 or args.get("start_time") != start or args.get("elapsed_time") != elapsed
-                or args.get("source_application") != int(source) or args.get("weight") != abs(weight)*norm
+                or args.get("source_application") != int(source)
+                or args.get("weight") != application_weight(weight, rec.source_scale if source else rec.initial_scale)
                 or args.get("recovery_scale") != psd_recovery(rec.psd_shift, elapsed)):
             raise ValueError("selected-grid application differs from the recorded physical schedule")
         steps = tuple(position["record"].step_count for position in actions[index]["positions"]) if pf else ()
@@ -147,242 +154,117 @@ def host_applications(plan, result, data):
 
 
 def selected_grid(plan, result, *, checks):
-    """Return the saved L, H, nodes and coefficients with the Result's application schedule, without spectral or quadrature selection."""
+    """Return the saved L, H, nodes and coefficients with the applications and nodes the Plan executes, without spectral or quadrature selection."""
     from .selection import LCHSData
     data = selected_payload(plan)
-    if type(data) is not LCHSData:
-        raise ValueError("selected-grid vector references require saved dense LCHS data; no periodic densification")
+    if type(data) is not LCHSData or data.dense is None:
+        raise ValueError("selected-grid vector references require saved dense LCHS data; "
+                         "no periodic or compact densification")
     rec, quad = plan.reconstruction, data.quadrature
     nodes, coefficients = quad.k_nodes, quad.coefficients
     n = len(nodes)
-    if (len(coefficients) != n or rec.psd_shift != quad.conversion["psd_shift"]
-            or rec.l_norm != quad.l_norm):
-        raise ValueError("selected grid differs from the original quadrature/PSD recovery")
     specs = _specifications(plan, data)
-    if n*len(specs) > checks.max_node_evaluations:
-        raise ValueError("selected grid exceeds max_node_evaluations before reference work")
-    _check_bytes(128*len(specs)*(n+1), checks.max_bytes, "selected reference schedule")
     pf = plan.method.hamiltonian_evolution_backend in {"trotter", "trotter_error_budgeted"}
-    applications = []
-    if plan.execution == "quantum":
+    # Planning can omit, under source_drop_allowance, an application or some
+    # nonzero slots of one whose PREP amplitude underflows. The grid lists
+    # only what the circuit applies, so the reference and the refined bounds
+    # leave out the omitted part that dropped_bound reports. The schedule
+    # bytes are checked from the kept application count before any slot is
+    # read, and the node limit from the applied nodes before any schedule is
+    # built. Only a layout with an omission reads its slot amplitudes.
+    coherent = plan.execution == "quantum" and data.selected_select == "coherent_lcu"
+    layout = data.source_layout if plan.execution == "quantum" and not coherent else None
+    dropped, omitted_nodes = set(), None
+    if coherent:
+        if data.qsp_plan.candidate.alternative != "lchs":
+            raise ValueError("the selected imaginary-time filter or commuting product evolves exp(-t A) without a "
+                             "kernel grid, so a selected-grid reference does not describe its finite sum; compare "
+                             "with the 'expm' or 'closed_form' reference instead")
+        # The coherent sum applies every kernel node to every kept
+        # application (coherent_selection). omitted_applications indexes the
+        # applications with a nonzero input, in the order of specs.
+        dropped = set(data.qsp_plan.preparation.omitted_applications)
+        count = len(specs)-len(dropped)
+    else:
+        count = len(specs) if layout is None else len(layout.applications)
+    _check_bytes(128*count*(n+1), checks.max_bytes, "selected reference schedule")
+    evaluations = n*count
+    if layout is not None and layout.dropped_bound is not None:
+        nonzero = np.asarray(coefficients) != 0
+        omitted_nodes = [frozenset(np.flatnonzero((layout.amplitudes[list(slots)] == 0) & nonzero).tolist())
+                         for slots in layout.application_slots]
+        evaluations -= sum(map(len, omitted_nodes))
+    if exceeds(evaluations, checks.max_node_evaluations):
+        raise ValueError("selected grid exceeds max_node_evaluations before reference work")
+    if coherent:
+        applications = [GridApplication(start, elapsed, weight, vector, (), source, norm)
+                        for index, (source, start, elapsed, weight, vector, norm) in enumerate(specs)
+                        if index not in dropped]
+    elif plan.execution == "quantum":
+        # The planned source layout maps each kept application, identified by
+        # its role and start time, to its SELECT address slots. Without a
+        # source the homogeneous application uses the first n slots.
         select = None if not pf else data.select_data.plan
-        if pf and tuple(select.branch_step_counts) != rec.step_counts:
-            raise ValueError("selected-grid PF counts differ from the actual selected schedule")
-        layout = data.source_layout
         if layout is None:
-            if data.source is not None or len(specs) != 1:
-                raise ValueError("selected-grid source layout is unavailable")
-            slots_by_app = (tuple(range(n)),)
+            kept = [(specs[0], tuple(range(n)))]
         else:
-            if (layout.source_nodes != rec.source_nodes or layout.source_weights != rec.source_weights
-                    or len(layout.applications) != len(specs)):
-                raise ValueError("selected-grid source layout differs from its original schedule")
-            slots_by_app = tuple(row[3] for row in layout.applications)
-        for index, (spec, slots) in enumerate(zip(specs, slots_by_app, strict=True)):
-            source, start, elapsed, weight, vector, norm = spec
-            if layout is not None:
-                row = layout.applications[index]
-                if (row[:3] != (start, elapsed, abs(weight)*norm) or len(slots) != n
-                        or any(layout.branch_to_node[slot] is None
-                            or layout.branch_kinds[layout.branch_to_node[slot]] != ("source" if source else "initial")
-                            for slot in slots)):
-                    raise ValueError("selected-grid source application differs from its physical input role")
+            planned = {spec[:2]: spec for spec in specs}
+            kept = [(planned[item.kind == "source", item.start_time], slots)
+                    for item, slots in zip(layout.applications, layout.application_slots, strict=True)]
+        applications = []
+        for index, ((source, start, elapsed, weight, vector, norm), slots) in enumerate(kept):
             steps = () if select is None else tuple(select.branch_step_counts[slot] for slot in slots)
-            applications.append(GridApplication(start, elapsed, weight, vector, steps, source, norm, slots))
+            omitted = frozenset() if omitted_nodes is None else omitted_nodes[index]
+            applications.append(GridApplication(start, elapsed, weight, vector, steps, source, norm, slots, omitted))
     else:
         applications = host_applications(plan, result, data)
-    return SelectedGrid(quad.l_part, quad.h_part, nodes, coefficients, rec.psd_shift, tuple(applications), data)
+    return SelectedGrid(data.dense.l_part, data.dense.h_part, nodes, coefficients, rec.psd_shift, tuple(applications), data)
 
 
 def grid_arguments(grid):
     """Return the (name, value) arguments that record the reproduced schedule.
 
     They list the node and application counts, the PSD shift, and for each
-    application its start, elapsed time, weight, source flag and per-node steps.
+    application its start, elapsed time, weight, source flag, per-node steps
+    and, when planning omitted some of its nodes, their number.
     """
     arguments = [("k_nodes", len(grid.nodes)), ("applications", len(grid.applications)), ("psd_shift", grid.shift)]
     for index, app in enumerate(grid.applications):
         arguments.extend(((f"application_{index}_start", app.start), (f"application_{index}_elapsed", app.elapsed),
                           (f"application_{index}_weight", app.weight), (f"application_{index}_source", int(app.source))))
         arguments.extend((f"application_{index}_node_{node}_steps", step) for node, step in enumerate(app.steps))
+        if app.omitted:
+            arguments.append((f"application_{index}_omitted_nodes", len(app.omitted)))
     return arguments
 
 
 def selected_pf_vector_requirements(circuit, dimension):
-    """Count the work and bytes of applying one built elementary product-formula branch to a vector, without calling to_matrix.
+    """Return (work, gates, bytes) of applying one decomposed product-formula branch to a D-vector.
 
-    The circuit is the branch after its one requested decompose(), with
-    the saved identity phase already attached. Work uses complex
-    multiply-add units plus scalar/entry visits. scalar_work provides the
-    alternative unfused scalar count. Neither total prices opaque SDK CPU
-    bookkeeping or process RSS.
-
-    For gate j acting on k_j qubits a contraction with the D-vector costs
-    D*2**k_j complex multiply-add units (D*(2*2**k_j - 1) literal scalar
-    operations), and forming its matrix costs M_j = 4**k_j + s_j visits,
-    with s_j the scalar visits of the gate class's matrix expression in
-    Qiskit 2.6.0 (H, SX, SXdg 0; CX 0; RX 6; RY 5; RZ 5; RXX 9; RYY 8;
-    RZZ 9; RZX 7). One global-phase test per visited definition and, for a
-    nonzero phase, D + 3 visits: W_phase = H + (D+3)*H_nz, here
-    1 + [phase != 0]*(D+3). The weighted accumulation
-    ``reference += (scale*coefficient)*evolved`` costs 2*D + 1. So
-    W_vec = D*sum_j 2**k_j + sum_j (4**k_j + s_j) + H + (D+3)*H_nz + 2*D + 1,
-    and the work checked against the limit adds up to 2*D reshape/reordering
-    copy visits and one counting visit per elementary gate, W_admit = W_vec + 2*D*G + G.
-    The known local arrays are six complex D-vectors (96*D bytes: the
-    current vector, a transposed/reshaped copy, the contraction result, the
-    final reordered copy, the reference accumulator and the weighting
-    temporary) and one gate matrix at a time, 16*max_j 4**k_j bytes. An
-    operation outside this elementary vocabulary is refused rather than
-    priced by its arity. These units are proxies for the limit checks, not
-    timings or equal-cost CPU operations.
+    The circuit is the branch after its one requested decompose(), with the
+    saved identity phase attached, and Statevector.evolve applies it gate by
+    gate. A gate on k qubits forms its 4**k-entry matrix, contracts it with
+    the vector in D*2**k complex multiply-adds and reorders the vector, up to
+    2*D copies. A nonzero global phase multiplies the D entries, and the
+    weighted accumulation ``reference += (scale*coefficient)*evolved`` costs
+    2*D + 1. The known arrays are six complex D-vectors and the largest gate
+    matrix, 96*D + 16*max 4**k bytes. These units are proxies for the limit
+    checks, not timings.
     """
-    from qiskit.circuit.library import (
-        HGate, SXGate, SXdgGate, CXGate,
-        RXGate, RYGate, RZGate, RXXGate, RYYGate, RZZGate, RZXGate,
-    )
-    prices = {
-        HGate: (1, 0), SXGate: (1, 0), SXdgGate: (1, 0),
-        CXGate: (2, 0), RXGate: (1, 6), RYGate: (1, 5),
-        RZGate: (1, 5), RXXGate: (2, 9), RYYGate: (2, 8),
-        RZZGate: (2, 9), RZXGate: (2, 7),
-    }
+    from qiskit.circuit import Gate
     if dimension != 1 << circuit.num_qubits:
         raise ValueError("PF reference dimension differs from its circuit")
     if circuit.num_clbits or circuit.parameters:
         raise ValueError("PF reference needs a bound unitary circuit")
-    contractions = scalar_contractions = matrices = 0
-    largest_matrix = 0
-    gates = 0
+    work = 2*dimension + 1 + dimension*int(circuit.global_phase != 0)
+    largest = 0
     for instruction in circuit.data:
-        gate = instruction.operation
-        price = prices.get(gate.base_class)
-        if price is None or instruction.clbits:
-            raise ValueError("PF reference gate needs an explicit matrix-work law")
-        arity, scalar_visits = price
-        if gate.num_qubits != arity:
-            raise ValueError("PF reference gate arity differs from its work law")
-        r = 1 << arity
-        contractions += dimension * r
-        scalar_contractions += dimension * (2 * r - 1)
-        matrices += r * r + scalar_visits
-        largest_matrix = max(largest_matrix, r * r)
-        gates += 1
-    phase_work = 1 + (dimension + 3) * int(circuit.global_phase != 0)
-    accumulation = 2 * dimension + 1
-    traffic = 2 * dimension * gates
-    extra = matrices + phase_work + accumulation + traffic + gates
-    return dict(
-        work=contractions + extra,
-        scalar_work=scalar_contractions + extra,
-        contraction_work=contractions,
-        gate_matrix_work=matrices,
-        global_phase_work=phase_work,
-        accumulation_work=accumulation,
-        copy_work=traffic,
-        census_work=gates,
-        gate_count=gates,
-        local_array_bytes=96 * dimension + 16 * largest_matrix,
-    )
-
-
-def pf_reference_held_payload(grid, *, held_inputs=(), max_work, max_bytes):
-    """Return (held bytes, metadata visits) without copying numerical arrays.
-
-    Count the planned LCHS numerical data, its grid schedule, and the input
-    arrays the caller holds. Follow array bases so shared buffers are
-    counted once and a view is counted with its complete backing allocation.
-    The Method, compiled SDK objects, interpreter frames, allocator arenas
-    and process RSS are outside this formula for the logical data and the
-    Python wrapper objects.
-
-    Python object allowances are 2048+16f for an f-field dataclass, 128+64n for
-    an n-entry frozen mapping, 64+16n for a tuple, 128+16n for a list,
-    256+16k for a k-axis
-    array descriptor, and 64+4n for an n-character string. Integers use
-    32+4*ceil(max(1,bit_length)/30). Float and complex values use 32 and
-    48. A 128-byte allowance per visit covers the temporary set of visited
-    objects and the recursion of the traversal. These are qualified engineering allowances.
-    """
-    from .selection import LCHSData
-    seen = set()
-    held = visits = 0
-
-    def add(size):
-        nonlocal held
-        held += size
-        if held + 128*visits > max_bytes:
-            raise ValueError("PF reference resident payload and inventory exceed max_bytes")
-
-    def visit(value):
-        nonlocal visits
-        if visits >= max_work:
-            raise ValueError("PF reference payload inventory exceeds max_dense_work")
-        visits += 1
-        if held + 128*visits > max_bytes:
-            raise ValueError("PF reference resident payload and inventory exceed max_bytes")
-        if value is None:
-            return
-        identity = id(value)
-        if identity in seen:
-            return
-        seen.add(identity)
-        if type(value) is bool:
-            add(32)
-        elif type(value) is int:
-            add(32 + 4*((max(1, abs(value).bit_length())+29)//30))
-        elif type(value) is float:
-            add(32)
-        elif type(value) is complex:
-            add(48)
-        elif type(value) is str:
-            add(64+4*len(value))
-        elif isinstance(value, (bytes, bytearray)):
-            add(64+len(value))
-        elif isinstance(value, memoryview):
-            add(128)
-            visit(value.obj)
-        elif isinstance(value, np.ndarray):
-            if value.dtype.hasobject:
-                raise TypeError("object arrays need an explicit resident-payload law")
-            add(256+16*value.ndim)
-            if value.base is None:
-                add(value.nbytes)
-            else:
-                visit(value.base)
-        elif isinstance(value, np.generic):
-            if value.dtype.hasobject:
-                raise TypeError("object scalars need an explicit resident-payload law")
-            add(128+value.dtype.itemsize)
-        elif isinstance(value, FrozenArray):
-            add(128)
-            visit(value.array)
-        elif isinstance(value, Fraction):
-            add(64)
-            visit(value.numerator)
-            visit(value.denominator)
-        elif is_dataclass(value) and not isinstance(value, type):
-            record_fields = fields(value)
-            add(2048+16*len(record_fields))
-            for field in record_fields:
-                if isinstance(value, LCHSData) and field.name == "method":
-                    continue
-                visit(getattr(value, field.name))
-        elif isinstance(value, Mapping):
-            add(128+64*len(value))
-            for key, child in value.items():
-                visit(key)
-                visit(child)
-        elif isinstance(value, (tuple, list)):
-            add((128 if isinstance(value, list) else 64)+16*len(value))
-            for child in value:
-                visit(child)
-        else:
-            raise TypeError(f"resident payload needs a typed law for {type(value).__name__}")
-
-    visit(grid)
-    visit(held_inputs)
-    return held, visits
+        if not isinstance(instruction.operation, Gate):
+            raise ValueError("PF reference applies unitary gates only")
+        r = 1 << instruction.operation.num_qubits
+        work += dimension*r + r*r + 2*dimension
+        largest = max(largest, r*r)
+    return work, len(circuit.data), 96*dimension + 16*largest
 
 
 def grid_reference(plan, grid, *, checks, counts, held_inputs=()):
@@ -417,56 +299,42 @@ def grid_reference(plan, grid, *, checks, counts, held_inputs=()):
     this call's limits before it runs. A saved route that does not fit is
     refused, never replaced by another route.
 
-    The classical product-formula reference holds the planned numerical
-    data and the caller's explicit verification inputs while each saved
-    node action runs. That payload includes dense L and H, the coefficient
-    and index tables, application records and input vectors. Shared array
-    buffers are counted once. Each action adds its rotation buffer, saved
-    route scratch and weighted-accumulation reserve to those held bytes.
-    Setup and the one-time count of metadata (pf_reference_held_payload)
-    have separate memory peaks.
+    A product-formula reference holds, while each saved node action or
+    branch runs, the dominant arrays of the Plan and of the caller: dense L
+    and H (32*D**2 bytes), the k nodes and coefficients, the application
+    schedule (128 bytes per application and node, as selected_grid checks),
+    the saved coefficient table of the classical route
+    (time_independent_terms._stored_node_table_bytes) or the occurrence-angle
+    table of the quantum SELECT with 64 bytes per address for its per-address
+    phases and maps, and the caller's input arrays (held_inputs). This is a
+    coarse estimate of the dominant allocations, not of Python objects or
+    process memory. A classical action adds its rotation buffer, saved route
+    scratch and weighted-accumulation reserve.
 
     The quantum selected_grid reference applies each planned decomposed
     product-formula branch directly to the input vector of its operator
-    application. The limit check counts the contraction arity of every
-    executed elementary gate, its matrix-entry and scalar-function work, each
-    executed global phase, and weighted accumulation. It also sets aside room
-    for the vector-reordering copies.
-    Contractions use complex multiply-add size units, while matrix
-    formation and vector operations use logical visits. The byte allowance
-    covers known arrays and the declared size of the circuit records. Opaque SDK
-    storage and runtime are outside that allowance
-    (selected_pf_vector_requirements).
-
-    The quantum product-formula reference holds dense L and H and the full
-    saved SELECT numerical payload while it builds and applies each branch.
-    Held storage includes the occurrence-angle table, phases, mappings,
-    saved node coefficients, source layout, saved records and input arrays,
-    with shared buffers counted once. Circuit construction adds the two sets
-    of logical circuit records within its byte bound before construction.
-    After decomposition, the vector check adds the remaining circuit's
-    records and the known vector and elementary-gate arrays. Opaque SDK
-    storage and the process heap are outside this known-data allowance.
+    application, with the work and bytes of selected_pf_vector_requirements.
+    Before construction, Qiskit's decompose holds several copies of the
+    branch's gates, which its envelope bound covers below.
     """
     from nwqlib.problems.inputs import PhysicalScale
     from .time_independent_terms import (_spectral_host_requirements, spectral_lchs_sum,
-        stored_pf_nodes, stored_node_read_work, _BorrowedRows)
+        stored_pf_nodes, stored_node_read_work, _stored_node_table_bytes, _BorrowedRows)
     exponent = psd_recovery_exponent(grid.shift, plan.reconstruction.elapsed_time)
     d = plan.reconstruction.encoded_dimension
     pf = plan.method.hamiltonian_evolution_backend in {"trotter", "trotter_error_budgeted"}
     held = 0
     if pf:
-        held, inventory_work = pf_reference_held_payload(
-            grid, held_inputs=held_inputs,
-            max_work=checks.max_dense_work-counts.get("dense_work", 0),
-            max_bytes=checks.max_bytes,
-        )
-        dense_work(
-            checks, counts, work=inventory_work,
-            peak_bytes=held+128*inventory_work,
-        )
+        held = (32*d*d + 32*len(grid.nodes) + 128*len(grid.applications)*(len(grid.nodes)+1)
+                + sum(array.nbytes for array in held_inputs if array is not None))
+        if plan.execution == "classical":
+            table = stored_pf_nodes(grid.payload)
+            held += _stored_node_table_bytes(table)
+        else:
+            select = grid.payload.select_data.plan
+            held += select.occurrence_angle_tables.array.nbytes + 64*select.padded_node_count
+        dense_work(checks, counts, work=0, peak_bytes=held)
     if pf and plan.execution == "classical":
-        table = stored_pf_nodes(grid.payload)
         active = any(app.weight != 0 and app.input_norm != 0 for app in grid.applications)
         read = sorted({
             int(table.grid_to_node[node])
@@ -487,28 +355,37 @@ def grid_reference(plan, grid, *, checks, counts, held_inputs=()):
         # (spectral_lchs_sum), admitted before the first eigensystem with its
         # law. Bytes: the phase bytes of the streamed sum, the reference
         # vector and four d-vectors, beside the live L and H.
-        active = [app for app in grid.applications if app.weight != 0 and app.input_norm != 0]
-        nodes = [(k, coefficient) for k, coefficient in zip(grid.nodes, grid.coefficients, strict=True)
-                 if coefficient != 0]
-        specifications = []
-        for app in active:
-            scale = app.weight*psd_recovery_part(grid.shift, app.elapsed, exponent)
-            if not isfinite(scale):
-                raise ValueError("selected-grid PSD recovery is nonfinite")
-            specifications.append((app.elapsed, scale, app.vector))
-        identity = not (np.any(grid.l_part) or np.any(grid.h_part)) or not any(app.elapsed for app in active)
-        eigensystems = 0 if identity or not nodes else (1 if not np.any(grid.l_part) else len(nodes))
-        inputs = len({id(app.vector) for app in active})
-        work, phase_bytes = _spectral_host_requirements(d, nodes=len(nodes), applications=len(active),
-            inputs=inputs, eigensystems=eigensystems)
+        # Applications that apply the same k nodes share one streamed sum.
+        # Only an omission of some nodes of an application under
+        # source_drop_allowance makes another group, with its own eigensystems.
+        groups = {}
+        for app in grid.applications:
+            if app.weight != 0 and app.input_norm != 0:
+                scale = app.weight*psd_recovery_part(grid.shift, app.elapsed, exponent)
+                if not isfinite(scale):
+                    raise ValueError("selected-grid PSD recovery is nonfinite")
+                groups.setdefault(app.omitted, []).append((app.elapsed, scale, app.vector))
+        sums, work, phase_bytes = [], 0, 0
+        for omitted, specifications in (groups or {frozenset(): []}).items():
+            nodes = [(k, coefficient) for j, (k, coefficient) in enumerate(zip(grid.nodes, grid.coefficients, strict=True))
+                     if coefficient != 0 and j not in omitted]
+            identity = (not (np.any(grid.l_part) or np.any(grid.h_part))
+                        or not any(elapsed for elapsed, _, _ in specifications))
+            eigensystems = 0 if identity or not nodes else (1 if not np.any(grid.l_part) else len(nodes))
+            inputs = len({id(vector) for _, _, vector in specifications})
+            group_work, group_bytes = _spectral_host_requirements(d, nodes=len(nodes),
+                applications=len(specifications), inputs=inputs, eigensystems=eigensystems)
+            work, phase_bytes = work+group_work, max(phase_bytes, group_bytes)
+            sums.append((nodes, specifications))
         dense_work(checks, counts, work=work, peak_bytes=phase_bytes+80*d)
-        if active and nodes:
-            spectral = {"eigh_calls": 0, "matvecs": 0}
-            reference += spectral_lchs_sum(grid.l_part, grid.h_part, [k for k, _ in nodes],
-                [coefficient for _, coefficient in nodes], tuple(specifications), counts=spectral)
-            counts["eigh_calls"] += spectral["eigh_calls"]
-            counts["matvec_attempts"] += spectral["matvecs"]
-            counts["matvec_completed"] += spectral["matvecs"]
+        for nodes, specifications in sums:
+            if specifications and nodes:
+                spectral = {"eigh_calls": 0, "matvecs": 0}
+                reference += spectral_lchs_sum(grid.l_part, grid.h_part, [k for k, _ in nodes],
+                    [coefficient for _, coefficient in nodes], tuple(specifications), counts=spectral)
+                counts["eigh_calls"] += spectral["eigh_calls"]
+                counts["matvec_attempts"] += spectral["matvecs"]
+                counts["matvec_completed"] += spectral["matvecs"]
     order = plan.method.trotter_order
     q = d.bit_length()-1
     stored = grid.payload.host_actions["applications"] if pf and plan.execution == "classical" else None
@@ -519,7 +396,7 @@ def grid_reference(plan, grid, *, checks, counts, held_inputs=()):
         if not isfinite(scale):
             raise ValueError("selected-grid PSD recovery is nonfinite")
         for node, coefficient in enumerate(grid.coefficients):
-            if coefficient == 0:
+            if coefficient == 0 or node in app.omitted:
                 continue
             steps = app.steps[node]
             if plan.execution == "classical":
@@ -530,7 +407,7 @@ def grid_reference(plan, grid, *, checks, counts, held_inputs=()):
                 route = stored[index]["positions"][node]["route"]
                 rotations = _rotation_count(len(rows), order)
                 total = counts["pf_operations"]+max(1, steps)*rotations
-                if total > checks.max_pf_operations:
+                if exceeds(total, checks.max_pf_operations):
                     raise ValueError("selected-grid reference exceeds max_pf_operations before its node action")
                 work, scratch, _ = _route_requirements(d, steps, rotations, route)
                 dense_work(
@@ -547,34 +424,38 @@ def grid_reference(plan, grid, *, checks, counts, held_inputs=()):
             else:
                 from qiskit.quantum_info import Statevector
                 from .select_synthesis import _build_product_formula_branch
+                from .solution_error_budget import unit_angle
                 selected = grid.payload.select_data.plan
                 # Preconstruction envelope: an occurrence with support s >= 2
                 # uses at most 2*(s-1) parity CX, 2*s basis changes and one
                 # rotation, at most 4*s - 1 elementary gates, and support one
                 # one rotation, so max(1, 4*q - 1)*W*R gates bound a branch
                 # of W occurrences per step over R saved repetitions. Bytes:
-                # 64 per gate for the undecomposed and the decomposed
-                # circuit while both exist (the logical gate-record
-                # allowance), the known arrays and one gate matrix of the
-                # widest priced gate, 16*4**2 bytes.
+                # 1024 per gate, because Qiskit's decompose holds the
+                # evolution gate's synthesized definition, its DAG, the
+                # substituted DAG and the decomposed circuit at once, each
+                # allowed 256 bytes per gate as in
+                # _dense_synthesis.gatewise_control_size (a 20,000-step
+                # two-qubit branch of 1,380,000 decomposed gates raised peak
+                # resident memory by 804 bytes per gate with Qiskit 2.6.0),
+                # plus the known arrays and one gate matrix of the widest
+                # priced gate, 16*4**2 bytes.
                 envelope = max(1, 4*q-1)*len(selected.occurrence_schedule)*sum(
                     selected.occurrence_block_repetitions)
-                if counts["pf_operations"]+envelope > checks.max_pf_operations:
+                if exceeds(counts["pf_operations"]+envelope, checks.max_pf_operations):
                     raise ValueError("selected-grid reference exceeds max_pf_operations before circuit construction")
                 dense_work(
                     checks, counts, work=0,
-                    peak_bytes=held+128*envelope+96*d+256,
+                    peak_bytes=held+1024*envelope+96*d+256,
                 )
                 circuit = _build_product_formula_branch(selected, app.slots[node], num_system_qubits=q)
-                circuit.global_phase += selected.identity_phases[app.slots[node]]
+                circuit.global_phase += unit_angle(selected.identity_phases[app.slots[node]])
                 decomposed = circuit.decompose()
                 del circuit
-                requirements = selected_pf_vector_requirements(decomposed, d)
-                gates = requirements["gate_count"]
-                if counts["pf_operations"]+gates > checks.max_pf_operations:
+                work, gates, local_bytes = selected_pf_vector_requirements(decomposed, d)
+                if exceeds(counts["pf_operations"]+gates, checks.max_pf_operations):
                     raise ValueError("selected-grid reference exceeds max_pf_operations before its vector action")
-                dense_work(checks, counts, work=requirements["work"],
-                           peak_bytes=held+requirements["local_array_bytes"]+64*gates)
+                dense_work(checks, counts, work=work, peak_bytes=held+local_bytes+64*gates)
                 counts["pf_operations"] += gates
                 counts["fixed_pf_attempts"] += 1
                 evolved = Statevector(app.vector).evolve(decomposed).data

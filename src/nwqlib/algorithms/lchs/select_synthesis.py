@@ -40,7 +40,14 @@ class LCHSProductFormulaSelectPlan:
             holds the rotation angles in radians of every address. Completed or
             inactive branches have zero angles. Code that uses the table reads its
             ``array``. The content hash of the planned data (selected_identity)
-            covers the array as one byte block.
+            covers the array as one byte block. Planning in this process hands
+            the table over without a copy (``FrozenArray._from_owned_canonical_array``),
+            8 bytes per angle where protected storage would hold 16 at the
+            handoff. Its elements then stay in a NumPy array that is the
+            ``.base`` of every view, ``setflags(write=True)`` on that array
+            succeeds, and a later write changes the angles that lowering
+            reads while a hash or content ID computed earlier stays. A table
+            loaded from JSON is stored in an immutable ``bytes`` object.
         occurrence_block_repetitions: Number of consecutive formula steps sharing each
             block of angle tables. Circuit construction expands these counts. Planning
             keeps them compact.
@@ -192,16 +199,33 @@ def _build_product_formula_branch(
     )
 
 
+def _combined_branch_phases(plan: LCHSProductFormulaSelectPlan) -> tuple[float, ...]:
+    """Return each address's coefficient phase plus its identity phase, joined in bounded form.
+
+    The identity phase -t*c_I can be a huge finite angle. It is first
+    reduced through its unit phase (``solution_error_budget.unit_angle``),
+    so the bounded coefficient phase added to it keeps its value instead of
+    vanishing in the rounding of a huge sum. An identity phase already in
+    [-pi, pi] is used unchanged.
+    """
+    from .solution_error_budget import unit_angle
+
+    return tuple(coefficient + unit_angle(identity)
+                 for coefficient, identity in zip(plan.coefficient_phases, plan.identity_phases, strict=True))
+
+
 def _product_formula_branch_phase_count(plan: LCHSProductFormulaSelectPlan) -> int:
     """Count physical phases after the circuit's ordered global-phase assignments.
 
-    The branch builder assigns the identity phase before LCU adds the coefficient
+    The branch builder assigns the reduced identity phase
+    (``solution_error_budget.unit_angle``) before LCU adds the coefficient
     phase. Qiskit normalizes each assignment modulo 2*pi. Combining them first
     can erase a small coefficient added after an identity phase of a full turn.
     """
+    from .solution_error_budget import unit_angle
 
     return sum(
-        node is not None and (identity % (2 * np.pi) + coefficient) % (2 * np.pi) != 0.0
+        node is not None and (unit_angle(identity) % (2 * np.pi) + coefficient) % (2 * np.pi) != 0.0
         for node, coefficient, identity in zip(
             plan.branch_to_node, plan.coefficient_phases, plan.identity_phases, strict=True
         )
@@ -394,10 +418,141 @@ def _append_structured_pauli_rotation(
     _leave_pauli_rotation_frame(circuit, active=active, label=label)
 
 
+def product_formula_select_size(
+    plan: LCHSProductFormulaSelectPlan,
+    *,
+    implementation: Literal["multiplexor", "structured"],
+) -> tuple[int, int]:
+    """Return the instruction entries of the SELECT circuit and the bytes its construction holds, from the plan alone.
+
+    The count follows the builders below from the repetition blocks and the
+    occurrence labels, in time independent of the step counts. Each
+    occurrence of a label with x X letters, y Y letters and s non-identity
+    letters appends 2(x + 2y + s - 1) frame gates and its rotation: one
+    UCRZ for the multiplexor, or at most one RZ and a controlled RZ per
+    address bit for the structured table. The diagonal adds one gate.
+    Bytes allow 256 per instruction entry, the allowance of the dense
+    syntheses for a standard Qiskit gate held in a circuit, whose measured
+    resident cost is 115 to 177 bytes (subroutines/_dense_synthesis.py),
+    2**(a + 1) definition gates of 256 bytes for the diagonal and for each
+    UCRZ built once per occurrence and repetition block, 1024 bytes for each
+    controlled RZ, which keeps its own controlled gate and definition, and
+    16384 for the circuit and register objects.
+
+    Returns:
+        The instruction entries and the bytes.
+    """
+    a = plan.padded_node_count.bit_length() - 1
+    width = len(plan.occurrence_schedule)
+    frame = sum(2 * (label.count("X") + 2 * label.count("Y") + len(label) - label.count("I") - 1)
+                for label in plan.occurrence_schedule)
+    repetitions = sum(plan.occurrence_block_repetitions)
+    rotation = 1 if implementation == "multiplexor" else 1 + a
+    instructions = 1 + repetitions * (frame + width * rotation)
+    if implementation == "multiplexor":
+        definitions = (1 + width * len(plan.occurrence_block_repetitions)) << (a + 1)
+        controlled = 0
+    else:
+        definitions = 1 << (a + 1)
+        controlled = repetitions * width * a
+    return instructions, _select_circuit_bytes(instructions + definitions, controlled)
+
+
+def _select_circuit_bytes(entries: int, controlled: int) -> int:
+    """Return the coarse allowance of a circuit of ``entries`` gates, ``controlled`` of them keeping a controlled RZ.
+
+    `product_formula_select_size` states what each coefficient allows for.
+    """
+    return 256 * entries + 1024 * controlled + 16384
+
+
+def admit_product_formula_select(
+    plan: LCHSProductFormulaSelectPlan,
+    *,
+    implementation: Literal["multiplexor", "structured"],
+    max_bytes,
+    copies: int = 0,
+    extra_instructions: int = 0,
+) -> None:
+    """Check the bytes of a SELECT circuit before any repetition is appended (``product_formula_select_size``).
+
+    ``copies`` counts further circuits that append every instruction of the
+    SELECT again, such as the segments of a sampled pair, and
+    ``extra_instructions`` the other instructions they append, each entry at
+    256 bytes. ``max_bytes`` None is the physical memory.
+    """
+    from nwqlib.operators.access import _check_bytes
+    instructions, size = product_formula_select_size(plan, implementation=implementation)
+    _check_bytes(size + 256 * (copies * instructions + extra_instructions), max_bytes, "product-formula SELECT circuit")
+
+
+def branch_controlled_select_size(plan: LCHSProductFormulaSelectPlan, *, slots: int) -> tuple[int, int]:
+    """Return the instructions Qiskit emits and the bytes it holds when native.construct_select controls the branches.
+
+    native.construct_select controls each of the first ``slots`` branches on
+    the a >= 1 address bits with ``qiskit_compat.controlled``, where Qiskit's
+    ``control`` unrolls the whole branch, every repetition included, and
+    controls each gate (``_dense_synthesis.gatewise_control_size``). A
+    repetition holds the occurrences of
+    ``_branch_controlled_product_formula_resource_law``. Qiskit 2.6.0 unrolls
+    an occurrence of a one-qubit label to one rotation and a longer label of
+    support s to 2(s - 1) CX, one RZ, an H pair for each X and an SX and SXdg
+    pair for each Y. It controls a CX in one instruction, an H in 7, an SX or
+    SXdg in 3 and an RZ in ``CONTROLLED_RZ_INSTRUCTIONS``. An RX or RY on
+    a < 4 controls is one controlled U or a Gray-code sequence of 2**(a+1) - 3
+    instructions, and on more controls takes the RZ construction, with two
+    more instructions for an RX (``QuantumCircuit.mcrx`` and ``mcry``). Each
+    branch adds at most one gate and one instruction for its global phase. The input
+    preparations of a source layout do not repeat and are not counted. Bytes
+    are the kept bytes of every branch and the working bytes of the largest,
+    with the allowances of ``gatewise_control_size``.
+
+    Returns:
+        The emitted instructions and the bytes.
+    """
+    from nwqlib.subroutines._dense_synthesis import CONTROLLED_RZ_INSTRUCTIONS, gatewise_control_size
+    a = plan.padded_node_count.bit_length() - 1
+    rz = CONTROLLED_RZ_INSTRUCTIONS[a - 1]
+    gray = (1 << (a + 1)) - 3 if a > 1 else 1
+    rotations = {"Z": rz, "X": gray if a < 4 else rz + 2, "Y": gray if a < 4 else rz}
+    instructions = kept = working = 0
+    for branch in range(slots):
+        steps = plan.branch_step_counts[branch]
+        step_gates = step_instructions = 0
+        if plan.branch_to_node[branch] is not None and steps:
+            labels = tuple(label for label, _ in _product_formula_branch_terms(plan, branch))
+            for label in labels if plan.formula_order == 1 else (*labels[:-1], *labels[::-1]):
+                support = len(label) - label.count("I")
+                if support == 1:
+                    step_gates += 1
+                    step_instructions += rotations[label.replace("I", "")]
+                    continue
+                x, y = label.count("X"), label.count("Y")
+                step_gates += 2 * (support + x + y) - 1
+                step_instructions += 2 * (support - 1) + rz + 14 * x + 6 * y
+        gates, emitted = 1 + steps * step_gates, 1 + steps * step_instructions
+        _, branch_working, branch_kept = gatewise_control_size(gates, emitted)
+        instructions += emitted
+        kept += branch_kept
+        working = max(working, branch_working)
+    return instructions, kept + working
+
+
+def admit_branch_controlled_select(plan: LCHSProductFormulaSelectPlan, *, slots: int, max_bytes) -> None:
+    """Check the bytes of a branch-controlled SELECT before its first branch is built (``branch_controlled_select_size``).
+
+    ``max_bytes`` None is the physical memory.
+    """
+    from nwqlib.operators.access import _check_bytes
+    _check_bytes(branch_controlled_select_size(plan, slots=slots)[1], max_bytes,
+                 "branch-controlled product-formula SELECT")
+
+
 def build_multiplexed_product_formula_select(
     plan: LCHSProductFormulaSelectPlan,
     *,
     num_system_qubits: int,
+    max_bytes=None,
 ) -> QuantumCircuit:
     """Build the plan's branch-diagonal multiplexed SELECT circuit.
 
@@ -406,9 +561,12 @@ def build_multiplexed_product_formula_select(
     one parity network, one uniformly controlled RZ over the full address
     table and their inverse, so all branches advance together through the
     shared Lie or Suzuki schedule. A branch with fewer steps gets zero angles
-    after its last step.
+    after its last step. The circuit's bytes are checked against
+    ``max_bytes`` (None: the physical memory) before the first gate
+    (``admit_product_formula_select``).
     """
 
+    admit_product_formula_select(plan, implementation="multiplexor", max_bytes=max_bytes)
     num_control_qubits = plan.padded_node_count.bit_length() - 1
     system = QuantumRegister(num_system_qubits, "system")
     control = (
@@ -422,15 +580,7 @@ def build_multiplexed_product_formula_select(
         if control is not None
         else QuantumCircuit(system, name="lcu_select_multiplexor")
     )
-    combined_phases = tuple(
-        coefficient + identity
-        for coefficient, identity in zip(
-            plan.coefficient_phases,
-            plan.identity_phases,
-            strict=True,
-        )
-    )
-    append_control_diagonal_phases(select, control_qubits, combined_phases)
+    append_control_diagonal_phases(select, control_qubits, _combined_branch_phases(plan))
     # Each repetition block has one angle table per occurrence, so its UCRZ
     # gates are built once and appended for every repetition of the block.
     width = len(plan.occurrence_schedule)
@@ -454,8 +604,13 @@ def build_structured_product_formula_select(
     plan: LCHSProductFormulaSelectPlan,
     *,
     num_system_qubits: int,
+    max_bytes=None,
 ) -> QuantumCircuit:
-    """Build the plan's certified affine-address structured SELECT."""
+    """Build the plan's certified affine-address structured SELECT.
+
+    The circuit's bytes are checked against ``max_bytes`` (None: the
+    physical memory) before the first gate (``admit_product_formula_select``).
+    """
 
     certificate = plan.structure_certificate
     payload = plan.structured_generator_payload
@@ -466,6 +621,7 @@ def build_structured_product_formula_select(
     affine_tables = tuple(payload["occurrence_affine_tables"])
     if len(affine_tables) != len(plan.occurrence_angle_tables):
         raise ValueError("structured payload must cover every formula occurrence")
+    admit_product_formula_select(plan, implementation="structured", max_bytes=max_bytes)
 
     num_control_qubits = plan.padded_node_count.bit_length() - 1
     system = QuantumRegister(num_system_qubits, "system")
@@ -480,15 +636,7 @@ def build_structured_product_formula_select(
         if control is not None
         else QuantumCircuit(system, name="lcu_select_structured")
     )
-    combined_phases = tuple(
-        coefficient + identity
-        for coefficient, identity in zip(
-            plan.coefficient_phases,
-            plan.identity_phases,
-            strict=True,
-        )
-    )
-    append_control_diagonal_phases(select, control_qubits, combined_phases)
+    append_control_diagonal_phases(select, control_qubits, _combined_branch_phases(plan))
     width = len(plan.occurrence_schedule)
     for block, repetitions in enumerate(plan.occurrence_block_repetitions):
         tables = affine_tables[block * width : (block + 1) * width]
@@ -509,26 +657,33 @@ def build_product_formula_select(
     *,
     num_system_qubits: int,
     implementation: Literal["multiplexor", "structured"],
+    max_bytes=None,
 ) -> QuantumCircuit:
-    """Build one resolved scalable product-formula SELECT."""
+    """Build one resolved scalable product-formula SELECT, checking its bytes against ``max_bytes`` first."""
 
     if implementation == "multiplexor":
         return build_multiplexed_product_formula_select(
             plan,
             num_system_qubits=num_system_qubits,
+            max_bytes=max_bytes,
         )
     if implementation == "structured":
         return build_structured_product_formula_select(
             plan,
             num_system_qubits=num_system_qubits,
+            max_bytes=max_bytes,
         )
     raise ValueError("implementation must be 'multiplexor' or 'structured'")
 
 
 __all__ = [
     "LCHSProductFormulaSelectPlan",
+    "admit_branch_controlled_select",
+    "admit_product_formula_select",
+    "branch_controlled_select_size",
     "build_product_formula_select",
     "build_multiplexed_product_formula_select",
     "build_structured_product_formula_select",
     "product_formula_occurrence_template",
+    "product_formula_select_size",
 ]

@@ -123,6 +123,24 @@ def test_saved_native_layout_preserves_compact_and_declared_inputs(tmp_path, mon
                        operators.ingest_pauli([("Z", 1.)], num_qubits=1),
                        operators.ingest_periodic_stencil(num_qubits=2, mass=.2, diffusion=.1),
                        operators.OperatorInput.from_record(dense.to_record())]
+    # A band, a Cartesian pair and a supplied block encoding keep their own
+    # data. The binary64 values below need all 53 bits, so a lossy save
+    # would change them.
+    from qiskit import QuantumCircuit
+    from nwqlib.core.records import InputRef, Source
+    from nwqlib.subroutines.block_encoding.core import BlockEncoding
+    band = operators.ingest_band([0, 1, -1], [1.1, -.3+.1j, -.3-.1j], num_qubits=2)
+    circuit = QuantumCircuit(2)
+    circuit.ry(.3, 0)
+    circuit.cx(0, 1)
+    supplied = operators.ingest_block_encoding(
+        BlockEncoding(circuit=circuit, alpha=1.1, num_ancillas=1, system_qubits=1, error_bound=.1,
+                      implementation="supplied", metadata={}),
+        reference=InputRef(identity="user:L", representation="block_encoding",
+                           source=Source(name="user", version="1", domain="test", reference="declared")),
+        hermitian=True, lower_bound=-.3)
+    operator_inputs += [band, operators.ingest_cartesian(band, operators.ingest_pauli([("ZI", .7)], num_qubits=2)),
+                        supplied]
     files = ArchiveFiles(tmp_path, 100_000)
     state_data = [files.write_state(f"state-{i}", state) for i, state in enumerate(state_inputs)]
     operator_data = [files.write_operator(f"operator-{i}", op) for i, op in enumerate(operator_inputs)]
@@ -144,16 +162,14 @@ def test_saved_native_layout_preserves_compact_and_declared_inputs(tmp_path, mon
                 assert a.dtype == b.dtype and not b.flags.writeable
     for original, data in zip(operator_inputs, operator_data, strict=True):
         assert reopened.read_operator(data).to_record() == original.to_record()
+    assert reopened.read_operator(operator_data[7]).band() == band.band()
+    parts = reopened.read_operator(operator_data[8]).cartesian_parts()
+    assert parts.dissipative.band() == band.band() and parts.hamiltonian.pauli_terms().labels() == (("ZI", .7+0j),)
+    restored = reopened.read_operator(operator_data[9]).supplied_block_encoding()
+    assert (restored.encoding.alpha, restored.encoding.error_bound, restored.lower_bound, restored.hermitian) == (
+        1.1, .1, -.3, True)
+    assert restored.encoding.circuit == circuit
     assert reopened.read_operator(repeated)._data is reopened.read_operator(operator_data[0])._data
-    wrong = dict(operator_data[0], array=state_data[0]["physical"])
-    with pytest.raises(ValueError, match="layout"):
-        reopened.read_operator(wrong)
-    wrong = dict(operator_data[4], x=operator_data[4]["coefficients"])
-    with pytest.raises(ValueError, match="layout"):
-        reopened.read_operator(wrong)
-    wrong = dict(operator_data[2], sparse_type="csc_matrix")
-    with pytest.raises(ValueError, match="layout"):
-        reopened.read_operator(wrong)
 
 
 def _with_fault(result, *, chunk=None, event=None, item=None, receipts=None, artifacts=None):

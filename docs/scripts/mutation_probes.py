@@ -27,9 +27,9 @@ MODULE_QUALNAME = "<module>"
 # source on disk when its process is killed. A run past the bound is an
 # infrastructure error, and _run_probe restores the source before the
 # campaign stops. The baseline runs the selected nodes together before any
-# mutation. With 143 nodes it took 40 s on an Apple M3 Max with Python
-# 3.12.14, so the bound leaves room for a slower host and for a mutant that
-# slows a test without making it loop.
+# mutation. With 314 nodes it took about 150 s on an Apple M3 Max with Python
+# 3.12.14, so the bound leaves room for a host about three times slower and
+# for a mutant that slows a test without making it loop.
 PYTEST_TIMEOUT_SECONDS = 600
 
 
@@ -124,9 +124,9 @@ PROBES = (
     ),
     single_replacement_probe(
         name="lanczos_gershgorin_trailing_empty_row",
-        module="nwqlib.algorithms._eigen_inputs", qualname="gershgorin_frame",
-        old="            radius[nonempty] = np.add.reduceat(re, a.indptr[nonempty])\n",
-        new="            radius = np.add.reduceat(re, a.indptr[:-1])\n",
+        module="nwqlib.algorithms._eigen_inputs", qualname="_gershgorin_rows",
+        old="            radius[nonempty] = np.add.reduceat(magnitude, a.indptr[nonempty])\n",
+        new="            radius = np.add.reduceat(magnitude, a.indptr[:-1])\n",
         pytest_args=("tests/test_lanczos.py::test_classical_gershgorin_frame_encloses_the_spectrum_with_empty_rows",),
     ),
     single_replacement_probe(
@@ -168,22 +168,22 @@ PROBES = (
     single_replacement_probe(
         name="inverse_native_multiplexer_table_drop",
         module="nwqlib.subroutines.qiskit_compat", qualname="inverse_realized_gate",
-        old="    if isinstance(gate, ControlledGate):\n        native_ucg = False\n    if isinstance(gate, UnitaryGate):\n",
-        new="    native_ucg = False\n    if isinstance(gate, UnitaryGate):\n",
+        old="        if isinstance(operation, ControlledGate):\n            native_ucg = False\n",
+        new="        native_ucg = False\n",
         pytest_args=("tests/test_lanczos_circuits.py::test_native_signed_centered_two_qubit_public_chain",),
     ),
     single_replacement_probe(
         name="inverse_native_multiplexer_conjugation_drop",
-        module="nwqlib.subroutines.qiskit_compat", qualname="inverse_realized_gate",
+        module="nwqlib.subroutines.qiskit_compat", qualname="_construct_inverse",
         old="        adjoint_table = [matrix.conj().T.copy() for matrix in gate.params]\n",
         new="        adjoint_table = [matrix.T.copy() for matrix in gate.params]\n",
         pytest_args=("tests/test_lanczos_circuits.py::test_native_signed_centered_two_qubit_public_chain",),
     ),
     single_replacement_probe(
         name="inverse_controlled_base_keeps_native_tables",
-        module="nwqlib.subroutines.qiskit_compat", qualname="inverse_realized_gate",
-        old="        base_inverse = inverse_realized_gate(gate.base_gate, native_ucg=False)\n",
-        new="        base_inverse = inverse_realized_gate(gate.base_gate)\n",
+        module="nwqlib.subroutines.qiskit_compat", qualname="_construct_inverse",
+        old="        base_inverse = invert(gate.base_gate, native_ucg=False)\n",
+        new="        base_inverse = invert(gate.base_gate, native_ucg=True)\n",
         pytest_args=("tests/test_qsp_evolution.py::test_qsp_evolution_synthesizes_each_child_multiplexer_once",),
     ),
     single_replacement_probe(
@@ -256,8 +256,8 @@ PROBES = (
     single_replacement_probe(
         name="qpe_product_formula_power_time_drop",
         module="nwqlib.subroutines.trotterization.error_budget", qualname="_select_common_step",
-        old='            p*dt, hi, ci, counts[p],\n',
-        new='            dt, hi, ci, counts[p],\n',
+        old='            p*dt, hi, ci, p // g * subdivisions,\n',
+        new='            dt, hi, ci, p // g * subdivisions,\n',
         pytest_args=("tests/test_qpe_efficiency_contract.py::test_common_grid_powers_record_the_checked_emitted_prefix_bounds",),
     ),
     single_replacement_probe(
@@ -266,6 +266,22 @@ PROBES = (
         old='    parts = dict(trotter=W*steps*abs(h)**3, pruning=loss*abs(t),\n',
         new='    parts = dict(trotter=W*steps*abs(h)**3, pruning=loss*abs(t)/2,\n',
         pytest_args=("tests/test_qpe_efficiency_contract.py::test_pruning_and_signed_power_time_owned_once",),
+    ),
+    # A nearest-rounded sum of several nonzero terms can lie below the exact
+    # sum, as for 2**-41 + 2**-100, so it is no upper bound without the steps up.
+    single_replacement_probe(
+        name="dropped_mass_nearest_sum",
+        module="nwqlib.subroutines.trotterization.error_budget", qualname="upper_dropped_mass",
+        old='    if nonzero > 1:\n',
+        new='    if False:\n',
+        pytest_args=("tests/test_trotterization.py::test_nonnegative_sums_lie_within_two_steps_above_the_exact_sum",),
+    ),
+    single_replacement_probe(
+        name="imaginary_time_nearest_coefficient_sum",
+        module="nwqlib.subroutines.qsp.imaginary_time", qualname="_upward_sum",
+        old='    if np.count_nonzero(values) > 1:\n',
+        new='    if False:\n',
+        pytest_args=("tests/test_trotterization.py::test_nonnegative_sums_lie_within_two_steps_above_the_exact_sum",),
     ),
     single_replacement_probe(
         name="qpe_repeat_drop_multiplicity",
@@ -307,6 +323,47 @@ PROBES = (
         pytest_args=("tests/test_qpe_workflow.py::test_rwpe_one_bit_update_matches_independent_gaussian_integration",),
     ),
     single_replacement_probe(
+        name="binary_hoeffding_interval_collapses_below_the_mean_resolution",
+        module="nwqlib.evidence.binary", qualname="infer_binary",
+        old="            if mean - radius == mean or mean + radius == mean:\n",
+        new="            if False:\n",
+        pytest_args=("tests/test_expectation_inference.py::"
+                     "test_stored_counts_beyond_binary64_keep_their_mean_and_an_interval_of_positive_width",),
+    ),
+    single_replacement_probe(
+        name="qhd_support_block_below_its_fixed_size",
+        module="nwqlib.algorithms.qhd.compiler", qualname="support_chunk_size",
+        old="    return min(entries, SUPPORT_BLOCK_ENTRIES)\n",
+        new="    return min(entries, 256)\n",
+        pytest_args=("tests/test_qhd_workflow.py::test_support_tables_are_evaluated_in_fixed_blocks_that_the_byte_limit_only_admits",),
+    ),
+    single_replacement_probe(
+        name="qhd_binary_cache_follows_the_limit",
+        module="nwqlib.algorithms.qhd.binary", qualname="_construction_cache_capacity",
+        old="    return CONSTRUCTION_CACHE_BYTES if limit is None else min(CONSTRUCTION_CACHE_BYTES, limit - baseline)\n",
+        new="    return CONSTRUCTION_CACHE_BYTES if limit is None else limit - baseline\n",
+        pytest_args=("tests/test_qhd_binary.py::test_binary_model_cache_is_capped_whatever_room_the_limit_leaves",),
+    ),
+    single_replacement_probe(
+        name="qhd_kept_readout_route_follows_the_limit",
+        module="nwqlib.algorithms.qhd.refinement", qualname="_kept_readout_choice",
+        old=("    if dimension <= DENSE_READOUT_POINTS:\n"
+             "        # The one-hot index builder allows 24*K bytes for three K-entry int64\n"
+             "        # vectors: local indices, their register offsets and the resulting bit masks.\n"
+             "        # This scratch allowance is also included for binary and classical readout.\n"
+             "        chunk, workspace = 0, (48 if native else 32) * dimension + 24 * k + 65536\n"
+             "        work = (d + 4) * dimension + (4 * d + 8) * entries\n"
+             "    else:\n"
+             "        chunk = min(dimension, QHD_DECODING_PROBABILITY_CHUNK_SIZE)\n"),
+        new=("    if held + (48 if native else 32) * dimension + 24 * k + 65536 <= max_bytes:\n"
+             "        chunk, workspace = 0, (48 if native else 32) * dimension + 24 * k + 65536\n"
+             "        work = (d + 4) * dimension + (4 * d + 8) * entries\n"
+             "    else:\n"
+             "        chunk = min(dimension, QHD_DECODING_PROBABILITY_CHUNK_SIZE,\n"
+             "                    max(1, (max_bytes - held - 65536 - 1024 * d) // (16 * d + 128)))\n"),
+        pytest_args=("tests/test_qhd_readout.py::test_a_streamed_readout_grid_has_the_same_probabilities",),
+    ),
+    single_replacement_probe(
         name="qhd_imaginary_component_discard",
         module="nwqlib.algorithms.qhd.potential",
         qualname="coerce_real_scalar",
@@ -319,9 +376,10 @@ PROBES = (
         module="nwqlib.algorithms.qhd.method",
         qualname="_summarize",
         old=("                block = ordered[ends[i]:ends[i + 1]]\n"
-             "                marginals[axis, i] = (sum(map(int, block.flat)) / scale if counts\n"),
+             "                marginals[axis, i] = _exact_count(block) / scale if counts else _accurate_sum(block)\n"),
         new=("                block = ordered[ends[i]:ends[i + 1]]\n"
-             "                marginals[axis, 1 - i if i < 2 else i] = (sum(map(int, block.flat)) / scale if counts\n"),
+             "                marginals[axis, 1 - i if i < 2 else i] = (_exact_count(block) / scale if counts\n"
+             "                                                          else _accurate_sum(block))\n"),
         pytest_args=("tests/test_qhd_workflow.py::test_observed_candidate_partial_and_invalid_population_without_reference",),
     ),
     single_replacement_probe(
@@ -329,9 +387,10 @@ PROBES = (
         module="nwqlib.algorithms.qhd.method",
         qualname="_summarize",
         old=("                block = grid_weights[tuple(cut)]\n"
-             "                marginals[axis, i] = (sum(map(int, block.flat)) / scale if counts\n"),
+             "                marginals[axis, i] = _exact_count(block) / scale if counts else _accurate_sum(block)\n"),
         new=("                block = grid_weights[tuple(cut)]\n"
-             "                marginals[axis, 1 - i if i < 2 else i] = (sum(map(int, block.flat)) / scale if counts\n"),
+             "                marginals[axis, 1 - i if i < 2 else i] = (_exact_count(block) / scale if counts\n"
+             "                                                          else _accurate_sum(block))\n"),
         pytest_args=("tests/test_qhd_readout.py::"
                      "test_the_array_summary_matches_a_scalar_reference_with_ties_and_a_leading_zero_cell",),
     ),
@@ -518,18 +577,18 @@ PROBES = (
     ),
     single_replacement_probe(
         name="qhd_kinetic_coefficient_x1_01",
-        module="nwqlib.algorithms.qhd.kinetic",
-        qualname="KineticCompiler.compile",
+        module="nwqlib.algorithms.qhd.onehot_schedule",
+        qualname="hopping_layers",
         old="coefficient = _normal_quotient(-kinetic_weight, 4.0 * spacing * spacing,\n",
         new="coefficient = _normal_quotient(-1.01 * kinetic_weight, 4.0 * spacing * spacing,\n",
         pytest_args=("tests/test_qhd_workflow.py::test_qhd_statevector_matches_ir_product_theory_distribution",),
     ),
     single_replacement_probe(
         name="qhd_second_order_reverted_to_forward",
-        module="nwqlib.algorithms.qhd.kinetic",
-        qualname="KineticCompiler.compile",
-        old="            if trotter_order == 2\n",
-        new="            if False\n",
+        module="nwqlib.algorithms.qhd.onehot_schedule",
+        qualname="hopping_layers",
+        old=" if trotter_order == 2\n",
+        new=" if False\n",
         pytest_args=("tests/test_qhd_corrections.py::test_actual_second_order_taylor_and_forward_falsifier",),
     ),
     # The wrap link (0, K-1) closes the periodic grid's chain of links into a
@@ -652,19 +711,6 @@ PROBES = (
             "tests/test_qhd_workflow.py::test_classical_probabilities_do_not_depend_on_an_additive_constant",
         ),
     ),
-    # Planning stores the start vector's error bound, and the windows read it.
-    # Recomputing it from the Method evaluates the initial state after
-    # planning, outside the admission.
-    single_replacement_probe(
-        name="qhd_start_error_reevaluated",
-        module="nwqlib.algorithms.qhd.method",
-        qualname="_host_start_error",
-        old="    return plan.reconstruction.initial_state_error\n",
-        new="    return evaluate_initial_state(plan.method.initial_state, _grid(plan))[1]\n",
-        pytest_args=(
-            "tests/test_qhd_workflow.py::test_initial_state_is_evaluated_once_at_planning",
-        ),
-    ),
     # The initial state's planning allowance adds the normalized arrays, the
     # stored payload and fixed bookkeeping to the per-point coefficient,
     # which alone falls below the traced stage on small grids.
@@ -702,15 +748,16 @@ PROBES = (
             "tests/test_qhd_workflow.py::test_circuit_route_kept_state_needs_a_phase_allowance_below_pi",
         ),
     ),
-    # The compiler forms each constant coefficient from the stored binary64
-    # constant. Multiplying the unrounded symbolic constant forms another
-    # product than the one the ledger allowance assumes.
+    # The one-hot schedule forms each constant coefficient from the stored
+    # binary64 constant. Multiplying the unrounded symbolic constant forms
+    # another product than the one the ledger allowance assumes.
     single_replacement_probe(
         name="qhd_constant_coefficient_from_symbolic_constant",
-        module="nwqlib.algorithms.qhd.compiler",
-        qualname="QHDCompiler.build_step_pauli_ir",
-        old='        constant_objective = coerce_real_scalar(self.decomposer.constant, context="constant objective")\n',
-        new="        constant_objective = self.decomposer.constant\n",
+        module="nwqlib.algorithms.qhd.method",
+        qualname="QHD.plan",
+        old="                step_weights=compiler.step_weights, constant=constant, total_time=self.total_time,\n",
+        new="                step_weights=compiler.step_weights, constant=compiler.decomposer.constant,"
+            " total_time=self.total_time,\n",
         pytest_args=(
             "tests/test_qhd_workflow.py::"
             "test_compiler_forms_the_constant_coefficient_from_the_stored_binary64_constant",
@@ -733,25 +780,86 @@ PROBES = (
     # exceeds the compensated bound.
     single_replacement_probe(
         name="qhd_phase_ledger_without_compensation",
-        module="nwqlib.algorithms.qhd.compiler",
-        qualname="QHDCompiler._compensated_add",
-        old="        result = total + correction\n",
-        new="        result = total\n",
+        module="nwqlib.algorithms.qhd.onehot_schedule",
+        qualname="_Neumaier.value",
+        old="        return high + correction\n",
+        new="        return high\n",
         pytest_args=(
-            "tests/test_qhd_workflow.py::test_compensated_ledger_sum_meets_its_bound_where_a_plain_sum_does_not",
+            "tests/test_qhd_workflow.py::test_compensated_ledger_sum_lies_within_its_bound_of_the_exact_sum",
         ),
     ),
     # Neumaier's residual takes the larger-magnitude operand first. Without the
     # branch the residual of 1e100 + 1 is lost, as in Kahan-Babuska summation.
     single_replacement_probe(
         name="qhd_phase_ledger_compensation_without_branch",
-        module="nwqlib.algorithms.qhd.compiler",
-        qualname="QHDCompiler._compensated_add",
-        old="        if abs(high) >= abs(value):\n",
-        new="        if True:\n",
+        module="nwqlib.algorithms.qhd.onehot_schedule",
+        qualname="_Neumaier.add",
+        old="        residual = (high - total) + value if abs(high) >= abs(value) else (value - total) + high\n",
+        new="        residual = (high - total) + value\n",
         pytest_args=(
             "tests/test_qhd_workflow.py::test_phase_ledger_compensation_recovers_what_a_plain_sum_loses",
         ),
+    ),
+    # The one-hot ledger adds one fsum per tile of table rows. Counting rows
+    # instead of tiles misstates M, and dropping beta' = u + (1 + u) beta_M
+    # leaves the tile sums' rounding out of the allowance.
+    single_replacement_probe(
+        name="qhd_phase_contributions_count_rows",
+        module="nwqlib.algorithms.qhd.method",
+        qualname="_phase_contributions",
+        old="    tiles = sum(-(-len(table.values) // ENTRY_TILE) for table in r.support_values)\n",
+        new="    tiles = sum(len(table.values) for table in r.support_values)\n",
+        pytest_args=("tests/test_qhd_workflow.py::"
+                     "test_compensated_ledger_sum_lies_within_its_bound_of_the_exact_sum",),
+    ),
+    single_replacement_probe(
+        name="qhd_phase_ledger_drops_tile_rounding",
+        module="nwqlib.algorithms.qhd.method",
+        qualname="_phase_ledger",
+        old="        beta_m = _add_up(u, _mul_up(one_plus_u, beta_m))\n",
+        new="        beta_m = beta_m\n",
+        pytest_args=("tests/test_qhd_workflow.py::test_compiled_phase_allowances_are_evaluated_upward",),
+    ),
+    # The one-hot blocks of a step keep only entries at least rotation_threshold,
+    # and construction refuses blocks whose counts differ from the Plan's record.
+    single_replacement_probe(
+        name="qhd_onehot_pruned_entries_kept",
+        module="nwqlib.algorithms.qhd.onehot_schedule",
+        qualname="OneHotSchedule._tile",
+        old="        emitted = kept & (magnitude >= self.threshold)\n",
+        new="        emitted = kept\n",
+        pytest_args=("tests/test_qhd_workflow.py::"
+                     "test_onehot_step_blocks_match_an_independent_scalar_derivation",),
+    ),
+    # A selection candidate refused after its tables are formed reports their exact count.
+    single_replacement_probe(
+        name="qhd_candidate_table_count_unknown_after_tables",
+        module="nwqlib.algorithms.qhd.method",
+        qualname="QHD.plan",
+        old="            evaluated[0] = evaluations\n",
+        new="            pass\n",
+        pytest_args=("tests/test_qhd_augmented_lagrangian.py::"
+                     "test_automatic_selection_under_a_planning_work_limit_keeps_the_admitted_plan",),
+    ),
+    # An overflowing upward angle sum bounds the stage at 2 only after its roundoff coefficient. Capping the raw
+    # sum first gives a formation bound near 7e-16 for a step that errs by more than 1.
+    single_replacement_probe(
+        name="qhd_onehot_overflow_capped_before_scaling",
+        module="nwqlib.algorithms.qhd.onehot_schedule",
+        qualname="OneHotSchedule.summary",
+        old="            return coefficient * Fraction(total) if math.isfinite(total) else Fraction(2)\n",
+        new="            return coefficient * (Fraction(total) if math.isfinite(total) else Fraction(2))\n",
+        pytest_args=("tests/test_qhd_resources.py::test_one_hot_stage_bounds_cap_an_overflowing_angle_sum_at_two",),
+    ),
+    # The one-hot constructor checks the recorded byte estimate before it allocates the circuit.
+    single_replacement_probe(
+        name="qhd_onehot_construction_skips_byte_check",
+        module="nwqlib.algorithms.qhd.native",
+        qualname="construct_qhd",
+        old="        check_memory(_onehot_native_bytes(reconstruction, options, grid.num_variables), options.max_bytes,\n",
+        new="        check_memory(0, options.max_bytes,\n",
+        pytest_args=("tests/test_qhd_resources.py::"
+                     "test_onehot_circuit_bytes_are_recorded_at_planning_and_checked_at_construction",),
     ),
     # The classical constant-phase allowance is evaluated upward. Rounded to
     # nearest, the boundary constant 2414255523835869.5 over seven steps of
@@ -890,7 +998,7 @@ PROBES = (
         new="    return np.asarray(register).reshape((k,) * d).reshape(-1)\n",
         pytest_args=("tests/test_qhd_refinement.py::test_native_binary_joint_mass_decodes_the_binary_register",),
     ),
-    # A streamed refused readout grid that gathers binary amplitudes with the variable axes reversed, and
+    # A streamed readout that gathers binary amplitudes with the variable axes reversed, and
     # a binary product that reserves no evolution state beside its model.
     single_replacement_probe(
         name="qhd_refinement_streamed_binary_axis_order",
@@ -898,7 +1006,7 @@ PROBES = (
         qualname="_LevelReadout._stream",
         old="                index |= (np.int64(1) << (j * k + points[j])) if self.bits is None else points[j] << (j * self.bits)\n",
         new="                index |= (np.int64(1) << (j * k + points[j])) if self.bits is None else points[j] << ((d - 1 - j) * self.bits)\n",
-        pytest_args=("tests/test_qhd_readout.py::test_a_refused_readout_grid_is_streamed_with_the_same_probabilities",),
+        pytest_args=("tests/test_qhd_readout.py::test_a_streamed_readout_grid_has_the_same_probabilities",),
     ),
     single_replacement_probe(
         name="qhd_binary_product_without_state_reservation",
@@ -1055,9 +1163,9 @@ PROBES = (
     single_replacement_probe(
         name="lchs_cauchy_kernel_x1_01",
         module="nwqlib.algorithms.lchs.providers",
-        qualname="_cauchy_provider_coefficient",
-        old="    return complex(1.0 / (pi * (1.0 + k_value**2)))\n",
-        new="    return complex(1.01 / (pi * (1.0 + k_value**2)))\n",
+        qualname="_cauchy_provider_coefficients",
+        old="    return (1.0 / (pi * (1.0 + k_values**2))).astype(np.complex128)\n",
+        new="    return (1.01 / (pi * (1.0 + k_values**2))).astype(np.complex128)\n",
         pytest_args=(
             "tests/test_lchs_providers.py::test_every_allowed_pair_has_independent_coefficients_and_status"
             "[kernel_request2-quadrature_request2-uncertified]",
@@ -1066,9 +1174,9 @@ PROBES = (
     single_replacement_probe(
         name="lchs_low_somma_gaussian_denominator_double",
         module="nwqlib.algorithms.lchs.providers",
-        qualname="low_somma_fhat_2",
-        old="        * exp(c_value - (k_value**2 + 1.0) / (4.0 * gamma**2))\n",
-        new="        * exp(c_value - (k_value**2 + 1.0) / (8.0 * gamma**2))\n",
+        qualname="_low_somma_profile",
+        old="        return (sqrt(2.0 / pi) * np.exp(c_value - (k_values**2 + 1.0) / (4.0 * gamma**2))\n",
+        new="        return (sqrt(2.0 / pi) * np.exp(c_value - (k_values**2 + 1.0) / (8.0 * gamma**2))\n",
         pytest_args=(
             "tests/test_lchs_providers.py::"
             "test_low_somma_paper_profile_grid_matches_independent_closed_form",
@@ -1089,13 +1197,8 @@ PROBES = (
         name="lchs_low_somma_drop_positive_endpoint",
         module="nwqlib.algorithms.lchs.providers",
         qualname="_build_symmetric_uniform_trapezoid",
-        old=(
-            "    nodes = tuple(float(index * step) for index in "
-            "range(-index_limit, index_limit + 1))\n"
-        ),
-        new=(
-            "    nodes = tuple(float(index * step) for index in range(-index_limit, index_limit))\n"
-        ),
+        old="    nodes = np.arange(-index_limit, index_limit + 1) * step\n",
+        new="    nodes = np.arange(-index_limit, index_limit) * step\n",
         pytest_args=(
             "tests/test_lchs_providers.py::"
             "test_low_somma_paper_profile_grid_matches_independent_closed_form",
@@ -1127,8 +1230,8 @@ PROBES = (
         name="lchs_provider_finalizer_coefficient_half",
         module="nwqlib.algorithms.lchs.providers",
         qualname="_resolve_coefficient_context",
-        old='            coefficient = weight * kernel.coefficient(node, pair_context)\n',
-        new='            coefficient = 0.5 * weight * kernel.coefficient(node, pair_context)\n',
+        old="        coefficients = weights[:evaluated] * values\n",
+        new="        coefficients = 0.5 * weights[:evaluated] * values\n",
         pytest_args=(
             "tests/test_lchs_providers.py::"
             "test_every_allowed_pair_has_independent_coefficients_and_status",
@@ -1146,8 +1249,8 @@ PROBES = (
         name="lchs_select_angle_time_half",
         module="nwqlib.algorithms.lchs.time_independent_terms",
         qualname="_build_product_formula_select_plan",
-        old="                    multiplier * elapsed_time * coefficient.real / steps\n",
-        new="                    0.5 * multiplier * elapsed_time * coefficient.real / steps\n",
+        old="                np.divide(multiplier * padded_times * coefficient.real, steps, out=angle, where=active)\n",
+        new="                np.divide(0.5 * multiplier * padded_times * coefficient.real, steps, out=angle, where=active)\n",
         pytest_args=(
             "tests/test_lchs_select_synthesis.py::"
             "test_generated_angle_tables_match_independent_suzuki_products",
@@ -1157,8 +1260,8 @@ PROBES = (
         name="lchs_select_inactive_repetition_reactivated",
         module="nwqlib.algorithms.lchs.time_independent_terms",
         qualname="_build_product_formula_select_plan",
-        old="                    if repetition < steps and steps > 0\n",
-        new="                    if repetition <= steps and steps > 0\n",
+        old="        active = (repetition < steps) & (steps > 0)\n",
+        new="        active = (repetition <= steps) & (steps > 0)\n",
         pytest_args=(
             "tests/test_lchs_select_synthesis.py::test_budgeted_plan_zeroes_inactive_repetitions",
         ),
@@ -1175,8 +1278,8 @@ PROBES = (
         name="trotter_pauli_triangle_order_one_factor_half",
         module="nwqlib.subroutines.trotterization.error_budget",
         qualname="coefficient_up",
-        old="        return Fraction(sum_up(part1)) * Fraction(2) ** (2 * e)\n",
-        new="        return Fraction(sum_up(part1)) / 2 * Fraction(2) ** (2 * e)\n",
+        old="            bounds.append(Fraction(sum_up(part12[k])) * Fraction(2) ** (2 * e))\n",
+        new="            bounds.append(Fraction(sum_up(part12[k])) / 2 * Fraction(2) ** (2 * e))\n",
         pytest_args=(
             "tests/test_trotterization.py::"
             "test_two_term_pauli_laws_zero_coefficients_and_identity_contract",
@@ -1186,11 +1289,178 @@ PROBES = (
         name="trotter_pauli_triangle_order_two_nested_factor_half",
         module="nwqlib.subroutines.trotterization.error_budget",
         qualname="coefficient_up",
-        old="    w = Fraction(sum_up(part12)) / 3 + Fraction(sum_up(part24)) / 6\n",
-        new="    w = Fraction(sum_up(part12)) / 6 + Fraction(sum_up(part24)) / 6\n",
+        old="        w = Fraction(sum_up(part12[k])) / 3 + Fraction(sum_up(part24[k])) / 6\n",
+        new="        w = Fraction(sum_up(part12[k])) / 6 + Fraction(sum_up(part24[k])) / 6\n",
         pytest_args=(
             "tests/test_trotterization.py::"
             "test_two_term_pauli_laws_zero_coefficients_and_identity_contract",
+        ),
+    ),
+    # "auto" keeps the exact census at the threshold itself, which the
+    # census-choice test reaches by moving the threshold to its own count.
+    single_replacement_probe(
+        name="trotter_census_threshold_exclusive",
+        module="nwqlib.subroutines.trotterization.error_budget",
+        qualname="choose_variant",
+        old='        return "exact_census" if selection_count <= EXACT_CENSUS_WORD_TESTS else "relaxed_prefix"\n',
+        new='        return "exact_census" if selection_count < EXACT_CENSUS_WORD_TESTS else "relaxed_prefix"\n',
+        pytest_args=(
+            "tests/test_trotterization.py::"
+            "test_census_choice_uses_counts_not_memory_and_refusals_state_the_need",
+        ),
+    ),
+    # Ignoring the weightings keeps a cohort on the full expression one
+    # weighting above the largest exact cohort, in the Pauli-string oracle
+    # and in the two-node LCHS ledger.
+    single_replacement_probe(
+        name="trotter_census_selection_ignores_weightings",
+        module="nwqlib.subroutines.trotterization.error_budget",
+        qualname="census_structure",
+        old="    selection = nested * max(w, weightings)\n",
+        new="    selection = nested * w\n",
+        pytest_args=(
+            "tests/test_trotterization.py::test_auto_census_counts_each_weighting",
+            "tests/test_lchs_numerics.py::test_node_census_counts_its_weightings_in_the_selection",
+        ),
+    ),
+    # Charging a full tile of 32 pairs against all later terms refuses the
+    # commuting table, which forms no nested tile, under 145,000 bytes.
+    single_replacement_probe(
+        name="trotter_census_bytes_unattained_tile",
+        module="nwqlib.subroutines.trotterization.error_budget",
+        qualname="census_bytes",
+        old="        size += 40 * w * (min(_PAIR_TILE, pairs) * max(p - 1, 0) if tile is None else tile)\n",
+        new="        size += 40 * _PAIR_TILE * p * w\n",
+        pytest_args=(
+            "tests/test_trotterization.py::"
+            "test_census_choice_uses_counts_not_memory_and_refusals_state_the_need",
+        ),
+    ),
+    # Every node row needs its own nested masses. Broadcasting the first
+    # node's tail gives the other rows a mass from the wrong magnitudes.
+    single_replacement_probe(
+        name="trotter_census_nodes_share_first_row_mass",
+        module="nwqlib.subroutines.trotterization.error_budget",
+        qualname="coefficient_up",
+        old='                    "ts,ks->kt", mask.astype(np.float64), tail, optimize=False)\n',
+        new='                    "ts,ks->kt", mask.astype(np.float64), tail[:1], optimize=False)\n',
+        pytest_args=(
+            "tests/test_trotterization.py::"
+            "test_node_weightings_share_one_census_and_zero_magnitudes_remove_terms",
+        ),
+    ),
+    # QPE limits refuse the counted expression. Without the admission the
+    # census would run past an explicit work limit.
+    single_replacement_probe(
+        name="qpe_census_admission_dropped",
+        module="nwqlib.algorithms.qpe.powers",
+        qualname="_census",
+        old="        tuple(zip(labels, coefficients, strict=True)), 2, max_bytes=config.max_bytes, admit=admit)\n",
+        new="        tuple(zip(labels, coefficients, strict=True)), 2, max_bytes=config.max_bytes)\n",
+        pytest_args=(
+            "tests/test_qpe_efficiency_contract.py::"
+            "test_census_limits_refuse_the_counted_expression",
+        ),
+    ),
+    # Without the reserve, the refined inverse table at kappa = 100 and
+    # epsilon_inv = 1e-12 misses its check again.
+    single_replacement_probe(
+        name="qls_inverse_refinement_reserve_dropped",
+        module="nwqlib.subroutines.qsp.inverse",
+        qualname="_inverse_chebyshev",
+        old="        target = epsilon - (2 * _REFINEMENT_FORMATION_RESERVE * formation + resolution)\n",
+        new="        target = epsilon - (2 * formation + resolution)\n",
+        pytest_args=(
+            "tests/test_qls_workflow.py::test_minimax_inverse_degree_boundary_and_numerical_refinement",
+        ),
+    ),
+    # The coupled-phase table is formed when the diagonal is built. A sign
+    # error there changes every source phase of the nonuniform layout.
+    single_replacement_probe(
+        name="source_table_phase_sign",
+        module="nwqlib.subroutines.block_encoding.source_prep",
+        qualname="build_coefficient_phase",
+        old="                values[labels + (slot << k)] = [_reduced(-t * preparation.coupled_rate * node) for node in nodes]\n",
+        new="                values[labels + (slot << k)] = [_reduced(t * preparation.coupled_rate * node) for node in nodes]\n",
+        pytest_args=(
+            "tests/test_block_encoding.py::test_factorized_source_preparation_matches_the_finite_sum[table]",
+        ),
+    ),
+    # Recording only minimax plus formation leaves the second formation term and
+    # the evaluation resolution out of the recorded check value, so it differs
+    # from the value compared with epsilon_inv. The exact bound on the residual
+    # of this table need not exceed minimax + formation, and on a hosted Linux
+    # runner it did not, so that bound does not detect the defect.
+    single_replacement_probe(
+        name="qls_inverse_check_value_without_allowance",
+        module="nwqlib.subroutines.qsp.inverse",
+        qualname="_inverse_chebyshev",
+        old="                minimax_error=delta, residual_check_value=value)\n",
+        new="                minimax_error=delta, residual_check_value=delta + formation)\n",
+        pytest_args=(
+            "tests/test_qls_workflow.py::"
+            "test_unresolved_inverse_check_reports_its_compared_value_for_a_table_that_meets_the_tolerance",
+        ),
+    ),
+    # Charging the retired unitarity product refuses a completion at its
+    # 9 d**3 work.
+    single_replacement_probe(
+        name="dense_completion_charges_unitarity_product",
+        module="nwqlib.subroutines.block_encoding.core",
+        qualname="_admit_dense_input",
+        old="    work = (1 if selected_svd else 9) * d**3 if construction else 16 * d * d\n",
+        new="    work = (9 if selected_svd else 17) * d**3 if construction else 16 * d * d\n",
+        pytest_args=(
+            "tests/test_block_encoding.py::test_dense_dilation_completion_is_unitary_and_admitted_at_its_work",
+        ),
+    ),
+    # Reversing the adjoint of a proved involution expands every multiplexor
+    # although U^dagger = U.
+    single_replacement_probe(
+        name="involution_adjoint_query_reversed",
+        module="nwqlib.subroutines.block_encoding.core",
+        qualname="build_block_encoding_query",
+        old='        adjoint = adjoint and source.detail.get("full_unitary_involution") is not True\n',
+        new="",
+        pytest_args=(
+            "tests/test_block_encoding.py::test_structured_queries_are_exact_and_hermitian_inputs_are_full_involutions",
+        ),
+    ),
+    # Predicting every term before the first check evaluates all 1000 traces
+    # of a sum that its first chunk already refuses.
+    single_replacement_probe(
+        name="circulant_check_without_first_chunk",
+        module="nwqlib.subroutines.block_encoding.core",
+        qualname="_detect_banded_pauli_structure",
+        old="    first, size = 0, min(_FIRST_CIRCULANT_ROWS, rows_per_chunk)\n",
+        new="    first, size = 0, rows_per_chunk\n",
+        pytest_args=(
+            "tests/test_block_encoding.py::test_circulant_check_stops_at_the_first_mismatching_chunk",
+        ),
+    ),
+    # Charging the SELECT tables of the circuit while planning refuses the
+    # 4097-term plan under its 1 MB limit.
+    single_replacement_probe(
+        name="pauli_plan_charges_construction_tables",
+        module="nwqlib.subroutines.block_encoding.core",
+        qualname="_admit_pauli_plan",
+        old="    _check_bytes(held_bytes + planning_bytes, max_bytes, \"block-encoding Pauli planning arrays\")\n",
+        new=("    _check_bytes(held_bytes + 64 * (1 << max(terms - 1, 0).bit_length()) * (n + 16), max_bytes,\n"
+             "                 \"block-encoding Pauli planning arrays\")\n"),
+        pytest_args=(
+            "tests/test_block_encoding.py::test_pauli_plan_checks_its_own_arrays_and_the_build_checks_the_tables",
+        ),
+    ),
+    # The opaque fallback's adjoint holds the reversed copies too. Counting
+    # only the forward copies admits the supplied circuit one byte below.
+    single_replacement_probe(
+        name="opaque_query_adjoint_copies_dropped",
+        module="nwqlib.subroutines.block_encoding.core",
+        qualname="_opaque_query_requirements",
+        old="    copies = 8 if adjoint and not num_controls else 5\n",
+        new="    copies = 5\n",
+        pytest_args=(
+            "tests/test_block_encoding.py::test_structured_queries_are_exact_and_hermitian_inputs_are_full_involutions",
         ),
     ),
     # Relative pruning preserves the original H-error scale and rejects a
@@ -1199,23 +1469,63 @@ PROBES = (
         name="lchs_compiled_qsp_relative_pruning_drop",
         module="nwqlib.algorithms.lchs.compiled_selection",
         qualname="_compiled_qsp_part_plans",
-        old='    kept, _pruned_mass_bound = prune_pauli_terms_relative(\n        (*l_decomposition.terms, *h_decomposition.terms)\n    )\n',
-        new='    kept = (*l_decomposition.terms, *h_decomposition.terms)\n',
+        old="    l_kept, h_kept = l_magnitudes > cutoff, h_magnitudes > cutoff\n",
+        new="    l_kept, h_kept = l_coefficients != 0, h_coefficients != 0\n",
         pytest_args=('tests/test_lchs_compiled_select.py::test_selected_qsp_pruned_h_and_near_antihermitian_l_keep_original_scale',),
     ),
-    # A two-child QSP generator gate is controlled by the combine qubit and
-    # then by the parity qubit. Pricing it as two controls at once puts the
-    # law below the transpiled built SELECT.
+    # A child whose kept word count settles the dense dilation is not
+    # transformed again, and an unpruned dense choice uses the part itself.
     single_replacement_probe(
-        name="lchs_qsp_nested_controls_as_two_at_once",
+        name="block_encoding_settled_dense_count_ignored",
+        module="nwqlib.subroutines.block_encoding.core",
+        qualname="_plan_block_encoding",
+        old='        if not (implementation == "auto" and term_count is not None and 2 * direct_preparation_cx_bound(\n',
+        new='        if not (implementation == "auto" and term_count is not None and False and direct_preparation_cx_bound(\n',
+        pytest_args=('tests/test_lchs_compiled_select.py::'
+                     'test_compiled_qsp_dense_children_reuse_the_counted_words_and_the_unpruned_part',),
+    ),
+    single_replacement_probe(
+        name="lchs_compiled_unpruned_dense_source_dropped",
         module="nwqlib.algorithms.lchs.compiled_selection",
-        qualname="compiled_select_cx_projection",
-        old="        twice = _twice_controlled_kind_cx()\n",
-        new="        twice = _controlled_kind_cx(2)\n",
-        pytest_args=(
-            "tests/test_lchs_resource_structural_law.py::"
-            "test_compiled_qsp_select_cx_law_bounds_the_built_select",
-        ),
+        qualname="_kept_pauli_part",
+        old="source_matrix=None if pruned else part)\n",
+        new="source_matrix=None)\n",
+        pytest_args=('tests/test_lchs_compiled_select.py::'
+                     'test_compiled_qsp_dense_children_reuse_the_counted_words_and_the_unpruned_part',),
+    ),
+    single_replacement_probe(
+        name="lchs_branch_controlled_select_bytes_unchecked",
+        module="nwqlib.algorithms.lchs.native",
+        qualname="construct_select",
+        old="        admit_branch_controlled_select(selected, slots=count, max_bytes=data.method.max_bytes)\n",
+        new="        pass\n",
+        pytest_args=('tests/test_lchs_select_synthesis.py::'
+                     'test_branch_controlled_select_checks_its_bytes_before_qiskit_expands_a_branch',),
+    ),
+    single_replacement_probe(
+        name="lchs_sampled_qsp_subnormal_rounding_dropped",
+        module="nwqlib.algorithms.lchs.sampled_qsp",
+        qualname="generator_error",
+        old="    return child + coverage * BRANCH_ROUNDING + SMALLEST_SUBNORMAL * (3 * coverage + 2 * active + 1)\n",
+        new="    return child + coverage * BRANCH_ROUNDING\n",
+        pytest_args=('tests/test_lchs_sampled_qsp.py::test_generator_term_covers_a_branch_weight_that_rounds_to_zero',),
+    ),
+    single_replacement_probe(
+        name="lchs_resource_breakdown_repeat_count_dropped",
+        module="nwqlib.algorithms.lchs.quantum_resources",
+        qualname="resource_breakdown",
+        old="            count(node.body, counts, factor * node.count)\n",
+        new="            count(node.body, counts, factor)\n",
+        pytest_args=('tests/test_lchs_periodic.py::test_periodic_resource_breakdown_counts_the_repeated_strang_step',),
+    ),
+    single_replacement_probe(
+        name="lchs_sampled_qsp_bank_start_unchecked",
+        module="nwqlib.algorithms.lchs.sampled_qsp_bank",
+        qualname="plan_sampled_qsp_bank",
+        old="            _check_target_start(member.target)\n",
+        new="            pass\n",
+        pytest_args=('tests/test_lchs_sampled_qsp.py::'
+                     'test_bank_checks_the_first_transform_of_its_highest_member_before_any_fit',),
     ),
     # Qiskit's noancilla RY with two or three controls is a Gray-code circuit
     # of 8 or 20 CX, above the MCRZ count of 4 or 14.
@@ -1257,12 +1567,13 @@ PROBES = (
             "test_planning_refuses_a_branch_select_that_the_lcu_intake_refuses",
         ),
     ),
+    # A fully pruned H keeps its mass in the joint-generator error.
     single_replacement_probe(
-        name="lchs_compiled_pruned_h_error_drop",
-        module='nwqlib.algorithms.lchs.native',
-        qualname='build_selected_evolution',
-        old='joint.error_bound+missing_h',
-        new='joint.error_bound',
+        name="lchs_coherent_pruned_h_error_drop",
+        module='nwqlib.algorithms.lchs.coherent_selection',
+        qualname='_lchs_rows',
+        old='                                else generator.error_bound + alternative.omitted_part_bound,\n',
+        new='                                else generator.error_bound,\n',
         pytest_args=('tests/test_lchs_compiled_select.py::test_selected_qsp_pruned_h_and_near_antihermitian_l_keep_original_scale',),
     ),
     # Native Pauli values and shot counts have distinct scalar reconstruction.
@@ -1377,39 +1688,19 @@ PROBES = (
         new="    root = np.sqrt(np.clip(1.0 - x_values**2, 0.0, None))\n",
         pytest_args=("tests/test_qsp_evolution.py::test_all_zero_phases_realize_chebyshev_t_d",),
     ),
-    # Without the Newton start, the LCHS guide's first problem fails at both
-    # margins on its degree-5 sine target.
+    # QLS passes the rescaled table to the canonical Wx synthesis. At the default
+    # phase target, a target shrunk by 0.1% must exceed the native circuit
+    # comparison allowance of this test's embedded case. Its other two cases
+    # allow more than this shift and pass.
     single_replacement_probe(
-        name="qsp_newton_start_skipped",
-        module="nwqlib.subroutines.qsp.phases",
-        qualname="solve_symmetric_qsp_phases",
-        old="        candidate, candidate_best = _damped_newton(residual_and_jacobian, start)\n",
-        new="        candidate, candidate_best = free, best\n",
-        pytest_args=("tests/test_qsp_evolution.py::test_lchs_guide_first_problem_plans_qsp_evolution",),
-    ),
-    # A Newton start after every L-BFGS start would also run on targets that
-    # L-BFGS already solves, and its residual evaluations would change the
-    # count that the parities and margins share under max_evaluations.
-    single_replacement_probe(
-        name="qsp_newton_start_unconditional",
-        module="nwqlib.subroutines.qsp.phases",
-        qualname="solve_symmetric_qsp_phases",
-        old="    if best >= residual_tolerance:\n        # Near max|f| = 1, L-BFGS from this start has no convergence\n",
-        new="    if True:\n        # Near max|f| = 1, L-BFGS from this start has no convergence\n",
+        name="qls_phase_target_misnormalized",
+        module="nwqlib.algorithms.qls.quantum",
+        qualname="plan_quantum",
+        old="            tuple(c / rec.polynomial.rescale for c in rec.polynomial.coefficients),\n",
+        new="            tuple(.999 * c / rec.polynomial.rescale for c in rec.polynomial.coefficients),\n",
         pytest_args=(
-            "tests/test_qsp_evolution.py::"
-            "test_qsp_evolution_evaluation_limit_is_shared_by_parities_and_margins",
+            "tests/test_qls_native.py::test_native_inverse_polynomial_action_and_physical_recovery",
         ),
-    ),
-    # A NaN maximum from a nonfinite L-BFGS point compares as converged, so
-    # the Newton start is skipped and the verification rejects the NaN phases.
-    single_replacement_probe(
-        name="qsp_nonfinite_residual_kept_as_nan",
-        module="nwqlib.subroutines.qsp.phases",
-        qualname="_max_abs_residual",
-        old="    return value if np.isfinite(value) else np.inf\n",
-        new="    return value\n",
-        pytest_args=("tests/test_qsp_evolution.py::test_nonfinite_lbfgs_point_falls_through_to_the_newton_start",),
     ),
     # Compensation is an LCHS recovery convention, not a rewrite of the
     # generic BlockEncoding contract. Dropping the deterministic OAA deficit
@@ -1418,21 +1709,12 @@ PROBES = (
         name="qsp_raw_oaa_deficit_drop",
         module="nwqlib.subroutines.qsp.evolution",
         qualname="qsp_evolution_error_terms",
-        old='    error_bound = None if part_error is None else (\n        deficit\n        + 6.0 * part_error\n',
-        new='    error_bound = None if part_error is None else (\n        0.0\n        + 6.0 * part_error\n',
+        old='    error_bound = None if oaa_residual_error_bound is None else deficit + oaa_residual_error_bound\n',
+        new='    error_bound = None if oaa_residual_error_bound is None else oaa_residual_error_bound\n',
         pytest_args=(
             "tests/test_lchs_compiled_select.py::"
             "test_qsp_oaa_raw_block_contract_and_compensated_metadata",
         ),
-    ),
-    # The independent joint-alpha check separates correct structure from a shared normalization error.
-    single_replacement_probe(
-        name="lchs_qsp_plan_alpha_k_x1_01",
-        module="nwqlib.subroutines.qsp.evolution",
-        qualname="_control_diagonal_generator_layout",
-        old='        "alpha": float(sum(child.alpha * scale for child, scale in active)),\n',
-        new='        "alpha": 1.01 * float(sum(child.alpha * scale for child, scale in active)),\n',
-        pytest_args=('tests/test_qsp_evolution.py::test_lchs_qsp_selected_quantities_reach_actual_native_program',),
     ),
     # The multiplexed-rotation
     # angle law theta_b = 2 arccos(d_b / d_max) is what makes the encoded
@@ -1548,40 +1830,26 @@ PROBES = (
         new="        structured_cx = 1 + sum(\n",
         pytest_args=("tests/test_lchs_structured_select.py::test_structured_and_multiplexed_select_match_independent_dense_blocks",),
     ),
-    # The actual mixed-source selection binds each Gauss application's elapsed
-    # time to its k-address, before the one selected QSP phase fit.
+    # The coherent mixed-source evolution gives each application its own
+    # elapsed time through the time factor q_a = t_a/T_e of its label.
     single_replacement_probe(
-        name="compiled_select_inhomogeneous_time_fold_drop",
-        module="nwqlib.algorithms.lchs.parameters",
-        qualname="select_parameters",
-        old="diagonal_l,diagonal_h = layout.elapsed_times*layout.k_values/problem.elapsed_time,layout.elapsed_times/problem.elapsed_time\n",
-        new="diagonal_l,diagonal_h = layout.k_values,layout.elapsed_times/problem.elapsed_time\n",
+        name="lchs_coherent_time_factor_drop",
+        module="nwqlib.algorithms.lchs.coherent_selection",
+        qualname="_layout_time",
+        old="    return evolution_time, tuple(float(t) / evolution_time for t in times)\n",
+        new="    return evolution_time, tuple(float(t > 0) for t in times)\n",
         pytest_args=(
             "tests/test_lchs_qsp_source.py::test_actual_qsp_source_binds_elapsed_diagonals_recovery_and_physical_phase",
         ),
     ),
-    # A scaled homogeneous H diagonal likewise sits
-    # below the synthesis bound at validation scale; the exact recorded-
-    # diagonal pin (all-ones H) is the guard.
+    # The physical recovery multiplies the PREP's gamma by the route's zeta
+    # once. Dropping zeta leaves the success amplitudes scaled by 1/zeta.
     single_replacement_probe(
-        name="compiled_select_homogeneous_h_diagonal_x1_01",
-        module="nwqlib.algorithms.lchs.parameters",
-        qualname="select_parameters",
-        old="diagonal_l,diagonal_h = data.quadrature.k_nodes,np.ones(len(coefficients))\n",
-        new="diagonal_l,diagonal_h = data.quadrature.k_nodes,np.full(len(coefficients),1.01)\n",
-        pytest_args=(
-            "tests/test_lchs_qsp_source.py::test_actual_qsp_source_binds_elapsed_diagonals_recovery_and_physical_phase",
-        ),
-    ),
-    # The LCHS recovery layer divides out the QSP evolution's known OAA
-    # amplitude factor. Dropping the shared scale revives the deterministic
-    # deficit floor in both homogeneous and inhomogeneous statevector paths.
-    single_replacement_probe(
-        name="lchs_compiled_recovery_scale_drop",
-        module="nwqlib.algorithms.lchs.parameters",
-        qualname="select_parameters",
-        old="qsp_recovery=prepared.recovery_scale,",
-        new="qsp_recovery=1.0,",
+        name="lchs_coherent_recovery_zeta_drop",
+        module="nwqlib.algorithms.lchs.quantum",
+        qualname="plan_coherent_lcu",
+        old="                                              exponent=prepared.physical_recovery[1]), prepared.recovery)\n",
+        new="                                              exponent=prepared.physical_recovery[1]))\n",
         pytest_args=(
             "tests/test_lchs_qsp_source.py::test_actual_qsp_source_binds_elapsed_diagonals_recovery_and_physical_phase",
         ),
@@ -1611,19 +1879,38 @@ PROBES = (
             "tests/test_qls_primary.py::test_selected_polynomial_exact_shape_independent_eigensystem",
         ),
     ),
+    # Without the headroom, the kappa = 43/32 witness accepts its degree-1
+    # table, whose exact endpoint residual exceeds epsilon_inv by 2**-58.
     single_replacement_probe(
-        name="qls_inverse_candidate_certificate_disabled",
+        name="qls_inverse_headroom_disabled",
         module="nwqlib.subroutines.qsp.inverse",
-        qualname="_fit_inverse_chebyshev",
-        old=(
-            "        if certificate <= epsilon_inv:\n"
-            "            passing = (degree, coefficients, certificate, node_count)\n"
-            "            break\n"
-        ),
-        new=("        passing = (degree, coefficients, certificate, node_count)\n        break\n"),
+        qualname="_inverse_chebyshev",
+        old="        if value <= epsilon:\n",
+        new="        if delta + formation <= epsilon:\n",
         pytest_args=(
-            "tests/test_qls_workflow.py::test_inverse_fit_meets_independent_relative_residual",
+            "tests/test_qls_workflow.py::test_minimax_inverse_degree_boundary_and_numerical_refinement",
         ),
+    ),
+    # A wrong gap branch of the shared filter changes every DCT coefficient,
+    # which the exact rational reference off the nodes detects.
+    single_replacement_probe(
+        name="qls_filter_gap_branch_exponent",
+        module="nwqlib.subroutines.qsp.inverse",
+        qualname="_filter_complement",
+        old="    values[gap] = np.expm1(-h) * np.expm1(h - 2 * b) / (1 + e * e)\n",
+        new="    values[gap] = np.expm1(-h) * np.expm1(h - b) / (1 + e * e)\n",
+        pytest_args=(
+            "tests/test_qls_workflow.py::"
+            "test_minimax_inverse_matches_exact_rational_reference_and_its_relative_residual",
+        ),
+    ),
+    single_replacement_probe(
+        name="kr_eq62_denominator_sign",
+        module="nwqlib.subroutines.qsp.shortcut",
+        qualname="_realize_kernel_reflection",
+        old="    values = 1 - 2 * _filter_complement(chebyshev_grid(points), delta, ell) / (1 + filter_delta)\n",
+        new="    values = 1 - 2 * _filter_complement(chebyshev_grid(points), delta, ell) / (1 - filter_delta)\n",
+        pytest_args=("tests/test_qls_workflow.py::test_kernel_reflection_polynomial_eq6_eq62_and_bounds",),
     ),
     single_replacement_probe(
         name="qls_shortcut_dilation_missing_child_query",
@@ -1725,7 +2012,7 @@ PROBES = (
     single_replacement_probe(
         name="spin_squared_ladder_sign_flip",
         module="nwqlib.subroutines.fermionic_pool",
-        qualname="apply_spin_squared",
+        qualname="_spin_ladder_product",
         old="        minus_terms.append((1.0, ((down_p, 1), (up_p, 0))))\n",
         new="        minus_terms.append((-1.0, ((down_p, 1), (up_p, 0))))\n",
         pytest_args=(
@@ -1766,9 +2053,8 @@ PROBES = (
         name="adapt_matrix_stage_admission_drop",
         module="nwqlib.algorithms.gcim.adapt_acquisition",
         qualname="drive_adapt",
-        old="                    run.check_capacity(preparations=count, circuits=count, "
-            "shots=count * (plan.shots or 0))\n",
-        new="                    pass\n",
+        old="            admit_growth(preparations=count, circuits=count, shots=count * (plan.shots or 0))\n",
+        new="            pass\n",
         pytest_args=(
             "tests/test_adapt_primary.py::"
             "test_matrix_stage_limit_refuses_before_its_first_query_and_extension_resumes_it",
@@ -1795,7 +2081,7 @@ PROBES = (
         new="        if False and not psd_premise_satisfied:\n",
         pytest_args=(
             "tests/test_lchs_solution_error_budget.py::"
-            "test_stage_bound_suppression_and_invalid_inputs",
+            "test_stage_bounds_suppress_their_scope_and_tell_exact_zero_from_underflow",
         ),
     ),
     # Composite Gauss now ends exactly at K; summaries project the selected
@@ -1814,17 +2100,17 @@ PROBES = (
     single_replacement_probe(
         name="lchs_duhamel_growth_drop",
         module="nwqlib.algorithms.lchs.inhomogeneous_theory",
-        qualname="_duhamel_quadrature_error_bound",
-        old="        + rho_plus * float(final_time)\n",
-        new="        + 0.0 * rho_plus * float(final_time)\n",
+        qualname="duhamel_log_bound",
+        old="            + max(0.0, -float(lower_bound)) * float(final_time) + log_source_norm)\n",
+        new="            + 0.0 * max(0.0, -float(lower_bound)) * float(final_time) + log_source_norm)\n",
         pytest_args=('tests/test_lchs_numerics.py::test_duhamel_remainder_uses_physical_growth_and_exact_zero_routes',),
     ),
     single_replacement_probe(
         name="qsp_complete_analytic_tail_drop",
         module="nwqlib.subroutines.qsp.evolution",
         qualname="jacobi_anger_expansion",
-        old="    combined_analytic_tail = 2.0 * parity_analytic_tail\n",
-        new="    combined_analytic_tail = 0.0 * parity_analytic_tail\n",
+        old="        parity_logs = np.logaddexp(np.log(suffix), np.array([log_even, log_odd])[:, None])\n",
+        new="        parity_logs = np.logaddexp(np.log(suffix), np.full((2, 1), -np.inf))\n",
         pytest_args=(
             "tests/test_qsp_evolution.py::"
             "test_jacobi_anger_records_complete_finite_and_analytic_tail",
@@ -1839,7 +2125,7 @@ PROBES = (
         new="    child_error = 0.0\n",
         pytest_args=(
             "tests/test_qsp_evolution.py::"
-            "test_qsp_child_operator_error_uses_physical_time_before_oaa",
+            "test_qsp_child_operator_error_uses_physical_time_after_oaa",
         ),
     ),
     single_replacement_probe(
@@ -1854,8 +2140,8 @@ PROBES = (
         name="lchs_qsp_gamma_drop",
         module="nwqlib.algorithms.lchs.solution_error_budget",
         qualname="_solution_stage_value",
-        old="        return _stage_product(name, gamma, compensated_recovery_error_bound)\n",
-        new="        return _stage_product(name, compensated_recovery_error_bound)\n",
+        old="        return _stage_value(name, _stage_product(name, gamma, compensated_recovery_error_bound))\n",
+        new="        return _stage_value(name, _stage_product(name, compensated_recovery_error_bound))\n",
         pytest_args=('tests/test_lchs_solution_error_budget.py::test_stage_bound_manifest_and_composition',),
     ),
     single_replacement_probe(
@@ -2003,17 +2289,6 @@ PROBES = (
             "tests/test_lchs_resource_structural_law.py::test_dense_exact_select_charges_the_syntheses_it_makes",
         ),
     ),
-    single_replacement_probe(
-        name="lchs_compiled_select_synthesis_admission_drop",
-        module="nwqlib.algorithms.lchs.parameters",
-        qualname="construction_work",
-        old="            work += sum(size[0] for size in sizes)\n",
-        new="            work += 0\n",
-        pytest_args=(
-            "tests/test_lchs_resource_structural_law.py::"
-            "test_compiled_qsp_select_charges_the_syntheses_of_its_dense_children",
-        ),
-    ),
     # Each dense branch, node or representative eigensystem is charged the
     # spectral law of time_independent_terms, not one D-square product.
     single_replacement_probe(
@@ -2049,21 +2324,11 @@ PROBES = (
     # A spectral norm is charged the bidiagonalization of its values-only
     # SVD, not one D-square product.
     single_replacement_probe(
-        name="lchs_duhamel_norm_svd_one_product",
-        module="nwqlib.algorithms.lchs.inhomogeneous_theory",
-        qualname="_duhamel_quadrature_error_bound",
-        old="    work = 8*d+32+(singular_values_work(d)+4*d*d if matrix_norm is None else 0)\n",
-        new="    work = 8*d+32+(d**3+4*d*d if matrix_norm is None else 0)\n",
-        pytest_args=(
-            "tests/test_lchs_numerics.py::test_duhamel_remainder_admits_the_singular_values_of_its_norm",
-        ),
-    ),
-    single_replacement_probe(
         name="lchs_refinement_norm_svd_one_product",
         module="nwqlib.algorithms.lchs.refinement",
         qualname="_spectral_norm",
-        old="        dense_work(checks, counts, work=singular_values_work(d), peak_bytes=64*d*d)\n",
-        new="        dense_work(checks, counts, work=d**3, peak_bytes=64*d*d)\n",
+        old="        dense_work(checks, counts, work=singular_values_work(d), peak_bytes=32*d*d)\n",
+        new="        dense_work(checks, counts, work=d**3, peak_bytes=32*d*d)\n",
         pytest_args=(
             "tests/test_lchs_verification.py::test_refinement_spectral_norm_admits_its_singular_values",
         ),
@@ -2146,8 +2411,8 @@ PROBES = (
         name="block_encoding_pauli_normalization_full_svd_wiring",
         module="nwqlib.subroutines.block_encoding.core",
         qualname="_plan_block_encoding",
-        old="        if work_used + _dense_norm_work(d, full_svd_requested) > max_work:\n",
-        new="        if work_used + _dense_norm_work(d, True) > max_work:\n",
+        old="        if exceeds(work_used + _dense_norm_work(d, full_svd_requested), max_work):\n",
+        new="        if exceeds(work_used + _dense_norm_work(d, True), max_work):\n",
         pytest_args=(
             "tests/test_block_encoding.py::test_pauli_dense_dilation_admits_the_singular_values_of_its_norm",
         ),
@@ -2286,7 +2551,7 @@ PROBES = (
         qualname="rotation_population",
         old="    slots = Counter()\n",
         new="    slots = Counter({1.0: 2 * reconstruction.dropped_count})\n",
-        pytest_args=("tests/test_qhd_resources.py::test_rotation_law_counts_the_emitted_circuit_after_pruning",),
+        pytest_args=("tests/test_qhd_resources.py::test_rotation_law_bounds_the_emitted_circuit_and_a_budget_classifies_it",),
     ),
     single_replacement_probe(
         name="qhd_rotation_law_counts_every_chain_link",
@@ -2294,7 +2559,7 @@ PROBES = (
         qualname="rotation_population",
         old="            for theta in chain_angles(alpha):\n",
         new="            for theta in chain_angles(alpha) + [1.0] * (len(alpha) - 1 - len(chain_angles(alpha))):\n",
-        pytest_args=("tests/test_qhd_resources.py::test_rotation_law_counts_the_emitted_circuit_after_pruning",),
+        pytest_args=("tests/test_qhd_resources.py::test_rotation_law_bounds_the_emitted_circuit_and_a_budget_classifies_it",),
     ),
     single_replacement_probe(
         name="qhd_t_estimate_undivided_budget",
@@ -2446,10 +2711,10 @@ PROBES = (
     ),
     single_replacement_probe(
         name="qhd_omitted_blocks_full_projector_norm",
-        module="nwqlib.algorithms.qhd.circuit_errors",
-        qualname="block_errors",
-        old="        (1 - Fraction(1, 2 ** len(support))) * sum(abs(Fraction(v)) for v in values)\n",
-        new="        sum(abs(Fraction(v)) for v in values)\n",
+        module="nwqlib.algorithms.qhd.onehot_schedule",
+        qualname="OneHotSchedule.summary",
+        old="                        omitted_weight += norm * abs(nominal * Fraction(potential_weight)) * Fraction(units, 1 << 1074)\n",
+        new="                        omitted_weight += abs(nominal * Fraction(potential_weight)) * Fraction(units, 1 << 1074)\n",
         pytest_args=("tests/test_qhd_resources.py::test_error_ledger_names_every_stage",),
     ),
     single_replacement_probe(
@@ -2518,7 +2783,7 @@ PROBES = (
         old="    factors = 1 if method.trotter_order == 1 else 2\n",
         new="    factors = 1\n",
         pytest_args=("tests/test_qhd_workflow.py::"
-                     "test_compensated_ledger_sum_meets_its_bound_where_a_plain_sum_does_not",),
+                     "test_compensated_ledger_sum_lies_within_its_bound_of_the_exact_sum",),
     ),
     # Planning refuses a spectral grid whose Nyquist energy pi**2/(2 h**2)
     # overflows. Without the check, the spacing 1.5e-154 is planned with
@@ -2562,7 +2827,6 @@ PROBES = (
         new="    return (4 * dimension**3 + 2) // 3\n",
         pytest_args=(
             "tests/test_lchs_verification.py::test_refinement_spectral_norm_admits_its_singular_values",
-            "tests/test_lchs_numerics.py::test_duhamel_remainder_admits_the_singular_values_of_its_norm",
         ),
     ),
     single_replacement_probe(
@@ -2610,8 +2874,8 @@ PROBES = (
         name="qsp_evolution_sine_pass_synthesis_drop",
         module="nwqlib.subroutines.qsp.evolution",
         qualname="build_qsp_evolution_encoding",
-        old="    admit_dense_syntheses(dense_synthesis_widths(cos_gate) + dense_synthesis_widths(sin_gate),\n",
-        new="    admit_dense_syntheses(dense_synthesis_widths(cos_gate),\n",
+        old="    admit_dense_syntheses(cos_widths + sin_widths, controls=(cos_counts, sin_counts),\n",
+        new="    admit_dense_syntheses(cos_widths, controls=(cos_counts, sin_counts),\n",
         pytest_args=(
             "tests/test_qsp_evolution.py::"
             "test_qsp_evolution_admits_the_dense_syntheses_of_both_passes_before_the_first",
@@ -2631,8 +2895,8 @@ PROBES = (
         name="coherent_qpe_synthesis_admission_drop",
         module="nwqlib.subroutines.qpe.coherent",
         qualname="build_coherent_qpe_circuit",
-        old="    if num_phase_qubits * (dimension**3 + synthesis_work) > integer(max_work, \"max_work\", 1):\n",
-        new="    if num_phase_qubits * dimension**3 > integer(max_work, \"max_work\", 1):\n",
+        old="    required = num_phase_qubits * (dimension**3 + synthesis_work)\n",
+        new="    required = num_phase_qubits * dimension**3\n",
         pytest_args=(
             "tests/test_dense_synthesis.py::test_coherent_qpe_admits_its_powers_and_their_controlled_synthesis",
         ),
@@ -2641,8 +2905,8 @@ PROBES = (
         name="controlled_dense_encoding_reservation_drop",
         module="nwqlib.blocks.selection",
         qualname="transform_block",
-        old="            work += sum(dense_synthesis_size(width)[0] for width in dense_synthesis_widths(circuit))\n",
-        new="            work += 0\n",
+        old="                work += sum(dense_synthesis_size(width)[0] for width in widths)\n",
+        new="                work += 0\n",
         pytest_args=(
             "tests/test_semantic_blocks.py::test_controlled_dense_encoding_reserves_its_exact_synthesis",
         ),
@@ -2650,58 +2914,57 @@ PROBES = (
     single_replacement_probe(
         name="dense_synthesis_widths_matrix_key_drop",
         module="nwqlib.subroutines.qiskit_compat",
-        qualname="_dense_unitary_widths",
-        old='                key = dense_matrix_key(matrix) if cached else ("dense_unitary", matrix.tobytes(), item.label)\n',
-        new='                key = dense_matrix_key(matrix) if cached else ("dense_unitary", item.label)\n',
+        qualname="dense_unitary_census",
+        old='                                  ("dense_unitary", matrix.tobytes(), item.label), item.num_qubits)\n',
+        new='                                  ("dense_unitary", item.label), item.num_qubits)\n',
         pytest_args=(
-            "tests/test_dense_synthesis.py::test_basis_lowering_admits_its_syntheses_before_the_first_one",
+            "tests/test_dense_synthesis.py::test_basis_lowering_lists_its_syntheses_before_the_first_one",
         ),
     ),
     single_replacement_probe(
-        name="noisy_aer_run_synthesis_limit_drop",
+        name="noisy_aer_run_synthesis_record_drop",
         module="nwqlib.backends.qiskit_aer",
         qualname="_lower_aer_circuit",
         old="        circuit = (decompose.exact_synthesis or exact_dense_unitaries)(circuit)\n",
         new="        circuit = exact_dense_unitaries(circuit)\n",
         pytest_args=(
-            "tests/test_dense_synthesis.py::test_noisy_aer_run_admits_dense_synthesis_against_its_limit",
+            "tests/test_dense_synthesis.py::test_noisy_aer_run_records_its_dense_synthesis",
             "tests/test_synthesis_admission.py::test_noisy_aer_lowering_takes_its_syntheses_from_the_run_cache",
         ),
     ),
     single_replacement_probe(
-        name="nwqsim_run_synthesis_limit_drop",
+        name="nwqsim_run_synthesis_record_drop",
         module="nwqlib.backends.nwqsim",
         qualname="NWQSimBackend._lower",
         old="        native = transpile(run._exact_dense_unitaries(logical) if self.optimization_level <= 1 else logical,\n",
         new=("        native = transpile(__import__('nwqlib.subroutines.qiskit_compat', fromlist=['x'])"
              ".exact_dense_unitaries(logical) if self.optimization_level <= 1 else logical,\n"),
         pytest_args=(
-            "tests/test_nwqsim_targets.py::test_prepare_admits_dense_synthesis_against_the_run_limit",
+            "tests/test_nwqsim_targets.py::test_prepare_counts_the_dense_synthesis_it_makes",
         ),
     ),
     single_replacement_probe(
         name="basis_lowering_run_charge_drop",
-        module="nwqlib.subroutines.qiskit_compat",
-        qualname="exact_dense_unitaries",
-        old="        if charge is not None and work:\n",
-        new="        if False:\n",
+        module="nwqlib._prepared_execution",
+        qualname="Run._exact_dense_unitaries",
+        old="            self._record_synthesis(work)\n",
+        new="            pass\n",
         pytest_args=(
-            "tests/test_dense_synthesis.py::test_basis_lowering_admits_its_syntheses_before_the_first_one",
-            "tests/test_dense_synthesis.py::test_noisy_aer_run_admits_dense_synthesis_against_its_limit",
-            "tests/test_nwqsim_targets.py::test_prepare_admits_dense_synthesis_against_the_run_limit",
+            "tests/test_dense_synthesis.py::test_noisy_aer_run_records_its_dense_synthesis",
+            "tests/test_nwqsim_targets.py::test_prepare_counts_the_dense_synthesis_it_makes",
         ),
     ),
     # Each probe below weakens the gate-wise control law, the count of control
     # steps or one charge of it, a supplied circuit's syntheses or the Run's
-    # cumulative synthesis limit. The test of a probe that weakens a control
+    # count of them. The test of a probe that weakens a control
     # charge states the boundary with the census written out and the
     # instructions of each gate kind counted from the installed Qiskit.
     single_replacement_probe(
         name="gatewise_control_work_law_half_gate_term",
         module="nwqlib.subroutines._dense_synthesis",
         qualname="gatewise_control_size",
-        old="    return (2048 * gates + 16 * instructions, 1024 * gates + 96 * instructions + 1024 * heavy + 65536,\n",
-        new="    return (1024 * gates + 16 * instructions, 1024 * gates + 96 * instructions + 1024 * heavy + 65536,\n",
+        old="    return (2048 * gates + 16 * instructions, 1024 * gates + 320 * instructions + 65536,\n",
+        new="    return (1024 * gates + 16 * instructions, 1024 * gates + 320 * instructions + 65536,\n",
         pytest_args=(
             "tests/test_qls_quantum.py::test_controlled_dense_query_synthesis_is_admitted_at_planning",
         ),
@@ -2709,7 +2972,7 @@ PROBES = (
     single_replacement_probe(
         name="dense_control_counts_multiplicity_drop",
         module="nwqlib.subroutines.qiskit_compat",
-        qualname="dense_control_counts",
+        qualname="dense_unitary_census",
         old="                total += occurrences(instruction.operation)\n",
         new="                total |= occurrences(instruction.operation)\n",
         pytest_args=(
@@ -2742,8 +3005,8 @@ PROBES = (
         name="qls_supplied_rhs_specializations_halved",
         module="nwqlib.algorithms.qls.host_planning",
         qualname="_admit_query_synthesis",
-        old="        specializations = 2 if method.solver == \"shortcut_native_svp\" else 4\n",
-        new="        specializations = 2\n",
+        old="        supplied.append((2 if method.solver == \"shortcut_native_svp\" else 4, rhs._native))\n",
+        new="        supplied.append((2, rhs._native))\n",
         pytest_args=(
             "tests/test_synthesis_admission.py::"
             "test_qls_shortcut_admits_the_supplied_rhs_syntheses_it_controls",
@@ -2760,22 +3023,11 @@ PROBES = (
         ),
     ),
     single_replacement_probe(
-        name="lchs_twice_controlled_child_as_once",
-        module="nwqlib.algorithms.lchs.compiled_selection",
-        qualname="compiled_select_dense_controls",
-        old="    twice = [sum(counts) for counts in zip(*(_twice_controlled_dense_counts(width) for width in widths))]\n",
-        new="    twice = [sum(counts) for counts in zip(*(gatewise_control_counts(width, 1) for width in widths))]\n",
-        pytest_args=(
-            "tests/test_lchs_resource_structural_law.py::"
-            "test_compiled_qsp_select_charges_the_syntheses_of_its_dense_children",
-        ),
-    ),
-    single_replacement_probe(
         name="qsp_evolution_pass_control_drop",
         module="nwqlib.subroutines.qsp.evolution",
         qualname="build_qsp_evolution_encoding",
-        old="                          controls=(dense_control_counts(cos_gate, 1), dense_control_counts(sin_gate, 1)),\n",
-        new="                          controls=(),\n",
+        old="    admit_dense_syntheses(cos_widths + sin_widths, controls=(cos_counts, sin_counts),\n",
+        new="    admit_dense_syntheses(cos_widths + sin_widths, controls=(),\n",
         pytest_args=(
             "tests/test_qsp_evolution.py::"
             "test_qsp_evolution_admits_the_dense_syntheses_of_both_passes_before_the_first",
@@ -2785,55 +3037,56 @@ PROBES = (
         name="lowering_controlled_transform_charge_drop",
         module="nwqlib.blocks.lowering",
         qualname="_lower_qiskit",
-        old="                    if synthesis_charge is not None:\n                        charge_control(result, record.signature.name)\n",
+        old="                    admit_control(result, record.signature.name)\n",
         new="                    pass\n",
         pytest_args=(
-            "tests/test_semantic_blocks.py::test_lowering_admits_a_controlled_dense_encoding_before_its_synthesis",
+            "tests/test_semantic_blocks.py::test_lowering_records_a_controlled_dense_encoding_before_its_synthesis",
             "tests/test_synthesis_admission.py::"
-            "test_run_admits_the_controlled_transform_of_a_supplied_basis_before_its_synthesis",
+            "test_run_records_the_controlled_transform_of_a_supplied_basis",
         ),
     ),
     single_replacement_probe(
         name="run_synthesis_total_drop",
         module="nwqlib._prepared_execution",
-        qualname="Run._charge_synthesis",
-        old="        if state[\"synthesis_work\"] + work <= limit:\n",
-        new="        if work <= limit:\n",
+        qualname="_finish_native_preparation",
+        old="    run._state[\"synthesis_work\"] += synthesis\n",
+        new="    run._state[\"synthesis_work\"] = synthesis\n",
         pytest_args=(
             "tests/test_synthesis_admission.py::"
             "test_run_synthesizes_each_basis_unitary_once_and_again_after_reopening",
         ),
     ),
+    # The memory check of the Run's syntheses: the batch against the physical
+    # memory, the cache emptied when it alone takes the batch over, and the
+    # work of a remote preparation saved with its local data.
     single_replacement_probe(
-        name="run_refused_preparation_release_drop",
+        name="run_synthesis_memory_unchecked",
         module="nwqlib._prepared_execution",
-        qualname="Run._charge_synthesis",
-        old="        if item is not None and item.preparation_id == identity:\n",
-        new="        if False:\n",
+        qualname="Run._exact_dense_unitaries",
+        old="            _, work = admit_dense_syntheses(widths, max_work=None, max_bytes=None, operation=(\n",
+        new="            _, work = admit_dense_syntheses(widths, max_work=None, max_bytes=10**18, operation=(\n",
         pytest_args=(
-            "tests/test_synthesis_admission.py::"
-            "test_run_synthesizes_each_basis_unitary_once_and_again_after_reopening",
+            "tests/test_synthesis_admission.py::test_run_checks_its_syntheses_and_cache_against_the_physical_memory",
         ),
     ),
     single_replacement_probe(
-        name="run_direct_synthesis_limit_drop",
+        name="run_synthesis_cache_not_emptied",
         module="nwqlib._prepared_execution",
-        qualname="Run._charge_synthesis",
-        old="        if state[\"synthesis_work\"] + work > limit:\n",
-        new="        if False:\n",
+        qualname="Run._exact_dense_unitaries",
+        old='            if cache and exceeds(data + state["synthesis_cache_kept"], memory_limit(None)):\n',
+        new="            if False:\n",
         pytest_args=(
-            "tests/test_synthesis_admission.py::"
-            "test_run_synthesizes_each_basis_unitary_once_and_again_after_reopening",
+            "tests/test_synthesis_admission.py::test_run_checks_its_syntheses_and_cache_against_the_physical_memory",
         ),
     ),
     # The Run's synthesis cache: one shared cache for the preparations of a
-    # Run and none for a direct backend call, only misses charged, content
+    # Run and none for a direct backend call, only misses counted, content
     # keys and a copy of the stored circuit for each gate.
     single_replacement_probe(
         name="run_synthesis_cache_drop",
         module="nwqlib._prepared_execution",
         qualname="Run._exact_dense_unitaries",
-        old='        cache = {} if state["synthesis_preparation"] is None else state["synthesis_cache"]\n',
+        old='        cache = state["synthesis_cache"] if preparing else {}\n',
         new="        cache = {}\n",
         pytest_args=(
             "tests/test_synthesis_admission.py::"
@@ -2844,7 +3097,7 @@ PROBES = (
         name="run_direct_synthesis_cached",
         module="nwqlib._prepared_execution",
         qualname="Run._exact_dense_unitaries",
-        old='        cache = {} if state["synthesis_preparation"] is None else state["synthesis_cache"]\n',
+        old='        cache = state["synthesis_cache"] if preparing else {}\n',
         new='        cache = state["synthesis_cache"]\n',
         pytest_args=(
             "tests/test_synthesis_admission.py::"
@@ -2853,12 +3106,13 @@ PROBES = (
     ),
     single_replacement_probe(
         name="synthesis_cache_hit_charged",
-        module="nwqlib.subroutines.qiskit_compat",
-        qualname="exact_dense_unitaries",
-        old="                             if key not in cache))\n",
-        new="                             if key is not None))\n",
+        module="nwqlib._prepared_execution",
+        qualname="Run._exact_dense_unitaries",
+        old="        widths = [width for key, width in needed.items() if key not in cache]\n",
+        new="        widths = [width for key, width in needed.items() if key is not None]\n",
         pytest_args=(
-            "tests/test_synthesis_admission.py::test_synthesis_cache_reuses_the_circuit_that_a_new_synthesis_makes",
+            "tests/test_synthesis_admission.py::"
+            "test_run_synthesizes_each_basis_unitary_once_and_again_after_reopening",
         ),
     ),
     single_replacement_probe(
@@ -3003,66 +3257,433 @@ PROBES = (
         ),
     ),
     single_replacement_probe(
-        name="compiled_select_whole_matrix_synthesis_width_drop",
-        module="nwqlib.algorithms.lchs.compiled_selection",
-        qualname="compiled_select_controlled_syntheses",
-        old="    return tuple(child.system_qubits + child.num_ancillas + 1 for child in (l_part, h_part)\n",
-        new="    return tuple(child.system_qubits + child.num_ancillas for child in (l_part, h_part)\n",
-        pytest_args=(
-            "tests/test_lchs_resource_structural_law.py::test_compiled_qsp_select_charges_the_syntheses_of_its_dense_children",
-        ),
-    ),
-    single_replacement_probe(
-        name="compiled_select_whole_matrix_parity_census_drop",
-        module="nwqlib.algorithms.lchs.compiled_selection",
-        qualname="compiled_select_dense_controls",
-        old="        unrolled = [sum(counts) for counts in zip(*(census_control_counts(controlled_synthesis_gate_census(width + 1), 1)\n",
-        new="        unrolled = [sum(counts) for counts in zip(*(census_control_counts(controlled_synthesis_gate_census(width), 1)\n",
-        pytest_args=(
-            "tests/test_lchs_resource_structural_law.py::test_compiled_qsp_select_charges_the_syntheses_of_its_dense_children",
-        ),
-    ),
-    single_replacement_probe(
-        name="compiled_select_whole_matrix_child_cx_drop",
-        module="nwqlib.algorithms.lchs.compiled_selection",
-        qualname="compiled_select_cx_projection",
-        old="                generator_cx += (_census_cx(_controlled_dense_child_census(child.system_qubits + child.num_ancillas),\n",
-        new="                generator_cx += (0*_census_cx(_controlled_dense_child_census(child.system_qubits + child.num_ancillas),\n",
-        pytest_args=(
-            "tests/test_lchs_resource_structural_law.py::test_compiled_qsp_select_cx_law_bounds_the_built_select",
-        ),
-    ),
-    single_replacement_probe(
         name="mps_two_qubit_synthesis_admission_drop",
-        module="nwqlib.subroutines.state_preparation.mps_circuit",
-        qualname="build_mps_circuit_state_preparation",
-        old="        if syntheses * dense_synthesis_size(2)[0] > max_svd_work:\n",
-        new="        if False:\n",
+        module="nwqlib.subroutines.state_preparation.mps",
+        qualname="admit_mps_circuit",
+        old="        work = (sweep + num_layers*(num_qubits-1)*dense_synthesis_size(2)[0]\n",
+        new="        work = (sweep\n",
         pytest_args=(
             "tests/test_mps_state_preparation.py::"
-            "test_mps_builder_admits_its_syntheses_and_layered_construction_first",
+            "test_mps_builder_admits_its_whole_construction_before_the_first_svd",
         ),
         requires=("scikit_tt",),
+    ),
+    # Pricing two-qubit syntheses for cores whose bonds are all one, or a
+    # gate for a scalar, refuses a product-state or scalar preparation that
+    # builds none of them.
+    single_replacement_probe(
+        name="mps_product_route_synthesis_charge",
+        module="nwqlib.subroutines.state_preparation.mps",
+        qualname="admit_mps_circuit",
+        old="    elif max(bonds) == 1:\n",
+        new="    elif False:\n",
+        pytest_args=(
+            "tests/test_mps_state_preparation.py::"
+            "test_mps_admission_prices_the_scalar_and_product_routes_they_take",
+        ),
+    ),
+    single_replacement_probe(
+        name="mps_scalar_route_gate_charge",
+        module="nwqlib.subroutines.state_preparation.mps",
+        qualname="admit_mps_circuit",
+        old="    if num_qubits == 0:\n",
+        new="    if False:\n",
+        pytest_args=(
+            "tests/test_mps_state_preparation.py::"
+            "test_mps_admission_prices_the_scalar_and_product_routes_they_take",
+        ),
     ),
     # scikit_tt repeats its SVD sweep after every extracted gate, work that
     # the layered law charges before the construction starts.
     single_replacement_probe(
         name="mps_layered_construction_admission_drop",
         module="nwqlib.subroutines.state_preparation.mps",
-        qualname="admit_layered_construction",
-        old="    if work > max_svd_work:\n",
-        new="    if False:\n",
+        qualname="admit_mps_circuit",
+        old="                + layered_construction_size(bonds, num_layers)[0])\n",
+        new="                + 0)\n",
         pytest_args=(
             "tests/test_mps_state_preparation.py::"
-            "test_mps_builder_admits_its_syntheses_and_layered_construction_first",
+            "test_mps_builder_admits_its_whole_construction_before_the_first_svd",
         ),
         requires=("scikit_tt",),
+    ),
+    # Hashing the selected MPS target at every build repeats an O(2^n) scan
+    # of a read-only vector whose hash the TT-SVD already compared.
+    single_replacement_probe(
+        name="selected_mps_target_rehashed",
+        module="nwqlib.subroutines.state_preparation.mps",
+        qualname="_selected_target_id",
+        old="    if bound is None or bound[0]() is not target or bound[1] != _layout(target):\n",
+        new="    if True:\n",
+        pytest_args=(
+            "tests/test_mps_state_preparation.py::"
+            "test_selected_mps_reuses_the_hash_of_immutable_storage",
+        ),
+    ),
+    # Scaling every observable before its action copies a dense O for each
+    # moment, although an O with components of at least 1/2 cannot underflow
+    # more unscaled and an overflow shows as a non-finite value.
+    single_replacement_probe(
+        name="observable_moment_always_scaled",
+        module="nwqlib.operators.inputs",
+        qualname="_scaled_observable_moment",
+        old="        if exponent >= 0:\n            data = operator._data\n",
+        new="        if False:\n            data = operator._data\n",
+        pytest_args=(
+            "tests/test_input_access.py::"
+            "test_observable_moment_acts_unscaled_and_scales_only_after_overflow",
+        ),
+    ),
+    # Querying the dense-dilation plan itself completes the child, a full SVD,
+    # at every query.
+    single_replacement_probe(
+        name="dense_child_completed_per_query",
+        module="nwqlib.subroutines.block_encoding.joint",
+        qualname="_complete_dense_children",
+        old="    if not isinstance(source, JointEncodingPlan):\n",
+        new="    if True:\n",
+        pytest_args=(
+            "tests/test_lchs_resource_structural_law.py::"
+            "test_coherent_lcu_completes_each_dense_child_once",
+        ),
+    ),
+    # Dropping the completion leaves the 9 d**3 dense-child SVD uncharged.
+    single_replacement_probe(
+        name="lchs_dense_child_completion_uncharged",
+        module="nwqlib.algorithms.lchs.parameters",
+        qualname="_coherent_construction_work",
+        old="                work += 9*d**3\n",
+        new="",
+        pytest_args=(
+            "tests/test_lchs_resource_structural_law.py::"
+            "test_coherent_lcu_completes_each_dense_child_once",
+        ),
+    ),
+    # Planning the coherent SELECT without the table queries that its generator queries build.
+    single_replacement_probe(
+        name="lchs_select_table_queries_uncounted",
+        module="nwqlib.algorithms.lchs.parameters",
+        qualname="_coherent_construction_work",
+        old="    work += query_work\n",
+        new="",
+        pytest_args=(
+            "tests/test_lchs_resource_structural_law.py::"
+            "test_coherent_planning_counts_the_table_queries_that_its_select_builds",
+        ),
+    ),
+    # Counting a nested plan's child queries without the external controls that they take.
+    single_replacement_probe(
+        name="joint_child_queries_without_external_controls",
+        module="nwqlib.subroutines.block_encoding.joint",
+        qualname="_component_query_requirements",
+        old="                component.components[name], num_controls=forward + (controlled - forward) * k,\n",
+        new="                component.components[name], num_controls=forward,\n",
+        pytest_args=(
+            "tests/test_lchs_resource_structural_law.py::"
+            "test_coherent_planning_counts_the_table_queries_that_its_select_builds",
+        ),
+    ),
+    # Planning a sampled QSP Plan without the byte laws of its branch table queries.
+    single_replacement_probe(
+        name="sampled_branch_queries_unchecked",
+        module="nwqlib.algorithms.lchs.sampled_qsp",
+        qualname="forecast_qsp",
+        old="            _, work, missing = _component_query_requirements(widest, num_controls=controls, adjoint=adjoint,\n",
+        new="            _, work, missing = (0, 0, None) if True else _component_query_requirements(widest, num_controls=controls, adjoint=adjoint,\n",
+        pytest_args=(
+            "tests/test_lchs_sampled_qsp.py::"
+            "test_planning_refuses_a_native_branch_query_above_max_bytes_at_its_built_controls",
+        ),
+    ),
+    # Checking the branch queries without the branch qubit that controls each sequence.
+    single_replacement_probe(
+        name="sampled_branch_queries_without_branch_control",
+        module="nwqlib.algorithms.lchs.sampled_qsp",
+        qualname="forecast_qsp",
+        old="        for _, controls, adjoint, _ in _qubitized_census(1, summary.full_unitary_involution is not True, "
+            "1):\n",
+        new="        for _, controls, adjoint, _ in _qubitized_census(1, summary.full_unitary_involution is not True, "
+            "0):\n",
+        pytest_args=(
+            "tests/test_lchs_sampled_qsp.py::"
+            "test_planning_refuses_a_native_branch_query_above_max_bytes_at_its_built_controls",
+        ),
+    ),
+    # Counting a two-part scaled branch's children without the combine control.
+    single_replacement_probe(
+        name="scaled_branch_children_without_combine_control",
+        module="nwqlib.subroutines.block_encoding.joint",
+        qualname="_component_query_requirements",
+        old="                child, num_controls=int(len(parts) == 2) + k, adjoint=adjoint, max_bytes=max_bytes)\n",
+        new="                child, num_controls=k, adjoint=adjoint, max_bytes=max_bytes)\n",
+        pytest_args=(
+            "tests/test_lchs_sampled_qsp.py::"
+            "test_planning_refuses_a_native_branch_query_above_max_bytes_at_its_built_controls",
+        ),
+    ),
+    # Counting nothing for the opaque query of a supplied encoding.
+    single_replacement_probe(
+        name="supplied_query_synthesis_uncounted",
+        module="nwqlib.subroutines.block_encoding.joint",
+        qualname="_component_query_requirements",
+        old="        return _opaque_query_requirements(component, num_controls=k, adjoint=adjoint, max_bytes=max_bytes,\n"
+            "                                          max_work=None, built=True)\n",
+        new="        return 0, 0, None\n",
+        pytest_args=(
+            "tests/test_lchs_sampled_qsp.py::"
+            "test_planning_refuses_the_largest_supplied_branch_query_that_preparation_admits[supplied_h]",
+        ),
+    ),
+    # Reading supplied definitions at planning, which makes Qiskit build them.
+    single_replacement_probe(
+        name="planning_builds_supplied_definitions",
+        module="nwqlib.subroutines.block_encoding.joint",
+        qualname="_component_query_requirements",
+        old="                                          max_work=None, built=True)\n",
+        new="                                          max_work=None, built=False)\n",
+        pytest_args=(
+            "tests/test_lchs_sampled_qsp.py::"
+            "test_a_supplied_gate_without_a_built_definition_is_planned_as_unknown_and_built_at_preparation",
+        ),
+    ),
+    # Checking an explicit max_select_work against the known part of an unresolved sampled SELECT.
+    single_replacement_probe(
+        name="sampled_unresolved_select_cap_unchecked",
+        module="nwqlib.algorithms.lchs.sampled_qsp",
+        qualname="forecast_qsp",
+        old="            _refuse_uncounted_select(method, query_unresolved)\n",
+        new="            pass\n",
+        pytest_args=(
+            "tests/test_lchs_sampled_qsp.py::"
+            "test_a_supplied_gate_without_a_built_definition_is_planned_as_unknown_and_built_at_preparation",
+        ),
+    ),
+    # Reporting the known part of a circuit's construction work as its total.
+    single_replacement_probe(
+        name="lowering_unknown_work_as_known_part",
+        module="nwqlib.blocks.lowering",
+        qualname="_lower_qiskit",
+        old="        visits, known_sum(work, unique_work, method_context.copied_work), tuple(defined),\n",
+        new="        visits, (work or 0) + (unique_work or 0) + method_context.copied_work, tuple(defined),\n",
+        pytest_args=(
+            "tests/test_resource_fold.py::"
+            "test_lowering_keeps_an_unknown_construction_work_unknown_and_skipped_calls_free",
+        ),
+    ),
+    # Counting an unknown saved construction work as zero when a Run is reopened.
+    single_replacement_probe(
+        name="reopened_unknown_construction_work_as_zero",
+        module="nwqlib._prepared_execution",
+        qualname="Run._restore_preparations",
+        old="                state[\"construction_work\"] = known_sum(state[\"construction_work\"], "
+            "record.construction_work_reserved)\n",
+        new="                state[\"construction_work\"] += record.construction_work_reserved or 0\n",
+        pytest_args=(
+            "tests/test_lchs_sampled_qsp.py::"
+            "test_a_supplied_gate_without_a_built_definition_is_planned_as_unknown_and_built_at_preparation",
+        ),
+    ),
+    # Stopping the planning walk at the first unbuilt definition, which drops the known dense matrices after it.
+    single_replacement_probe(
+        name="planning_census_stops_at_unbuilt",
+        module="nwqlib.subroutines.qiskit_compat",
+        qualname="dense_unitary_census",
+        old="        for instruction in circuit.data:\n"
+            "            if not (instruction.is_standard_gate() or instruction.is_control_flow()):\n",
+        new="        for instruction in circuit.data:\n"
+            "            if unbuilt:\n"
+            "                break\n"
+            "            if not (instruction.is_standard_gate() or instruction.is_control_flow()):\n",
+        pytest_args=(
+            "tests/test_synthesis_admission.py::"
+            "test_planning_census_skips_unbuilt_definitions_and_keeps_the_known_part",
+            "tests/test_lchs_sampled_qsp.py::"
+            "test_a_known_dense_matrix_beside_an_unbuilt_definition_is_priced_at_planning",
+        ),
+    ),
+    # Leaving the known dense matrices of a partly unbuilt supplied query unpriced.
+    single_replacement_probe(
+        name="opaque_unresolved_known_part_unpriced",
+        module="nwqlib.subroutines.block_encoding.core",
+        qualname="_opaque_query_requirements",
+        old="    widths, counts, unbuilt = dense_gatewise_charges(encoding.circuit, num_controls, built=built)\n",
+        new="    widths, counts, unbuilt = dense_gatewise_charges(encoding.circuit, num_controls, built=built)\n"
+            "    widths, counts = ((), (0, 0)) if unbuilt is not None else (widths, counts)\n",
+        pytest_args=(
+            "tests/test_lchs_sampled_qsp.py::"
+            "test_a_known_dense_matrix_beside_an_unbuilt_definition_is_priced_at_planning",
+        ),
+    ),
+    # Reading supplied definitions when a block is transformed, which makes Qiskit build them.
+    single_replacement_probe(
+        name="transform_planning_builds_definitions",
+        module="nwqlib.blocks.selection",
+        qualname="transform_block",
+        old="            widths, counts, unbuilt = dense_gatewise_charges(circuit, 1, built=True)\n",
+        new="            widths, counts, unbuilt = dense_gatewise_charges(circuit, 1)\n",
+        pytest_args=(
+            "tests/test_synthesis_admission.py::"
+            "test_planning_leaves_the_controlled_synthesis_of_an_unbuilt_definition_unknown",
+        ),
+    ),
+    # Recording the known part of a transformed supplied circuit's controlled synthesis as its total.
+    single_replacement_probe(
+        name="transform_unbuilt_counted_as_known",
+        module="nwqlib.blocks.selection",
+        qualname="transform_block",
+        old="            if unbuilt is None:\n",
+        new="            if True:\n",
+        pytest_args=(
+            "tests/test_synthesis_admission.py::"
+            "test_planning_leaves_the_controlled_synthesis_of_an_unbuilt_definition_unknown",
+        ),
+    ),
+    # Checking an explicit QLS max_work against the known part only.
+    single_replacement_probe(
+        name="qls_unbuilt_limit_unchecked",
+        module="nwqlib.algorithms.qls.host_planning",
+        qualname="_admit_query_synthesis",
+        old="        if unbuilt is not None and method.max_work is not None:\n",
+        new="        if False:\n",
+        pytest_args=(
+            "tests/test_synthesis_admission.py::"
+            "test_planning_leaves_the_controlled_synthesis_of_an_unbuilt_definition_unknown",
+        ),
+    ),
+    # Checking an explicit ADAPT max_products against the known part only.
+    single_replacement_probe(
+        name="adapt_unbuilt_limit_unchecked",
+        module="nwqlib.algorithms.gcim.adapt",
+        qualname="ADAPT.plan",
+        old="            if unbuilt is not None and self.max_products is not None:\n",
+        new="            if False:\n",
+        pytest_args=(
+            "tests/test_synthesis_admission.py::"
+            "test_planning_leaves_the_controlled_synthesis_of_an_unbuilt_definition_unknown",
+        ),
+    ),
+    # Synthesizing a controlled supplied QLS query without checking the syntheses that planning could not count.
+    single_replacement_probe(
+        name="qls_construction_admission_dropped",
+        module="nwqlib.algorithms.qls.quantum",
+        qualname="_query_circuit",
+        old="        if selected.record.implementation.name in (\"encoding.native\", \"preparation.supplied\"):\n",
+        new="        if False:\n",
+        pytest_args=(
+            "tests/test_synthesis_admission.py::"
+            "test_planning_leaves_the_controlled_synthesis_of_an_unbuilt_definition_unknown",
+        ),
+    ),
+    # Synthesizing the controlled supplied ADAPT reference without checking the syntheses that planning could not count.
+    single_replacement_probe(
+        name="adapt_construction_admission_dropped",
+        module="nwqlib.algorithms.gcim.adapt_acquisition",
+        qualname="_reference_gate",
+        old="                if reference.preparation.implementation == \"qiskit.supplied\":\n",
+        new="                if False:\n",
+        pytest_args=(
+            "tests/test_synthesis_admission.py::"
+            "test_planning_leaves_the_controlled_synthesis_of_an_unbuilt_definition_unknown",
+        ),
+    ),
+    # Reserving only the declaration of a provider estimate, whose known fields are then counted after the job.
+    single_replacement_probe(
+        name="estimate_reservation_declaration_only",
+        module="nwqlib._prepared_execution",
+        qualname="readout_bytes",
+        old="        return declaration + run.backend.estimate_bytes(prepared.record, max_bytes=max_bytes)\n",
+        new="        return declaration\n",
+        pytest_args=(
+            "tests/test_ibm_backend.py::test_an_estimate_reserves_its_known_fields_before_submission",
+        ),
+    ),
+    # Bounding the provider metadata of a paid estimate by the data limit, which forces a second fetch.
+    single_replacement_probe(
+        name="paid_estimate_metadata_bounded_by_limit",
+        module="nwqlib.backends.ibm_runtime",
+        qualname="IBMRuntimeBackend._estimate_result",
+        old="        stored = encode(metadata, None)\n",
+        new="        stored = encode(metadata, run.limits.max_data_bytes)\n",
+        pytest_args=(
+            "tests/test_ibm_backend.py::test_large_provider_metadata_of_a_paid_estimate_is_saved_after_one_fetch",
+        ),
+    ),
+    # Admitting the Sampler decode arrays only after the paid job returns.
+    single_replacement_probe(
+        name="sampler_decode_admitted_after_submission",
+        module="nwqlib.backends.ibm_runtime",
+        qualname="IBMRuntimeBackend.admit_preparation",
+        old="        if observation.kind == \"counts\" and classical_widths:\n",
+        new="        if False:\n",
+        pytest_args=(
+            "tests/test_ibm_backend.py::test_sampler_decode_arrays_are_admitted_before_submission",
+        ),
+    ),
+    # Copying the operator for every small common scale, such as 0.25 IZ,
+    # instead of scaling the vector exactly.
+    single_replacement_probe(
+        name="observable_small_scale_copies_operator",
+        module="nwqlib.operators.inputs",
+        qualname="_scaled_observable_action",
+        old="    if not certain:\n",
+        new="    if False:\n",
+        pytest_args=(
+            "tests/test_input_access.py::"
+            "test_observable_moment_copies_the_operator_only_beyond_exact_vector_scaling",
+        ),
+    ),
+    # Refusing a binary QHD Plan on its future circuit-construction bytes.
+    single_replacement_probe(
+        name="qhd_binary_plan_refuses_construction_bytes",
+        module="nwqlib.algorithms.qhd.method",
+        qualname="QHD._select_binary_native",
+        old='        self._admit(work, 0, stage="native binary construction")\n',
+        new='        self._admit(work, native_bytes, stage="native binary construction")\n',
+        pytest_args=(
+            "tests/test_qhd_resources.py::"
+            "test_binary_circuit_bytes_are_recorded_at_planning_and_checked_at_construction",
+        ),
+    ),
+    # Summing the gathered table entries without the objective constant.
+    single_replacement_probe(
+        name="qhd_summary_gather_drops_constant",
+        module="nwqlib.algorithms.qhd.method",
+        qualname="_summarize",
+        old="        terms[:, 0] = reconstruction.constant\n",
+        new="        terms[:, 0] = 0.0\n",
+        pytest_args=(
+            "tests/test_qhd_resources.py::test_summary_objectives_equal_pointwise_objective_at",
+        ),
+    ),
+    # Keeping the caller's ndarray object lets a change to its dtype or shape
+    # reinterpret a stored immutable input.
+    single_replacement_probe(
+        name="frozen_input_shares_caller_header",
+        module="nwqlib.operators.inputs",
+        qualname="_freeze_array",
+        old="        return array.view()\n",
+        new="        return array\n",
+        pytest_args=(
+            "tests/test_input_access.py::test_immutable_input_storage_is_shared_under_independent_headers",
+        ),
+    ),
+    # Counting one rotation per fused hopping link, whose definition holds two.
+    single_replacement_probe(
+        name="onehot_rotation_bound_one_per_link",
+        module="nwqlib.algorithms.qhd.resources",
+        qualname="onehot_rotation_bound",
+        old="    total = 2 * links + 2 * schedule.hopping_blocks\n",
+        new="    total = 2 * links + schedule.hopping_blocks\n",
+        pytest_args=(
+            "tests/test_qhd_resources.py::test_rotation_law_bounds_the_emitted_circuit_and_a_budget_classifies_it",
+        ),
     ),
     single_replacement_probe(
         name="adapt_supplied_reference_synthesis_admission_drop",
         module="nwqlib.algorithms.gcim.adapt",
         qualname="ADAPT.plan",
-        old="        if execution == \"quantum\" and reference.preparation.implementation == \"qiskit.supplied\":\n",
+        old="        if (acquisition.pair_preparation in (\"controlled\", \"vacuum_reference\", \"vacuum_restore\")\n"
+            "                and reference.preparation.implementation == \"qiskit.supplied\"):\n",
         new="        if False:\n",
         pytest_args=(
             "tests/test_synthesis_admission.py::test_adapt_admits_the_controlled_synthesis_of_a_supplied_reference",
@@ -3072,10 +3693,1047 @@ PROBES = (
         name="adapt_verification_reference_synthesis_charge_drop",
         module="nwqlib.algorithms.gcim.adapt_verification",
         qualname="_lowered_native_circuits",
-        old="    if synthesis_work > max_work:\n",
+        old="    if exceeds(synthesis_work, max_work):\n",
         new="    if False:\n",
         pytest_args=(
             "tests/test_synthesis_admission.py::test_adapt_admits_the_controlled_synthesis_of_a_supplied_reference",
+        ),
+    ),
+    # Running the analytic kernel's MP1 batches without checking their bytes.
+    single_replacement_probe(
+        name="analytic_kernel_mp1_unadmitted",
+        module="nwqlib.subroutines.block_encoding.analytic_prep",
+        qualname="prepare_analytic_kernel",
+        old="    _check_bytes(_mp1_bytes(target.size, plan.degree + 1, 2 * plan.recipe.half_width + 1), plan.max_bytes,\n"
+            "                 \"analytic kernel MP1 pass\")\n",
+        new="",
+        pytest_args=(
+            "tests/test_block_encoding.py::test_analytic_kernel_mp1_pass_is_admitted_before_it_runs",
+        ),
+    ),
+    # Storing a band offset outside int64, which the input digest and archive cannot hold.
+    single_replacement_probe(
+        name="band_offset_int64_guard_dropped",
+        module="nwqlib.operators.inputs",
+        qualname="ingest_band",
+        old="    if any(not -(1 << 63) <= offset < 1 << 63 for offset, _ in combined):\n",
+        new="    if False:\n",
+        pytest_args=(
+            "tests/test_block_encoding.py::"
+            "test_band_offsets_fit_int64_storage_and_long_range_angles_keep_their_phase",
+        ),
+    ),
+    # A PeriodicStencil built directly refusing the NumPy width that ingest_periodic_stencil accepts.
+    single_replacement_probe(
+        name="periodic_stencil_refuses_numpy_width",
+        module="nwqlib.operators.inputs",
+        qualname="PeriodicStencil.__post_init__",
+        old="        object.__setattr__(self, \"num_qubits\", integer(self.num_qubits, \"num_qubits\", 1))\n",
+        new="        if type(self.num_qubits) is not int or self.num_qubits < 1:\n"
+            "            raise ValueError(\"num_qubits must be a positive integer\")\n",
+        pytest_args=(
+            "tests/test_input_access.py::test_integer_parameters_accept_numpy_integers_and_refuse_out_of_domain_values",
+        ),
+    ),
+    # Automatic dense routing scanning for an exact circulant instead of one within its roundoff window.
+    single_replacement_probe(
+        name="auto_dense_circulant_without_roundoff_window",
+        module="nwqlib.subroutines.block_encoding.core",
+        qualname="_detect_circulant",
+        old="            specification, detection_error = _detect_banded_structure_with_error(array, atol=atol)\n",
+        new="            specification, detection_error = _detect_banded_structure_with_error(array, atol=0.0)\n",
+        pytest_args=(
+            "tests/test_block_encoding.py::test_circulant_frobenius_certificate_rounds_outward",
+        ),
+    ),
+    # Forming the band angle 2 pi b 2**j / N in binary64 without reducing b 2**j modulo N first.
+    single_replacement_probe(
+        name="band_angles_unreduced",
+        module="nwqlib.subroutines.block_encoding.banded",
+        qualname="_band_angle_tables",
+        old="(((abs(offset) << qubit_index) % dimension) / dimension)",
+        new="((abs(offset) << qubit_index) / dimension)",
+        pytest_args=(
+            "tests/test_block_encoding.py::"
+            "test_band_offsets_fit_int64_storage_and_long_range_angles_keep_their_phase",
+        ),
+    ),
+    # Admitting the binary rotation census for a resource query without a synthesis budget.
+    single_replacement_probe(
+        name="qhd_census_admitted_without_budget",
+        module="nwqlib.algorithms.qhd.resources",
+        qualname="circuit_resources",
+        old="    census = _admit_inspection(plan, classify=synthesis_epsilon is not None)\n",
+        new="    census = _admit_inspection(plan)\n",
+        pytest_args=(
+            "tests/test_qhd_resources.py::"
+            "test_binary_rotation_census_is_admitted_only_when_a_synthesis_budget_runs_it",
+        ),
+    ),
+    # Storing a copy in an owning ndarray, which setflags can make writable again.
+    single_replacement_probe(
+        name="frozen_array_owner_writable",
+        module="nwqlib.core.records",
+        qualname="_immutable_elements",
+        old='            stored = stored_array(values.tobytes(order="C"), values.shape)\n',
+        new='            stored = np.array(values, order="C", copy=True)\n',
+        pytest_args=(
+            "tests/test_input_access.py::test_frozen_array_storage_cannot_be_made_writable",
+        ),
+    ),
+    # Copying canonical input that a bytes object already holds.
+    single_replacement_probe(
+        name="frozen_array_bytes_input_copied",
+        module="nwqlib.core.records",
+        qualname="_immutable_elements",
+        old="            stored = values.view()\n",
+        new='            stored = stored_array(values.tobytes(order="C"), values.shape)\n',
+        pytest_args=(
+            "tests/test_input_access.py::test_frozen_array_storage_cannot_be_made_writable",
+        ),
+    ),
+    # Handing the QLS sample arrays over without protected storage.
+    single_replacement_probe(
+        name="qls_samples_owned_transfer",
+        module="nwqlib.algorithms.qls.quantum",
+        qualname="_counts_statistics",
+        old="        indices = FrozenArray(indices)\n",
+        new="        indices = FrozenArray._from_owned_canonical_array(indices)\n",
+        pytest_args=(
+            "tests/test_qls_quantum.py::test_samples_follow_the_solution_distribution_in_original_coordinates",
+        ),
+    ),
+    # Handing the LCHS sample arrays over without protected storage.
+    single_replacement_probe(
+        name="lchs_samples_owned_transfer",
+        module="nwqlib.algorithms.lchs.analysis",
+        qualname="analyze_quantum",
+        old="            indices = FrozenArray(indices)\n",
+        new="            indices = FrozenArray._from_owned_canonical_array(indices)\n",
+        pytest_args=(
+            "tests/test_scientist_lchs.py::test_source_pf_padding_and_original_readout_follow_recorded_steps",
+        ),
+    ),
+    # Never marking a level whose table rounding can cover its whole potential.
+    single_replacement_probe(
+        name="refinement_unresolved_flag_dropped",
+        module="nwqlib.algorithms.qhd.refinement_records",
+        qualname="RefinementLevel.numerically_unresolved",
+        old="        return 4 * Fraction(self.table_magnitude) >= UNRESOLVED_ROUNDING_SCALE * 2**53 * Fraction(self.energy_scale)\n",
+        new="        return False\n",
+        pytest_args=(
+            "tests/test_qhd_refinement.py::test_a_level_whose_table_rounding_can_cover_its_potential_is_marked_unresolved",
+        ),
+    ),
+    # Returning a Pauli table's stored mask array, whose dtype a caller can then reassign.
+    single_replacement_probe(
+        name="pauli_terms_shares_header",
+        module="nwqlib.operators._pauli",
+        qualname="PauliTerms.x",
+        old="        return self._x.view()\n",
+        new="        return self._x\n",
+        pytest_args=(
+            "tests/test_input_access.py::test_pauli_table_arrays_are_new_views_of_immutable_storage",
+        ),
+    ),
+    # Returning the stored ndarray from np.asarray, whose dtype or shape a caller can then reassign.
+    single_replacement_probe(
+        name="frozen_array_asarray_shares_header",
+        module="nwqlib.core.records",
+        qualname="FrozenArray.__array__",
+        old="        return self._array.copy() if copy else self._array.view()\n",
+        new="        return self._array.copy() if copy else self._array\n",
+        pytest_args=(
+            "tests/test_input_access.py::test_frozen_array_exports_are_views_with_their_own_headers",
+        ),
+    ),
+    single_replacement_probe(
+        name="lowering_instruction_memory_unchecked",
+        module="nwqlib.blocks.lowering",
+        qualname="_lower_qiskit",
+        old='        check_memory(INSTRUCTION_BYTES * instructions, max_bytes, f"logical circuit lowering of {instructions} instructions")\n',
+        new="        pass\n",
+        pytest_args=(
+            "tests/test_semantic_blocks.py::test_lowering_checks_256_bytes_per_appended_instruction_before_the_sdk",
+            "tests/test_prepared_execution.py::test_a_direct_preparation_beyond_the_physical_memory_is_refused_before_any_preparation",
+        ),
+    ),
+    # Building the trees of a circuit's direct state preparations without checking them against the memory first.
+    single_replacement_probe(
+        name="direct_preparation_memory_unchecked",
+        module="nwqlib._prepared_execution",
+        qualname="_admit_direct_preparations",
+        old='        check_memory(need, None, "building the direct state preparations of this circuit")\n',
+        new="        pass\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::test_a_direct_preparation_beyond_the_physical_memory_is_refused_before_any_preparation",
+            "tests/test_lchs_periodic.py::test_periodic_preparation_checks_the_trees_of_its_coefficient_prep_and_inverse_against_memory",
+        ),
+    ),
+    # Counting one tree for a Repeat of direct preparation calls.
+    single_replacement_probe(
+        name="direct_trees_not_multiplied_by_repeats",
+        module="nwqlib.blocks.lowering",
+        qualname="_count_definition",
+        old="            lazy += multiplicity * body.lazy\n",
+        new="            lazy += body.lazy\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::test_direct_preparations_count_each_call_and_at_most_one_set_state",
+        ),
+    ),
+    # Counting the state that Aer sets on the qubits of the preparation instead of the whole circuit.
+    single_replacement_probe(
+        name="direct_set_state_counted_on_the_preparation_width",
+        module="nwqlib._prepared_execution",
+        qualname="_admit_direct_preparations",
+        old="            width=sum(root.widths.values()), memory_mb=run.limits.simulator_memory() or 0,\n",
+        new="            width=opening, memory_mb=run.limits.simulator_memory() or 0,\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::test_direct_preparations_count_each_call_and_at_most_one_set_state",
+        ),
+    ),
+    # Treating a counts readout as one whose opening preparation Aer sets as the state.
+    single_replacement_probe(
+        name="direct_counts_set_as_the_state",
+        module="nwqlib.backends.qiskit_aer",
+        qualname="_direct_initial_state_bytes",
+        old='    if observation.kind == "counts" or not noiseless or not observes:\n',
+        new="    if not noiseless or not observes:\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::test_direct_preparations_count_each_call_and_at_most_one_set_state",
+        ),
+    ),
+    # Treating a transformed preparation that opens the circuit as one that Aer sets as the state.
+    single_replacement_probe(
+        name="direct_transformed_opening_set_as_the_state",
+        module="nwqlib.blocks.lowering",
+        qualname="_Count.opening_direct",
+        old="        return None if transformed else qubits\n",
+        new="        return qubits\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::test_direct_preparations_count_each_call_and_at_most_one_set_state",
+        ),
+    ),
+    # Counting the untransformed preparations that Aer never runs, after a Pauli position or a trajectory's last save.
+    single_replacement_probe(
+        name="direct_trees_counted_after_the_executed_prefix",
+        module="nwqlib._prepared_execution",
+        qualname="_admit_direct_preparations",
+        old="        need += root.lazy_bytes_before(stop)\n",
+        new="        need += root.lazy_bytes\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::test_an_exact_pauli_readout_counts_only_the_direct_preparations_that_aer_runs",
+            "tests/test_prepared_execution.py::test_a_trajectory_counts_only_the_direct_preparations_before_its_last_point",
+        ),
+    ),
+    # Counting a Repeat body that lies wholly in the prefix once.
+    single_replacement_probe(
+        name="direct_prefix_repeat_not_divided",
+        module="nwqlib.blocks.lowering",
+        qualname="_Count.lazy_bytes_before",
+        old="                return whole * body.lazy + prefix(node.body, rest)\n",
+        new="                return body.lazy + prefix(node.body, rest)\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::test_an_exact_pauli_readout_counts_only_the_direct_preparations_that_aer_runs",
+        ),
+    ),
+    # Leaving out the trees of controls and adjoints, which lowering builds whatever the readout position.
+    single_replacement_probe(
+        name="direct_eager_trees_not_counted",
+        module="nwqlib._prepared_execution",
+        qualname="_admit_direct_preparations",
+        old="    need = sum(count.eager_bytes for count in counted.values())\n",
+        new="    need = 0\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::test_direct_preparations_count_each_call_and_at_most_one_set_state",
+        ),
+    ),
+    # Translating every view definition, including an inverse that the trajectory never composes.
+    single_replacement_probe(
+        name="view_definitions_translated_before_composition",
+        module="nwqlib.backends.qiskit_aer",
+        qualname="_prepare_aer_execution",
+        old="            tails = {}\n",
+        new="            tails = {name: preparation.prepare(tail, decompose) for name, tail in (views or {}).items()}\n",
+        pytest_args=(
+            "tests/test_observation_schedule.py::test_aer_translates_a_view_inverse_only_when_it_composes_it",
+        ),
+    ),
+    # Applying a view's inverse after the last group of a trajectory's saves.
+    single_replacement_probe(
+        name="view_inverse_counted_after_the_last_group",
+        module="nwqlib.backends.qiskit_aer",
+        qualname="_view_applications",
+        old="        if index + 1 < len(saves) and (saves[index + 1].boundary, saves[index + 1].view) != group:\n",
+        new="        if index + 1 == len(saves) or (saves[index + 1].boundary, saves[index + 1].view) != group:\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::test_a_trajectory_applies_a_view_tail_per_group_and_its_inverse_between_groups",
+        ),
+    ),
+    # Counting NWQ-Sim direct preparations after its executed prefix.
+    single_replacement_probe(
+        name="nwqsim_trees_counted_after_the_executed_prefix",
+        module="nwqlib._prepared_execution",
+        qualname="_admit_direct_preparations",
+        old="    truncates = (aer_backend and run.backend.noise_model_id is None) or isinstance(run.backend, NWQSimBackend)\n",
+        new="    truncates = aer_backend and run.backend.noise_model_id is None\n",
+        pytest_args=(
+            "tests/test_nwqsim_targets.py::test_nwqsim_counts_only_the_direct_preparations_of_its_executed_prefix",
+        ),
+    ),
+    # Translating the whole NWQ-Sim circuit for a Pauli readout before its end.
+    single_replacement_probe(
+        name="nwqsim_pauli_translated_past_its_position",
+        module="nwqlib.backends.nwqsim",
+        qualname="NWQSimBackend.prepare",
+        old="        stop = executed_stop(len(circuit.data), position=position if observation.kind == \"pauli_expectation\" else None)\n",
+        new="        stop = executed_stop(len(circuit.data))\n",
+        pytest_args=(
+            "tests/test_nwqsim_targets.py::test_nwqsim_counts_only_the_direct_preparations_of_its_executed_prefix",
+        ),
+    ),
+    # Saving a direct preparation with its definition, which builds its tree.
+    single_replacement_probe(
+        name="direct_preparation_saved_with_its_tree",
+        module="nwqlib._qpy_archive",
+        qualname="encode_circuit",
+        old="        if type(gate) is DirectPreparationGate:\n",
+        new="        if False:\n",
+        pytest_args=(
+            "tests/test_qpy_archive.py::test_a_direct_preparation_is_stored_by_its_state_and_read_back_unbuilt",
+            "tests/test_prepared_execution.py::test_a_reopened_run_restores_its_direct_preparation_unbuilt_and_still_sets_it_as_the_aer_state",
+        ),
+    ),
+    # Building a direct tree without the memory check where it is built.
+    single_replacement_probe(
+        name="direct_tree_unchecked_when_built",
+        module="nwqlib.subroutines.state_preparation.direct",
+        qualname="DirectPreparationGate._define",
+        old="            check_memory(direct_tree_bytes(self.num_qubits), None,\n",
+        new="            (direct_tree_bytes(self.num_qubits), None,\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::test_reading_a_direct_tree_beyond_the_physical_memory_is_refused_before_it_is_built",
+        ),
+    ),
+    # Preparing the first point of a static Plan before checking the direct preparations of the others.
+    single_replacement_probe(
+        name="static_plan_direct_preparations_unchecked",
+        module="nwqlib._prepared_execution",
+        qualname="_static_points_workload",
+        old="            if direct or (whole and remaining):\n",
+        new="            if False:\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::test_a_static_plan_refuses_a_direct_preparation_that_does_not_fit_before_any_preparation",
+        ),
+    ),
+    # Starting the final PencilSampling stages of ADAPT without checking their analysis on the final basis.
+    single_replacement_probe(
+        name="adapt_final_stage_analysis_unchecked",
+        module="nwqlib.algorithms.gcim.adapt_acquisition",
+        qualname="drive_adapt",
+        old="                        from .adapt import _admit_final_analysis\n",
+        new="                        _admit_final_analysis = lambda *args: None  # noqa: E731\n",
+        pytest_args=(
+            "tests/test_run_archive.py::test_adapt_checks_the_final_stage_analysis_on_the_basis_that_growth_ends_with",
+        ),
+    ),
+    # Admitting a growth query of ADAPT without the PencilSampling final shots that the Plan spends after it.
+    single_replacement_probe(
+        name="adapt_growth_admitted_without_final_shots",
+        module="nwqlib.algorithms.gcim.adapt_acquisition",
+        qualname="drive_adapt",
+        old="            run.check_capacity(preparations=preparations, circuits=circuits, shots=shots + final)\n",
+        new="            run.check_capacity(preparations=preparations, circuits=circuits, shots=shots)\n",
+        pytest_args=(
+            "tests/test_controller_frontiers.py::test_adapt_admits_a_growth_query_only_while_the_final_stage_shots_still_fit",
+        ),
+    ),
+    # Preparing a statevector readout on Aer without checking its simulation against simulator_memory_mb.
+    single_replacement_probe(
+        name="simulator_memory_unchecked_before_preparation",
+        module="nwqlib._prepared_execution",
+        qualname="_admitted_point",
+        old="            admit(observation, width=width, memory_mb=memory_mb, run=run)\n",
+        new="            pass\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::test_a_statevector_simulation_beyond_simulator_memory_is_refused_before_lowering",
+            "tests/test_prepared_execution.py::test_simulator_memory_precedes_readout_size_and_explains_binary_applicability",
+        ),
+    ),
+    # Leaving out the saved amplitudes, or the probability vector, of a readout other than a trajectory.
+    single_replacement_probe(
+        name="aer_saved_amplitudes_not_counted",
+        module="nwqlib.backends.qiskit_aer",
+        qualname="_admit_aer_saved_buffers",
+        old="            charge_power(16, width, \"saved amplitudes\")\n",
+        new="            pass\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::test_aer_counts_the_saved_amplitudes_and_probabilities_of_a_readout",
+        ),
+    ),
+    single_replacement_probe(
+        name="aer_saved_probabilities_not_counted",
+        module="nwqlib.backends.qiskit_aer",
+        qualname="_admit_aer_saved_buffers",
+        old="            charge_power(8, len(observation.qubits), \"saved probabilities\")\n",
+        new="            pass\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::test_aer_counts_the_saved_amplitudes_and_probabilities_of_a_readout",
+        ),
+    ),
+    single_replacement_probe(
+        name="lowering_repeat_instructions_not_multiplied",
+        module="nwqlib.blocks.lowering",
+        qualname="_count_definition",
+        old="            instructions += multiplicity * body.instructions\n",
+        new="            instructions += body.instructions\n",
+        pytest_args=(
+            "tests/test_semantic_blocks.py::test_lowering_checks_256_bytes_per_appended_instruction_before_the_sdk",
+        ),
+    ),
+    single_replacement_probe(
+        name="lowering_iterates_a_body_without_instructions",
+        module="nwqlib.blocks.lowering",
+        qualname="_lower_qiskit",
+        old="            for _ in range(min(repeat_counts[name], 1) if empty else repeat_counts[name]):\n",
+        new="            for _ in range(repeat_counts[name]):\n",
+        pytest_args=(
+            "tests/test_semantic_blocks.py::test_lowering_emits_a_repeated_body_without_instructions_once",
+        ),
+    ),
+    single_replacement_probe(
+        name="lowering_revisits_a_shared_node_without_instructions",
+        module="nwqlib.blocks.lowering",
+        qualname="_lower_qiskit",
+        old="            if name in emitted_empty:\n",
+        new="            if False:\n",
+        pytest_args=(
+            "tests/test_semantic_blocks.py::test_lowering_emits_a_shared_sequence_without_instructions_once",
+        ),
+    ),
+    single_replacement_probe(
+        name="lchs_pair_key_walks_every_select_occurrence",
+        module="nwqlib.algorithms.lchs.sampled_native",
+        qualname="pair_key",
+        old="                                       corrections=corrections, prepares=prepares, select=False)\n",
+        new="                                       corrections=corrections, prepares=prepares, select=True)\n",
+        pytest_args=(
+            "tests/test_ibm_backend.py::test_product_formula_recipe_row_templates_bind_to_each_row_circuit",
+        ),
+    ),
+    single_replacement_probe(
+        name="lchs_pair_tables_checked_per_row",
+        module="nwqlib.algorithms.lchs.sampled_plan",
+        qualname="_pair_plan",
+        old='        object.__setattr__(payload, "_pair_table_cache", checked)\n',
+        new="        pass\n",
+        pytest_args=(
+            "tests/test_ibm_backend.py::test_product_formula_recipe_row_templates_bind_to_each_row_circuit",
+        ),
+    ),
+    single_replacement_probe(
+        name="lchs_breakdown_ignores_axis_points",
+        module="nwqlib.algorithms.lchs.quantum_resources",
+        qualname="resource_breakdown",
+        old="    return tuple(dict(name=name, settings=len(node.settings) * prod(len(range(axis.start, axis.stop, axis.step))\n",
+        new="    return tuple(dict(name=name, settings=len(node.settings) or prod(len(range(axis.start, axis.stop, axis.step))\n",
+        pytest_args=(
+            "tests/test_lchs_primary.py::test_sampled_pair_rows_are_one_range_axis_counted_without_enumeration",
+        ),
+    ),
+    single_replacement_probe(
+        name="static_points_ignore_range_axes",
+        module="nwqlib.core.planning",
+        qualname="Plan._static_points",
+        old="            for values in _grid(tuple(range(axis.start, axis.stop, axis.step) for axis in axes)):\n",
+        new="            for values in _grid(tuple(range(axis.start, axis.stop, axis.step) for axis in axes[:0])):\n",
+        pytest_args=(
+            "tests/test_lchs_primary.py::test_sampled_pair_row_points_resolve_and_forecast_one_by_one",
+        ),
+    ),
+    single_replacement_probe(
+        name="static_point_key_unescaped",
+        module="nwqlib.core.planning",
+        qualname="point_key",
+        old='    name = name.replace("\\\\", "\\\\\\\\").replace("[", "\\\\[")\n',
+        new="    name = name\n",
+        pytest_args=(
+            "tests/test_selected_runtime.py::"
+            "test_an_experiment_named_like_an_axis_point_keeps_its_own_item_seed_and_attempt",
+        ),
+    ),
+    single_replacement_probe(
+        name="reduction_work_counted_without_allowance",
+        module="nwqlib.core.planning",
+        qualname="admit_reductions",
+        old="        if allowance is None:\n",
+        new="        if False:\n",
+        pytest_args=("tests/test_observation_schedule.py::"
+                     "test_reduction_work_and_saved_states_are_admitted_before_native_preparation",),
+    ),
+    single_replacement_probe(
+        name="reduction_without_work_takes_finite_allowance",
+        module="nwqlib.core.planning",
+        qualname="admit_reductions",
+        old="        if reducer.work is None:\n",
+        new="        if False:\n",
+        pytest_args=("tests/test_observation_schedule.py::"
+                     "test_reduction_work_and_saved_states_are_admitted_before_native_preparation",),
+    ),
+    single_replacement_probe(
+        name="reduction_workspace_unchecked",
+        module="nwqlib._prepared_execution",
+        qualname="_admit_trajectory_work",
+        old="    if workspace and memory_mb is not None:\n",
+        new="    if False:\n",
+        pytest_args=("tests/test_observation_schedule.py::"
+                     "test_projected_reduction_workspace_is_admitted_with_the_saved_state",),
+    ),
+    single_replacement_probe(
+        name="reduction_workspace_without_saved_states",
+        module="nwqlib._prepared_execution",
+        qualname="_admit_trajectory_work",
+        old="        needed = held + workspace\n",
+        new="        needed = workspace\n",
+        pytest_args=("tests/test_observation_schedule.py::"
+                     "test_projected_reduction_workspace_is_admitted_with_the_saved_state",),
+    ),
+    single_replacement_probe(
+        name="reduction_workspace_without_kept_probabilities",
+        module="nwqlib._prepared_execution",
+        qualname="_admit_trajectory_work",
+        old="        held = saved * 16 << width if kept is None else kept\n",
+        new="        held = saved * 16 << width\n",
+        pytest_args=("tests/test_observation_schedule.py::"
+                     "test_reduction_workspace_is_admitted_with_the_kept_probabilities",),
+    ),
+    single_replacement_probe(
+        name="reduction_execution_checked_only_with_allowance",
+        module="nwqlib.core.planning",
+        qualname="admit_reductions",
+        old="        if not reducer.executable:\n",
+        new="        if allowance is not None and not reducer.executable:\n",
+        pytest_args=("tests/test_observation_schedule.py::"
+                     "test_reduction_work_and_saved_states_are_admitted_before_native_preparation",),
+    ),
+    single_replacement_probe(
+        name="static_point_key_keeps_backslash",
+        module="nwqlib.core.planning",
+        qualname="point_key",
+        old='    name = name.replace("\\\\", "\\\\\\\\").replace("[", "\\\\[")\n',
+        new='    name = name.replace("[", "\\\\[")\n',
+        pytest_args=("tests/test_selected_runtime.py::"
+                     "test_stepped_axes_count_order_and_match_their_points_and_keys_stay_distinct",),
+    ),
+    single_replacement_probe(
+        name="static_points_read_whole_axis",
+        module="nwqlib.core.planning",
+        qualname="_grid",
+        old="    iterators = [iter(grid) for grid in grids]\n",
+        new="    iterators = [iter(tuple(grid)) for grid in grids]\n",
+        pytest_args=("tests/test_selected_runtime.py::test_a_trillion_point_axis_is_read_only_as_far_as_needed",),
+    ),
+    single_replacement_probe(
+        name="static_prepare_scans_before_shot_budget",
+        module="nwqlib._prepared_execution",
+        qualname="prepare_static",
+        old='    if exceeds(state["shots"] + known, limits.max_total_shots):\n',
+        new="    if False:\n",
+        pytest_args=("tests/test_selected_runtime.py::test_a_trillion_point_axis_is_read_only_as_far_as_needed",),
+    ),
+    single_replacement_probe(
+        name="static_prepare_scans_before_circuit_budget",
+        module="nwqlib._prepared_execution",
+        qualname="prepare_static",
+        old="    if exceeds(counted + total, limits.max_total_circuits):\n",
+        new="    if False:\n",
+        pytest_args=("tests/test_selected_runtime.py::test_a_trillion_point_axis_is_read_only_as_far_as_needed",),
+    ),
+    single_replacement_probe(
+        name="static_run_holds_every_point",
+        module="nwqlib._prepared_execution",
+        qualname="execute_static",
+        old="    points = plan._static_points()\n",
+        new="    points = iter(tuple(plan._static_points()))\n",
+        pytest_args=("tests/test_selected_runtime.py::test_a_trillion_point_axis_is_read_only_as_far_as_needed",),
+    ),
+    single_replacement_probe(
+        name="static_outcome_collected_after_its_commit",
+        module="nwqlib._prepared_execution",
+        qualname="Run._finish_attempt",
+        old="                                 collected=tuple(item.content_id for item in chunks) if collect else ())\n",
+        new="                                 collected=())\n",
+        pytest_args=("tests/test_selected_runtime.py::"
+                     "test_a_process_stopped_at_the_second_point_keeps_its_seed_and_collected_prefix",),
+    ),
+    single_replacement_probe(
+        name="template_row_seeds_kept_after_refusal",
+        module="nwqlib._prepared_execution",
+        qualname="_static_items",
+        old="        run.rng.backend.bit_generator.state = start\n",
+        new="        pass\n",
+        pytest_args=("tests/test_ibm_backend.py::"
+                     "test_template_rows_refused_by_the_data_budget_keep_their_seeds_for_a_retry",),
+    ),
+    single_replacement_probe(
+        name="static_scan_resolves_every_point",
+        module="nwqlib._prepared_execution",
+        qualname="_static_points_workload",
+        old="        uniform = (point_shots is not None and kind in {\"counts\", \"pauli_expectation\", \"probabilities\"}\n",
+        new="        uniform = (point_shots is not None and kind in ()\n",
+        pytest_args=("tests/test_selected_runtime.py::"
+                     "test_the_points_of_a_fixed_shot_batch_share_their_first_readout_before_preparation",
+                     "tests/test_selected_runtime.py::"
+                     "test_fixed_shots_refuse_from_the_axis_bounds_and_point_dependent_shots_point_by_point"),
+    ),
+    single_replacement_probe(
+        name="container_opens_device_without_fractional_gates",
+        module="nwqlib.backends.ibm_runtime",
+        qualname="IBMRuntimeBackend.launch",
+        old="                               use_fractional_gates=self.use_fractional_gates)\n",
+        new="                               )\n",
+        pytest_args=("tests/test_ibm_backend.py::"
+                     "test_an_existing_container_opens_the_device_with_the_prepared_fractional_gates",),
+    ),
+    single_replacement_probe(
+        name="collect_progress_inside_submission",
+        module="nwqlib._prepared_execution",
+        qualname="Run._finish_attempt",
+        old="                self._state[\"chunks\"][item.acquisition_key] = item\n",
+        new=("                self._state[\"chunks\"][item.acquisition_key] = item\n"
+             "                self.progress(\"collect\", len(self._state[\"chunks\"]), None)\n"),
+        pytest_args=("tests/test_selected_runtime.py::"
+                     "test_an_interrupt_in_the_collect_progress_leaves_its_point_completed",),
+    ),
+    single_replacement_probe(
+        name="template_index_not_restored",
+        module="nwqlib._prepared_execution",
+        qualname="Run._restore_preparations",
+        old="            _index_template_record(state, record)\n",
+        new="            pass\n",
+        pytest_args=("tests/test_ibm_backend.py::"
+                     "test_interrupted_template_preparation_never_compiles_a_template_twice",
+                     "tests/test_ibm_backend.py::"
+                     "test_sampled_lchs_rows_share_compiled_templates_in_one_job_and_resume_by_row"),
+    ),
+    single_replacement_probe(
+        name="charge_seed_kept_after_refusal",
+        module="nwqlib._prepared_execution",
+        qualname="prepare_experiment",
+        old="            run.rng.backend.bit_generator.state = start\n",
+        new="            pass\n",
+        pytest_args=("tests/test_static_runtime.py::"
+                     "test_a_charge_refused_by_the_data_budget_keeps_its_seed_for_a_retry",),
+    ),
+    single_replacement_probe(
+        name="static_row_committed_before_its_charge",
+        module="nwqlib._prepared_execution",
+        qualname="_prepare_static_item",
+        old="            return prepare_experiment(realization, run=run, held=held)\n",
+        new=("            item = WorkflowItem(realization=realization, runtime=RuntimeOptions(seed=run.rng.next_seed()))\n"
+             "            run._write(((\"workflow_item\", key, item), (\"rng\", \"current\", run.rng.snapshot())))\n"
+             "            run._state[\"workflow_items\"][key] = item\n"
+             "            return prepare_experiment(realization, run=run, runtime=item.runtime, held=held)\n"),
+        pytest_args=("tests/test_selected_runtime.py::"
+                     "test_a_process_stopped_at_the_second_point_keeps_its_seed_and_collected_prefix",),
+    ),
+    single_replacement_probe(
+        name="program_binds_axis_parameter",
+        module="nwqlib.ir.validation",
+        qualname="_Admission.setup",
+        old="                    if name in bound:\n",
+        new="                    if False:\n",
+        pytest_args=("tests/test_ir.py::test_compact_axis_selection_resolves_count_without_expansion",),
+    ),
+    single_replacement_probe(
+        name="lchs_partial_analysis_forms_every_point",
+        module="nwqlib.algorithms.lchs.analysis",
+        qualname="_chunks",
+        old="    total = plan._point_count()\n",
+        new="    total = len(tuple(plan._static_points()))\n",
+        pytest_args=(
+            "tests/test_lchs_primary.py::test_sampled_pair_run_reports_raw_partial_sums_and_continues_only_missing_rows",
+        ),
+    ),
+    single_replacement_probe(
+        name="lchs_analysis_resolves_each_row",
+        module="nwqlib.algorithms.lchs.analysis",
+        qualname="_chunks",
+        old="        realization = plan._point_realization(name,point.bindings)\n",
+        new="        realization = plan.resolve(name,bindings=point.bindings)\n",
+        pytest_args=(
+            "tests/test_lchs_primary.py::test_sampled_pair_run_reports_raw_partial_sums_and_continues_only_missing_rows",
+        ),
+    ),
+    single_replacement_probe(
+        name="profile_points_skip_static_axes",
+        module="nwqlib.backends.assessment",
+        qualname="_profile_points",
+        old="            if batch.axes and catalog:\n",
+        new="            if batch.axes:\n",
+        pytest_args=(
+            "tests/test_lchs_primary.py::test_sampled_pair_row_points_resolve_and_forecast_one_by_one",
+        ),
+    ),
+    single_replacement_probe(
+        name="lchs_qsp_evolution_planned_per_branch",
+        module="nwqlib.algorithms.lchs.sampled_qsp",
+        qualname="row_evolutions",
+        old="            if key not in memo:\n",
+        new="            if True:\n",
+        pytest_args=(
+            "tests/test_lchs_sampled_qsp.py::test_sampled_qsp_rows_match_exact_cross_terms_and_count_their_queries",
+        ),
+    ),
+    single_replacement_probe(
+        name="planning_memo_recomputes",
+        module="nwqlib.core.planning",
+        qualname="planning_memo",
+        old="    if memo is None:\n",
+        new="    if True:\n",
+        pytest_args=(
+            "tests/test_lchs_qsp_source.py::test_provider_enumeration_prepares_only_the_chosen_grid",
+            "tests/test_lchs_sampled_qsp.py::test_sampled_accuracy_selects_the_least_row_count_in_one_pass",
+        ),
+    ),
+    single_replacement_probe(
+        name="run_without_paid_budgets",
+        module="nwqlib._prepared_execution",
+        qualname="Run.__init__",
+        old="        limits = with_paid_budgets(limits, backend)\n",
+        new="        pass\n",
+        pytest_args=(
+            "tests/test_selected_runtime.py::test_a_run_fills_circuit_and_shot_budgets_only_for_a_backend_that_may_charge",
+        ),
+    ),
+    single_replacement_probe(
+        name="nwqec_output_text_copies_unchecked",
+        module="nwqlib.backends._auxiliary_process",
+        qualname="_compile_nwqec",
+        old="        if exceeds(4 * len(qasm), max_bytes):\n",
+        new="        if False:\n",
+        pytest_args=(
+            "tests/test_nwqec_compilation.py::test_child_forwards_exact_external_options_and_checks_four_copies_of_the_output_text",
+        ),
+    ),
+    single_replacement_probe(
+        name="estimate_batch_checked_through_one_point",
+        module="nwqlib._prepared_execution",
+        qualname="_static_points_workload",
+        old="        uniform = (point_shots is not None and kind in {\"counts\", \"pauli_expectation\", \"probabilities\"}\n",
+        new="        uniform = (point_shots is not None and kind in {\"counts\", \"pauli_expectation\", \"probabilities\", \"estimated_observable\"}\n",
+        pytest_args=(
+            "tests/test_ibm_backend.py::"
+            "test_each_point_of_an_estimator_batch_is_checked_before_the_first_preparation",
+        ),
+    ),
+    single_replacement_probe(
+        name="nwqsim_output_checked_only_by_runner",
+        module="nwqlib.backends.nwqsim",
+        qualname="NWQSimBackend._check_output",
+        old="        if needed > self.max_output_bytes:\n",
+        new="        if False:\n",
+        pytest_args=(
+            "tests/test_nwqsim_targets.py::"
+            "test_result_values_and_side_files_beyond_max_output_bytes_refuse_at_preparation",
+        ),
+    ),
+    single_replacement_probe(
+        name="projected_coefficient_checked_after_simulation",
+        module="nwqlib._quantum_readout",
+        qualname="_projected_fields",
+        old=" or not _binary64(value) for label, value in terms)):\n",
+        new=" for label, value in terms)):\n",
+        pytest_args=(
+            "tests/test_observation_schedule.py::"
+            "test_a_projected_coefficient_beyond_binary64_is_refused_before_native_preparation",
+        ),
+    ),
+    single_replacement_probe(
+        name="opening_direct_preparation_built_as_tree",
+        module="nwqlib.backends.qiskit_aer",
+        qualname="_prepare_aer_execution",
+        old="        inject = (initial_state is not None and \"set_statevector\" in decompose.native_types\n",
+        new="        inject = (False and \"set_statevector\" in decompose.native_types\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::"
+            "test_an_opening_direct_preparation_is_set_as_the_aer_state_inside_the_error_bounds",
+        ),
+    ),
+    single_replacement_probe(
+        name="unexecuted_opening_preparation_set_directly",
+        module="nwqlib.backends.connection",
+        qualname="AerBackend.prepare",
+        old="                observes=(max(position) if trajectory is not None else position) >= 1,\n",
+        new="                observes=(max(position) if trajectory is not None else position) >= 0,\n",
+        pytest_args=(
+            "tests/test_observation_schedule.py::"
+            "test_readouts_around_an_opening_direct_preparation_keep_their_order",
+        ),
+    ),
+    single_replacement_probe(
+        name="compiled_inventory_without_the_replaced_preparation",
+        module="nwqlib.backends.inspection",
+        qualname="inspect_circuit_resources",
+        old="        if initial_state is not None:\n",
+        new="        if False:\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::"
+            "test_an_opening_direct_preparation_is_set_as_the_aer_state_inside_the_error_bounds",
+        ),
+    ),
+    single_replacement_probe(
+        name="compiled_preparation_built_from_the_set_vector",
+        module="nwqlib.backends.qiskit_aer",
+        qualname="_prepare_aer_execution",
+        old="            source_state = initial_state[0]\n",
+        new=("            source_state = np.array(_state_view(next(item for item in execution_circuit.data"
+             " if item.name == 'set_statevector').operation.params[0], initial_state[1],"
+             " execution_circuit.num_qubits)).reshape(-1)\n"),
+        pytest_args=(
+            "tests/test_prepared_execution.py::"
+            "test_a_compiled_inventory_builds_a_directly_set_preparation_from_its_own_vector",
+        ),
+    ),
+    single_replacement_probe(
+        name="prepared_vector_not_saved_for_inspection",
+        module="nwqlib._run_archive",
+        qualname="_cache_entry",
+        old="                    initial_state=files.write_array(name + \"-initial-state.npy\", state))\n",
+        new="                    initial_state=None)\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::"
+            "test_a_compiled_inventory_builds_a_directly_set_preparation_from_its_own_vector",
+        ),
+    ),
+    single_replacement_probe(
+        name="saved_source_vector_read_at_restoration",
+        module="nwqlib._prepared_execution",
+        qualname="PreparedHandle._restore_native",
+        old="                                                 else partial(files.read_array, initial_state))\n",
+        new="                                                 else (lambda array: lambda: array)(files.read_array(initial_state)))\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::"
+            "test_a_compiled_inventory_builds_a_directly_set_preparation_from_its_own_vector",
+        ),
+    ),
+    single_replacement_probe(
+        name="rotation_synthesis_applied_to_nonbasis_gates",
+        module="nwqlib.resources.fold",
+        qualname="_Fold.primitive",
+        old="                if self.rotation_t is not None and phase and width == 1:\n",
+        new="                if self.rotation_t is not None:\n",
+        pytest_args=(
+            "tests/test_resource_fold.py::test_typical_rotation_synthesis_gives_t_only_for_single_qubit_phases",
+        ),
+    ),
+    single_replacement_probe(
+        name="rotation_synthesis_without_the_selected_source",
+        module="nwqlib.resources.fold",
+        qualname="_Fold.__init__",
+        old="                           and context.synthesis == TYPICAL_ROTATION_SYNTHESIS else None)\n",
+        new="                           else None)\n",
+        pytest_args=(
+            "tests/test_resource_fold.py::test_typical_rotation_synthesis_gives_t_only_for_single_qubit_phases",
+        ),
+    ),
+    single_replacement_probe(
+        name="synthesized_t_count_labeled_exact",
+        module="nwqlib.resources.fold",
+        qualname="_Fold.primitive",
+        old="                    result[\"t\"] = _Value(counts[\"t\"] + synthesized * self.rotation_t, \"estimate\",\n",
+        new="                    result[\"t\"] = _Value(counts[\"t\"] + synthesized * self.rotation_t, \"exact\",\n",
+        pytest_args=(
+            "tests/test_resource_fold.py::test_typical_rotation_synthesis_gives_t_only_for_single_qubit_phases",
+        ),
+    ),
+    single_replacement_probe(
+        name="equal_exact_branch_counts_labeled_upper_bound",
+        module="nwqlib.resources.fold",
+        qualname="_Fold.merge_cost",
+        old="            invariant = branch and a.value == b.value and a.interpretation == b.interpretation == \"exact\"\n",
+        new="            invariant = False\n",
+        pytest_args=(
+            "tests/test_resource_fold.py::test_branch_adaptive_and_shot_populations_remain_conditional",
+            "tests/test_qre_projection.py::"
+            "test_a_resource_estimate_of_one_execution_is_projected_with_a_t_count_independent_of_shots",
+        ),
+    ),
+    single_replacement_probe(
+        name="workload_totals_projected_as_one_execution",
+        module="nwqlib.backends.qre",
+        qualname="_estimated_counts",
+        old="    if population not in {(0, 0, 0), (1, 1, 0)}:\n",
+        new="    if population is None:\n",
+        pytest_args=(
+            "tests/test_qre_projection.py::"
+            "test_a_resource_estimate_of_one_execution_is_projected_with_a_t_count_independent_of_shots",
+        ),
+    ),
+    single_replacement_probe(
+        name="aer_template_rows_share_the_compiled_runtime",
+        module="nwqlib.backends.connection",
+        qualname="AerBackend.bind_template",
+        old="        return bound, dict(runtime=runtime, counts_sampling=CountsSampling(kind=\"fixed_seed\", seed=runtime.seed))\n",
+        new="        return bound, {}\n",
+        pytest_args=(
+            "tests/test_static_runtime.py::test_aer_binds_sampled_pair_rows_to_their_templates_with_each_rows_seed",
+        ),
+    ),
+    single_replacement_probe(
+        name="aer_template_rows_run_with_the_template_seed",
+        module="nwqlib.backends.qiskit_aer",
+        qualname="_submit_aer_execution",
+        old="        options[\"seed_simulator\"] = prepared.metadata[\"seed_simulator\"]\n",
+        new="        pass\n",
+        pytest_args=(
+            "tests/test_static_runtime.py::test_aer_binds_sampled_pair_rows_to_their_templates_with_each_rows_seed",
+        ),
+    ),
+    single_replacement_probe(
+        name="aer_template_rows_lowered_one_by_one",
+        module="nwqlib.backends.connection",
+        qualname="AerBackend",
+        old="    supports_template_pubs: ClassVar[bool] = True\n",
+        new="    supports_template_pubs: ClassVar[bool] = False\n",
+        pytest_args=(
+            "tests/test_static_runtime.py::test_aer_binds_sampled_pair_rows_to_their_templates_with_each_rows_seed",
+        ),
+    ),
+    single_replacement_probe(
+        name="aer_template_needing_values_bound",
+        module="nwqlib.backends.connection",
+        qualname="AerBackend.translates_template",
+        old="        return _standard_gate_parameters(circuit)\n",
+        new="        return True\n",
+        pytest_args=(
+            "tests/test_static_runtime.py::test_aer_prepares_the_rows_of_templates_it_cannot_bind_one_by_one",
+        ),
+    ),
+    single_replacement_probe(
+        name="template_without_parameters_bound",
+        module="nwqlib._prepared_execution",
+        qualname="_row_templates",
+        old="    return tuple(template for template in templates if template.parameters) or None\n",
+        new="    return tuple(templates) or None\n",
+        pytest_args=(
+            "tests/test_static_runtime.py::test_aer_prepares_the_rows_of_templates_it_cannot_bind_one_by_one",
+        ),
+    ),
+    single_replacement_probe(
+        name="aer_exact_readout_points_offered_for_templates",
+        module="nwqlib._prepared_execution",
+        qualname="_row_templates",
+        old="    if kinds is not None:\n",
+        new="    if False:\n",
+        pytest_args=(
+            "tests/test_static_runtime.py::"
+            "test_aer_asks_the_method_only_about_counts_points_and_streams_a_plan_without_templates",
+        ),
+    ),
+    single_replacement_probe(
+        name="static_points_collected_without_templates",
+        module="nwqlib._prepared_execution",
+        qualname="_groups_points",
+        old="    if not getattr(run.backend, \"supports_template_pubs\", False) or not plan.method.has_row_templates(plan):\n",
+        new="    if not getattr(run.backend, \"supports_template_pubs\", False):\n",
+        pytest_args=(
+            "tests/test_static_runtime.py::"
+            "test_aer_asks_the_method_only_about_counts_points_and_streams_a_plan_without_templates",
+        ),
+    ),
+    single_replacement_probe(
+        name="reopened_set_statevector_left_plain",
+        module="nwqlib.backends.qiskit_aer",
+        qualname="_restore_aer_readout",
+        old="            circuit.data[index] = item.replace(operation=SetStatevector(operation.params[0]))\n",
+        new="            pass\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::test_a_compiled_inventory_builds_a_directly_set_preparation_from_its_own_vector",
+        ),
+    ),
+    single_replacement_probe(
+        name="instructions_after_the_last_readout_translated",
+        module="nwqlib.backends.qiskit_aer",
+        qualname="_prepare_aer_execution",
+        old="        elif stop < len(circuit.data):\n",
+        new="        elif False:\n",
+        pytest_args=(
+            "tests/test_observation_schedule.py::"
+            "test_readouts_around_an_opening_direct_preparation_keep_their_order",
+        ),
+    ),
+    single_replacement_probe(
+        name="initial_state_defect_left_out_of_state_error",
+        module="nwqlib.execution",
+        qualname="PreparedArtifact.state_error",
+        old="        return _add_up(native_state_error(self.native_operations, per_operation), self.initial_state_error), None\n",
+        new="        return native_state_error(self.native_operations, per_operation), None\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::"
+            "test_an_opening_direct_preparation_is_set_as_the_aer_state_inside_the_error_bounds",
+        ),
+    ),
+    single_replacement_probe(
+        name="injected_set_statevector_listed_as_exclusion",
+        module="nwqlib.backends.qiskit_aer",
+        qualname="_probability_window_exclusions",
+        old="        excluded.discard(\"set_statevector\")\n",
+        new="        pass\n",
+        pytest_args=(
+            "tests/test_prepared_execution.py::"
+            "test_an_opening_direct_preparation_is_set_as_the_aer_state_inside_the_error_bounds",
+        ),
+    ),
+    single_replacement_probe(
+        name="ionq_histogram_checked_only_after_the_job",
+        module="nwqlib.backends.ionq",
+        qualname="IonQBackend.prepare",
+        old="        if histogram > self.max_response_bytes:\n",
+        new="        if False:\n",
+        pytest_args=(
+            "tests/test_ionq_backend.py::"
+            "test_a_histogram_beyond_max_response_bytes_is_refused_at_preparation",
+        ),
+    ),
+    single_replacement_probe(
+        name="upload_started_beyond_data_limit",
+        module="nwqlib._remote_preparation",
+        qualname="_advance",
+        old="            # data exceed max_data_bytes (Run._write).\n            run.check_capacity()\n",
+        new="            # data exceed max_data_bytes (Run._write).\n",
+        pytest_args=(
+            "tests/test_remote_preparation.py::test_a_run_beyond_its_data_limit_starts_no_upload_or_compilation",
+        ),
+    ),
+    single_replacement_probe(
+        name="compilation_started_beyond_data_limit",
+        module="nwqlib._remote_preparation",
+        qualname="_advance",
+        old="            # A compilation is new remote work, refused like an upload.\n            run.check_capacity()\n",
+        new="            # A compilation is new remote work, refused like an upload.\n",
+        pytest_args=(
+            "tests/test_remote_preparation.py::test_a_run_beyond_its_data_limit_starts_no_upload_or_compilation",
+        ),
+    ),
+    single_replacement_probe(
+        name="admitted_outcome_refused_by_data_limit",
+        module="nwqlib._prepared_execution",
+        qualname="Run._settles",
+        old="        if reserve_output or max_data_bytes is not _RUN_DATA_LIMIT or deleted:\n",
+        new="        if True:\n",
+        pytest_args=(
+            "tests/test_observation_schedule.py::test_an_admitted_aer_acquisition_is_saved_beyond_the_data_limit",
+        ),
+    ),
+    single_replacement_probe(
+        name="derived_rows_settle_beyond_data_limit",
+        module="nwqlib._prepared_execution",
+        qualname="Run._settles",
+        old="                settled = False\n",
+        new="                settled = True\n",
+        pytest_args=(
+            "tests/test_observation_schedule.py::test_an_admitted_aer_acquisition_is_saved_beyond_the_data_limit",
         ),
     ),
 )

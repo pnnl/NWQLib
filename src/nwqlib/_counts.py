@@ -8,8 +8,8 @@ circuit, hashes no saved circuit data, does no numerical work and runs nothing.
 from dataclasses import dataclass
 from hashlib import sha256
 
+from nwqlib._limits import memory_limit
 from nwqlib.execution import PreparedArtifact
-from nwqlib.operators.access import DEFAULT_INPUT_BYTES
 
 
 @dataclass(frozen=True)
@@ -44,7 +44,7 @@ class CountsSources:
     likelihood controllers.
     """
 
-    def __init__(self, receipt_for, acquisition_for, *, max_bytes=DEFAULT_INPUT_BYTES):
+    def __init__(self, receipt_for, acquisition_for, *, max_bytes=None):
         self.receipt_for, self.acquisition_for = receipt_for, acquisition_for
         self.max_bytes = max_bytes
         self.preparations = {}
@@ -54,10 +54,12 @@ class CountsSources:
         """Return "sha256:" plus the hex digest of the _run_journal JSON encoding of fields."""
         from nwqlib._run_journal import encode
         # Bound the portable scalar JSON plus UTF-8 copy before encoding. The
-        # bound, a third of max_bytes, is an untuned allowance. The Run
-        # accounts for cumulative receipt and data storage. No backend circuit
-        # or payload is hashed here.
-        encoded = encode(fields, self.max_bytes // 3)
+        # bound, a third of max_bytes or of the physical memory when it is
+        # None, is an untuned allowance. Without a reported memory size no
+        # bound applies. The Run accounts for cumulative receipt and data
+        # storage. No backend circuit or payload is hashed here.
+        limit = memory_limit(self.max_bytes)
+        encoded = encode(fields, None if limit is None else limit // 3)
         return "sha256:" + sha256(encoded.encode("utf-8")).hexdigest()
 
     def _preparation(self, prepared_id):

@@ -1,5 +1,6 @@
 """Finite classical LCHS evaluation and exact initial-condition identities."""
 
+from nwqlib._limits import ResourceLimitError, exceeds
 from math import fsum
 from dataclasses import replace
 from typing import NamedTuple
@@ -13,8 +14,7 @@ from nwqlib.core.records import Float64, InputRef
 from nwqlib.evidence.error_model import exact_readout_sampling
 from nwqlib.execution import KernelApplication, ScalarValue
 from nwqlib.evidence.records import Evidence
-from nwqlib.ir import Binding, ClassicalStage, Definition, Sequence
-from nwqlib.ir.validation import admitted_program
+from nwqlib.ir import Binding, ClassicalStage, Definition, Program, Sequence
 from nwqlib.operators.access import _check_bytes
 from nwqlib.problems.records import Solution, StateVector, NormSquared, NormalizedExpectation, QuadraticForm, Samples
 from nwqlib.problems.inputs import compose_recovery
@@ -23,10 +23,46 @@ from nwqlib._run_journal import _json_bound
 from nwqlib.resources.records import ResourceLaw, Workspace
 from .primary_records import METHOD, LCHSReconstruction, LCHSAnalysis
 from .analysis import error_model, fact, result_fields
-from .solution_error_budget import psd_recovery, psd_recovery_exponent, psd_recovery_part, psd_recovery_scale
+from .solution_error_budget import (application_weight, psd_recovery, psd_recovery_exponent, psd_recovery_part,
+                                    psd_recovery_scale)
 
 
-def plan_initial(method,problem,*,output,execution,shots,rng,zero):
+def initial_accuracy_shots(method,problem,*,output,accuracy):
+    """Return the shots of a sampling-accuracy request on the no-evolution route, or None when it acquires nothing.
+
+    ``plan_initial`` answers a NormSquared and a zero physical quadratic form
+    from the input, with no data collection, so no count is selected. A
+    nonzero initial QuadraticForm measures the initial-state PREP in the
+    qubit-wise commuting groups of ``quantum.lchs_readout``, with no success
+    qubits and the recovery ``Gamma = ||u0||``, the input's PhysicalScale
+    (``_initial_acquisition``), so its count is the AH1 law
+    ``analysis.sufficient_counts`` at that recovery
+    (``quantum.sampling_readout``).
+    """
+    return _initial_accuracy(method,problem,output=output,accuracy=accuracy)[0]
+
+
+def _initial_accuracy(method,problem,*,output,accuracy):
+    """Return ``(shots, readout)`` of `initial_accuracy_shots`, ``(None, None)`` when nothing is acquired.
+
+    ``readout`` is the ``(terms, settings, groups, comparisons)`` grouping of
+    ``quantum.sampling_readout``, on the same system qubits as
+    ``_initial_acquisition``, so the plan pass emits it without grouping again.
+    """
+    from nwqlib.algorithms.protocol import ApplicabilityError
+    from .quantum import sampling_readout
+    scale = problem.initial_state.preparation.physical_scale
+    if not isinstance(output,QuadraticForm) or scale.mantissa==0:
+        return None,None
+    q = max(1,(problem.dimension-1).bit_length())
+    target,readout = sampling_readout(problem,output,accuracy,num_qubits=q,method=method)
+    shots = target.shots(compose_recovery(scale))
+    if shots is None:
+        raise ApplicabilityError("the initial-state counts for this sampling radius exceed the shots per setting that a saved Plan can hold")
+    return shots,readout
+
+
+def plan_initial(method,problem,*,output,execution,shots,rng,zero,accuracy=None):
     """Plan the no-evolution case, zero elapsed time or all physical inputs zero.
 
     The solution is the initial vector itself, so no quadrature, eigensolve
@@ -35,8 +71,16 @@ def plan_initial(method,problem,*,output,execution,shots,rng,zero):
     vector uses one recorded classical computation. Samples, quantum
     observables and compact states use the initial-state PREP followed by
     the requested amplitude, exact scalar or sampled readout. A compact zero state has no normalized PREP, so a requested physical
-    zero array is formed once and unit outputs are undefined.
+    zero array is formed once and unit outputs are undefined. With an
+    ``accuracy`` request, ``shots`` must be its count
+    (``initial_accuracy_shots``), the readout uses the grouping that count
+    was computed from, and the Plan records the request.
     """
+    readout = None
+    if accuracy is not None:
+        selected,readout = _initial_accuracy(method,problem,output=output,accuracy=accuracy)
+        if shots!=selected:
+            raise ValueError("actual shots differ from the accuracy-selected allocation of the initial-state readout")
     state = problem.initial_state
     scale = state.preparation.physical_scale
     if isinstance(output,Samples) and scale.mantissa==0:
@@ -63,16 +107,21 @@ def plan_initial(method,problem,*,output,execution,shots,rng,zero):
         if execution != 'quantum':
             from nwqlib.algorithms.protocol import ApplicabilityError
             raise ApplicabilityError('classical initial-condition output needs an explicit vector; select quantum execution to acquire a prepared state')
-        return _initial_acquisition(method,problem,rec,output=output,shots=shots,rng=rng)
-    construction = SelectedConstruction(program=admitted_program('LCHS.max_admission_steps',method.max_admission_steps,root='initial',definitions=(Definition(id='initial',node=Sequence()),)),selections=())
+        return _initial_acquisition(method,problem,rec,output=output,shots=shots,rng=rng,accuracy=accuracy,
+            readout=readout)
+    construction = SelectedConstruction(program=Program(root='initial',definitions=(Definition(id='initial',node=Sequence()),)),selections=())
     plan = Plan(problem=problem,method=method,output=output,execution=execution,shots=shots,randomness=rng.snapshot(),
-        construction=construction,experiments=(),reconstruction=rec,error_model=error_model(problem,output,construction,shots=None),
+        selection_accuracy=accuracy,construction=construction,experiments=(),reconstruction=rec,error_model=error_model(problem,output,construction,shots=None),
         assumptions=('initial-condition identity; no evolution or circuit acquisition',))
     return plan._bind()
 
 
-def _initial_acquisition(method,problem,rec,*,output,shots,rng):
-    """Plan readout of the prepared initial state, with recovery by its physical norm."""
+def _initial_acquisition(method,problem,rec,*,output,shots,rng,accuracy=None,readout=None):
+    """Plan readout of the prepared initial state, with recovery by its physical norm.
+
+    ``readout`` is the accuracy pass's grouping from ``_initial_accuracy``,
+    or None to group here.
+    """
     from nwqlib.blocks import select_preparation
     from nwqlib.ir import BlockCall, PortMap
     from nwqlib.problems.inputs import compose_recovery
@@ -86,13 +135,14 @@ def _initial_acquisition(method,problem,rec,*,output,shots,rng):
     else:
         block = select_preparation('initial_prep',state,per_bit=True)
     coordinates = tuple(range(q))
-    terms = observable_terms(problem,output,max_bytes=method.max_bytes)
+    terms = observable_terms(problem,output,max_bytes=method.max_bytes) if readout is None else readout[0]
     rec = rec.revise(encoded_dimension=1<<q,system_bits=coordinates,recovery=compose_recovery(state.preparation.physical_scale),
         terms=terms,selected_backend='initial_preparation_readout')
     definition = Definition(id='initial_prep',node=BlockCall(signature='initial_prep',
         ports=tuple(PortMap(port=f'system_{j}',wire=f'bit_{j}') for j in range(q))))
     return finish_quantum_plan(method,problem,rec,output=output,shots=shots,rng=rng,blocks=[block],
-        definitions=[definition],calls=['initial_prep'])
+        definitions=[definition],calls=['initial_prep'],selection_accuracy=accuracy,
+        readout=None if readout is None else readout[1:])
 
 
 def analyze_initial(plan,data):
@@ -146,6 +196,8 @@ def _initial_kernel(method,problem,output,kind):
         # Fails early when the vector data is missing. The call returns the
         # existing immutable array without a copy.
         state.physical_vector()
+        # The allowance includes the exceptional scaled operator copy, which
+        # ordinary observable scales do not make.
         from nwqlib.operators.inputs import _scaled_observable_requirements
         workspace,products=_scaled_observable_requirements(output.observable)
         # Norm/subnormal refinement and the original binary vector frame.
@@ -160,8 +212,9 @@ def _initial_kernel(method,problem,output,kind):
         inputs,labels,frames,dependencies=(state.reference,),('norm_squared',),('physical',),('numpy',)
         outputs=(ArrayOutput(name='solution' if isinstance(output,Solution) else 'state_vector',kind='vector',
             basis=problem.basis,frame='physical',global_phase='physical' if isinstance(output,Solution) else output.global_phase),)
-    if work>method.max_select_work:
-        raise ValueError('initial output computation exceeds max_select_work')
+    if exceeds(work,method.max_select_work):
+        raise ResourceLimitError(f'initial output computation exceeds max_select_work: it needs {work} work units, '
+                                 f'max_select_work={method.max_select_work}')
     _check_bytes(workspace,method.max_bytes,'initial output arrays')
     receipt = _initial_application(kind,dimension,work)
     return SelectedKernel(name=kind,implementation=METHOD,inputs=inputs,scalars=labels,scalar_frames=frames,
@@ -193,7 +246,7 @@ def _plan_initial_host(method,problem,rec,*,output,execution,shots,rng,kind):
     kernel=_initial_kernel(method,problem,output,kind)
     rec=rec.revise(selected_backend=kind,selected_select='no_evolution',
         classical_work=(('size_units',kernel.invocation_work),))
-    program=admitted_program('LCHS.max_admission_steps',method.max_admission_steps,root=kind,definitions=(Definition(id=kind,node=ClassicalStage(implementation=METHOD,boundary='host',kernel=kind)),))
+    program=Program(root=kind,definitions=(Definition(id=kind,node=ClassicalStage(implementation=METHOD,boundary='host',kernel=kind)),))
     construction=SelectedConstruction(program=program,selections=(),kernels=(kernel,))
     chosen=Plan(problem=problem,method=method,output=output,execution=execution,shots=shots,randomness=rng.snapshot(),
         construction=construction,experiments=(Experiment(name='initial_output',setting='initial_output',
@@ -251,22 +304,20 @@ def plan_classical(method,problem,data,*,output,rng):
     source_scale = None if problem.source is None else problem.source.preparation.physical_scale
     source_nodes = source_weights = ()
     if source_scale is not None and source_scale.mantissa!=0:
-        # Legendre rule for m nodes: 32*m**2 for the m-by-m Jacobi eigensolve
-        # arrays, 32*m for nodes and weights and their mapped copies, and m**3
-        # work for the eigensolve.
-        _check_bytes(32*method.duhamel_nodes**2+32*method.duhamel_nodes,method.max_bytes,'Duhamel quadrature')
-        if method.duhamel_nodes**3>method.max_quadrature_work:
-            raise ValueError(
-                f'Duhamel quadrature exceeds max_quadrature_work: it needs {method.duhamel_nodes**3} work units '
-                f'(duhamel_nodes**3), LCHS.max_quadrature_work={method.max_quadrature_work}. '
-                f'Raise LCHS.max_quadrature_work to at least {method.duhamel_nodes**3}.')
+        # The tridiagonal Legendre rule uses linear arrays and quadratic work.
+        _check_bytes(128*method.duhamel_nodes,method.max_bytes,'Duhamel quadrature')
+        if exceeds(method.duhamel_nodes**2,method.max_quadrature_work):
+            raise ResourceLimitError(
+                f'Duhamel quadrature exceeds max_quadrature_work: it needs {method.duhamel_nodes**2} work units '
+                f'(duhamel_nodes**2), LCHS.max_quadrature_work={method.max_quadrature_work}. '
+                f'Raise LCHS.max_quadrature_work to at least {method.duhamel_nodes**2}.')
         source_nodes,source_weights = duhamel_quadrature(problem.elapsed_time,method.duhamel_nodes)
-    rec = LCHSReconstruction(elapsed_time=problem.elapsed_time,dimension=problem.dimension,encoded_dimension=len(data.initial),
+    rec = LCHSReconstruction(elapsed_time=problem.elapsed_time,dimension=problem.dimension,encoded_dimension=data.generator.encoded_dimension,
         has_source=problem.source is not None,initial_scale=problem.initial_state.preparation.physical_scale,source_scale=source_scale,
         coefficient_l1_norm=data.coefficient_plan.coefficient_l1_norm,physical_branches=len(data.coefficient_plan.coefficients),
         padded_branches=1<<(len(data.coefficient_plan.coefficients)-1).bit_length(),
-        selected_backend=method.hamiltonian_evolution_backend,selected_select='finite_classical_quadrature',
-        psd_premise='numerical' if data.quadrature.numerical_psd_premise_satisfied else 'unavailable',
+        selected_backend=data.backend,selected_select='finite_classical_quadrature',
+        psd_premise='numerical' if data.quadrature.psd_premise_satisfied else 'unavailable',
         psd_shift=data.quadrature.conversion['psd_shift'],l_norm=data.quadrature.l_norm,
         source_nodes=tuple(map(float,source_nodes)),source_weights=tuple(map(float,source_weights)),
         kernel_approximation_bound=data.quadrature.coefficient_plan.quadrature.approximate_lchs_error_bound,
@@ -281,7 +332,7 @@ def plan_classical(method,problem,data,*,output,rng):
             global_phase='physical' if isinstance(output,Solution) else output.global_phase),)
     # Count repeated dense-kernel work across all coefficient and source nodes
     # before admitting the host invocation, not only the size of one matrix.
-    if method.hamiltonian_evolution_backend != 'dense_exact':
+    if data.backend != 'dense_exact':
         from .host_pf import select_actions
         from .parameters import freeze_selected
         actions,counts,workspace = select_actions(data,elapsed=problem.elapsed_time,
@@ -293,9 +344,11 @@ def plan_classical(method,problem,data,*,output,rng):
         # sum (_spectral_host_requirements).
         starts = ((0.,) if rec.initial_scale.mantissa!=0 else ())+tuple(map(float,source_nodes))
         counts,phase_bytes = _classical_work(data,problem.elapsed_time,starts)
-        workspace = 32*len(data.initial)**2+128*len(data.initial)+phase_bytes
+        workspace = 32*data.generator.encoded_dimension**2+128*data.generator.encoded_dimension+phase_bytes
     work = counts['size_units']
     if observable:
+        # The allowance includes the exceptional scaled operator copy, which
+        # ordinary observable scales do not make.
         from nwqlib.operators.inputs import _scaled_observable_requirements
         observable_bytes,observable_work = _scaled_observable_requirements(output.observable)
         work += observable_work
@@ -303,17 +356,17 @@ def plan_classical(method,problem,data,*,output,rng):
         counts['observable_actions'] = 1
         workspace += observable_bytes
     rec = rec.revise(classical_work=tuple(counts.items()))
-    if work>method.max_select_work:
-        raise ValueError('selected classical LCHS dense-kernel work exceeds max_select_work')
+    if exceeds(work,method.max_select_work):
+        raise ResourceLimitError(f'selected classical LCHS dense-kernel work exceeds max_select_work: it needs {work} '
+                                 f'work units, max_select_work={method.max_select_work}')
     _check_bytes(workspace,method.max_bytes,'classical LCHS arrays')
     # Every component input and application receipt is selected by now. The
     # Plan publishes the same application sums that execution records, and
-    # the kernel declares the receipts' JSON size bound, the measure that
-    # completion admission uses. The Run reserves it with the outputs, so the
-    # receipts do not spend the provider-metadata allowance.
+    # the kernel declares the receipts' JSON size bound, which the Run
+    # reserves with the outputs before the invocation runs.
     receipts = tuple(_application(method,problem,rec,index,planned)
         for index,planned in enumerate(_planned_applications(method,problem,rec,data)))
-    components = _summed_components(method,problem,[receipt.facts for receipt in receipts])+_duhamel_component(problem,rec)
+    components = _summed_components(rec.selected_backend,problem,[receipt.facts for receipt in receipts])+_duhamel_component(problem,rec)
     from .parameters import selected_identity
     selection = InputRef(identity=selected_identity(data,problem,method),representation='selected_lchs_parameters',source=METHOD)
     kernel = SelectedKernel(name='lchs',implementation=METHOD,
@@ -326,7 +379,7 @@ def plan_classical(method,problem,data,*,output,rng):
             evidence=Evidence(kind='proved_relation',source=METHOD),assumptions=('selected vector/rotation/dense-kernel size proxy; CPU and opaque library workspaces are not bounded',)),),
         workspace=(Workspace(location='host',purpose='workspace',bytes=workspace,source=METHOD),
                    Workspace(location='host',purpose='workspace',bytes=None,source=METHOD)))
-    program = admitted_program('LCHS.max_admission_steps',method.max_admission_steps,root='lchs',definitions=(Definition(id='lchs',node=ClassicalStage(implementation=METHOD,boundary='host',kernel='lchs')),))
+    program = Program(root='lchs',definitions=(Definition(id='lchs',node=ClassicalStage(implementation=METHOD,boundary='host',kernel='lchs')),))
     construction = SelectedConstruction(program=program,selections=(),kernels=(kernel,))
     plan = Plan(problem=problem,method=method,output=output,execution='classical',shots=None,randomness=rng.snapshot(),construction=construction,
         experiments=(Experiment(name='solution',setting='solution',observation=ObservationSpec(kind='host_scalars',labels=labels)),),
@@ -350,12 +403,11 @@ def _classical_work(data,elapsed,starts):
         work, and the phase bytes of the sum beyond its inputs in memory.
     """
     from .time_independent_terms import _spectral_host_requirements
-    dimension,nodes = len(data.initial),data.quadrature.k_nodes
-    quad = data.quadrature
-    identity = not (np.any(quad.l_part) or np.any(quad.h_part)) or not any(elapsed-start for start in starts)
-    eigensystems = 0 if identity else (1 if not np.any(quad.l_part) else len(nodes))
+    dimension,nodes = data.generator.encoded_dimension,data.quadrature.k_nodes
+    identity = data.generator.zero_evolution or not any(elapsed-start for start in starts)
+    eigensystems = 0 if identity else (1 if not np.any(data.dense_inputs().l_part) else len(nodes))
     # The initial and the source vector are the distinct inputs.
-    inputs = len({start==0. for start in starts}) if data.source is not None else 1
+    inputs = len({start==0. for start in starts}) if data.source_state is not None else 1
     work,phase_bytes = _spectral_host_requirements(dimension,nodes=len(nodes),applications=len(starts),
         inputs=inputs,eigensystems=eigensystems)
     matvecs = 0 if identity else len(nodes)*(inputs+1)
@@ -397,11 +449,6 @@ class _HostApplication(NamedTuple):
     norm: float | None
     raw: dict
 
-    @property
-    def scale(self):
-        """Return |weight|*norm, the physical input weight w_a of solution_error_budget, or None."""
-        return None if self.norm is None else abs(self.weight)*self.norm
-
 
 def _planned_applications(method,problem,rec,data):
     """Yield the planned classical applications in execution order, without evolving anything.
@@ -415,22 +462,25 @@ def _planned_applications(method,problem,rec,data):
     from these, and execution records the same ones. Yielding one
     application at a time keeps one set of node records in memory.
     """
-    from .time_independent_terms import lchs_quadrature_summary, _trotter_budget_quadrature_terms
+    from .time_independent_terms import lchs_quadrature_summary, _trotter_budget_quadrature_terms, _trotter_pruning_bound
     elapsed = problem.elapsed_time
     norms = (rec.initial_scale.as_float(),None if rec.source_scale is None else rec.source_scale.as_float())
     if data.host_actions is not None:
-        raw_base = lchs_quadrature_summary(data.quadrature,method=data.method,he_backend=method.hamiltonian_evolution_backend,
+        raw_base = lchs_quadrature_summary(data.quadrature,method=data.method,he_backend=rec.selected_backend,
             final_time=elapsed)
         for action in data.host_actions["applications"]:
             raw = dict(raw_base)
-            raw.update(_trotter_budget_quadrature_terms([position["record"] for position in action["positions"]],
-                coefficients=data.quadrature.coefficients,method=data.method))
+            records = [position["record"] for position in action["positions"]]
+            raw.update(_trotter_budget_quadrature_terms(records,coefficients=data.quadrature.coefficients,method=data.method))
+            if rec.selected_backend=='trotter':
+                raw['trotter_pruning_error_bound'] = _trotter_pruning_bound([record.pruned_l1_mass for record in records],
+                    coefficients=data.quadrature.coefficients,elapsed_time=elapsed-action['start'])
             yield _HostApplication(action['start'],action['weight'],action['source'],norms[int(action['source'])],raw)
         return
     # The shared quadrature record, without any node evolution.
     raw = lchs_quadrature_summary(data.quadrature,method=data.method,he_backend='dense_exact',
         final_time=elapsed)
-    if data.source is None:
+    if data.source_state is None:
         yield _HostApplication(0.,1.,False,norms[0],raw)
         return
     if rec.initial_scale.mantissa!=0:
@@ -439,35 +489,46 @@ def _planned_applications(method,problem,rec,data):
         yield _HostApplication(float(node),float(weight),True,norms[1],raw)
 
 
-def _component_names(method):
-    """Return the application-weighted component stages of the chosen backend."""
-    return ('kernel_approximation','k_quadrature')+(('trotter_synthesis',) if method.hamiltonian_evolution_backend!='dense_exact' else ())
+def _component_names(backend):
+    """Return the application-weighted component stages of the resolved backend (`LCHSReconstruction.selected_backend`).
+
+    A fixed step count also reports its known trotter_pruning part. The
+    budgeted bound already holds it in trotter_synthesis.
+    """
+    return (('kernel_approximation','k_quadrature')+(('trotter_synthesis',) if backend!='dense_exact' else ())
+            +(('trotter_pruning',) if backend=='trotter' else ()))
 
 
 def _application_facts(method,problem,rec,planned):
     """Return the physical component facts of one classical application.
 
     application_stage_bounds multiplies each recorded operator-level bound by
-    the input weight |w|*||u|| and the PSD recovery exp(shift*elapsed). A
-    stage without a usable value is unknown with its stage reason, for
-    example missing_stage:trotter_synthesis for a fixed step count.
+    the input weight |w|*||u|| and the PSD recovery exp(shift*elapsed). |w|
+    and ||u|| are passed separately, so their product is composed with the
+    other factors before the one binary64 conversion of each stage, even
+    when the product alone underflows. A stage without a usable value is
+    unknown with its stage reason, for example
+    missing_stage:trotter_synthesis for a fixed step count.
     """
-    from .solution_error_budget import _build_lchs_application_record,application_stage_bounds
+    from .solution_error_budget import _build_lchs_application_record,application_stage_bounds,pruning_stage
     from .time_independent_terms import _unusable_kernel_stage_names
-    names = _component_names(method)
+    names = _component_names(rec.selected_backend)
     frame = Solution().frame(problem)
     raw = planned.raw
-    if planned.scale is None:
+    if planned.norm is None:
         return tuple(fact(name,frame,reason='physical application scale is not representable') for name in names)
-    record = _build_lchs_application_record(raw,final_time=problem.elapsed_time,start_time=planned.start,weight=1.,
-        input_norm=planned.scale,backend=method.hamiltonian_evolution_backend,
+    record = _build_lchs_application_record(raw,final_time=problem.elapsed_time,start_time=planned.start,
+        weight=abs(planned.weight),input_norm=planned.norm,backend=rec.selected_backend,
         synthesis_error_bound=raw.get('trotter_synthesis_error_bound'))
-    values = application_stage_bounds(raw,applications=(record,),backend=method.hamiltonian_evolution_backend,
+    values = application_stage_bounds(raw,applications=(record,),backend=rec.selected_backend,
         psd_premise_satisfied=rec.psd_premise=='numerical',unusable_stages=_unusable_kernel_stage_names(raw))
+    if 'trotter_pruning' in names:
+        values['trotter_pruning'] = pruning_stage((record,),(raw['trotter_pruning_error_bound'],),
+            psd_premise_satisfied=rec.psd_premise=='numerical')
     return tuple(fact(name,frame,values[name][0],reason=values[name][1] or 'unavailable component') for name in names)
 
 
-def _summed_components(method,problem,application_facts):
+def _summed_components(backend,problem,application_facts):
     """Sum each component over all applications.
 
     plan_classical passes the facts of the planned applications, and
@@ -478,7 +539,7 @@ def _summed_components(method,problem,application_facts):
     """
     frame = Solution().frame(problem)
     components = []
-    for name in _component_names(method):
+    for name in _component_names(backend):
         facts = [item for application in application_facts for item in application if item.fact.quantity==name]
         missing = next((item.fact.reason for item in facts if not isinstance(item.fact.value,Float64)),None)
         if len(facts)!=len(application_facts):
@@ -509,6 +570,10 @@ def _application(method,problem,rec,index,planned):
 
     The arguments (start and elapsed time, source role, weight and recovery
     scale) are the schedule that selected_grid checks against the Plan. The
+    weight |w|*||u|| (``solution_error_budget.application_weight``) is
+    composed from the Plan's input PhysicalScale and bound only when binary64
+    represents it, so a positive weight is never recorded as zero; the
+    application, its schedule and its facts are kept either way. The
     per-node step records and routes are in the Plan's classical actions,
     beside the saved node table from which rotations are formed at
     application time. Execution applies them there, and selected_grid and
@@ -526,8 +591,9 @@ def _application(method,problem,rec,index,planned):
     recovery = psd_recovery(raw['psd_shift'],problem.elapsed_time-start)
     if recovery is not None:
         arguments += (Binding(parameter='recovery_scale',value=Float64(value=recovery)),)
-    if planned.scale is not None:
-        arguments += (Binding(parameter='weight',value=Float64(value=planned.scale)),)
+    weight = application_weight(planned.weight,rec.source_scale if planned.source else rec.initial_scale)
+    if weight is not None:
+        arguments += (Binding(parameter='weight',value=Float64(value=weight)),)
     return KernelApplication(name=f'application_{index}',implementation=METHOD,arguments=arguments,facts=facts)
 
 
@@ -568,13 +634,13 @@ def _evolve(plan,data):
     exponent = psd_recovery_exponent(shift,elapsed)
     quad = data.quadrature
     planned_applications = _planned_applications(plan.method,plan.problem,plan.reconstruction,data)
-    if data.source is None:
+    if data.source_state is None:
         planned, = planned_applications
         application = _application(plan.method,plan.problem,plan.reconstruction,0,planned)
         recovery = _carried_recovery(plan.reconstruction.initial_scale,shift,elapsed)
         scale = psd_recovery_part(shift,elapsed,exponent) if shift > 0 else 1.
-        solution = spectral_lchs_sum(quad.l_part,quad.h_part,quad.k_nodes,quad.coefficients,
-            ((elapsed,scale,data.initial_direction),))
+        solution = spectral_lchs_sum(data.dense.l_part,data.dense.h_part,quad.k_nodes,quad.coefficients,
+            ((elapsed,scale,data.dense.initial_direction),))
         return solution,recovery,(application,)
     specifications,applications = [],[]
     for index,planned in enumerate(planned_applications):
@@ -582,9 +648,9 @@ def _evolve(plan,data):
             raise ValueError('constant-source classical LCHS needs representable application norms')
         duration = elapsed-planned.start
         specifications.append((duration,planned.weight*psd_recovery_part(shift,duration,exponent),
-            data.source if planned.source else data.initial))
+            data.dense.source if planned.source else data.dense.initial))
         applications.append(_application(plan.method,plan.problem,plan.reconstruction,index,planned))
-    solution = spectral_lchs_sum(quad.l_part,quad.h_part,quad.k_nodes,quad.coefficients,tuple(specifications))
+    solution = spectral_lchs_sum(data.dense.l_part,data.dense.h_part,quad.k_nodes,quad.coefficients,tuple(specifications))
     return solution,_carried_recovery(None,shift,elapsed),tuple(applications)
 
 
@@ -599,14 +665,14 @@ def _evolve_pauli_actions(plan,data):
     shift = plan.reconstruction.psd_shift
     exponent = psd_recovery_exponent(shift,elapsed)
     planned_applications = _planned_applications(plan.method,plan.problem,plan.reconstruction,data)
-    solution = np.zeros(len(data.initial),dtype=complex)
+    solution = np.zeros(data.generator.encoded_dimension,dtype=complex)
     applications = []
     table = data.host_actions['nodes']
     for index,(action,planned) in enumerate(zip(data.host_actions['applications'],planned_applications,strict=True)):
-        if data.source is None:
-            vector = data.initial_direction
+        if data.source_state is None:
+            vector = data.dense.initial_direction
         else:
-            vector = data.source if planned.source else data.initial
+            vector = data.dense.source if planned.source else data.dense.initial
             if planned.norm is None:
                 raise ValueError('constant-source classical LCHS needs representable application norms')
         branch = np.zeros_like(solution)
@@ -616,7 +682,7 @@ def _evolve_pauli_actions(plan,data):
         branch *= psd_recovery_part(shift,elapsed-action['start'],exponent)
         solution += action['weight']*branch
         applications.append(_application(plan.method,plan.problem,plan.reconstruction,index,planned))
-    recovery = _carried_recovery(plan.reconstruction.initial_scale if data.source is None else None,shift,elapsed)
+    recovery = _carried_recovery(plan.reconstruction.initial_scale if data.source_state is None else None,shift,elapsed)
     return solution,recovery,tuple(applications)
 
 
@@ -665,15 +731,17 @@ def analyze_classical(plan,data,chunks):
     listed = tuple(term for term in plan.error_model.terms if term.role=='listed_only')
     summed = {}
     if listed:
-        summed = {item.fact.quantity:item for item in _summed_components(plan.method,plan.problem,
+        summed = {item.fact.quantity:item for item in _summed_components(plan.reconstruction.selected_backend,plan.problem,
             [application.facts for application in chunk.applications])}
     components = []
     for term in listed:
         if term.name!='duhamel_quadrature' and term.name not in summed:
             raise ValueError(f'classical LCHS Plan lists component {term.name!r} that its applications do not report')
         components.append(term.fact if term.name=='duhamel_quadrature' else summed[term.name])
+    from .analysis import adds_to_total
     from .solution_error_budget import propagate_physical_error
-    bound = propagate_physical_error(plan.output,(item.fact.value.value if isinstance(item.fact.value,Float64) else None for item in components),
+    bound = propagate_physical_error(plan.output,(item.fact.value.value if isinstance(item.fact.value,Float64) else None
+        for item in components if adds_to_total(item.fact.quantity)),
         radius=chunk.physical_scale.as_float(),observable_norm=None)
     facts = tuple(components)+(fact('algorithmic_approximation',plan.error_model.frame,bound),
         *exact_readout_sampling(plan,data.observations,random_draws=False))

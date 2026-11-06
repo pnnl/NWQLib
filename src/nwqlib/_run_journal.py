@@ -10,7 +10,8 @@ that the Method has collected, which gets the next positive ordinal.
 the saved observation arrays as ordered blocks of at most 1 MiB.
 
 Every change of a Run's state is one ``commit`` call, and SQLite makes it atomic.
-Row sizes are checked against the byte limit before any JSON text is allocated.
+Each row is encoded once and its UTF-8 size is checked against the byte limit
+before the row is written.
 Only cache rows and fields that an adaptive Method removed from its saved
 iteration state (the state its iteration code needs to choose the next
 experiment) can be deleted. Every other row records work that happened and is
@@ -30,6 +31,7 @@ import json
 import os
 from pathlib import Path
 
+from nwqlib._limits import exceeds
 from nwqlib.core.records import ContentID, FrozenArray, Record, Text
 from nwqlib.core.planning import Realization, RuntimeOptions
 from nwqlib.operators.access import Count
@@ -40,7 +42,13 @@ from nwqlib.operators.access import Count
 # A Method-owned Result field change may instead bump that Method's archive
 # format when load_run checks it before restoring the journal and validating
 # the concrete Result.
-RUN_FORMAT = "nwqlib.run/22"
+RUN_FORMAT = "nwqlib.run/24"
+# Size of the ordered blocks of a saved payload. 1 MiB keeps each value far
+# below SQLite's per-value length limit and bounds the buffers of later chunked
+# reads, whatever max_data_bytes is. LocalJournal.commit writes these blocks and
+# Run._saved_payload passes the size to ArtifactStore._hydrate, which checks it
+# against every block.
+PAYLOAD_BLOCK_BYTES = 1024**2
 
 
 def unsupported_run_format(found, where="saved run"):
@@ -56,9 +64,11 @@ def unsupported_run_format(found, where="saved run"):
 
 
 class WorkflowItem(Record):
-    """One experiment of a static Plan, with its random draw and the identifiers of its preparation and acquisition.
+    """One point of a static Plan, with its random draw and the identifiers of its preparation and acquisition.
 
-    One row per experiment, keyed by experiment name. The runtime seed is
+    One row per point of the Plan (`StaticPoint`), keyed by the point's key:
+    the experiment name, followed by the axis values for an experiment with
+    range axes. The runtime seed is
     drawn once when the row is created. The three identifiers are filled in as
     the preparation charge, the preparation record and the attempt commit,
     which lets a restart find the exact work of each experiment instead of
@@ -84,17 +94,15 @@ class PreparationCharge(Record):
         preparation_id: Identifier of this attempt.
         prepared_id: Content hash of the preparation record once the preparation completed, else None.
         checkpoint_sequence: Checkpoint of the iteration state that was current when the charge was made, or None.
-        synthesis_work: Exact dense synthesis work reserved against ``ExecutionLimits.max_synthesis_work`` during this preparation, each amount before its synthesis started.
-        synthesis_refused: Work of the synthesis that ``max_synthesis_work`` refused before it started, or None. A refused preparation made no synthesis or backend call after the refusal, and its experiment is left unprepared.
+        synthesis_work: Exact dense synthesis work that this preparation made, saved in the transaction that first saved its lowering result.
     """
 
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     execution: Text
     preparation_id: Text
     prepared_id: ContentID | None = None
     checkpoint_sequence: Count | None = None
     synthesis_work: Count = 0
-    synthesis_refused: Count | None = None
 
 
 def _portable(value):
@@ -125,9 +133,10 @@ def _json_bound(value, max_bytes):
     size. Finite binary64 values have an upper bound of 32 bytes. Reading
     Record fields avoids allocating its portable tree merely to count it. This
     bounds encoded bytes, not Python object storage, CPU time or process memory.
+    ``max_bytes=None`` sets no limit and returns the bound.
     """
-    if type(max_bytes) is not int or max_bytes < 0:
-        raise ValueError("JSON byte limit must be a nonnegative integer")
+    if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+        raise ValueError("JSON byte limit must be None or a nonnegative integer")
     pending, size = [(value, 0)], 0
     while pending:
         item, depth = pending.pop()
@@ -173,11 +182,11 @@ def _json_bound(value, max_bytes):
                 pending.append((child, depth + 1))
         elif isinstance(item, (list, tuple)):
             size += 2 + max(0, len(item)-1)
-            if len(item) > max_bytes:
+            if exceeds(len(item), max_bytes):
                 raise JSONBytesExceeded("run data exceeds the byte limit")
             pending.extend((child, depth + 1) for child in item)
         elif isinstance(item, str):
-            if len(item) > max_bytes:
+            if exceeds(len(item), max_bytes):
                 raise JSONBytesExceeded("run data exceeds the byte limit")
             size += len(json.encoder.encode_basestring(item).encode("utf-8"))
         elif item is None:
@@ -187,7 +196,7 @@ def _json_bound(value, max_bytes):
         elif type(item) is int:
             # log10(2) > 1/4, so this cheap lower bound rejects an enormous
             # integer before creating its decimal representation.
-            if item.bit_length()//4 > max_bytes:
+            if exceeds(item.bit_length()//4, max_bytes):
                 raise JSONBytesExceeded("run data exceeds the byte limit")
             size += len(str(item))
         elif type(item) is float:
@@ -200,31 +209,62 @@ def _json_bound(value, max_bytes):
             pending.append((_portable(item), depth + 1))
         else:
             raise TypeError("run data must contain portable records or JSON scalars")
-        if size > max_bytes:
+        if exceeds(size, max_bytes):
             raise JSONBytesExceeded("run data exceeds the byte limit")
     return size
 
 
+def _check_portable(value):
+    """Reject a container tree that the run log would not store faithfully, without measuring it.
+
+    Dictionaries need string keys, nesting is limited to 128 levels as in
+    ``_json_bound``, and every other item must be a Record, a FrozenArray, a
+    string, an exact int, float or bool, None, a datetime or an Enum. The walk
+    stops at a Record, whose typed fields its own validation admitted and
+    whose JSON form ``_portable`` produces.
+    """
+    pending = [(value, 0)]
+    while pending:
+        item, depth = pending.pop()
+        if depth > 128:
+            raise ValueError("run JSON nesting exceeds 128 levels")
+        if isinstance(item, dict):
+            if any(type(key) is not str for key in item):
+                raise TypeError("run JSON dictionaries require string keys")
+            pending.extend((child, depth + 1) for child in item.values())
+        elif isinstance(item, (list, tuple)):
+            pending.extend((child, depth + 1) for child in item)
+        elif not (item is None or type(item) in (bool, int, float)
+                  or isinstance(item, (Record, FrozenArray, str, datetime, Enum))):
+            raise TypeError("run data must contain portable records or JSON scalars")
+
+
 def _encode_admitted(value, max_bytes):
-    """Encode a value whose bound was already checked, and return its text and UTF-8 byte length.
+    """Encode a value and return its text and UTF-8 byte length, refusing it when that length exceeds ``max_bytes``.
 
     The compact separators and ``allow_nan=False`` give the spelling that
     ``_json_bound`` counts. Nonfinite floats raise instead of producing invalid
     JSON. The text is UTF-8-encoded once here, and its byte length travels
     with it to the size checks of ``Run._write`` and ``LocalJournal.commit``,
-    so no later step encodes it again to measure it. The actual size is still
-    checked against ``max_bytes``.
+    so no later step encodes it again to measure it.
     """
     text = json.dumps(value, default=_portable, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     size = len(text.encode("utf-8"))
-    if size > max_bytes:
+    if max_bytes is not None and size > max_bytes:
         raise JSONBytesExceeded("run data exceeds the byte limit")
     return text, size
 
 
 def encode(value, max_bytes):
-    """Check the size bound of ``value``, then encode it as compact JSON for the run log."""
-    _json_bound(value, max_bytes)
+    """Check the size bound of ``value``, then encode it as compact JSON for the run log.
+
+    ``max_bytes=None`` checks only that the run log can store the tree
+    (``_check_portable``), as ``encode_records`` does for admitted work.
+    """
+    if max_bytes is None:
+        _check_portable(value)
+    else:
+        _json_bound(value, max_bytes)
     return _encode_admitted(value, max_bytes)[0]
 
 
@@ -262,25 +302,34 @@ class _EncodedRecords:
 
 
 def encode_records(records, max_bytes):
-    """Check the size of a complete, finite set of row changes before producing any JSON output.
+    """Encode a complete, finite set of row changes and check their total size before any row is written.
 
-    Each row is bounded, then encoded once (``_encode_admitted``), in the
-    saved form of ``_row_value``.
+    Each row, in the saved form of ``_row_value``, passes ``_check_portable``
+    and is encoded once (``_encode_admitted``). Its measured UTF-8 length is
+    checked against the part of ``max_bytes`` that the earlier rows leave, so
+    a set whose encoded rows exceed ``max_bytes`` raises JSONBytesExceeded.
+    ``max_bytes=None`` sets no bound, for rows of admitted work, whose
+    decoding checks bound them, and for the run log's own writes. The text
+    of a row exists before its size is checked.
     """
     if not isinstance(records, (tuple, list)):
         raise TypeError("run row transitions require a finite tuple or list")
     records = tuple(records)
+    if records and max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+        raise ValueError("JSON byte limit must be a nonnegative integer or None")
     remaining = max_bytes
     keys = set()
-    values = []
+    encoded = []
     for kind, key, value in records:
         if (kind, key) in keys:
             raise ValueError("duplicate row in an atomic run transition")
         keys.add((kind, key))
         value = _row_value(kind, value)
-        remaining -= _json_bound(value, remaining)
-        values.append(value)
-    encoded = tuple(_encode_admitted(value, max_bytes) for value in values)
+        _check_portable(value)
+        text, size = _encode_admitted(value, remaining)
+        if remaining is not None:
+            remaining -= size
+        encoded.append((text, size))
     return _EncodedRecords(tuple((kind, key, text) for (kind, key, _), (text, _) in zip(records, encoded)),
                            tuple(size for _, size in encoded))
 
@@ -310,10 +359,16 @@ class LocalJournal:
     payloads avoid that per-value limit by being stored in blocks.
 
     Each ``records`` row stores the UTF-8 byte size of its JSON text in its
-    ``size`` column, written with the text. The column precedes the text in
-    the row, so the size limits, the saved total and the replaced sizes read
-    it without reading the text. Loading does not check the column against
-    the text of the Run's own run log.
+    ``size`` column, written with the text in the same transaction. The
+    column precedes the text in the row, so a reopened Run restores its
+    saved sizes and total from it without reading the text
+    (``Run._restore_sizes``). Loading does not check the column against the
+    text of the Run's own run log. ``Run._write`` keeps the only byte
+    count and is the only admission check of ``max_data_bytes``, so the run
+    log neither counts, refuses a commit nor refuses to open because of its
+    saved total, which lifecycle rows of admitted attempts can take beyond
+    that limit. ``max_bytes`` still bounds each array and binary payload
+    read back and sets the block size of new payloads.
     """
 
     def __init__(self, path, max_bytes, *, create, restore_limits=False):
@@ -322,9 +377,9 @@ class LocalJournal:
         The lock is taken before the database is opened, so a second process
         fails before reading any row. ``create=True`` requires a new file
         (``O_EXCL``), so an existing Run is never initialized twice.
-        ``restore_limits`` reads the current limits before checking the
-        cumulative saved bytes against them. Collection ordinals record the
-        order in which the Method collected observations.
+        ``restore_limits`` reads the current limits, whose ``max_data_bytes``
+        bounds the arrays and payloads read back. Collection ordinals record
+        the order in which the Method collected observations.
         """
         if os.name != "posix":
             raise ValueError("durable run journals require POSIX advisory locking")
@@ -360,41 +415,32 @@ class LocalJournal:
                 if row is not None:
                     from nwqlib.execution import ExecutionLimits
                     self.max_bytes = ExecutionLimits.model_validate_json(row[0]).max_data_bytes
-            self._data_bytes = self.connection.execute(
-                "SELECT coalesce(sum(size),0) FROM records").fetchone()[0]
-            self._data_bytes += self.connection.execute(
-                "SELECT coalesce(sum(length(payload)),0) FROM binary").fetchone()[0]
             self._collected_count = self.connection.execute(
                 "SELECT count(*) FROM records WHERE kind='chunk' AND collected!=0").fetchone()[0]
-            self._check_size()
         except BaseException:
             self.close()
             raise
 
-    def _check_size(self, extra=0):
-        """Reject a saved total, rows plus binary blocks, above ``max_bytes``, and return the current total."""
-        if self._data_bytes + extra > self.max_bytes:
-            raise ValueError("saved run data exceeds max_data_bytes")
-        return self._data_bytes
-
-    def commit(self, records=(), *, collected=(), payloads=(), deleted=(), encoded=None, replaced=None):
+    def commit(self, records=(), *, collected=(), payloads=(), deleted=(), encoded=None):
         """Commit all rows of one change of state, or none of them.
 
-        ``BEGIN IMMEDIATE`` takes the write lock at the start, so the size check and
-        the writes see one consistent database. Replaced rows are credited before
-        the new size is checked. ``replaced`` maps each written or deleted
-        ``(kind, key)`` to the saved size its caller already holds (``Run``
-        keeps them in ``data_sizes``). Without it the ``size`` column is read. A
-        binary payload whose content hash is already saved is not written again,
-        which lets two acquisitions with identical array bytes share one
-        payload. Chunks named in ``collected`` get the next ordinals, in
-        the given order, only if they have none yet. Any error rolls the whole
-        change back, and the in-memory byte and ordinal counters change only
-        after ``COMMIT``.
+        ``BEGIN IMMEDIATE`` takes the write lock at the start, so the payload
+        and ordinal reads and the writes see one consistent database.
+        ``encoded`` holds the rows already encoded by ``Run._write``, and
+        without it the rows are encoded here. Each row's size is written with
+        its text. A binary payload whose content hash is already saved is not
+        written again, which lets two acquisitions with identical array bytes
+        share one payload. Chunks named in ``collected`` get the next
+        ordinals, in the given order, only if they have none yet. Any error
+        rolls the whole change back, and the in-memory ordinal counter changes
+        only after ``COMMIT``. A change with nothing to write opens no
+        transaction.
         """
         conn = self.connection
         if conn is None:
             raise ValueError("journal is closed")
+        if not records and not collected and not payloads and not deleted:
+            return
         if not isinstance(records, (tuple, list)) or not isinstance(deleted, (tuple, list)):
             raise TypeError("run transitions require finite row tuples")
         keys = {(kind, key) for kind, key, _ in records}
@@ -415,13 +461,6 @@ class LocalJournal:
             error.add_note(f"Cannot begin a transition in Run journal {self.path}; its folder must remain writable.")
             raise
         try:
-            if replaced is not None:
-                previous = dict(replaced)
-            else:
-                previous = {}
-                for kind, key in keys | removed:
-                    prior = conn.execute("SELECT size FROM records WHERE kind=? AND key=?", (kind, key)).fetchone()
-                    previous[kind, key] = 0 if prior is None else prior[0]
             new_payloads = []
             for reference, data in payloads:
                 if not isinstance(data, (bytes, memoryview)) or len(data) != reference.bytes:
@@ -430,21 +469,11 @@ class LocalJournal:
                     raise ValueError("saved binary payload requires read-only contiguous bytes")
                 if not conn.execute("SELECT 1 FROM binary WHERE identity=? LIMIT 1", (reference.content_id,)).fetchone():
                     new_payloads.append((reference, data))
-            # Account for replacement bytes and new binary payloads before writing.
-            # The same transaction must publish both data and completed observations.
-            binary_added = sum(reference.bytes for reference, _ in new_payloads)
-            replaced = sum(previous.values())
+            # The same transaction publishes both data and completed observations.
             if encoded is None:
-                encoded = encode_records(records, self.max_bytes - self._data_bytes + replaced - binary_added)
-            extra = sum(encoded.sizes) - replaced + binary_added
-            self._check_size(extra)
+                encoded = encode_records(records, None)
             for reference, data in new_payloads:
-                # 1 MiB blocks keep each value far below SQLite's per-value length
-                # limit and bound the buffers of later chunked reads.
-                # ``Run._saved_payload`` passes the reader its block size, which
-                # ``ArtifactStore._hydrate`` checks against every block, so change
-                # both together.
-                _write_bytes(conn, reference.content_id, data, min(1024**2, self.max_bytes // 16 * 16))
+                _write_bytes(conn, reference.content_id, data, PAYLOAD_BLOCK_BYTES)
             for kind, key in removed:
                 conn.execute("DELETE FROM records WHERE kind=? AND key=?", (kind, key))
             for (kind, key, text), size in zip(encoded.rows, encoded.sizes, strict=True):
@@ -459,7 +488,6 @@ class LocalJournal:
                     collected_count += 1
                     conn.execute("UPDATE records SET collected=? WHERE kind='chunk' AND key=?", (collected_count, key))
             conn.execute("COMMIT")
-            self._data_bytes += extra
             self._collected_count = collected_count
         except BaseException as error:
             if conn.in_transaction:
@@ -471,8 +499,7 @@ class LocalJournal:
     def rows(self, kind):
         """Yield ``(key, parsed JSON, collected)`` for each row of ``kind`` in insertion order.
 
-        The run log checks its total saved bytes against its limit before rows
-        are read. ``collected`` is True for a chunk the Method has collected.
+        ``collected`` is True for a chunk the Method has collected.
         """
         for key, text, collected in self.connection.execute(
                 "SELECT key,payload,collected FROM records WHERE kind=? ORDER BY rowid", (kind,)):
@@ -494,7 +521,7 @@ class LocalJournal:
         closed is the one it saved.
         """
         import sqlite3
-        if reference.bytes > self.max_bytes:
+        if exceeds(reference.bytes, self.max_bytes):
             raise ValueError("saved array exceeds max_data_bytes")
         connection = self.connection
         if connection is None:
@@ -519,7 +546,7 @@ class LocalJournal:
         is rejected before the payload is used for a new submission or a remote
         preparation. Block contents are not authenticated.
         """
-        if reference.bytes > self.max_bytes:
+        if exceeds(reference.bytes, self.max_bytes):
             raise ValueError("saved binary data exceeds max_data_bytes")
         sizes = self.connection.execute("SELECT ordinal,length(payload) FROM binary WHERE identity=? ORDER BY ordinal",
                                         (reference.content_id,)).fetchall()
@@ -533,11 +560,6 @@ class LocalJournal:
             output[offset:offset+size] = data
             offset += size
         return bytes(output)
-
-    @property
-    def usage(self):
-        """Counted saved bytes (rows and blocks) and the database file size, which can be larger."""
-        return dict(data_bytes=self._check_size(), database_bytes=self.path.stat().st_size)
 
     def close(self):
         """Close the database, then release the Run's exclusive lock by closing its descriptor. Idempotent."""

@@ -1,6 +1,6 @@
 """Explicit original-input QLS comparisons, sharing one reference solve."""
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from nwqlib._limits import byte_allowance, exceeds, memory_limit
 
 from math import isfinite, sqrt
 from typing import Literal
@@ -30,20 +30,27 @@ class QLSVerification(Record):
     shows a complete check.
 
     All comparisons share one solve of the original `A/alpha` with the
-    normalized b, and a spectral-only request solves nothing. Singular
-    endpoints that the Plan already computed are reused. A comparison that
+    normalized b, and a spectral-only request solves nothing. When that solve
+    fails, for example on a singular `A`, each comparison that needs it gives
+    an unknown fact with the reason, which a certificate reads as INCONCLUSIVE.
+    Singular endpoints that the Plan already computed are reused. A comparison that
     needs only the norm of the solution, such as `"eq17"`, reuses the
     encoded reference norm that a grid or noisy-search norm model recorded
     from its own solve, which is that model's intermediate value, not
     independent evidence. A new spectral or solution reference needs a
     dense A, and compact Pauli or sparse input is never converted to a
     dense matrix. Without `relative_tolerance`, `"inverse_relative_error"`
-    reports the raw relative error divided by the error budget
-    `epsilon_inv + polynomial_kappa s delta / ||y_ref||`, with delta the
-    phase-fit residual bound (zero for classical execution), s the
+    reports the raw relative error divided by the nominal allowance of the
+    two selected components, `e + polynomial_kappa s delta / ||y_ref||`,
+    with e the polynomial's `residual_check_value`, delta the
+    phase residual (zero for classical execution), s the
     polynomial rescale and `y_ref = (A/alpha)^-1 b/||b||`. A value of 0.386
-    then means 0.386 of that budget, not 38.6% physical inverse error. A
-    missing phase bound leaves that budget unknown. The automatic mass
+    then means 0.386 of that allowance, not 38.6% physical inverse error.
+    The raw error also contains rounding of the circuit and the reference,
+    which the allowance leaves out, so a FAIL means only that the raw error
+    exceeds the allowance. It does not say which contribution is
+    responsible, and it can occur with a raw error below `epsilon_inv`. A
+    missing phase residual leaves that allowance unknown. The automatic mass
     windows and the default `5*epsilon_inv` direction window are heuristics.
     These checks do not prove a bound on the total physical error or
     establish confidence coverage.
@@ -62,8 +69,9 @@ class QLSVerification(Record):
             comparisons need an inverse Plan, and the shortcut comparisons a
             shortcut Plan.
         relative_tolerance: Default `None`. Nonnegative threshold on the
-            relative L2 inverse error. `None` reports the error divided by
-            the method's error budget, checked against 1.
+            relative L2 inverse error, compared with the raw error. `None`
+            reports the error divided by the nominal allowance above,
+            checked against 1.
         direction_tolerance: Default `None`. Nonnegative threshold on the
             phase-aligned L2 direction error. `None` uses `5*epsilon_inv`.
         probability_tolerance: Default `None`. Nonnegative absolute
@@ -73,10 +81,11 @@ class QLSVerification(Record):
             dimensionless spectral-domain deficit, wide enough for ordinary
             rounding of an automatic `kappa`. It is a numerical window, not a
             spectral theorem.
-        max_work: Default `1e9` (`1_000_000_000`). Upper limit on the known
+        max_work: Default `None`, no limit. Optional upper limit on the known
             reference work, checked before any solve.
-        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Upper
-            limit on the known reference arrays, checked before any solve.
+        max_bytes: Default `None`, the physical memory of this computer.
+            Upper limit on the known reference arrays, checked before any
+            solve.
 
     Raises:
         ValueError: If `comparisons` is empty or repeats a name.
@@ -97,8 +106,8 @@ class QLSVerification(Record):
     direction_tolerance: Nonnegative | None = None
     probability_tolerance: Nonnegative | None = None
     spectral_tolerance: Nonnegative = QLS_SPECTRAL_COVERAGE_TOLERANCE
-    max_work: PositiveInt = 1_000_000_000
-    max_bytes: PositiveInt = DEFAULT_MAX_BYTES
+    max_work: PositiveInt | None = None
+    max_bytes: PositiveInt | None = None
 
     @model_validator(mode="after")
     def _choices(self):
@@ -319,8 +328,8 @@ def _verify(plan, result, choice):
     work = ((d**3 + 8 * d * d + 128 * d) * int(solve)
             + (singular_values_work(d) + 3 * d * d) * int(spectrum))
     data_bytes = 16 * ((3 * d * d + 48 * d) * int(solve) + (2 * d * d + d) * int(spectrum))
-    if work > choice.max_work or data_bytes > choice.max_bytes:
-        raise ValueError("selected QLS reference exceeds max_work or max_bytes")
+    if exceeds(work, choice.max_work) or exceeds(data_bytes, memory_limit(choice.max_bytes)):
+        raise ValueError(f"selected QLS reference exceeds max_work={choice.max_work} or {byte_allowance(choice.max_bytes)}")
     if (solve or spectrum) and plan.problem.A.reference.representation != "dense":
         raise ValueError(
             "QLS verification requires original dense input access for the selected missing "
@@ -362,6 +371,7 @@ def _verify(plan, result, choice):
     # All requested solution comparisons share one solve of the normalized
     # original matrix. Spectral-only checks do not acquire that reference vector.
     reference = norm = discrepancy = None
+    unavailable = "required finite reference, phase certificate or valid mass allowance unavailable"
     if counts["recorded_reference_norm_reuses"]:
         norm = recorded
         parameters["encoded_reference_norm"] = norm
@@ -370,15 +380,21 @@ def _verify(plan, result, choice):
         counts["rhs_expansions"] = int(plan.problem.b.preparation.implementation != "qiskit.direct")
         encoded = normalized_matrix(matrix, rec.alpha)
         counts["solve_attempts"] += 1
-        reference = np.linalg.solve(encoded, rhs)
-        counts["solve_completed"] += 1
-        counts["norm_attempts"] += 1
-        norm = stable_vector_norm(reference)
-        counts["norm_completed"] += 1
-        if not isfinite(norm) or norm <= 0:
-            norm = None
+        try:
+            reference = np.linalg.solve(encoded, rhs)
+        except np.linalg.LinAlgError as error:
+            # A failed reference is missing evidence. Every comparison that needs
+            # it stays unknown with this cause, and a check attaches it as INCONCLUSIVE.
+            unavailable = f"the reference solve of A/alpha failed: {error}"
         else:
-            parameters["encoded_reference_norm"] = norm
+            counts["solve_completed"] += 1
+            counts["norm_attempts"] += 1
+            norm = stable_vector_norm(reference)
+            counts["norm_completed"] += 1
+            if not isfinite(norm) or norm <= 0:
+                norm = None
+            else:
+                parameters["encoded_reference_norm"] = norm
     # Inverse error preserves physical phase and scale. Direction-only
     # shortcut comparison may align global phase before computing its L2 error.
     if target is not None and norm is not None:
@@ -435,9 +451,7 @@ def _verify(plan, result, choice):
             scope=frame.scope,
             availability="unknown" if value is None else "concrete",
             value=None if value is None else Float64(value=value),
-            reason="required finite reference, phase certificate or valid mass allowance unavailable"
-            if value is None
-            else None,
+            reason=unavailable if value is None else None,
             evidence=None
             if value is None
             else Evidence(
@@ -476,8 +490,12 @@ def _comparisons(plan, result, options, *, bounds, norm, discrepancy, parameters
     """Return the method's nominal criteria and the separate raw and heuristic facts, without rerunning the circuit.
 
     NWQLib's derivations, with ``y = (A/alpha)^{-1} b_hat``, ``k`` the
-    polynomial domain parameter, ``s`` the rescale, ``e = epsilon_inv`` and
-    ``delta`` the phase-fit residual bound (zero for the classical model).
+    polynomial domain parameter, ``s`` the rescale, ``e`` the inverse
+    polynomial's ``residual_check_value`` and ``delta`` the phase residual
+    (zero for the classical model). The numerical value e is at most
+    ``epsilon_inv`` and is the polynomial's actual check, without an
+    arithmetic enclosure. A reflection polynomial has no such value and is
+    judged by its own ``eta`` in ``eq17``.
     All allowances require the spectral assumption to hold within the
     spectral tolerance.
 
@@ -522,16 +540,16 @@ def _comparisons(plan, result, options, *, bounds, norm, discrepancy, parameters
         else None
     )
     delta = 0.0 if plan.execution == "classical" else rec.phase_error
-    s, k, e = rec.polynomial.rescale, rec.polynomial_kappa, plan.method.epsilon_inv
-    # The polynomial certificate is relative to each inverse component.
+    s, k = rec.polynomial.rescale, rec.polynomial_kappa
+    # The polynomial check is relative to each inverse component.
     # The ideal postselected amplitude has norm ||y||/(k*s).
-    amplitude = (e * (norm / k) / s + delta
-                 if norm is not None and covered and delta is not None else None)
-    if amplitude is not None and (not isfinite(amplitude) or amplitude <= 0):
-        amplitude = None
-    relative_allowance = (
-        e + (k / norm) * (s * delta) if norm is not None and covered and delta is not None else None
-    )
+    amplitude = relative_allowance = None
+    if rec.polynomial.kind == "inverse" and norm is not None and covered and delta is not None:
+        e = rec.polynomial.residual_check_value
+        amplitude = e * (norm / k) / s + delta
+        if not isfinite(amplitude) or amplitude <= 0:
+            amplitude = None
+        relative_allowance = e + (k / norm) * (s * delta)
 
     def put(name, value):
         values[name] = value if value is not None and isfinite(value) else None
@@ -633,7 +651,7 @@ def _comparisons(plan, result, options, *, bounds, norm, discrepancy, parameters
             else:
                 widened_lower = widened_upper = deterministic = None
                 if covered and delta is not None:
-                    # Reuse exact selected endpoints when there is no phase-fit
+                    # Reuse exact selected endpoints when there is no phase
                     # discrepancy. Sqrt followed by square would add rounding.
                     # Numerical sqrt/square rounding must not shrink the
                     # base interval that a nonnegative delta only widens.

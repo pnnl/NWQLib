@@ -1,12 +1,7 @@
-"""Certified ``1/x`` polynomial construction for QSVT matrix inversion.
+"""Relative minimax ``1/x`` polynomial for QSVT matrix inversion.
 
-When QLS chooses its polynomial, it fits an odd polynomial ``P``
-approximating ``1/(kappa x)`` on the domain ``D(a) = {x : a <= |x| <= 1}``
-with ``a = 1/kappa``. The fit is an odd-Chebyshev least-squares fit on
-Chebyshev nodes restricted to the domain, and its degree is found by
-doubling and then bisection until an affine Chebyshev-grid norming bound
-establishes ``max_D |kappa * x * P(x) - 1| <= epsilon_inv``. The fit
-procedure is NWQLib's own construction.
+QLS needs an odd polynomial ``P`` with ``|kappa x P(x) - 1| <= epsilon_inv``
+on the domain ``D(a) = {x : a <= |x| <= 1}``, ``a = 1/kappa``.
 
 The domain parameter ``kappa`` must exceed 1. QLS passes its
 ``polynomial_kappa``, the encoding's ``kappa_be`` raised to at least
@@ -18,355 +13,252 @@ analytic periodic encoding passes ``alpha / min(sigma_min, encoded gap)``,
 rounded outward (QLS periodic encoding). Every ``kappa`` below is
 that domain parameter.
 
-Two choices make the polynomial usable by QSVT and by physical recovery.
-The target ``1/(kappa x)`` has magnitude at most one on ``D``, so ``P``
-needs only a small rescale into the QSP amplitude domain. The criterion is
-a relative residual. For each eigenvalue (Hermitian ``A``) or singular value
-(general ``A``, through its odd singular-value transform) ``s`` of
-``A/alpha`` in ``D``, ``|P(s) - 1/(kappa s)| <= epsilon_inv / (kappa |s|)``.
-Summing over components, the transformed vector ``y`` of ``b`` satisfies
+The criterion is a relative residual. For each eigenvalue (Hermitian
+``A``) or singular value (general ``A``, through its odd singular-value
+transform) ``s`` of ``A/alpha`` in ``D``,
+``|P(s) - 1/(kappa s)| <= epsilon_inv / (kappa |s|)``. Summing over
+components, the transformed vector ``y`` of ``b`` satisfies
 ``||y - (kappa A/alpha)^{-1} b|| <= epsilon_inv ||(kappa A/alpha)^{-1} b||``.
 Childs, Kothari, and Somma [CKS], arXiv:1511.02306v2, and Sunderhauf,
 Nemeth, Walayat, Patterson, and Berntson [SNWPB], arXiv:2507.15537v1,
-instead bound the absolute error ``|p(x) - 1/x|``. Equation, lemma and
-section numbers refer to these arXiv versions.
+instead bound the absolute error ``|p(x) - 1/x|``.
+
+Construction. An odd ``P`` of degree at most ``2m - 1`` is ``x q(x^2)``
+with ``deg q <= m - 1``, so ``R(y) = 1 - kappa y q(y)``, ``y = x^2``, has
+degree at most ``m`` and ``R(0) = 1``; conversely every such ``R`` gives
+``P(x) = (1 - R(x^2)) / (kappa x)``. The map
+``t(y) = (1 + a^2 - 2y) / (1 - a^2)`` sends ``[a^2, 1]`` onto ``[-1, 1]``
+and ``y = 0`` to ``cosh(beta)``, ``beta = 2 atanh(a)``. The residual
+``R_m(y) = T_m(t(y)) / cosh(m beta)`` alternates ``m + 1`` times with
+magnitude ``delta_m = sech(m beta)`` on ``[a^2, 1]``. A degree-``m``
+residual with ``R(0) = 1`` and a smaller maximum would differ from ``R_m``
+by a polynomial with a zero between each pair of successive extrema and
+another at ``y = 0``, which is impossible at degree ``m``. Hence
+``delta_m`` is the smallest relative residual of any odd polynomial of
+degree ``2m - 1``, and since it decreases strictly with ``m`` the smallest
+odd degree meeting ``epsilon_inv`` in exact arithmetic is ``2m - 1`` with
+``m = max(1, ceil(acosh(1/epsilon_inv) / beta))``. The ceiling of a
+rounded quotient can land on either side of an integer, so the neighbors
+of this ``m`` are compared by ``delta_m`` itself. This choice minimizes the
+relative residual, not the QSP rescale, the phase synthesis or the
+success probability.
+
+Coefficients. ``P`` has degree ``d = 2m - 1``, so its values at the
+``d + 1`` Chebyshev zeros determine its Chebyshev coefficients by the
+DCT-II divided by ``d + 1`` in exact arithmetic. Odd parity sets every
+even coefficient to zero.
+
+Check of the stored table. For the stored coefficients ``p``,
+``E(x) = kappa x p(x) - (1 - R_m(x^2))`` is a polynomial of degree
+``d + 1`` on all of ``[-1, 1]``. Its values at ``M = 4(d + 2)`` Chebyshev
+zeros and the Ehlich-Zeller factor ``1/cos(pi (d + 1)/(2M))``
+(doi:10.1007/BF01111276, Satz 2) bound ``max |E|`` in exact arithmetic,
+and on ``D(a)`` ``|kappa x p(x) - 1| <= delta_m + max |E|``. Evaluated in
+binary64, the same formula gives the formation term ``F``, an estimate of
+``max |E|`` that can fall below it (0.79 times a 40-digit evaluation at
+``kappa = 1.01`` and degree 13). ``F`` is rounding noise that grows with
+``kappa`` and differs from one degree to the next. The check value of a
+table is ``delta_m + 2F + R``, computed in binary64 as
+``(delta_m + F) + (F + R)``, where ``R = 4 eps b`` is the evaluation
+resolution, with ``eps`` the binary64 machine epsilon and ``b`` the bit
+length of ``M``. The second ``F`` and ``R`` allow for the error of the
+estimate. A table is used only when its check value is at most
+``epsilon_inv``. When the check value exceeds ``epsilon_inv``, one
+refinement takes the smallest ``m`` above the first with
+``delta_m <= epsilon_inv - 8F - R``, which leaves room for a refined
+formation term up to four times the first, and checks it the same way. When
+that right side is not positive, or the refined table also misses, the
+request is refused as unresolved. Raising the degree lowers ``delta_m`` but
+not ``F + R``, so the refusal means that this binary64 check cannot decide
+the table for ``epsilon_inv``, not that ``epsilon_inv`` is unattainable. At
+``kappa = 1.01`` the degree-13 table has check value 6.9e-15, and an exact
+rational bound limits its residual to 1.03e-15, so ``epsilon_inv = 3e-15``
+is refused although the table meets it. The check value has no arithmetic
+enclosure, so it is a numerical check of the table and not a bound on its
+residual.
+
+The work and storage are ``O(d log d)`` and ``O(d)``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import ceil, log
-from typing import NamedTuple
+import math
 
 import numpy as np
+from scipy.fft import dct
 
-from nwqlib._linalg_laws import least_squares_work
-from nwqlib._validation import finite_real, integer
-from nwqlib.operators.access import DEFAULT_INPUT_BYTES, _check_bytes
-from nwqlib.subroutines.qsp.phases import chebyshev_grid, chebyshev_norming_sup_bound
-
-
-# Engineering constants (registered in docs/ENGINEERING_CONSTANTS.md):
-# - QLS_FIT_LSQ_NODE_MULTIPLIER 4: the odd-coefficient LSQ is exactly determined on
-#   (d+1)/2 domain nodes, and a 4x overdetermined grid removes fit-the-grid
-#   minima, as for the phase solver's grid multiplier.
-# - QLS_FIT_CERTIFICATE_GRID_PER_DEGREE 25: the sampling density N = 25d of
-#   [SNWPB] arXiv:2507.15537v1, Sec. III, Eq. (26), placed on affine
-#   Chebyshev-zero nodes of [1/kappa, 1]
-#   so that the shared norming inequality bounds the degree-(d+1) residual.
-#   That inequality is Ehlich and Zeller (1964), doi:10.1007/BF01111276,
-#   Satz 2, Eqs. (12)-(14), on Chebyshev-zero nodes. SNWPB's Eq. (25) is not
-#   valid on the equidistant x grid stated there, which Ehlich and Zeller,
-#   doi:10.1007/BF01111276, Satz 1, treat separately. The QLS guide gives a
-#   rational counterexample.
-QLS_FIT_LSQ_NODE_MULTIPLIER = 4
-QLS_FIT_CERTIFICATE_GRID_PER_DEGREE = 25
-
-# Degree-law tripwire factor over the [CKS] (arXiv:1511.02306v2) reference form
-# d = O(kappa log(kappa/eps)). In [CKS], Lemma 17, Eq. (74), approximates
-# 1/x by (1-(1-x^2)^b)/x with b >= kappa^2 log(kappa/eps), Lemma 18,
-# Eq. (77), expands it in odd Chebyshev polynomials, and Lemma 19, Eq. (88),
-# truncates at j_0 = sqrt(b log(4b/eps)), which together give that degree
-# law. C_law scales the reference degree
-# ceil(C_law * kappa * log(kappa / epsilon_inv)). It is an engineering
-# value motivated by that law, not a finite guarantee that a passing fit
-# exists below the bound. In this module it only sets the runaway stop of
-# the doubling search. Revisit when the fit construction or certificate
-# grid changes.
-QLS_INVERSE_DEGREE_LAW_FACTOR = 1.25
-
-# Runaway stop for the doubling search, far above the tripwire. If no tested
-# degree passes within this limit, fail with the finite search scope. The failure
-# does not prove that every larger degree or different fit would fail.
-# Registered in docs/ENGINEERING_CONSTANTS.md. Revisit when the fit
-# construction or the certificate grid changes.
-_DOUBLING_FACTOR_OVER_TRIPWIRE = 8
+from nwqlib._validation import finite_real
+from nwqlib.operators.access import _check_bytes
+from nwqlib.subroutines.qsp.phases import _values_at_zeros, chebyshev_grid, chebyshev_norming_sup_bound
 
 
-class _FitCost(NamedTuple):
-    """Cost of one least-squares Chebyshev fit, computed from its degree and checked against the limits before the fit runs.
+# Evaluation resolution of the stored-table check, in machine epsilons per
+# bit of the check length M: an untuned allowance for the rounding of the
+# DCT-III samples and the filter values, which have no enclosure. Registered
+# in docs/ENGINEERING_CONSTANTS.md. Revisit with a different evaluation
+# method or an enclosure of the check.
+_CHECK_RESOLUTION_EPS_PER_BIT = 4
 
-    ``inverse_candidate_cost`` and ``shortcut.kernel_reflection_cost``
-    return this record. Their docstrings map each term to its arrays.
-
-    Attributes:
-        coefficients: Length ``d + 1`` of the Chebyshev coefficient table.
-        peak_bytes: Byte allowance for the NumPy arrays alive at the fit's
-            peak, summed from per-array terms. LAPACK workspace and Python
-            object overhead are excluded.
-        work: Scalar operation count compared with ``max_work``. It is a
-            size formula, not measured time.
-    """
-
-    coefficients: int
-    peak_bytes: int
-    work: int
+# The refinement reserves this multiple of the first table's formation term
+# for the refined table's. Formation terms are rounding noise: over windows of
+# 10% in m they varied by factors up to 3.07 for kappa <= 3000, and refined
+# tables reached 2.2 times the first in a 25 x 300 sweep of kappa <= 3000
+# and epsilon_inv >= 1e-14. A reserve of 1 lets the refinement at kappa = 100,
+# epsilon_inv = 1e-12 miss. Registered in docs/ENGINEERING_CONSTANTS.md.
+# Revisit with another evaluation of the table or a sweep that exceeds it.
+_REFINEMENT_FORMATION_RESERVE = 4
 
 
 @dataclass(frozen=True, kw_only=True)
-class InverseChebyshevFit:
-    """Certified odd-Chebyshev fit of `1/(kappa * x)` on `D(1/kappa)`.
+class InverseChebyshevPolynomial:
+    """Odd Chebyshev table of the relative minimax approximation to `1/(kappa x)` on `a <= |x| <= 1`, `a = 1/kappa`.
 
-    The QLS Method's planning produces it, and no public function of this
-    module returns a fitted instance. Its `coefficients` define the
-    polynomial `P`. The fields below are read-only.
+    The QLS Method computes it while it chooses its polynomial. The fields
+    are read-only.
 
     Attributes:
-        coefficients: Full Chebyshev coefficient vector ``(c_0..c_d)`` of the
-            fitted ``P``. Even entries are exactly zero.
-        degree: Odd degree ``d`` chosen by the bounded search.
-        kappa: Domain parameter, greater than 1, defining the domain
-            ``D = {1/kappa <= |x| <= 1}``. QLS passes its ``polynomial_kappa``.
-        epsilon_inv: Requested certificate tolerance.
-        certificate: Chebyshev-grid norming upper bound on
-            ``max_D |kappa * x * P(x) - 1|``, evaluated in binary64, not
-            interval arithmetic.
-        certificate_grid_points: Affine Chebyshev-grid size behind the bound.
-        lsq_node_count: Least-squares node count of the accepted fit.
+        coefficients: Chebyshev coefficients `c_0, ..., c_d` of `P`. Even
+            entries are exactly zero.
+        degree: Odd degree `d` of the table.
+        ideal_degree: Smallest odd degree whose minimax relative residual
+            `sech(m beta)` meets `epsilon_inv`, decided by binary64
+            evaluation of that residual. When `epsilon_inv` lies within a few
+            rounding units of a residual, this can be one degree pair above
+            the exact minimum. It is below `degree` when the numerical check
+            of the stored table needed its refinement.
+        kappa: Domain parameter, greater than 1.
+        epsilon_inv: Requested bound on `|kappa x P(x) - 1|` over the domain.
+        minimax_error: `sech(m beta)` with `m = (degree + 1)/2` and
+            `beta = 2 atanh(1/kappa)`, the relative residual of the exact
+            minimax polynomial of this degree.
+        residual_check_value: The value compared with `epsilon_inv`,
+            `minimax_error + 2F + R`, computed in binary64 as
+            `(minimax_error + F) + (F + R)`. The table is used only when it
+            is at most `epsilon_inv`. `F` is the binary64 evaluation of the
+            Chebyshev-zero bound on the largest difference between
+            `kappa x P(x)` for the stored coefficients and for the exact
+            minimax polynomial, and `R` is the evaluation resolution
+            `4 eps b` of the module docstring. The second `F` and `R` allow
+            for the error of that evaluation. The value has no arithmetic
+            enclosure. In the cases checked it exceeds
+            `max |kappa x P(x) - 1|` over the domain, but no proof shows that
+            it always does.
     """
 
     coefficients: tuple[float, ...]
     degree: int
+    ideal_degree: int
     kappa: float
     epsilon_inv: float
-    certificate: float
-    certificate_grid_points: int
-    lsq_node_count: int
+    minimax_error: float
+    residual_check_value: float
 
 
-def inverse_degree_law_bound(kappa: float, epsilon_inv: float) -> int:
-    """Return the engineering degree estimate `ceil(C_law * kappa * log(kappa/eps))` that limits the inverse-fit search.
+def _minimax_error(m, beta):
+    """``sech(m beta)``, through ``exp(-m beta)`` so that a large argument underflows to 0."""
+    e = math.exp(-m * beta)
+    return 2 * e / (1 + e * e)
 
-    `C_law` is 1.25. The doubling search of the inverse fit stops at eight
-    times this estimate, or at `max_degree` if that is smaller. The
-    asymptotic scaling `O(kappa log(kappa/eps))` of [CKS]
-    arXiv:1511.02306v2 motivates the expression, which is not a proven upper
-    bound on the degree of this fit.
+
+def _filter_complement(x, a, m):
+    """Return ``G = 1 - T_m(t(x^2)) / cosh(B)``, ``B = 2m atanh(a)``, at points ``|x| <= 1`` without cancellation.
+
+    With ``t = |x|`` and ``e = exp(-B)``: for ``t >= a``, ``T_m(t(x^2)) =
+    cos(m theta)`` with ``theta/2 = atan2(sqrt((t-a)(t+a)), sqrt((1-t)(1+t)))``
+    and ``G = ((1-e)^2 + 4e sin^2(m theta/2)) / (1 + e^2)``. For ``t < a``,
+    ``T_m(t(x^2)) = cosh(B - h)`` with ``u = sqrt((1-t)(1+t))``,
+    ``v = sqrt((a-t)(a+t))`` and
+    ``h = 2m log1p(t^2 (1/(1+u) + 1/(a+v)) / (u+v))``, since
+    ``exp(h/(2m)) = (1+a)/(u+v)``; then
+    ``G = (1 - exp(-h)) (1 - exp(-(2B-h))) / (1 + e^2)``. Near ``x = 0``,
+    ``G = (m/a) tanh(B) x^2 + O(x^4)``, which this form keeps to relative
+    accuracy.
     """
+    t = np.abs(np.asarray(x, float))
+    b = 2 * m * math.atanh(a)
+    e = math.exp(-b)
+    values = np.empty_like(t)
+    gap = t < a
+    s = t[gap]
+    u = np.sqrt((1 - s) * (1 + s))
+    v = np.sqrt((a - s) * (a + s))
+    h = 2 * m * np.log1p(s * s * (1 / (1 + u) + 1 / (a + v)) / (u + v))
+    values[gap] = np.expm1(-h) * np.expm1(h - 2 * b) / (1 + e * e)
+    s = t[~gap]
+    half = np.arctan2(np.sqrt((s - a) * (s + a)), np.sqrt((1 - s) * (1 + s)))
+    values[~gap] = (math.expm1(-b) ** 2 + 4 * e * np.sin(m * half) ** 2) / (1 + e * e)
+    return values
 
-    return int(ceil(QLS_INVERSE_DEGREE_LAW_FACTOR * kappa * log(kappa / epsilon_inv)))
+
+def _half_degree(beta, epsilon):
+    """Smallest ``m >= 1`` with ``sech(m beta) <= epsilon``, from the ceiling formula and its neighbors."""
+    # acosh(1/epsilon) without forming 1/epsilon.
+    quotient = (math.log1p(math.sqrt((1 - epsilon) * (1 + epsilon))) - math.log(epsilon)) / beta
+    if not math.isfinite(quotient):
+        raise ValueError(f"the inverse polynomial degree for epsilon_inv={epsilon:.6g} is not representable")
+    m = max(1, math.ceil(quotient))
+    if m > 1 and _minimax_error(m - 1, beta) <= epsilon:
+        return m - 1
+    return m if _minimax_error(m, beta) <= epsilon else m + 1
 
 
-def _odd_chebyshev_values(x_values: np.ndarray, degree: int) -> np.ndarray:
-    """Return the matrix ``T_{2l+1}(x_i)`` for ``l = 0..(degree-1)//2``."""
+def _table(kappa, m, max_bytes):
+    """Return the DCT coefficients of degree ``2m - 1`` and their formation bound."""
+    a, d = 1 / kappa, 2 * m - 1
+    checks = 4 * (d + 2)
+    _check_bytes(8 * (2 * (d + 1) + 8 * checks), max_bytes, "QLS inverse polynomial")
+    x = chebyshev_grid(d + 1)
+    coefficients = dct(_filter_complement(x, a, m) / (kappa * x), type=2) / (d + 1)
+    # Odd parity: the even coefficients, including c_0 and its half weight,
+    # are zero.
+    coefficients[::2] = 0.0
+    y = chebyshev_grid(checks)
+    sampled = np.max(abs(kappa * y * _values_at_zeros(coefficients, checks) - _filter_complement(y, a, m)))
+    formation = float(chebyshev_norming_sup_bound(float(sampled), degree=d + 1, num_points=checks))
+    resolution = _CHECK_RESOLUTION_EPS_PER_BIT * float(np.finfo(float).eps) * checks.bit_length()
+    return coefficients, formation, resolution
 
-    # chebvander builds every column in one three-term-recurrence pass, which the doubling
-    # and bisection search repeats for each candidate.
-    return np.polynomial.chebyshev.chebvander(x_values, degree)[:, 1::2]
 
+def _inverse_chebyshev(kappa, epsilon_inv, *, max_bytes=None) -> InverseChebyshevPolynomial:
+    """Return the relative minimax inverse table for ``kappa > 1`` and ``0 < epsilon_inv < 1``.
 
-def _fit_candidate(
-    degree: int,
-    *,
-    kappa: float,
-    certificate_grid: np.ndarray,
-) -> tuple[np.ndarray, float, int]:
-    """Fit one odd degree and return ``(coefficients, certificate, num_nodes)``.
-
-    The odd coefficients minimize ``sum_i (kappa x_i P(x_i) - 1)^2`` over
-    ``num_nodes = 4 (d + 1)/2`` affine Chebyshev nodes on
-    ``[1/kappa, 1]``. ``coefficients`` is the full table ``c_0..c_d``
-    with zero even entries. ``certificate`` is the Ehlich-Zeller bound on
-    ``max |kappa x P(x) - 1|`` over ``1/kappa <= |x| <= 1``, computed
-    from the samples on ``certificate_grid``.
+    See the module docstring for the construction, the numerical check of
+    the stored table and its single refinement. ``max_bytes=None`` checks
+    the ``O(d)`` arrays against the physical memory. Raises ValueError for
+    invalid inputs, an unrepresentable degree, or a check that the
+    refinement cannot resolve.
     """
-
-    num_unknowns = (degree + 1) // 2
-    num_nodes = QLS_FIT_LSQ_NODE_MULTIPLIER * num_unknowns
-    # Chebyshev points affine-mapped onto the positive domain [1/kappa, 1].
-    # Odd symmetry makes the negative side redundant for both fit and
-    # certificate.
-    reference = chebyshev_grid(num_nodes)
-    lower = 1.0 / kappa
-    nodes = 0.5 * (1.0 - lower) * reference + 0.5 * (1.0 + lower)
-    # Residual is the certificate integrand itself: kappa * x * P(x) - 1.
-    design = kappa * nodes[:, None] * _odd_chebyshev_values(nodes, degree)
-    solution = np.linalg.lstsq(design, np.ones(num_nodes), rcond=None)[0]
-    coefficients = np.zeros(degree + 1)
-    coefficients[1::2] = solution
-    certified_values = np.polynomial.chebyshev.chebval(certificate_grid, coefficients)
-    sampled = float(np.max(np.abs(kappa * certificate_grid * certified_values - 1.0)))
-    # Affine interval restriction preserves polynomial degree. x*P(x)-1
-    # has degree d+1 and is even, so its positive-domain bound covers D(a).
-    certificate = chebyshev_norming_sup_bound(sampled, degree=degree+1,
-                                             num_points=len(certificate_grid))
-    return coefficients, certificate, num_nodes
-
-
-def inverse_candidate_cost(degree) -> _FitCost:
-    """Return the bytes and work counted for one inverse-fit candidate of odd degree `d` before it is computed.
-
-    With ``u = (d + 1)/2`` odd unknowns, ``n = 4u`` least-squares nodes and
-    ``q = 25 d`` certificate nodes, ``peak_bytes`` counts 8-byte entries:
-
-    - ``n (d + 1)``: the Chebyshev-Vandermonde matrix from ``chebvander``.
-      Its odd columns are a view, which the scaling turns into the design
-      matrix.
-    - ``3 n u``: three ``n x u`` arrays, two for the design matrix and the
-      copy that ``lstsq`` factorizes and one to spare.
-    - ``10 n``: length-``n`` vectors (reference and affine nodes, their
-      temporaries, the right-hand side and its copy inside ``lstsq``).
-    - ``u + 3 (d + 1)``: the ``lstsq`` solution, the coefficient table and
-      its copies inside ``chebval``.
-    - ``8 q``: certificate-grid vectors (the nodes, the Clenshaw recurrence
-      of ``chebval`` and the residual temporaries).
-
-    The terms are summed although the Vandermonde matrix is released before
-    ``lstsq`` runs, so ``peak_bytes`` is an allowance above the peak of these
-    arrays.
-    With d, u, n and q as defined above, ``work`` adds
-    ``least_squares_work(n, u)``, NWQLib's work formula for
-    ``numpy.linalg.lstsq`` on the ``n x u`` design matrix,
-    ``4 n (d + 1)`` for the Vandermonde recurrence and design scaling, and
-    ``8 q (d + 1)`` for the Clenshaw evaluation and residual on the
-    certificate grid. The caller checks ``peak_bytes`` per candidate and
-    sums ``work`` over all candidates.
-    """
-    u = (degree + 1) // 2
-    n = QLS_FIT_LSQ_NODE_MULTIPLIER * u
-    q = QLS_FIT_CERTIFICATE_GRID_PER_DEGREE * degree
-    slots = n * (degree + 1) + 3*n*u + 10*n + u + 3*(degree+1) + 8*q
-    return _FitCost(
-        coefficients=degree + 1,
-        peak_bytes=8 * slots,
-        work=least_squares_work(n, u) + 4*n*(degree+1) + 8*q*(degree+1),
-    )
-
-
-def _fit_inverse_chebyshev(
-    kappa: float,
-    epsilon_inv: float,
-    *, max_degree=256, max_work=1_000_000_000, max_bytes=DEFAULT_INPUT_BYTES,
-    candidate_degrees=None,
-) -> InverseChebyshevFit:
-    """Select an odd-Chebyshev approximation of ``1/(kappa x)``.
-
-    Implements NWQLib's inverse-fit construction (module docstring):
-    odd-Chebyshev least squares on domain-restricted Chebyshev nodes,
-    candidate degree doubled until the affine Chebyshev-grid residual norming
-    bound ``max_D |kappa * x * P(x) - 1| <= epsilon_inv`` holds, then
-    bisected within that bracket. This search does not establish global
-    degree optimality or monotonicity of floating-point least-squares fits.
-    The reference degree formula is
-    ``d = O(kappa log(kappa/eps))`` [CKS arXiv:1511.02306v2, Lemmas 17-19].
-    The doubling search stops at the smaller of `max_degree` and ``8x`` the
-    registered engineering degree estimate (``inverse_degree_law_bound``),
-    rounded down to an odd degree, and raises if no tested degree passes.
-
-    Args:
-        kappa: Domain parameter, greater than 1. QLS passes its
-            ``polynomial_kappa``, described in the module docstring.
-        epsilon_inv: Certificate tolerance in ``(0, 1)`` on the relative
-            residual ``|kappa * x * P(x) - 1|``.
-        max_degree: Largest allowed odd degree, checked before every fit.
-        max_work: Limit on the summed work of all fitted candidates
-            (``inverse_candidate_cost``).
-        max_bytes: Limit on the NumPy arrays alive at once in one candidate
-            fit, excluding LAPACK workspace.
-        candidate_degrees: Optional list to which every attempted degree,
-            passing or failing, is appended.
-
-    Returns:
-        InverseChebyshevFit with the selected coefficients, residual norming
-        bound and grid density.
-
-    Raises:
-        ValueError: For out-of-range arguments, or when no degree below the
-            upper stop of the doubling search passes the certificate.
-    """
-
     kappa = finite_real(kappa, "kappa")
-    epsilon_inv = finite_real(epsilon_inv, "epsilon_inv")
-    max_degree = integer(max_degree, "max_degree", 1)
-    max_work = integer(max_work, "max_work", 1)
-    if kappa <= 1.0:
-        raise ValueError("kappa must exceed 1, so that the domain 1/kappa <= |x| <= 1 has positive width")
-    if not 0.0 < epsilon_inv < 1.0:
-        raise ValueError("epsilon_inv must be in the open interval (0, 1)")
-
-    used_work = 0
-
-    def _certificate_grid(degree: int) -> np.ndarray:
-        """Check one candidate degree against the limits, record it and return its certificate nodes.
-
-        The ``25 d`` nodes are the Chebyshev zeros of ``[-1, 1]`` mapped
-        affinely onto ``[1/kappa, 1]``.
-        """
-        nonlocal used_work
-        cost = inverse_candidate_cost(degree)
-        _check_bytes(cost.peak_bytes, max_bytes, "inverse polynomial fit")
-        if used_work + cost.work > max_work:
-            raise ValueError(
-                f"inverse polynomial fit exceeds max_work={max_work}: candidate degree {degree} needs "
-                f"{used_work + cost.work} work units including {used_work} for earlier candidates. "
-                f"Raise max_work to at least {used_work + cost.work} to admit this candidate.")
-        used_work += cost.work
-        if candidate_degrees is not None:
-            candidate_degrees.append(degree)
-        points = QLS_FIT_CERTIFICATE_GRID_PER_DEGREE * degree
-        lower = 1.0 / kappa
-        return .5 * (1-lower) * chebyshev_grid(points) + .5 * (1+lower)
-
-    runaway_stop = min(max_degree, _DOUBLING_FACTOR_OVER_TRIPWIRE * inverse_degree_law_bound(kappa, epsilon_inv))
-    # Round down to an odd degree, because P approximates the odd function 1/x.
-    runaway_stop -= (runaway_stop + 1) % 2
-    coefficients, certificate, node_count = _fit_candidate(
-        1, kappa=kappa, certificate_grid=_certificate_grid(1)
-    )
-    passing: tuple[int, np.ndarray, float, int] | None = (
-        (1, coefficients, certificate, node_count) if certificate <= epsilon_inv else None
-    )
-    degree = 3
-    last_failure = 1
-    while passing is None and degree <= runaway_stop:
-        coefficients, certificate, node_count = _fit_candidate(
-            degree, kappa=kappa, certificate_grid=_certificate_grid(degree)
-        )
-        if certificate <= epsilon_inv:
-            passing = (degree, coefficients, certificate, node_count)
+    epsilon = finite_real(epsilon_inv, "epsilon_inv")
+    if kappa <= 1:
+        raise ValueError("kappa must exceed 1")
+    if not 0 < epsilon < 1:
+        raise ValueError("epsilon_inv must lie in (0, 1)")
+    beta = 2 * math.atanh(1 / kappa)
+    ideal = m = _half_degree(beta, epsilon)
+    for refined in (False, True):
+        coefficients, formation, resolution = _table(kappa, m, max_bytes)
+        delta = _minimax_error(m, beta)
+        value = (delta + formation) + (formation + resolution)
+        if value <= epsilon:
+            return InverseChebyshevPolynomial(
+                coefficients=tuple(float(c) for c in coefficients), degree=2 * m - 1,
+                ideal_degree=2 * ideal - 1, kappa=kappa, epsilon_inv=epsilon,
+                minimax_error=delta, residual_check_value=value)
+        target = epsilon - (2 * _REFINEMENT_FORMATION_RESERVE * formation + resolution)
+        if refined or target <= 0:
             break
-        last_failure = degree
-        if degree == runaway_stop:
-            break
-        degree = min(2 * degree + 1, runaway_stop)
-    if passing is None:
-        raise ValueError(
-            f"no tested odd degree through {runaway_stop} meets the residual norming bound target "
-            f"|kappa*x*P(x) - 1| <= {epsilon_inv:.3g} at kappa = {kappa:.6g}; "
-            f"max_degree={max_degree}. Inspect conditioning and intended work before increasing "
-            "the cap; the requested tolerance may also exceed float64 fit resolution"
-        )
-
-    # Bisect odd degrees in (last failing, first passing].
-    low = last_failure
-    high = passing[0]
-    while high - low > 2:
-        middle = low + 2 * ((high - low) // 4)  # odd midpoint
-        coefficients, certificate, node_count = _fit_candidate(
-            middle, kappa=kappa, certificate_grid=_certificate_grid(middle)
-        )
-        if certificate <= epsilon_inv:
-            passing = (middle, coefficients, certificate, node_count)
-            high = middle
-        else:
-            low = middle
-
-    degree, coefficients, certificate, node_count = passing
-    return InverseChebyshevFit(
-        coefficients=tuple(float(value) for value in coefficients),
-        degree=int(degree),
-        kappa=kappa,
-        epsilon_inv=epsilon_inv,
-        certificate=certificate,
-        certificate_grid_points=int(QLS_FIT_CERTIFICATE_GRID_PER_DEGREE * degree),
-        lsq_node_count=int(node_count),
-    )
+        m = max(m + 1, _half_degree(beta, target))
+    step = ("after one refinement" if refined else
+            f"and no refinement fits, since epsilon_inv - {2 * _REFINEMENT_FORMATION_RESERVE} formation - "
+            f"resolution = {target!r} is not positive")
+    raise ValueError(
+        f"the binary64 numerical check of the QLS inverse table of degree {2 * m - 1} for kappa={kappa!r} and "
+        f"epsilon_inv={epsilon!r} is unresolved {step}. Its check value (minimax + formation) + (formation + "
+        f"resolution) = ({delta!r} + {formation!r}) + ({formation!r} + {resolution!r}) = {value!r} exceeds "
+        f"epsilon_inv. This O(d log d) check cannot decide the table, and the refusal does not show that "
+        f"epsilon_inv is unattainable.")
 
 
-__all__ = [
-    "InverseChebyshevFit",
-    "QLS_FIT_CERTIFICATE_GRID_PER_DEGREE",
-    "QLS_FIT_LSQ_NODE_MULTIPLIER",
-    "QLS_INVERSE_DEGREE_LAW_FACTOR",
-    "inverse_degree_law_bound",
-]
+__all__ = ["InverseChebyshevPolynomial"]

@@ -28,7 +28,7 @@ same <U>. The cost is the label-controlled basis change, whose table-size
 limit is in ENGINEERING_CONSTANTS "Chebyshev Lanczos defaults".
 """
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from nwqlib._limits import ResourceLimitError, exceeds, memory_limit
 
 from math import fsum
 from typing import Annotated, ClassVar, Literal
@@ -41,7 +41,6 @@ from nwqlib.algorithms._eigen_inputs import (
     state_direction,
     preparation_requirements,
     gershgorin_frame,
-    DEFAULT_CONVERSION_WORK,
 )
 from nwqlib.blocks import (
     SelectedConstruction,
@@ -59,7 +58,6 @@ from nwqlib.core.planning import (
     Plan,
     ReadoutDetails,
     ReadoutView,
-    point_items,
     readout_shape,
 )
 from nwqlib.core.analysis import capture_analysis_origin
@@ -106,16 +104,6 @@ DESCRIPTOR = AlgorithmDescriptor(
     references=(METHOD,),
     limitations=("projected Ritz estimate does not establish ground identification",),
 )
-
-# Planning admits at most 2**20 entries in one exact probability marginal or
-# in one histogram of a fixed per-setting shot count. Exact probability
-# readout is therefore limited to 20 measured qubits. SensitivitySampling
-# plans at its two-shot stage minimum, so its stage histograms are bounded
-# later by the Run's data limit. This caps returned data size and is not an
-# accuracy parameter. Revisit for a wider exact readout
-# (ENGINEERING_CONSTANTS "Chebyshev Lanczos defaults").
-MAX_READOUT_ENTRY_BITS = 20
-
 
 class ChebyshevSubspace(Record):
     """Record whose content hash identifies one trial space span{T_k(K)|psi>, k<m}.
@@ -217,7 +205,8 @@ def _centered_operator(table, readout, *, scaled, max_bytes):
     The one check B_centered = caller + ingestion + H0
     = J*(80*W+88+S(q)) + (q+8)//8 + 1024 + 65536 bytes runs before
     ``physical`` is allocated. The ingester then receives
-    max_bytes - caller - H0 as its own limit, which keeps its rule of
+    max_bytes - caller - H0 as its own limit, with max_bytes None read as
+    the physical memory, which keeps its rule of
     counting only bytes beyond the caller's arrays without counting the
     copies twice. Separate checks of the copies and of ingestion against
     max_bytes would never establish their sum. The scaled branch keeps
@@ -228,12 +217,13 @@ def _centered_operator(table, readout, *, scaled, max_bytes):
     _check_bytes(caller+ingestion+H0, max_bytes, "Lanczos SELECT/K and mask ingestion")
     physical = table.coefficients.real[readout.rows]
     coefficients = readout.coefficients if scaled else physical
+    limit = memory_limit(max_bytes)
     return ingest_pauli_masks(
         table.x[readout.rows],
         table.z[readout.rows],
         coefficients.astype(complex),
         num_qubits=table.num_qubits,
-        max_bytes=max_bytes-caller-H0,
+        max_bytes=None if limit is None else limit-caller-H0,
     )
 
 
@@ -349,8 +339,8 @@ def _moment_program(reference, select_operator, *, m, n, a, degrees, acquisition
             ),
         )
 
-    # Admit each readout layout, including the capped count population,
-    # before any block is selected.
+    # Check each readout layout before any block is selected. The Run's
+    # max_data_bytes bounds the returned entries when a setting is prepared.
     for odd in {k % 2 for k in degrees}:
         readout_shape(
             kind=acquisition,
@@ -358,7 +348,6 @@ def _moment_program(reference, select_operator, *, m, n, a, degrees, acquisition
             width=a + n,
             classical_width=a + n if odd else a,
             repetitions=shots,
-            max_items=1 << min(MAX_READOUT_ENTRY_BITS, a + n),
         )
     blocks = _selected_blocks(reference, select_operator, a=a, degrees=degrees, trajectory=False,
                               max_bytes=max_bytes)
@@ -576,12 +565,13 @@ def _trajectory_program(reference, select_operator, *, n, a, degrees, max_bytes)
     Each point's position is the number of bound logical operations before
     it, one operation per bound call (the circuit-construction convention of
     PreparedArtifact.body_length). The body has no measurement register,
-    and the trajectory declares zero shots. Planning checks the whole
-    declared schedule against the limits with readout_shape before the
-    blocks are chosen, and each
-    point's marginal is one exact probability marginal capped by
-    MAX_READOUT_ENTRY_BITS. An over-budget schedule is rejected, never
-    replaced by fewer points or another route. A backend without trajectory
+    and the trajectory declares zero shots. Planning checks the layout of the whole
+    declared schedule with readout_shape before the blocks are chosen, and
+    each point's marginal is one exact probability marginal. The Run's
+    max_data_bytes bounds the marginals when the trajectory is prepared, and
+    the simulator's memory allowance bounds the simulated state. An
+    over-budget schedule is rejected, never replaced by fewer points or
+    another route. A backend without trajectory
     views rejects the Plan before work.
 
     Returns:
@@ -609,14 +599,8 @@ def _trajectory_program(reference, select_operator, *, n, a, degrees, max_bytes)
             points.append(ObservationPoint(id=f"moment_{2 * j + 1}", position=position, kind="probabilities",
                                            qubits=odd_wires, view=odd_view))
     observation = ObservationSpec(kind="trajectory", positions=tuple(points), padding=_READOUT_PADDING)
-    # Admit the whole schedule, and each point's marginal against the
-    # per-marginal cap, before any block is selected.
+    # Check the whole schedule before any block is selected.
     readout_shape(kind="trajectory", details=observation, width=width, classical_width=0, repetitions=1)
-    for point in points:
-        point_items(point, width=width, max_items=1 << min(MAX_READOUT_ENTRY_BITS, width),
-                    max_items_source=(f"exact probability readout is limited to {MAX_READOUT_ENTRY_BITS} measured qubits "
-                                      "per marginal (MAX_READOUT_ENTRY_BITS); request sampled readout "
-                                      "with shots=N"))
     blocks = _selected_blocks(reference, select_operator, a=a, degrees=degrees, trajectory=True,
                               max_bytes=max_bytes)
     selected = {block.record.signature.name: block for block in blocks}
@@ -718,16 +702,13 @@ class Lanczos(Method):
             [`SensitivitySampling`][nwqlib.algorithms.lanczos.method.SensitivitySampling]
             shot allocation. It conflicts with `shots=` and with classical
             execution.
-        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
-            the bytes, known in advance, of the input, the moments and the
-            projected numerical workspace.
-        max_analysis_work: Default `1e8`. Limit on the work of the projected
-            analysis, including matrix assembly and solve. Planning checks it
-            before any moment is obtained.
-        max_classical_products: Default `1e8`. Limit on the counted scalar
-            work of the classical preparation of the reference state and of
-            the Chebyshev recurrence, including the operator actions and the
-            vector operations.
+        max_bytes: Default `None`, the physical memory of this computer.
+            Limit on the bytes, known in advance, of the input, the moments
+            and the projected numerical workspace.
+        max_classical_products: Default `None`, no limit. Optional limit on
+            the counted scalar work of the classical preparation of the
+            reference state and of the Chebyshev recurrence, including the
+            operator actions and the vector operations.
         input_conversion: Default `"auto"`, which keeps Pauli access and,
             for quantum execution, converts explicit dense matrices of
             original dimension at most 16 to Pauli access. Classical
@@ -735,11 +716,6 @@ class Lanczos(Method):
             `"dense_pauli"` permits explicit dense-to-Pauli conversion, which
             quantum execution needs for sparse input and for dense input of
             dimension above 16.
-        max_conversion_work: Default `1e8`. Limit on the work of operator
-            conversion, counted as ``q*D²`` transform work. For original
-            operator dimension d, ``q = max(1, ceil(log2(d)))`` is the
-            embedding's qubit count and ``D = 2**q`` is its padded dimension.
-            It is not a time estimate.
 
     Examples:
         `H = ZZ + 0.5*(XI + IX)` on two qubits has lowest eigenvalue
@@ -767,11 +743,9 @@ class Lanczos(Method):
     overlap_noise_multiplier: Annotated[Real, Field(gt=0)] = 1.0
     overlap_failure_probability: Annotated[Real, Field(gt=0, lt=1)] = 0.05
     sampling: SensitivitySampling | None = None
-    max_bytes: PositiveInt = DEFAULT_MAX_BYTES
-    max_analysis_work: PositiveInt = 100_000_000
-    max_classical_products: PositiveInt = 100_000_000
+    max_bytes: PositiveInt | None = None
+    max_classical_products: PositiveInt | None = None
     input_conversion: Literal["auto", "dense_pauli"] = "auto"
-    max_conversion_work: PositiveInt = DEFAULT_CONVERSION_WORK
     result_type: ClassVar[type] = LanczosResult
 
     descriptor: ClassVar[AlgorithmDescriptor] = DESCRIPTOR
@@ -789,9 +763,9 @@ class Lanczos(Method):
         the scalar frame and the table's content hash. Readout signs, support
         masks and normalized coefficients come from that same table, so the
         classical action and the quantum decoder use one term order. Dense,
-        CSR and CSC input on the classical path uses scaled Gershgorin row
+        CSR and CSC input on the classical path uses Gershgorin row
         intervals, or the equal column intervals of Hermitian CSC storage
-        (`"scaled_gershgorin"`). The frame determines every moment, so later
+        (`"gershgorin"`). The frame determines every moment, so later
         analysis never changes it. Moments known algebraically are recorded
         instead of measured.
 
@@ -821,19 +795,18 @@ class Lanczos(Method):
         model.
 
         Raises:
-            ValueError: If `krylov_dimension` exceeds the problem dimension,
-                if `degrees` are not distinct members of 1 to `2m - 1`, or if
-                `shots` conflicts. Also if the projected analysis, or a
-                sensitivity pilot with its solve and derivative, would exceed
-                `max_bytes` or `max_analysis_work`. These analyses run after
-                the moments are measured, so planning rejects them before any
-                moment is measured.
-            ApplicabilityError: If the Problem requests a different trial
-                subspace.
+            ValueError: If `degrees` are not distinct members of 1 to `2m - 1`,
+                or if `shots` conflicts. Also if the arrays of the projected
+                analysis, which also hold a sensitivity pilot's solve and
+                derivative, would exceed `max_bytes`. These analyses run
+                after the moments are measured, so planning rejects them
+                before any moment is measured.
+            ApplicabilityError: If `krylov_dimension` exceeds the problem
+                dimension, or the Problem requests a different trial subspace.
         """
         m = self.krylov_dimension or min(8, problem.dimension)
         if m > problem.dimension:
-            raise ValueError("krylov_dimension exceeds the original problem dimension")
+            raise ApplicabilityError("krylov_dimension exceeds the original problem dimension")
         if self.degrees is not None and (
             len(set(self.degrees)) != len(self.degrees) or any(k >= 2 * m for k in self.degrees)
         ):
@@ -848,14 +821,13 @@ class Lanczos(Method):
 
         # The projected analysis runs after every moment is acquired, but its
         # envelope depends only on m, so it is admitted before any acquisition.
-        admit_projected_analysis(m, max_bytes=self.max_bytes, max_work=self.max_analysis_work)
+        admit_projected_analysis(m, max_bytes=self.max_bytes)
         operator = eigen_operator(
             problem,
             output,
             max_bytes=self.max_bytes,
             as_pauli=execution == "quantum",
             input_conversion=self.input_conversion,
-            max_conversion_work=self.max_conversion_work,
         )
         reference = eigen_state(
             self.initial_state,
@@ -881,7 +853,7 @@ class Lanczos(Method):
             low, high, enclosure = center - alpha, center + alpha, "pauli_l1"
         else:
             low, high, center, alpha = gershgorin_frame(operator, max_bytes=self.max_bytes)
-            enclosure = "scaled_gershgorin"
+            enclosure = "gershgorin"
         terms = len(readout.signs) if pauli else 0
         subspace_record = ChebyshevSubspace(
             operator=problem.A.reference,
@@ -913,16 +885,6 @@ class Lanczos(Method):
             # the odd moments <K> need acquisition.
             known.extend((k, 1.0) for k in range(2, 2 * m, 2))
             degrees = tuple(k for k in degrees if k % 2)
-        if self.sampling and degrees:
-            # The pilot solve and its derivative run after the pilot stage is
-            # acquired. A Plan with no acquired moment never runs the pilot.
-            admit_projected_analysis(
-                m,
-                max_bytes=self.max_bytes,
-                max_work=self.max_analysis_work,
-                solves=2,
-                operation="sensitivity pilot",
-            )
         if degrees and execution == "quantum":
             program, blocks, settings, experiments = _moment_program(
                 reference,
@@ -998,12 +960,21 @@ class Lanczos(Method):
         if execution == "classical" and degrees:
             from nwqlib.algorithms._eigen_support import host_construction
 
+            # The reference and the recurrence are known now, so their bytes
+            # and products are checked once here, before the Run starts.
+            required_bytes, required_work = self._classical_requirements(operator, reference, reconstruction)
+            _check_bytes(required_bytes, self.max_bytes, "classical Chebyshev preparation and recurrence")
+            if exceeds(required_work, self.max_classical_products):
+                raise ResourceLimitError(
+                    f"classical Chebyshev preparation and recurrence require {required_work} classical "
+                    f"products, above max_classical_products={self.max_classical_products}. Raise "
+                    f"max_classical_products to at least {required_work} or set it to None.")
             labels = tuple(f"moment_{degree}" for degree in reconstruction.moment_indices)
             construction, experiments = host_construction(
                 METHOD,
                 (operator.reference, reference.reference),
                 labels,
-                work=self._classical_requirements(operator, reference, reconstruction)[1],
+                work=required_work,
                 description="selected classical Chebyshev recurrence, not an independent reference",
             )
         if execution == "quantum" and acquisition == "counts":
@@ -1024,9 +995,9 @@ class Lanczos(Method):
         routine runs with center 0 and alpha 1. K is ingested from the x/z
         words of the Plan's readout table and its scaled coefficients, in
         SELECT address order, without label strings. Matrix input keeps its
-        original storage and chebyshev_moments applies the affine map. Byte
-        and product caps are checked when the routine is invoked, before any
-        recurrence.
+        original storage and chebyshev_moments applies the affine map.
+        Planning checked the bytes and products of the reference and the
+        recurrence (``_classical_requirements``).
         """
         from nwqlib.blocks.kernels import BoundKernel, KernelOutput
         from nwqlib.execution import ScalarValue
@@ -1043,21 +1014,11 @@ class Lanczos(Method):
         def invoke():
             """Run the recurrence once and return the computed moments as scalars.
 
-            The Run calls this once, for the one classical evaluation. It
-            checks the byte and product totals against the limits before
-            building the reference vector, then returns one ScalarValue
-            ``moment_k`` with frame ``unit`` for each requested degree not
-            known algebraically, together with the reference's physical
-            scale.
+            The Run calls this once, for the one classical evaluation, and it
+            returns one ScalarValue ``moment_k`` with frame ``unit`` for each
+            requested degree not known algebraically, together with the
+            reference's physical scale.
             """
-            required_bytes, required_work = self._classical_requirements(operator, reference, rec)
-            _check_bytes(
-                required_bytes, self.max_bytes, "classical Chebyshev preparation and recurrence"
-            )
-            if required_work > self.max_classical_products:
-                raise ValueError(
-                    "classical Chebyshev preparation and recurrence exceed max_classical_products"
-                )
             moments = chebyshev_moments(
                 centered,
                 state_direction(reference, max_bytes=self.max_bytes),
@@ -1241,7 +1202,6 @@ class Lanczos(Method):
             cutoff=cutoff,
             sampled=plan.shots is not None,
             max_bytes=self.max_bytes,
-            max_work=self.max_analysis_work,
             overlap_failure_probability=delta,
             overlap_cutoff_policy=policy,
             overlap_noise_multiplier=multiplier,

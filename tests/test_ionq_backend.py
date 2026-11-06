@@ -193,6 +193,45 @@ def test_one_post_lost_ack_stays_uncertain_and_never_resubmits(tmp_path, api, mo
         assert state.posts == 1 and len(exchanges) == 1
 
 
+def test_limits_known_before_a_charge_or_a_request_refuse_with_nothing_counted(api, tmp_path):
+    """Two refusals whose remedy must work, because nothing has been spent when they are decided.
+
+    A saved circuit's QPY buffer of twice max_input_bytes is known from the configuration, so a smaller
+    max_data_bytes refuses before the preparation's charge and draw, and extend_limits continues with the seed
+    of an ample Run. The body of a whole batch is known from the saved requests, so a total above
+    max_input_bytes refuses before the submission is saved, though each circuit fits alone.
+    """
+    from nwqlib.execution import ExecutionLimits
+
+    state, backend, _ = api
+    _, selected = selection()
+    with Run(selected, backend=backend, directory=tmp_path / "ample") as ample:
+        ample.resume()
+        seed = next(iter(ample._state["workflow_items"].values())).runtime.seed
+    state.posts = 0
+    with Run(selected, backend=backend, directory=tmp_path / "tight",
+             limits=ExecutionLimits(max_data_bytes=2 * backend.max_input_bytes - 1)) as run:
+        with pytest.raises(ValueError, match=r"run\.extend_limits\(max_data_bytes="):
+            run.resume()
+        assert run.trace.preparations == 0 and not run._state["workflow_items"] and state.posts == 0
+        run.extend_limits(max_data_bytes=1 << 30)
+        run.resume()
+        assert run.trace.preparations == 1 and state.posts == 1
+        assert next(iter(run._state["workflow_items"].values())).runtime.seed == seed
+    state.posts = 0
+    with Run(selected, backend=backend, directory=tmp_path / "sized") as sizing:
+        handle = handle_for(selected, backend, sizing)
+        body = len(json.dumps(handle._native.input, separators=(",", ":")))
+        limit = max(handle.record.payload.bytes, 2 * body)
+        count = limit // body + 1
+    narrow = backend.model_copy(update=dict(max_input_bytes=limit))
+    with Run(selected, backend=narrow, directory=tmp_path / "batch") as run:
+        handle = handle_for(selected, narrow, run)
+        with pytest.raises(ValueError, match=rf"IonQ request exceeds its limit of {limit} bytes.*max_input_bytes={limit}"):
+            submit_detached((handle,) * count, run=run)
+        assert run.trace.submissions == () and run.trace.events == () and state.posts == 0
+
+
 def test_sync_pending_then_same_job_completes_and_cancel_preserves_exposure(api, tmp_path):
     state, backend, _ = api
     _, selected = selection()
@@ -395,7 +434,7 @@ def test_restore_admits_before_json_and_keeps_original_measurement_map(monkeypat
                                                                              for key, count in decimal.items()}}}})):
         run.calls.clear()
         result = backend._decode(histogram, artifact_format=artifact, native=tall, shots=12, job_id="tall", run=run)
-        assert result.raw_output["counts"] == expected and run.calls == [4 * (65 + 16)]
+        assert result.raw_output["counts"] == expected and run.calls == [4 * (65 + 64)]
     run.limits = ExecutionLimits(max_data_bytes=10)
     monkeypatch.setattr(ionq.json, "loads", lambda *a, **k: pytest.fail("JSON parsed before admission"))
     with pytest.raises(ValueError, match="max_data_bytes"):
@@ -409,34 +448,8 @@ def _array_route_native():
                          num_qubits=0, metadata={"observation": ObservationSpec(kind="counts", shots=4)})
 
 
-@pytest.mark.parametrize(
-    "qubits,measurement_map,keys,array_bytes",
-    [
-        # Distinct spellings of four native states: at most 2**q, not 2**c, distinct mapped indices.
-        (2, (0, 1, 0, 1, None, None, None, None), ("0", "1", "2", "3", "00", "01"), 374),
-        # Fewer provider entries than 2**min(q, c): at most m, not 2**64, distinct mapped indices.
-        (64, tuple(range(64)), 16, 1_040),
-    ],
-)
-def test_decode_admits_the_live_array_bound_of_the_uint64_route(qubits, measurement_map, keys, array_bytes):
-    """Up to 64 bits the decoder checks the represented count keys and then 57*m + 8*min(m, 2**min(q, c)) bytes."""
-    from dataclasses import replace
-    from test_nexus_backend import IO
-    from nwqlib.execution import ExecutionLimits
-
-    backend = IonQBackend(device="qpu.forte-1", max_input_bytes=65536, max_response_bytes=65536)
-    native = replace(_array_route_native(), num_qubits=qubits, measurement_map=measurement_map)
-    histogram = {key: 1 for key in keys} if isinstance(keys, tuple) else {str(state): 1 for state in range(keys)}
-    outcomes = len(histogram)
-    run = IO()
-    run.limits = ExecutionLimits(max_data_bytes=max(array_bytes, outcomes * (len(measurement_map) + 16)))
-    result = backend._decode(histogram, artifact_format="ionq.result.histogram.json.v1",
-                             native=native, shots=outcomes, job_id="array", run=run)
-    assert run.calls == [outcomes * (len(measurement_map) + 16), array_bytes]
-    assert int(result.raw_output["counts"][1].sum()) == outcomes
-
-
-def test_decode_refuses_below_the_array_bound_before_the_state_array(monkeypatch):
+def test_decode_refuses_below_its_byte_estimate_before_the_state_array(monkeypatch):
+    # Sixteen entries and four classical bits: 16*(4+64) = 1,088 bytes.
     from dataclasses import replace
     import numpy as np
     from test_nexus_backend import IO
@@ -446,13 +459,13 @@ def test_decode_refuses_below_the_array_bound_before_the_state_array(monkeypatch
     native = replace(_array_route_native(), num_qubits=4, measurement_map=(0, 1, 2, 3))
     histogram = {str(state): 1 for state in range(16)}
     run = IO()
-    run.limits = ExecutionLimits(max_data_bytes=1_039)
+    run.limits = ExecutionLimits(max_data_bytes=1_087)
     with monkeypatch.context() as patch:
         patch.setattr(np, "empty", lambda *a, **k: pytest.fail("state array allocated before admission"))
         with pytest.raises(ValueError, match="max_data_bytes"):
             backend._decode(histogram, artifact_format="ionq.result.histogram.json.v1", native=native, shots=16,
                             job_id="cap", run=run)
-    run.limits = ExecutionLimits(max_data_bytes=1_040)
+    run.limits = ExecutionLimits(max_data_bytes=1_088)
     result = backend._decode(histogram, artifact_format="ionq.result.histogram.json.v1", native=native, shots=16,
                              job_id="cap", run=run)
     assert result.raw_output["counts"][0].tolist() == list(range(16))
@@ -508,6 +521,31 @@ def test_response_reader_holds_at_most_one_byte_past_the_cap(monkeypatch):
     with pytest.raises(ValueError, match="exceeds max_response_bytes"):
         backend._request("GET", "jobs/cap", run=run)
     assert sum(delivered) == cap + 1
+
+
+def test_a_histogram_beyond_max_response_bytes_is_refused_at_preparation(api, tmp_path):
+    """Four shots on three qubits have at most four histogram entries of 3 + 1 + 4 bytes each, 32 bytes,
+    inside the 44-byte fixed structure of the v2 format."""
+    from qiskit import QuantumCircuit
+
+    _, original, exchanges = api
+    qc = QuantumCircuit(3, 3)
+    qc.h(0)
+    qc.measure([0, 1, 2], [0, 1, 2])
+    _, selected = selection()
+    for cap in (75, 76):
+        backend = original.revise(max_response_bytes=cap)
+        with Run(selected, backend=backend, directory=tmp_path / str(cap)) as run:
+            def prepare_circuit():
+                return backend.prepare(qc, observation=ObservationSpec(kind="counts", shots=4),
+                                       runtime=RuntimeOptions(seed=7), position=len(qc.data),
+                                       source_definitions=(), run=run, snapshot="cap")
+            if cap == 75:
+                with pytest.raises(ValueError, match="at least 76"):
+                    prepare_circuit()
+            else:
+                assert prepare_circuit().native.num_qubits == 3
+    assert not exchanges
 
 
 def test_qis_lowering_keeps_dense_unitaries_exact(api, tmp_path, monkeypatch):

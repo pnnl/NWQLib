@@ -5,7 +5,6 @@ Loading never plans again.
 
 from nwqlib._choice_archive import unsupported_archive_format
 from nwqlib.blocks.selection import SelectedBlock
-from nwqlib.operators.access import _check_bytes
 from nwqlib.operators.inputs import OperatorInput
 from nwqlib.subroutines.fermionic_pool import FermionicGenerator
 from .adapt_inputs import AdaptInputs
@@ -116,11 +115,12 @@ def save(plan, files):
     writes this archive before any selection, so the plans it builds later
     are saved with its checkpoints (``save_context``).
 
-    The archive format is ``adapt/8``. Its saved reconstruction carries the
+    The archive format is ``adapt/9``. Its saved reconstruction carries the
     Hamiltonian action allowance (``hamiltonian_action_work``) computed at
-    planning under this format's work formula, and loading reuses it without
-    recomputing it, so an archive of an earlier format, whose query and
-    action work formulas differ, is rejected. A classical Plan's packed
+    planning under this format's work formula and the effective energy
+    thresholds that the run reads. Loading reuses both without recomputing
+    them, so an archive of an earlier format, which lacks those thresholds, is
+    rejected. A classical Plan's packed
     action tables are not saved. Loading packs them again and checks their
     cost again (``adapt_actions.build_action_tables``).
     """
@@ -137,7 +137,7 @@ def save(plan, files):
         ]
     )
     return dict(
-        format="adapt/8",
+        format="adapt/9",
         plan=plan.to_record(),
         problem=files.write_problem(plan.problem),
         output=files.write_output(plan.output),
@@ -161,8 +161,8 @@ def load(saved, files):
     """Reopen saved generator data and bind the saved query construction without rerunning selection."""
     from .adapt import ADAPT, CompilerPlans
 
-    if saved.get("format") != "adapt/8":
-        raise unsupported_archive_format("ADAPT archive", saved.get("format"), "adapt/8")
+    if saved.get("format") != "adapt/9":
+        raise unsupported_archive_format("ADAPT archive", saved.get("format"), "adapt/9")
     fields = dict(saved["method"])
     original = saved["original_pool"]
     fields["pool"] = (
@@ -185,14 +185,6 @@ def load(saved, files):
         output=files.read_output(saved["output"]),
         reconstruction=rec,
     )
-    if plan.execution == "quantum":
-        # A restored quantum Plan passes the decoded label cache's
-        # count-based reservation before its first cache decode, from the
-        # stored row shapes, members and group sizes.
-        from .adapt_inputs import restored_cache_reservation
-
-        _check_bytes(restored_cache_reservation(rec, sampled=plan.shots is not None),
-                     method.max_bytes, "restored ADAPT records and decoded label cache")
     reference = files.read_state(saved["reference"])
     generators = tuple(_read_generator(g) for g in saved["generators"])
     inputs = AdaptInputs(
@@ -211,11 +203,10 @@ def load(saved, files):
         offset_free_requirements=(rec.offset_free_action_bytes, rec.offset_free_action_work),
     )
     if plan.execution == "classical":
-        from .adapt_actions import build_action_tables, restored_record_allowance
+        from .adapt_actions import build_action_tables
 
         build_action_tables(inputs, rec.num_qubits, max_bytes=method.max_bytes,
-                            max_products=method.max_products,
-                            other_live=restored_record_allowance(inputs, rec))
+                            max_products=method.max_products)
     compilers = (
         CompilerPlans(
             generators,

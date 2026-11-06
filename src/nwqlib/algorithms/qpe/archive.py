@@ -1,6 +1,7 @@
 """Save the QPE inputs and powers that a Plan uses, and the numerical caches already computed."""
 
-from nwqlib.blocks.selection import SelectedBlock, _preparation_circuit
+from nwqlib.blocks.selection import NATIVE_POSITION_BYTES, SelectedBlock, _preparation_circuit
+from nwqlib.operators.inputs import _same_storage
 from . import powers
 from .method import _Input, _bind_host
 from .records import QPEReconstruction
@@ -14,7 +15,7 @@ def save(method, plan, files):
     a Hamiltonian, the polar factor for a unitary, which the archive saves
     once) and a product-formula step must use the Plan's Pauli terms, so the
     archive holds one copy of each operator. The format label names this
-    layout (``qpe/<estimator>/8``), and load rejects any other label instead
+    layout (``qpe/<estimator>/9``), and load rejects any other label instead
     of converting it.
     """
     data = plan._native["input"]
@@ -30,7 +31,7 @@ def save(method, plan, files):
                 item = dict(kind="phase", gate=payload)
             elif constructor is powers.construct_dense_power:
                 matrix, tau, power = payload
-                if matrix is not data.spectral._data:
+                if not _same_storage(matrix, data.spectral._data):
                     raise ValueError("QPE power differs from its bound base data")
                 item = dict(kind="dense_power", tau=tau, power=power)
             elif constructor is powers.construct_suzuki_step:
@@ -42,7 +43,7 @@ def save(method, plan, files):
                 raise ValueError("QPE archive needs its actual built-in constructors")
             payloads.append(item)
     return dict(
-        format=f"qpe/{method.estimator}/8",
+        format=f"qpe/{method.estimator}/9",
         estimator=method.estimator,
         plan=plan.to_record(),
         problem=files.write_problem(plan.problem),
@@ -61,7 +62,7 @@ def save(method, plan, files):
 
 def load(method_type, saved, files):
     """Attach the saved QPE inputs and known constructors to the Plan without rebuilding powers."""
-    if saved["format"] != f"qpe/{method_type.estimator}/8":
+    if saved["format"] != f"qpe/{method_type.estimator}/9":
         raise ValueError("unsupported QPE archive format")
     fields = dict(saved["method"])
     fields["initial_state"] = (
@@ -92,6 +93,9 @@ def load(method_type, saved, files):
             dense_power=powers.construct_dense_power,
             suzuki_step=powers.construct_suzuki_step,
         )
+        # The memory estimates of select_powers, which are not saved. Each step
+        # reads every term, so they are computed once for all its powers.
+        memory = dict(phase=NATIVE_POSITION_BYTES, suzuki_step=powers.step_memory_bytes(r.pauli_terms))
         for record, item in zip(plan.construction.selections, saved["payloads"], strict=True):
             kind = item["kind"]
             payload = (
@@ -105,8 +109,11 @@ def load(method_type, saved, files):
                 if kind == "suzuki_step"
                 else None
             )
+            size = (powers.dense_memory_bytes(data.spectral._data.shape[0]) if kind == "dense_power"
+                    else memory.get(kind))
             blocks.append(
-                SelectedBlock.bind(record, payload=payload, constructor=constructors[kind])
+                SelectedBlock.bind(record, payload=payload, constructor=constructors[kind],
+                                   native_bytes=size, definition_bytes=size)
             )
         blocks = tuple(blocks)
     return plan._bind(blocks=blocks, input=data)

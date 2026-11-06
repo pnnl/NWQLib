@@ -48,6 +48,14 @@ def test_coherent_qpe_register_order_for_exact_phase(monkeypatch) -> None:
     assert result.num_phase_qubits == 2
     with pytest.raises(ValueError, match="num_phase_qubits"):
         build_coherent_qpe_circuit(np.eye(2), num_phase_qubits=0)
+    # A 2x2 unitary at m = 2 needs 2 (2**3 + w) work units for the synthesis work w on two qubits, with no default
+    # limit, and an explicit limit one unit lower is refused with that count.
+    from nwqlib.subroutines._dense_synthesis import controlled_synthesis_size
+    need = 2 * (8 + controlled_synthesis_size(2)[0])
+    assert build_coherent_qpe_circuit(np.eye(2), num_phase_qubits=2, max_work=None).num_phase_qubits == 2
+    assert build_coherent_qpe_circuit(np.eye(2), num_phase_qubits=2, max_work=need).num_phase_qubits == 2
+    with pytest.raises(ValueError, match=f"need {need} work units, above max_work={need - 1}"):
+        build_coherent_qpe_circuit(np.eye(2), num_phase_qubits=2, max_work=need - 1)
 
 
 def _controlled(unitary):

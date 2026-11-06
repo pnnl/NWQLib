@@ -6,18 +6,19 @@ compared.
 """
 
 from dataclasses import dataclass, field
+from fractions import Fraction
 from hashlib import sha256
 import json
+import math
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import StrictBool, model_validator
 
 from nwqlib.backends.assessment import PlanEstimate, estimate_plan
 from nwqlib.backends.profiles import Allocation, TimeScope
 from nwqlib.core.planning import Plan
 from nwqlib.core.records import ContentID, Rational, Record, Text, Unit
 from nwqlib.evidence import Fact
-from nwqlib.evidence._work import ExactArithmetic
 from nwqlib.evidence.error_model import FramedFact, TargetReference
 from nwqlib.operators.access import Count
 from nwqlib.resources import ResourceContext, WorkloadEstimate
@@ -119,16 +120,18 @@ class ObjectiveValue(Record):
 
     [`scan`][nwqlib.search.scan] computes these values, one per row and
     objective, in `SearchSelection.values`. A value is `exact`, `conditional`
-    on the assumptions it lists, or `unavailable` with a `reason`. A sum of
-    binary64 time predictions is computed exactly but stays a conditional
-    prediction. It does not bound the elapsed time or state that the
-    predictions hold together. The fields below are read-only.
+    on the assumptions it lists, or `unavailable` with a `reason`. Predicted
+    seconds are the correctly rounded binary64 sum (`math.fsum`) of the
+    predictions and stay a conditional prediction. The sum does not bound
+    the elapsed time or state that the predictions hold together. The fields
+    below are read-only.
 
     Attributes:
         objective_id: Content hash of the [`Objective`][nwqlib.search.Objective]
             this value answers.
-        value: Exact nonnegative rational value (`Rational`), or `None` when
-            unavailable.
+        value: Nonnegative value as a `Rational`, an integer for shots and
+            width and exactly the binary64 sum for predicted seconds, or
+            `None` when unavailable.
         unit: `Unit(symbol="count", dimension="count")` for shots and width,
             `Unit(symbol="s", dimension="time")` for predicted seconds.
         status: `"exact"`, `"conditional"` or `"unavailable"`.
@@ -138,6 +141,10 @@ class ObjectiveValue(Record):
         assumptions: Conditions taken over from those sources.
         reason: Why the value is unavailable, or `None` for an available
             value.
+        resource_limited: Default `False`. `True` when the row has no Plan
+            because its Method's planning exceeded a memory or work limit.
+            `False` for every other value, including a row whose Method cannot
+            handle the Problem. A value with `True` is unavailable.
     """
 
     objective_id: ContentID
@@ -147,11 +154,14 @@ class ObjectiveValue(Record):
     sources: tuple[ContentID, ...]
     assumptions: tuple[Text, ...] = ()
     reason: Text | None = None
+    resource_limited: StrictBool = False
 
     @model_validator(mode="after")
     def _value(self):
         if (self.value is None) != (self.status == "unavailable"):
             raise ValueError("objective value must preserve its availability")
+        if self.resource_limited and self.value is not None:
+            raise ValueError("a row at a limit has no Plan and no objective value")
         if self.value is None:
             if self.reason is None:
                 raise ValueError("unavailable objective requires its reason")
@@ -210,11 +220,12 @@ class SearchSelection(Record):
     least one is smaller. The Pareto front, `nondominated`, is every row
     whose objectives are all available and that no other such row
     dominates, so equal rows all stay. A row with any unavailable objective
-    is listed in `incomparable` instead of being ranked as zero or infinity.
-    The front holds only within the rows given. It is not a feasibility
+    is listed in `incomparable` instead of being ranked as zero or infinity,
+    and `ObjectiveValue.resource_limited` marks a row whose planning exceeded
+    a limit. The front holds only within the rows given. It is not a feasibility
     filter or a global optimum. Validation recomputes both lists from the
-    objective values with exact rational arithmetic. The fields below are
-    read-only.
+    objective values, comparing the stored values exactly for every ordered
+    pair of rows. The fields below are read-only.
 
     Attributes:
         comparison_id: Content hash of the Comparison that this selection
@@ -232,13 +243,6 @@ class SearchSelection(Record):
             record kept as often as it was supplied.
         work: The [`SearchWork`][nwqlib.search.SearchWork] of the scan that
             produced this selection.
-        max_pair_comparisons: Default `1_000_000`. Largest number of
-            coordinate comparisons of the front, `N*(N-1)*k` for N rows and
-            k objectives, checked before any comparison.
-        max_values: Default `4096`. Largest number of row and objective
-            values, `N*k`, checked before any comparison.
-        max_integer_bits: Default `4096`. Largest bit length of an integer in
-            the exact rational arithmetic.
     """
 
     comparison_id: ContentID
@@ -248,9 +252,6 @@ class SearchSelection(Record):
     incomparable: tuple[Count, ...] | None = None
     prior_work: tuple[tuple[Fact, ...], ...]
     work: SearchWork
-    max_pair_comparisons: Count = 1_000_000
-    max_values: Count = 4096
-    max_integer_bits: Count = 4096
 
     @model_validator(mode="after")
     def _rows(self):
@@ -258,16 +259,12 @@ class SearchSelection(Record):
 
         Every row must hold one value per objective in objective order, with
         the objective's unit, integer counts for shots and width, and a
-        predicted duration that is never marked exact. The size limits are
-        checked before any comparison. The Pareto front then follows the
-        class definition with exact rational comparisons, which determine
-        both lists.
+        predicted duration that is never marked exact. The Pareto front then
+        follows the class definition with exact comparisons of the stored
+        rationals, which determine both lists.
         """
         if not self.values or not self.objectives or len(self.prior_work) != len(self.values):
             raise ValueError("search requires nonempty aligned original rows and objectives")
-        _frontier_size(
-            len(self.values), len(self.objectives), self.max_pair_comparisons, self.max_values
-        )
         ids = tuple(o.content_id for o in self.objectives)
         if len(set(ids)) != len(ids):
             raise ValueError("search objectives must be distinct")
@@ -284,22 +281,24 @@ class SearchSelection(Record):
                     raise ValueError("shot and logical-width objectives require integer counts")
                 if time and value.status == "exact":
                     raise ValueError("predicted duration is not an exact measured time")
-        arithmetic = ExactArithmetic(max_integer_bits=self.max_integer_bits)
         numeric = tuple(
-            tuple(None if v.value is None else arithmetic.fraction(v.value) for v in row)
+            tuple(
+                None if v.value is None else Fraction(v.value.numerator, v.value.denominator)
+                for v in row
+            )
             for row in self.values
         )
         comparable = tuple(i for i, row in enumerate(numeric) if None not in row)
         # a strictly dominates b iff every a_j <= b_j and at least one is <.
-        # ponytail: bounded quadratic frontier; use a specialized skyline
-        # algorithm if explicitly requested larger finite populations need it.
+        # ponytail: quadratic frontier; a skyline algorithm would serve larger
+        # populations if their comparisons become material.
         frontier = tuple(
             i
             for i in comparable
             if not any(
                 j != i
                 and numeric[j] != numeric[i]
-                and all(arithmetic.le(a, b) for a, b in zip(numeric[j], numeric[i], strict=True))
+                and all(a <= b for a, b in zip(numeric[j], numeric[i], strict=True))
                 for j in comparable
             )
         )
@@ -362,7 +361,8 @@ class SearchResult:
         """Return the row at `index`, unchanged, as `Comparison.select` does.
 
         Any row can be selected, including a dominated row or a row without a
-        Plan. Running a row without a Plan raises `ApplicabilityError`.
+        Plan. Running a row without a Plan raises `ApplicabilityError`, or
+        `ResourceLimitError` when the row has `resource_limited=True`.
 
         Args:
             index (int): Row position, from 0 to the number of rows minus 1.
@@ -397,6 +397,7 @@ def _comparison_identity(comparison):
             tuple(f.content_id for f in row.facts),
             None if row.reference is None else row.reference.content_id,
             tuple(f.content_id for f in row.prior_work),
+            row.resource_limited,
         )
         for row in comparison.rows
     )
@@ -408,24 +409,7 @@ def _comparison_identity(comparison):
     return identity
 
 
-def _frontier_size(count, width, limit, max_values):
-    """Check N rows and k objectives against the size limits before any value is computed.
-
-    The table has N*k cells, at most ``max_values``. The Pareto front compares
-    every ordered pair of distinct rows on every objective, N*(N-1)*k
-    coordinate comparisons, at most ``limit``.
-    """
-    if type(max_values) is not int or max_values < 1:
-        raise ValueError("max_values must be a positive integer")
-    if count * width > max_values:
-        raise ValueError("candidate/objective output exceeds max_values before evaluation")
-    if type(limit) is not int or limit < 0:
-        raise ValueError("max_pair_comparisons must be a nonnegative integer")
-    if count * max(0, count - 1) * width > limit:
-        raise ValueError("finite Pareto comparisons exceed max_pair_comparisons before evaluation")
-
-
-def _objective_value(row, objective, arithmetic, profile_points):
+def _objective_value(row, objective, profile_points):
     """Read one objective for one comparison row from its Plan and resource estimate.
 
     Nothing is planned, estimated or predicted here. The value comes from
@@ -448,8 +432,10 @@ def _objective_value(row, objective, arithmetic, profile_points):
       point, that is per planned execution. It remains conditional as a
       model prediction.
 
-    Sums and maxima use exact rational arithmetic within the scan's
-    integer-bit limit.
+    Shot sums and width maxima are exact integers, so adjacent large counts
+    stay distinct. Predicted seconds are the correctly rounded binary64 sum
+    of the matching predictions (``math.fsum``), and a sum beyond binary64
+    leaves the value unavailable.
 
     ``profile_points`` returns ``backends.assessment._profile_points`` of a
     Plan, evaluated once per Plan for the whole scan.
@@ -461,11 +447,11 @@ def _objective_value(row, objective, arithmetic, profile_points):
     status = "conditional" if time else "exact"
 
     def result(value=None, reason=None):
-        scalar = (
-            None
-            if value is None
-            else Rational(numerator=value.numerator, denominator=value.denominator)
-        )
+        scalar = None
+        if value is not None:
+            # An int count or a binary64 sum, stored as its exact ratio.
+            numerator, denominator = value.as_integer_ratio()
+            scalar = Rational(numerator=numerator, denominator=denominator)
         return ObjectiveValue(
             objective_id=objective.content_id,
             value=scalar,
@@ -474,11 +460,12 @@ def _objective_value(row, objective, arithmetic, profile_points):
             sources=tuple(dict.fromkeys(sources)),
             assumptions=tuple(dict.fromkeys(assumptions)),
             reason=reason,
+            resource_limited=row.resource_limited,
         )
 
     if row.plan is None:
         return result(reason=row.reason or "blocked row has no selected workload")
-    direct_shots = arithmetic.fraction(0)
+    direct_shots = 0
     if objective.kind == "requested_shots":
         from nwqlib.ir import AdaptiveLoop
 
@@ -499,9 +486,7 @@ def _objective_value(row, objective, arithmetic, profile_points):
         for experiment in direct:
             if experiment.observation.kind == "estimated_observable":
                 return result(reason="provider-managed estimation has no selected raw shot count")
-            direct_shots = arithmetic.add(
-                direct_shots, arithmetic.fraction(experiment.observation.shots or 0)
-            )
+            direct_shots += experiment.observation.shots or 0
             sources.append(experiment.content_id)
         if all(e.batch is None for e in row.plan.experiments):
             sources.append(row.plan.content_id)
@@ -510,8 +495,8 @@ def _objective_value(row, objective, arithmetic, profile_points):
     resources = estimate.resources if isinstance(estimate, PlanEstimate) else estimate
     if not isinstance(resources, WorkloadEstimate):
         return result(reason="no original logical estimate is stored for this row")
-    total = direct_shots if objective.kind == "requested_shots" else arithmetic.fraction(0)
     if not time:
+        total = direct_shots if objective.kind == "requested_shots" else 0
         metric = "shots" if objective.kind == "requested_shots" else "logical_width"
         quantities = tuple(q for q in resources.quantities if q.metric == metric)
         if not quantities:
@@ -529,6 +514,7 @@ def _objective_value(row, objective, arithmetic, profile_points):
                 or quantity.interpretation != "exact"
                 and not conditional_width
                 or not isinstance(fact.value, Rational)
+                or fact.value.denominator != 1
             ):
                 return result(reason="objective requires exact concrete selected workload evidence")
             if (
@@ -536,14 +522,8 @@ def _objective_value(row, objective, arithmetic, profile_points):
                 and resources.context.batch_schedule != "serial"
             ):
                 return result(reason="quantity requires its declared serial acquisition schedule")
-            value = arithmetic.fraction(fact.value)
-            total = (
-                arithmetic.add(total, value)
-                if metric == "shots"
-                else value
-                if arithmetic.le(total, value)
-                else total
-            )
+            value = fact.value.numerator
+            total = total + value if metric == "shots" else max(total, value)
             sources.append(quantity.content_id)
             assumptions.extend(fact.assumptions)
             if fact.assumptions:
@@ -559,6 +539,7 @@ def _objective_value(row, objective, arithmetic, profile_points):
             reason="forecast does not cover the complete selected workload: "
             + "; ".join(estimate.unpredicted)
         )
+    seconds = []
     for assessment in estimate.assessments:
         matches = tuple(
             p
@@ -574,8 +555,11 @@ def _objective_value(row, objective, arithmetic, profile_points):
             return result(
                 reason="matching prediction is unavailable: " + "; ".join(prediction.reasons)
             )
-        total = arithmetic.add(total, arithmetic.fraction(prediction.seconds))
-    return result(total)
+        seconds.append(prediction.seconds.value)
+    try:
+        return result(math.fsum(seconds))
+    except OverflowError:
+        return result(reason="the sum of the predicted seconds exceeds binary64")
 
 
 def scan(
@@ -585,11 +569,6 @@ def scan(
     profile=None,
     context=None,
     assessed_at=None,
-    max_candidates=256,
-    max_assessments=4096,
-    max_pair_comparisons=1_000_000,
-    max_values=4096,
-    max_integer_bits=4096,
 ):
     """Rank Plans of one Problem by resource objectives and return their Pareto front.
 
@@ -605,9 +584,7 @@ def scan(
     the estimates and forecasts that its rows hold, and then nothing is
     planned, estimated or predicted. Every row is an existing Plan. A
     different shot count or Method setting is a different Plan, supplied as
-    another Candidate. The limits on rows, values and comparisons are
-    checked before any estimate, model evaluation or comparison, and a profile's complete
-    set of forecasts is checked before its first model evaluation. The
+    another Candidate. The
     [Rank candidate plans](../search.md) guide describes the objectives.
 
     Args:
@@ -625,16 +602,6 @@ def scan(
         assessed_at (datetime | None): Time-zone-aware time of new
             forecasts. Omitted, the current time is used. Not accepted when
             rescoring.
-        max_candidates (int): Default `256`. Largest number of rows.
-        max_assessments (int): Default `4096`. Largest number of forecast
-            rows evaluated, or read from a Comparison being rescored.
-        max_pair_comparisons (int): Default `1_000_000`. Largest number of
-            coordinate comparisons of the Pareto front, `N*(N-1)*k` for N
-            rows and k objectives.
-        max_values (int): Default `4096`. Largest number of row and
-            objective values, `N*k`.
-        max_integer_bits (int): Default `4096`. Largest bit length of an
-            integer in the exact rational arithmetic.
 
     Returns:
         result (SearchResult): The ranked Comparison and its
@@ -644,9 +611,8 @@ def scan(
         TypeError: If `objectives` is not a nonempty tuple of Objective
             records, or `candidates` is neither a nonempty tuple of Candidate
             records nor a Comparison.
-        ValueError: If the objectives are not distinct, a limit has an
-            invalid value or is exceeded, the Plans of the Candidates belong
-            to different Problems, a profile is given without an Allocation
+        ValueError: If the objectives are not distinct, the Plans of the
+            Candidates belong to different Problems, a profile is given without an Allocation
             on every Candidate, or a Comparison is rescored with `profile`,
             `context` or `assessed_at`.
 
@@ -675,10 +641,6 @@ def scan(
         raise TypeError("objectives must be a nonempty finite tuple of Objective records")
     if len({o.content_id for o in objectives}) != len(objectives):
         raise ValueError("search objectives must be distinct")
-    if type(max_candidates) is not int or max_candidates < 1:
-        raise ValueError("max_candidates must be a positive integer")
-    if type(max_assessments) is not int or max_assessments < 1:
-        raise ValueError("max_assessments must be a positive integer")
     if not isinstance(candidates, Comparison) and (
         type(candidates) is not tuple
         or not candidates
@@ -686,10 +648,8 @@ def scan(
     ):
         raise TypeError("scan requires a finite Candidate tuple or existing Comparison")
     count = len(candidates.rows) if isinstance(candidates, Comparison) else len(candidates)
-    if not count or count > max_candidates:
-        raise ValueError("finite candidate count exceeds max_candidates")
-    _frontier_size(count, len(objectives), max_pair_comparisons, max_values)
-    arithmetic = ExactArithmetic(max_integer_bits=max_integer_bits)
+    if not count:
+        raise ValueError("scan requires at least one candidate")
     # One _profile_points evaluation per Plan object for this scan. The rows
     # keep their Plans alive, so the object id stays unique during the call.
     profiled = {}
@@ -706,18 +666,6 @@ def scan(
                 "stored comparison supplies its original contexts; rescoring cannot replace them"
             )
         comparison = candidates
-        seen = set()
-        stored = 0
-        for row in comparison.rows:
-            forecast = row.estimate
-            if isinstance(forecast, PlanEstimate) and id(forecast) not in seen:
-                seen.add(id(forecast))
-                stored += len(forecast.assessments)
-                if stored > max_assessments:
-                    raise ValueError("stored forecast traversal exceeds max_assessments")
-                stored += sum(len(a.predictions) for a in forecast.assessments)
-                if stored > max_assessments:
-                    raise ValueError("stored forecast traversal exceeds max_assessments")
         requested = sum(
             len(r.estimate.assessments)
             for r in comparison.rows
@@ -734,7 +682,7 @@ def scan(
             ),
         )
     else:
-        from nwqlib.backends.assessment import _assessment_time, _forecast_rows
+        from nwqlib.backends.assessment import _assessment_time
         from nwqlib.resources import estimate as fold
 
         context = ResourceContext() if context is None else context
@@ -761,9 +709,6 @@ def scan(
                 raise ValueError(
                     "model evaluation requires its actual DeviceProfile and every explicit Allocation"
                 )
-            unique = {key: c for key, c in zip(keys, candidates, strict=True)}
-            points = sum(len(profile_points(c.plan)[0]) for c in unique.values())
-            _forecast_rows(points, profile, max_assessments)
         at = _assessment_time(assessed_at)
         forecasts = {}
         folds = {}
@@ -785,7 +730,6 @@ def scan(
                         assessed_at=at,
                         facts=candidate.facts,
                         reference=candidate.reference,
-                        max_assessments=max_assessments,
                     )
                     forecasts[key] = estimate
                     assessed += len(estimate.assessments)
@@ -822,7 +766,7 @@ def scan(
             reused_folds=reused_folds,
         )
     values = tuple(
-        tuple(_objective_value(row, o, arithmetic, profile_points) for o in objectives)
+        tuple(_objective_value(row, o, profile_points) for o in objectives)
         for row in comparison.rows
     )
     selection = SearchSelection(
@@ -831,8 +775,5 @@ def scan(
         values=values,
         prior_work=tuple(row.prior_work for row in comparison.rows),
         work=work,
-        max_pair_comparisons=max_pair_comparisons,
-        max_values=max_values,
-        max_integer_bits=max_integer_bits,
     )
     return SearchResult(comparison, selection)

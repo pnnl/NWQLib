@@ -4,7 +4,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from qiskit import QuantumCircuit
-from nwqlib._limits import DEFAULT_MAX_DIRECT_AMPLITUDES
 from nwqlib.algorithms.gcim import adapt_acquisition
 from nwqlib.problems import bind_preparation_circuit, ingest_occupation
 from nwqlib.core import InputRef, Source
@@ -34,7 +33,6 @@ def reference_kwargs(circuit):
         compiler_plans=(),
         policy=SimpleNamespace(max_bytes=MAX_BYTES),
         context=adapt_acquisition.AdaptContext(),
-        max_direct_amplitudes=DEFAULT_MAX_DIRECT_AMPLITUDES,
     )
 
 

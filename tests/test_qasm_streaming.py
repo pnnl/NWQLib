@@ -10,10 +10,7 @@ import pytest
 import nwqlib
 from nwqlib.algorithms.expectation import ExpectationMethod
 from nwqlib.blocks import SelectedConstruction, select_preparation, select_zero_reflection, transform_block
-from nwqlib.io import (
-    QasmMaterializationBudget, QasmWriteBudget, QasmWriteError, QasmWriteReceipt,
-    materialize_qasm3_file, write_qasm3, write_qasm3_file,
-)
+from nwqlib.io import QasmWriteError, QasmWriteReceipt, materialize_qasm3_file, write_qasm3, write_qasm3_file
 from nwqlib.ir import (
     Allocate, BlockCall, ClassicalValue, Definition, Measure, PortMap, Program,
     Register, Release, Repeat, Reset, Sequence,
@@ -21,10 +18,18 @@ from nwqlib.ir import (
 from nwqlib.operators import ingest_pauli
 from nwqlib.problems.inputs import ingest_occupation, ingest_vector
 
-WRITE = QasmWriteBudget(max_metadata_bytes=1000000, max_walk_steps=100000,
-                        max_qubits=3, max_clbits=3, max_bytes=4096, max_instructions=100, max_chunk_bytes=13)
-MATERIALIZE = QasmMaterializationBudget(max_bytes=4096, max_qubits=3, max_clbits=3,
-                                      max_dynamic_visits=100, max_operations=100)
+class Limited:
+    """A binary sink that accepts at most ``cap`` bytes and then fails."""
+
+    def __init__(self, cap):
+        self.cap, self.data = cap, bytearray()
+
+    def write(self, chunk):
+        if len(self.data) >= self.cap:
+            raise OSError("sink full")
+        size = min(len(chunk), self.cap - len(self.data))
+        self.data.extend(chunk[:size])
+        return size
 
 
 def expectation_plan():
@@ -51,9 +56,9 @@ def one(block, *, repeat=1, reverse_registers=False):
     ), selections=(block.record,))
 
 
-def emit(construction, budget=WRITE):
+def emit(construction):
     sink = BytesIO()
-    receipt = write_qasm3(construction, sink, budget=budget)
+    receipt = write_qasm3(construction, sink)
     text = sink.getvalue().decode("ascii")
     return text, receipt, openqasm3.parse(text)
 
@@ -86,10 +91,9 @@ def test_actual_expectation_selection_and_json_file_consumer(tmp_path):
         assert selected.output.kind == "normalized_expectation"
         assert receipt.expanded_operations == len(expected)
         path = tmp_path / f"{choice}-{expected[0]}.qasm"
-        completed = write_qasm3_file(construction, path, budget=WRITE)
-        loaded = materialize_qasm3_file(construction, path, completed, writer_budget=WRITE,
-                                       budget=MATERIALIZE.revise(max_bytes=2**100))
-        assert loaded.output_nodes == 1
+        completed = write_qasm3_file(construction, path)
+        loaded = materialize_qasm3_file(construction, path, completed)
+        assert loaded.output_nodes == completed.unrolled_instructions == 1
         assert loaded.circuit.num_qubits == 1
         assert [item.operation.name for item in loaded.circuit.data[0].operation.definition.data] == expected
         assert QasmWriteReceipt.model_validate_json(completed.model_dump_json()) == completed
@@ -171,7 +175,7 @@ def test_repeat_text_is_lazy_nested_and_dynamic_admission_precedes_sdk(tmp_path,
     assert len(texts[3]) - len(texts[2]) == 11  # inclusive endpoint digits: 1 versus 999999999999
     huge = one(block, repeat=10**12)
     path = tmp_path / "huge.qasm"
-    receipt = write_qasm3_file(huge, path, budget=WRITE)
+    receipt = write_qasm3_file(huge, path)
     import qiskit.qasm3
     import qiskit.transpiler.passes
     def forbidden(*args, **kwargs):
@@ -179,30 +183,56 @@ def test_repeat_text_is_lazy_nested_and_dynamic_admission_precedes_sdk(tmp_path,
     with monkeypatch.context() as patch:
         patch.setattr(qiskit.qasm3, "loads", forbidden)
         patch.setattr(qiskit.transpiler.passes, "UnrollForLoops", forbidden)
-        with pytest.raises(ValueError, match="dynamic materialization"):
-            materialize_qasm3_file(huge, path, receipt, writer_budget=WRITE, budget=MATERIALIZE)
+        # 10**12 unrolled calls at 4096 bytes each exceed any physical memory.
+        assert receipt.unrolled_instructions == 10**12
+        with pytest.raises(ValueError, match="OpenQASM 3 import with unrolled loops"):
+            materialize_qasm3_file(huge, path, receipt)
+        # A file that is not the unchanged writer output is refused before it is read.
+        path.write_bytes(b"x")
+        with pytest.raises(ValueError, match="the file has 1 bytes"):
+            materialize_qasm3_file(huge, path, receipt.revise(unrolled_instructions=1))
     nested = one(block, repeat=2)
     definitions = tuple(d.revise(node=Repeat(body="inner", count=2)) if d.id == "repeat" else d
                         for d in nested.program.definitions) + (Definition(id="inner", node=Repeat(body="call", count=3)),)
     nested = nested.revise(program=nested.program.revise(definitions=definitions))
-    receipt = write_qasm3_file(nested, path, budget=WRITE)
+    receipt = write_qasm3_file(nested, path)
     assert receipt.expanded_operations == 18
-    imported = materialize_qasm3_file(nested, path, receipt, writer_budget=WRITE, budget=MATERIALIZE)
-    assert imported.output_nodes == 6  # six logical HZH calls, eighteen primitive applications
+    imported = materialize_qasm3_file(nested, path, receipt)
+    # Six logical HZH calls and eighteen primitive applications.
+    assert imported.output_nodes == receipt.unrolled_instructions == 6
     assert all(item.operation.name == "g0" for item in imported.circuit.data)
 
 
+def test_declared_wires_enter_the_import_estimate_before_qiskit(tmp_path, monkeypatch):
+    """A register of 10**12 qubits and no gates, a file under 100 bytes, is refused before Qiskit allocates its wires."""
+    program = Program(root="root", registers=(Register(name="wide", width=10**12),),
+                      definitions=(Definition(id="root", node=Allocate(wire="wide")),))
+    path = tmp_path / "wide.qasm"
+    receipt = write_qasm3_file(SelectedConstruction(program=program, selections=()), path)
+    assert receipt.unrolled_instructions == 0 and receipt.quantum_layout == (("wide", "q0", 10**12),)
+    assert receipt.bytes_written < 100
+    assert "qubit[1000000000000] q0;" in path.read_text()
+    import qiskit.qasm3
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Qiskit allocated before the import estimate")
+
+    monkeypatch.setattr(qiskit.qasm3, "loads", forbidden)
+    with pytest.raises(ValueError, match="OpenQASM 3 import with unrolled loops"):
+        materialize_qasm3_file(SelectedConstruction(program=program, selections=()), path, receipt)
+
+
 def test_byte_boundaries_partial_sink_failure_and_cancellation(tmp_path, monkeypatch):
-    """Exact byte caps and partial writes must report the accepted prefix while failed file
+    """A full sink, partial writes and cancellation report the accepted prefix, while failed file
     replacement preserves old content.
     """
     construction = one(select_zero_reflection("reflect", 2), repeat=2)
     text, receipt, _ = emit(construction)
-    assert emit(construction, WRITE.revise(max_bytes=len(text)))[1].bytes_written == len(text)
-    sink = BytesIO()
+    assert write_qasm3(construction, Limited(len(text))).bytes_written == len(text)
+    sink = Limited(len(text) - 1)
     with pytest.raises(QasmWriteError) as failure:
-        write_qasm3(construction, sink, budget=WRITE.revise(max_bytes=len(text) - 1))
-    assert sink.getvalue() == text.encode()[:-1]
+        write_qasm3(construction, sink)
+    assert bytes(sink.data) == text.encode()[:-1]
     assert failure.value.prefix.bytes_written == len(text) - 1
     class Partial:
         def __init__(self):
@@ -217,21 +247,22 @@ def test_byte_boundaries_partial_sink_failure_and_cancellation(tmp_path, monkeyp
             return size
     partial = Partial()
     with pytest.raises(QasmWriteError) as failure:
-        write_qasm3(construction, partial, budget=WRITE)
+        write_qasm3(construction, partial)
     assert isinstance(failure.value.__cause__, OSError)
     assert bytes(partial.data) == text.encode()[:17]
     assert failure.value.prefix.bytes_written == 17
-    assert max(partial.offered) <= WRITE.max_chunk_bytes
     partial = Partial()
     with pytest.raises(QasmWriteError) as failure:
-        write_qasm3(construction, partial, budget=WRITE, cancel=lambda: len(partial.data) >= 7)
+        write_qasm3(construction, partial, cancel=lambda: len(partial.data) >= 7)
     assert isinstance(failure.value.__cause__, InterruptedError)
     assert bytes(partial.data) == text.encode()[:len(partial.data)]
     path = tmp_path / "existing.qasm"
     path.write_bytes(b"previous")
-    for kwargs in ({"budget": WRITE.revise(max_bytes=10)}, {"budget": WRITE, "cancel": lambda: True}):
+    # Cancelled before any text, and after part of the text was written.
+    for answers in ((True,), (False,) * 3 + (True,)):
+        replies = iter(answers + (True,) * 100)
         with pytest.raises(QasmWriteError):
-            write_qasm3_file(construction, path, **kwargs)
+            write_qasm3_file(construction, path, cancel=lambda: next(replies))
         assert path.read_bytes() == b"previous"
         assert list(tmp_path.iterdir()) == [path]
     import os
@@ -240,10 +271,10 @@ def test_byte_boundaries_partial_sink_failure_and_cancellation(tmp_path, monkeyp
             raise OSError("replacement refused")
         patch.setattr(os, "replace", refused)
         with pytest.raises(QasmWriteError) as failure:
-            write_qasm3_file(construction, path, budget=WRITE)
+            write_qasm3_file(construction, path)
         assert isinstance(failure.value.__cause__, OSError)
         assert path.read_bytes() == b"previous" and list(tmp_path.iterdir()) == [path]
-    write_qasm3_file(construction, path, budget=WRITE)
+    write_qasm3_file(construction, path)
     assert path.read_bytes() == text.encode()
 
 
@@ -275,10 +306,10 @@ def test_measure_reset_position_and_bit_register_order():
         if ";" in line and not line.startswith(("OPENQASM", "include", "qubit[", "bit[")):
             position = offset + line.index(";")
             for cap, expected in ((position, completed), (position + 1, completed + 1)):
-                sink = BytesIO()
+                sink = Limited(cap)
                 with pytest.raises(QasmWriteError) as failure:
-                    write_qasm3(construction, sink, budget=WRITE.revise(max_bytes=cap))
-                assert sink.getvalue() == text.encode()[:cap]
+                    write_qasm3(construction, sink)
+                assert bytes(sink.data) == text.encode()[:cap]
                 assert failure.value.prefix.emitted_instructions == expected
             completed += 1
         offset += len(line)

@@ -7,24 +7,26 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
-from nwqlib._validation import integer
+from nwqlib._limits import exceeds, memory_limit, optional_limit
 
 if TYPE_CHECKING:
     from qiskit import QuantumCircuit
 
 
 class _TextSink:
-    """A text stream that counts UTF-8 bytes and refuses a write that would pass ``maximum``."""
+    """A text stream that counts UTF-8 bytes and refuses a write that would pass ``maximum``, None for no limit.
 
-    def __init__(self, stream, maximum):
-        self.stream, self.maximum, self.bytes = stream, maximum, 0
+    ``source`` names the limit in the refusal, ``max_text_bytes`` or the physical memory.
+    """
+
+    def __init__(self, stream, maximum, source):
+        self.stream, self.maximum, self.source, self.bytes = stream, maximum, source, 0
 
     def write(self, text):
         """Write ``text`` if its UTF-8 size still fits, before it reaches the stream."""
         size = len(text.encode("utf-8"))
-        if size > self.maximum - self.bytes:
-            raise ValueError("QASM output exceeds max_text_bytes")
+        if exceeds(self.bytes + size, self.maximum):
+            raise ValueError(f"QASM output exceeds {self.source}")
         written = self.stream.write(text)
         self.bytes += size
         return written
@@ -35,8 +37,8 @@ def export_qasm(
     *,
     format: str = "qasm3",
     path: str | Path | None = None,
-    max_text_bytes: int = DEFAULT_MAX_BYTES,
-    max_operations: int = 100_000,
+    max_text_bytes: int | None = None,
+    max_operations: int | None = None,
 ) -> str | Path:
     """Return the OpenQASM 3 or 2 text of a Qiskit circuit, or write it to a file.
 
@@ -56,19 +58,22 @@ def export_qasm(
         format (str): `"qasm3"` or `"qasm2"`.
         path (str | Path | None): A file path whose parent directory exists, or
             `None` to return the text.
-        max_text_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
-            Positive limit on the UTF-8 bytes of the exported text.
-        max_operations (int): Positive limit on the top-level
-            instructions of `circuit`, checked before export.
+        max_text_bytes (int | None): Positive limit on the UTF-8 bytes of the
+            exported text. Default `None`: the physical memory of this
+            computer for returned text, and no limit for a file.
+        max_operations (int | None): Default `None`, no limit. Positive limit
+            on the top-level instructions of `circuit`, checked before export.
 
     Returns:
         output (str | Path): The OpenQASM text, or the destination path when `path` is
             given.
 
     Raises:
-        ValueError: If `format` is not `"qasm2"` or `"qasm3"`, a limit is not a
-            positive integer, the circuit has more than `max_operations`
-            instructions, or the text exceeds `max_text_bytes`.
+        ValueError: If `format` is not `"qasm2"` or `"qasm3"`, a limit is neither
+            a positive integer nor `None`, the circuit has more than
+            `max_operations` instructions, or the text exceeds
+            `max_text_bytes` (or, for returned text without that limit, the
+            physical memory).
         TypeError: If `circuit` is not a Qiskit `QuantumCircuit`.
 
     Examples:
@@ -86,24 +91,31 @@ def export_qasm(
     """
     if format not in {"qasm2", "qasm3"}:
         raise ValueError('format must be either "qasm2" or "qasm3"')
-    maximum = integer(max_text_bytes, "max_text_bytes", 1)
-    operation_limit = integer(max_operations, "max_operations", 1)
+    maximum = optional_limit(max_text_bytes, "max_text_bytes")
+    source = f"max_text_bytes={maximum}"
+    if maximum is None and path is None:
+        # Without max_text_bytes, the returned string, which stays in memory, is
+        # limited to the physical memory. A written file has no output limit.
+        # Neither limit covers Qiskit's own workspace (the QASM 2 note below).
+        maximum = memory_limit(None)
+        source = f"the physical memory ({maximum} bytes)"
+    operation_limit = optional_limit(max_operations, "max_operations")
     from qiskit import QuantumCircuit, qasm2, qasm3
 
     if not isinstance(circuit, QuantumCircuit):
         raise TypeError("QASM export requires a Qiskit circuit")
-    if len(circuit.data) > operation_limit:
+    if exceeds(len(circuit.data), operation_limit):
         raise ValueError("QASM native input exceeds max_operations")
 
     def emit(stream):
         """Export the circuit through the byte-counting sink in the selected format."""
-        sink = _TextSink(stream, maximum)
+        sink = _TextSink(stream, maximum, source)
         if format == "qasm3":
             qasm3.dump(circuit, sink)
         else:
             # qasm2.dump builds the whole text with dumps as well, so the QASM 2 path
             # does not stream. The whole text exists in memory before the sink
-            # checks max_text_bytes.
+            # checks the output limit.
             sink.write(qasm2.dumps(circuit))
 
     if path is None:

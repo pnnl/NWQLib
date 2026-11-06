@@ -19,6 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from dataclasses import dataclass
 from importlib.metadata import version
+import cmath
 import json
 from math import isfinite
 import os
@@ -31,14 +32,14 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 
+from nwqlib._limits import least
 from nwqlib.backends.capabilities import BackendCapability, BackendTarget
 from nwqlib.core.records import PositiveInt, Record, Source, Text
 from nwqlib.execution import CountsSampling
 from nwqlib.operators.access import Count
 
-# The runner protocol: request, result, failure packet, --describe and the
-# --phase-factor reply. The runner checks the same string, and no reader accepts
-# another format.
+# The runner protocol: request, result, failure packet and --describe. The
+# runner checks the same string, and no reader accepts another format.
 NWQSIM_FORMAT = "nwqlib.nwqsim/3"
 
 # CPU/SV executes trajectories: several positions, readout views, and every
@@ -131,6 +132,39 @@ def _buffer_bytes(backend, method, ranks, width, observation):
     return 48 * dim + 16, 32 * shots
 
 
+def _output_bytes(observation, *, width, classical_width=0, measured=0):
+    """Return a lower bound on the bytes of the runner's result file for one readout.
+
+    Before it allocates the state, the runner refuses a result whose JSON
+    header, side files and JSON values exceed ``max_output_bytes``
+    (``nwqsim_runner.cpp``). The side files and values alone, at the
+    runner's 36 bytes per value plus the width of its key, are known before
+    any job is queued or launched. Counts have ``min(shots, 2**measured)``
+    values for ``measured`` distinct measured qubits, keyed by
+    ``classical_width`` bits. A Pauli readout has one value per label,
+    keyed by ``width`` letters. A probability marginal on k qubits leaves a
+    float64 side file of ``8 * 2**k`` bytes, and an amplitude readout or a
+    trajectory point that saves its state a complex128 side file of at
+    least ``16 * 2**width`` bytes. A trajectory adds these over its points.
+    The header is not counted, so this is a necessary condition only.
+    """
+    def values(count, key_width):
+        return count * (key_width + 36)
+
+    kind = observation.kind
+    if kind == "counts":
+        return values(min(observation.shots, 1 << measured), classical_width)
+    if kind == "pauli_expectation":
+        return values(len(observation.labels), width)
+    if kind == "probabilities":
+        return 8 << len(observation.qubits)
+    if kind == "amplitudes":
+        return 16 << width
+    return sum(values(len(point.labels), width) if point.kind == "pauli_expectation"
+               else 8 << len(point.qubits) if point.kind == "probabilities" else 16 << width
+               for point in observation.positions)
+
+
 # The exact-probability roundoff constant NWQSIM_CPU_SV_ROUNDOFF_PER_OPERATION
 # (_validation.py) was derived by reading these files at this revision: the
 # binary64 value type (ValType = double, declared in both config.hpp and
@@ -205,27 +239,14 @@ def _describe(executable, backend, method):
     return build
 
 
-def _phase_factor(executable, phase, *, run):
-    """Ask the configured runner for the finite binary64 phase factor by which it multiplies its output."""
-    # The scalar reply is at most 128 ASCII bytes. The admitted 256 bytes are
-    # an untuned allowance for its read and decode, with no recorded derivation.
-    run.check_data(256)
-    try:
-        reply = subprocess.run(
-            [executable, "--phase-factor", json.dumps(phase, allow_nan=False)],
-            check=True, capture_output=True, text=True,
-        )
-    except subprocess.CalledProcessError as error:
-        raise ValueError(f"NWQ-Sim phase-factor query failed: {error.stderr.strip()}") from error
-    if len(reply.stdout) > 256:
-        raise ValueError("NWQ-Sim phase-factor reply exceeds its admitted 256 bytes")
-    data = json.loads(reply.stdout)
-    if data.get("format") != NWQSIM_FORMAT:
-        raise ValueError("NWQ-Sim phase-factor query requires the current runner format")
-    a, b = data["phase_factor"]
-    if not isfinite(a) or not isfinite(b):
-        raise ValueError("NWQ-Sim output phase factor must be finite")
-    return complex(a, b)
+def _phase_factor(phase):
+    """Return the binary64 factor ``exp(i*phase)`` by which the runner multiplies its output.
+
+    The request carries this represented factor, and its error bound
+    (``_phase_envelope``) uses only the factor's own value, so it holds
+    whatever libm rounded the cosine and sine.
+    """
+    return cmath.rect(1.0, phase)
 
 
 def _phase_envelope(factor, width):
@@ -360,11 +381,12 @@ class NWQSimBackend(Record):
 
         A trajectory whose points this backend/method pair cannot serve is
         refused here, before the preparation is counted against the run's
-        limits. Such points are an amplitude point (the refresh of a job that
-        continues after Python exits saves no point arrays), and a reduction
-        declared at an explicit position before the last point's explicit
-        position whose reducer is not registered phase invariant (Qiskit reports
-        no phase per segment).
+        limits. Such points are an amplitude point at any boundary, and a
+        reduction declared at an explicit position before the last point's
+        explicit position whose reducer is not registered phase invariant. Both
+        follow from Qiskit reporting no phase per segment, except that an
+        amplitude point at the last boundary, which has its phase factor, is
+        refused only because this adapter does not serve it.
         ``_trajectory_request`` repeats the reduction check on the resolved
         boundaries, which also covers the end shorthand.
         """
@@ -447,6 +469,13 @@ class NWQSimBackend(Record):
         """Add the marker of a non-default optimization level to a preparation record's exclusions."""
         return exclusions | ({"optimization_level"} if self.optimization_level != 0 else set())
 
+    def _check_output(self, needed):
+        """Refuse a readout whose result file needs more than ``max_output_bytes`` (``_output_bytes``), before any job."""
+        if needed > self.max_output_bytes:
+            raise ValueError(f"NWQ-Sim result needs more than {needed} bytes for its values and side files, "
+                             f"over max_output_bytes={self.max_output_bytes}. Use a connection with a larger "
+                             "max_output_bytes.")
+
     def _build(self, context):
         """The runner's checked ``--describe`` output, run once per Run and kept in the backend context."""
         if "build" not in context:
@@ -461,8 +490,8 @@ class NWQSimBackend(Record):
         translated. The MPI global-gate transfer check runs during translation,
         and the input-byte limit applies while the request is encoded
         (``_stream_request``). An amplitude readout at the end of the circuit,
-        or a trajectory with a reduction at its last boundary, asks the runner
-        once for its output phase factor after translation (``_phase_factor``)
+        or a trajectory with a reduction at its last boundary, forms the output
+        phase factor ``exp(i*global_phase)`` after translation (``_phase_factor``)
         and records the error bound of that factor in ``statevector_roundoff``. A Pauli readout keeps only the
         instruction prefix before its original position. Measurements must be
         terminal, and their clbit-to-qubit map travels with the request so the
@@ -505,16 +534,20 @@ class NWQSimBackend(Record):
         if observation.kind == "trajectory":
             return self._trajectory_request(circuit, observation, runtime, position, views, run, snapshot, build, target)
         # A Pauli readout names an original logical instruction boundary. Only
-        # its prefix determines the requested expectation.
+        # its prefix determines the requested expectation, and only that prefix
+        # is translated (connection.executed_stop, which the Run's check of
+        # direct preparation trees also counts).
+        from nwqlib.backends.connection import executed_stop
         selected = circuit
-        if observation.kind == "pauli_expectation" and position != len(circuit.data):
+        stop = executed_stop(len(circuit.data), position=position if observation.kind == "pauli_expectation" else None)
+        if stop != len(circuit.data):
             selected = circuit.copy_empty_like()
-            selected.data = circuit.data[:position]
+            selected.data = circuit.data[:stop]
         if any(isinstance(item.operation, (ControlFlowOp, Reset)) for item in selected.data):
             raise ValueError("NWQ-Sim does not support dynamic control or reset in the selected observation prefix")
         # Qiskit would lower a dense UnitaryGate with its inexact synthesis.
         # The Run makes the exact synthesis of each distinct matrix once per Run
-        # object and reserves each new one against its max_synthesis_work first.
+        # object and records the work of each new one first.
         native = self._lower(
             selected, run=run, seed=runtime.seed,
             exact=observation.kind != "counts",
@@ -550,6 +583,8 @@ class NWQSimBackend(Record):
             raise ValueError("NWQ-Sim counts require actual terminal measurements")
         if observation.kind == "pauli_expectation" and measurements:
             raise ValueError("NWQ-Sim exact Pauli readout cannot follow a measurement")
+        self._check_output(_output_bytes(observation, width=native.num_qubits, classical_width=native.num_clbits,
+                                         measured=len(set(measurements.values()))))
         phase = float(native.global_phase)
         if not isfinite(phase):
             raise ValueError("NWQ-Sim global phase must be finite")
@@ -560,11 +595,11 @@ class NWQSimBackend(Record):
             clbits=list(measurements) if kind == "counts" else [])
         head = dict(format=NWQSIM_FORMAT, input_id=input_id, backend=self.backend, method=self.method, ranks=self.ranks,
             num_qubits=native.num_qubits, num_clbits=native.num_clbits)
-        factor = _phase_factor(self.executable, phase, run=run) if kind == "amplitudes" else None
+        factor = _phase_factor(phase) if kind == "amplitudes" else None
         tail = dict(phase_factor=None if factor is None else [factor.real, factor.imag],
             observation=readout, shots=observation.shots, seed=runtime.seed,
             max_buffer_bytes=self.max_buffer_bytes, max_output_bytes=self.max_output_bytes)
-        payload, operations = _stream_request(head, gates(), tail, min(self.max_input_bytes, run.limits.max_data_bytes))
+        payload, operations = _stream_request(head, gates(), tail, least(self.max_input_bytes, run.limits.max_data_bytes))
         metadata = dict(readout_population="unconditional", statevector_semantics="pre_final_measurement" if self.method == "SV" else None,
                         nwqsim_revision=build["nwqsim_revision"], native_simulations=None,
                         native_readout=kind, requested_shots=observation.shots, num_qubits=native.num_qubits,
@@ -644,15 +679,17 @@ class NWQSimBackend(Record):
         ``phase_invariant`` and reads the raw saved amplitudes. A saved state at
         the last boundary is multiplied, as an output copy, by the phase of the
         translated prefix through that boundary, which includes the logical
-        circuit's own top-level phase. Amplitude points are refused, because the
-        refresh of a job that continues after Python exits saves no point
-        arrays.
+        circuit's own top-level phase. Amplitude points are refused at every
+        boundary. Before the last boundary their values would need the missing
+        per-segment phase, and the last boundary, which has its phase factor, is
+        refused only because this adapter does not serve it.
         """
         from qiskit.circuit import Barrier
         from qiskit.circuit.library import CXGate, UGate
-        from nwqlib.backends.connection import NativePreparation, circuit_layout, coherent_body_issue, environment
+        from nwqlib.backends.connection import (NativePreparation, circuit_layout, coherent_body_issue, environment,
+                                                executed_stop)
         name = f"NWQ-Sim {self.backend}/{self.method}"
-        last = boundaries[-1]
+        last = executed_stop(len(circuit.data), last=boundaries[-1])
         issue = coherent_body_issue(circuit, last)
         if issue is None:
             issue = next((f"view {key!r}: {found}" for key, tail in (views or {}).items()
@@ -719,8 +756,9 @@ class NWQSimBackend(Record):
             raise ValueError("NWQ-Sim global phase must be finite")
         corrected = any(point.kind == "reduction" and boundary == last
                         for point, boundary in zip(observation.positions, boundaries, strict=True))
-        factor = _phase_factor(self.executable, phase, run=run) if corrected else None
+        factor = _phase_factor(phase) if corrected else None
         factor_pair = None if factor is None else [factor.real, factor.imag]
+        self._check_output(_output_bytes(observation, width=native.num_qubits))
         tails, points, executed = {}, [], position
         kinds = {"pauli_expectation": "pauli", "probabilities": "probabilities", "reduction": "state"}
         for index, (point, boundary) in enumerate(zip(observation.positions, boundaries, strict=True)):
@@ -750,7 +788,7 @@ class NWQSimBackend(Record):
             num_qubits=native.num_qubits, num_clbits=native.num_clbits)
         tail = dict(observation=dict(kind="trajectory", points=points), shots=0, seed=runtime.seed,
             max_buffer_bytes=self.max_buffer_bytes, max_output_bytes=self.max_output_bytes)
-        payload, _ = _stream_request(head, gates(), tail, min(self.max_input_bytes, run.limits.max_data_bytes))
+        payload, _ = _stream_request(head, gates(), tail, least(self.max_input_bytes, run.limits.max_data_bytes))
         metadata = dict(readout_population="unconditional", statevector_semantics="pre_final_measurement",
                         nwqsim_revision=build["nwqsim_revision"], native_simulations=None, native_readout="trajectory",
                         requested_shots=0, num_qubits=native.num_qubits, marginal_width=None,
@@ -792,6 +830,16 @@ class NWQSimBackend(Record):
         if len(natives) != 1:
             raise ValueError("one NWQ-Sim runner request executes exactly one prepared circuit")
 
+    def admit_submission(self, natives, *, run):
+        """Check the bytes of one runner request against the Run's data limit, before its submission is saved.
+
+        The input is written once and read by every cooperating rank. Rank zero
+        writes the combined JSON and artifact output once, and refresh checks
+        its read again.
+        """
+        native, = natives
+        run.check_data((1 + self.ranks) * len(native.payload) + self.max_output_bytes)
+
     def launch(self, natives, *, submission_id, run):
         """Create the spool directory once, write the request and start the runner in its own session.
 
@@ -806,10 +854,6 @@ class NWQSimBackend(Record):
         if str(UUID(submission_id)) != submission_id:
             raise ValueError("local native submission requires its canonical UUID")
         directory = Path(self.spool) / submission_id
-        # Input is written once and read by every cooperating rank. Rank zero
-        # writes the combined JSON/artifact output once, and fetch admits its read.
-        payload_bytes = (1 + self.ranks) * len(native.payload) + self.max_output_bytes
-        run.check_data(payload_bytes)
         directory.mkdir(parents=True, exist_ok=False)
         source, output = directory / "input.json", directory / "result.json"
         with source.open("xb") as stream:
@@ -842,8 +886,10 @@ class NWQSimBackend(Record):
         """Read the original spool once and report pending, completed, failed or uncertain.
 
         Without a result file, a process known to have exited, or a PID absent
-        on the same host, makes the outcome uncertain. The run is never
-        relaunched. A result file is decoded against the original request.
+        on the same host, makes the outcome uncertain and terminal without a
+        result, so ``Run.wait`` stops instead of polling. A process on another
+        host cannot be checked and stays pending. The run is never relaunched.
+        A result file is decoded against the original request.
         """
         from nwqlib.backends.connection import BackendRefresh
         self.admit_batch(natives)
@@ -855,12 +901,14 @@ class NWQSimBackend(Record):
         code = None if process is None else process.poll()
         if not output.is_file():
             if code is not None:
-                return BackendRefresh("uncertain", failure="native process exited without a terminal result")
+                return BackendRefresh("uncertain", failure="native process exited without a terminal result",
+                                      terminal_without_result=True)
             if locator.process_id is not None and locator.host == platform.node():
                 try:
                     os.kill(locator.process_id, 0)
                 except ProcessLookupError:
-                    return BackendRefresh("uncertain", failure="native process is absent and no terminal result is available")
+                    return BackendRefresh("uncertain", failure="native process is absent and no terminal result is available",
+                                          terminal_without_result=True)
             return BackendRefresh("acknowledged", provider_status="terminal result unavailable")
         # Every actual result read has its own finite allowance. Status-only
         # checks do not reserve a nonexistent output transfer.
@@ -1034,55 +1082,11 @@ def _trajectory_points(observation):
                  for point in observation.positions)
 
 
-def _streamed_gate_bound(name, wires, params, *, preceded_by_comma):
-    """Largest compact JSON size of one U or CX request gate, checked before it is encoded.
-
-    The U/CX request writer checks each compact JSON gate against the limit
-    before encoding or writing it. A U gate costs at most ``134+digits(q)`` bytes and a CX gate at
-    most ``38+digits(q0)+digits(q1)``, plus its list separator. Fixed request
-    fields and the closing suffix are counted separately. The writer
-    validates finite binary64 parameters and verifies each encoded length
-    against the bound.
-
-    Derivation, for the fields ``name``, ``qubits`` and ``params`` in compact
-    ASCII JSON with separators ``(',', ':')``, finite binary64 parameters and
-    nonnegative integer wires: the empty-list U skeleton
-    ``{"name":"u","qubits":[],"params":[]}`` has 36 bytes. Insert one wire,
-    three float strings of at most 32 bytes each and two parameter commas, so
-    ``B_U = 36 + d(q) + 3*32 + 2 = 134 + d(q)``. The CX skeleton is one byte
-    longer, with two wires, one comma and an empty parameter list, so
-    ``B_CX = 37 + d(q0) + d(q1) + 1 = 38 + d(q0) + d(q1)``. One byte is added
-    for the preceding list comma except at the first gate. The 32-byte float
-    bound is the binary64 JSON bound of ``_run_journal._json_bound``.
-    Signs, exponent and decimal point are inside it. The bound covers no other
-    spelling (spaces, indentation, custom float formatting or extra fields).
-    """
-    if any(type(q) is not int or q < 0 for q in wires):
-        raise ValueError("wire indices must be nonnegative native integers")
-    if any(type(x) is not float or not isfinite(x) for x in params):
-        raise ValueError("gate parameters must be finite native binary64")
-    if name == "u" and len(wires) == 1 and len(params) == 3:
-        size = 134 + len(str(wires[0]))
-    elif name == "cx" and len(wires) == 2 and not params:
-        size = 38 + sum(len(str(q)) for q in wires)
-    else:
-        raise ValueError("streaming requires the admitted typed U/CX gate")
-    return size + int(preceded_by_comma)
-
-
-def _write_gate(stream, gate, *, used, limit, suffix_bytes, first):
-    """Check one gate against ``_streamed_gate_bound``, then encode and write it. Return the bytes used."""
-    bound = _streamed_gate_bound(gate["name"], gate["qubits"], gate["params"],
-                                preceded_by_comma=not first)
-    if bound > limit-used-suffix_bytes:
-        raise ValueError("streamed request exceeds remaining input-byte allowance")
-    body = json.dumps(gate, separators=(",", ":"), ensure_ascii=True,
-                      allow_nan=False).encode("ascii")
-    data = (b"" if first else b",") + body
-    if len(data) > bound:
-        raise ValueError("gate encoder exceeds its established byte bound")
-    stream.write(data)
-    return used + len(data)
+def _request_refusal(needed, limit, part):
+    """The refusal of a request that needs at least ``needed`` bytes, known once ``part`` is encoded."""
+    return (f"the NWQ-Sim request needs at least {needed} bytes through {part}, more than its limit of {limit} "
+            "bytes, the smaller of max_input_bytes and the Run's max_data_bytes when that is set. Raise that "
+            "limit or shorten the circuit")
 
 
 def _stream_request(head, gates, tail, limit):
@@ -1091,22 +1095,31 @@ def _stream_request(head, gates, tail, limit):
     The request is the compact run-log JSON of ``head``, then ``"gates"``,
     then ``tail``, in that key order, so it is the same bytes as encoding the
     whole request object at once. The fixed fields of ``head`` and ``tail``
-    are bounded and encoded first, and the closing suffix stays counted
-    while each gate is checked by ``_write_gate`` before it is written. No
-    list of all gate objects and no second text copy of the request is made.
-    ``limit`` is the smaller of the input-byte limit and the Run's data limit.
+    are encoded first. Each gate is then encoded, and the request is refused
+    before that gate is written when its actual bytes, with the closing
+    suffix, would exceed ``limit``. No list of all gate objects and no second
+    text copy of the request is made. ``limit`` is the smaller of the
+    input-byte limit and the Run's data limit.
     """
     from io import BytesIO
-    from nwqlib._run_journal import encode
-    prefix = encode(head, limit)[:-1].encode("utf-8") + b',"gates":['
-    suffix = b"]," + encode(tail, limit)[1:].encode("utf-8")
-    if len(prefix) + len(suffix) > limit:
-        raise ValueError("streamed request exceeds remaining input-byte allowance")
+    from nwqlib._run_journal import JSONBytesExceeded, encode
+    try:
+        prefix = encode(head, limit)[:-1].encode("utf-8") + b',"gates":['
+        suffix = b"]," + encode(tail, limit)[1:].encode("utf-8")
+    except JSONBytesExceeded:
+        raise ValueError(_request_refusal(limit + 1, limit, "its fixed fields")) from None
+    needed = len(prefix) + len(suffix)
+    if needed > limit:
+        raise ValueError(_request_refusal(needed, limit, "its fixed fields"))
     stream = BytesIO()
     stream.write(prefix)
     used, count = len(prefix), 0
     for gate in gates:
-        used = _write_gate(stream, gate, used=used, limit=limit, suffix_bytes=len(suffix), first=not count)
+        data = (b"," if count else b"") + json.dumps(gate, separators=(",", ":"), allow_nan=False).encode("ascii")
+        used += len(data)
+        if used + len(suffix) > limit:
+            raise ValueError(_request_refusal(used + len(suffix), limit, f"its first {count + 1} gates"))
+        stream.write(data)
         count += 1
     stream.write(suffix)
     return stream.getvalue(), count

@@ -45,8 +45,8 @@ print(facts[0].fact.value.value)
 ```
 
 ```text
-0.0008214720329548587
-0.0008214720329548587
+0.0008214720329520691
+0.0008214720329520691
 ```
 
 Both lines are the absolute L2 distance between the LCHS solution and the matrix exponential. Every built-in options type returns the pair `(receipt, facts)`:
@@ -75,13 +75,13 @@ print(sampling.status)
 
 ```text
 INCONCLUSIVE
-native_floating_point: selected error component is unavailable
+native_floating_point: binary64 construction of the coefficient table (quadrature nodes and weights, kernel values, Duhamel nodes and weights) and floating-point execution are not bounded
 required failure probability is unsupported
 ('algorithmic_approximation',)
 PASS
 ```
 
-The reference comparison measured a discrepancy of about .000821, but the bounds do not prove a total error of at most .01. No bound is available for the `native_floating_point` error source, and the method's algorithmic approximation bound, about .00931, is a numerical estimate rather than a proof, so it is listed in `unverified`. The sampling component passes because this run used exact readout (`shots=None`), in which observations are obtained without shot sampling, although numerical errors can remain ([sampling error by method](#sampling-error-by-method)).
+The reference comparison measured a discrepancy of about .000821, but the bounds do not prove a total error of at most .01. No bound is available for the `native_floating_point` error source, which covers the binary64 construction of the coefficient table and the floating-point execution. The method's algorithmic approximation bound, about .00931, is a numerical estimate rather than a proof, so it is listed in `unverified`. The sampling component passes because this run used exact readout (`shots=None`), in which observations are obtained without shot sampling, although numerical errors can remain ([sampling error by method](#sampling-error-by-method)).
 
 `assess` works on the saved experiment and data. It takes no new measurements, changes no shot count and does not rerun the method. A Result holds no accuracy assessment. Each `ClaimAssessment` records its own `accuracy`, the experiment and data it assessed and the evidence it used, and a later stricter criterion is a new assessment of the same experiment. The default confidence is .95.
 
@@ -281,7 +281,7 @@ The Method's `projected_diagnostics()` supplies the saved Gram coordinates, thei
 
 | Criterion | Value |
 | --- | --- |
-| `gram_hermiticity` | The maximum absolute real or imaginary component of `S-S†` over the saved square coordinates. This does not establish agreement between independently measured opposite entries |
+| `gram_hermiticity` | The maximum absolute real or imaginary component of `S-S†` over the saved square coordinates, computed exactly from the saved entries, so a defect just above the tolerance is not rounded down to it. This does not establish agreement between independently measured opposite entries |
 | `gram_psd_deficit` | `max(0,-min(spectrum))` over the saved raw spectrum |
 | `projected_backward_error` | `||H c - E S c|| / ((||H||_F + |E| ||S||_F) ||c||)` for the lowest Ritz pair, with c its coefficient vector, on the pencil described below |
 | `overlap_normalization` | The saved coefficient normalization defect. The basis is not normalized again |
@@ -371,4 +371,4 @@ Checks run only when you call `result.verify` or one of the `verify_*` functions
 
 Method-specific state, circuit, spectrum and reference checks have their own size limits in their options. Missing required data produces a limitation that names it, and no measurement is repeated to supply it.
 
-All exact scalar comparisons use the finite limit `ExactArithmetic.max_integer_bits`. It limits the size of integers in exact arithmetic, not process memory. Extra simulation, reference decompositions and large state operations run only for a check you select.
+Each check value is compared with its threshold in exact rational arithmetic. Extra simulation, reference decompositions and large state operations run only for a check you select.

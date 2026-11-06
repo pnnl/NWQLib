@@ -463,7 +463,12 @@ class RangeAxis(Record):
     Build it as `RangeAxis(parameter="k", start=0, stop=8)` and pass it in
     `axes=` of a [`MeasurementBatch`][nwqlib.ir.records.MeasurementBatch], which
     combines every setting with every value. `parameter`, `start` and `stop` are
-    required.
+    required. The axis takes every value of its grid, so neither a setting of
+    the batch nor the Program's bindings may bind its parameter, and the
+    Program's structural check refuses such a binding. One point is chosen
+    with [`Program.select_experiment`][nwqlib.ir.records.Program.select_experiment],
+    and a one-value axis such as `RangeAxis(parameter="k", start=3, stop=4)`
+    fixes one axis while the others vary.
 
     Attributes:
         parameter: Required. Parameter name.
@@ -721,7 +726,8 @@ class Program(Record):
             program (Program): The bound Program.
 
         Raises:
-            ValueError: If the bound Program fails the structural check.
+            ValueError: If the bound Program fails the structural check, for
+                example because a value binds the parameter of a range axis.
         """
         bound = {item.parameter: item for item in self.bindings}
         bound.update({key: Binding(parameter=key, value=value) for key, value in values.items()})

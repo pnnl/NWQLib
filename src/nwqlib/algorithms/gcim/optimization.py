@@ -10,7 +10,6 @@ from types import MappingProxyType
 import numpy as np
 import scipy.optimize as spo
 from nwqlib.execution import ExecutionMode
-from nwqlib.operators.access import DEFAULT_INPUT_BYTES
 from nwqlib.subroutines.fermionic_circuits import (
     _require_default_double,
     _plan_generator_circuit,
@@ -19,9 +18,13 @@ from nwqlib.subroutines.fermionic_circuits import (
 )
 from nwqlib.subroutines.fermionic_pool import (
     _active_occupation_blocks,
-    _check_generator_work,
     _snapshot_generator,
 )
+
+# The gradient tolerance given to BFGS on the dimensionless objective of ``optimize_product``, stated
+# here so that it does not follow a later SciPy default. A named stationarity heuristic, registered
+# in docs/ENGINEERING_CONSTANTS.md, with no derivation that makes it optimal for any system.
+BFGS_NORMALIZED_GTOL = 1e-5
 
 
 def taylor_action_derivative(action, state, theta, steps, degree):
@@ -180,8 +183,6 @@ def _generator_shift_rule(
     *,
     execution_mode=ExecutionMode.STATEVECTOR,
     compilation_plan=None,
-    max_bytes=DEFAULT_INPUT_BYTES,
-    max_products=1_000_000_000,
 ):
     """Resolve generalized shifts from small active occupation blocks once.
 
@@ -224,6 +225,13 @@ def _generator_shift_rule(
     Outside SHOTS, the rule with fewer energy evaluations is chosen, with the
     signed weight square sum breaking ties.
 
+    Its arrays are bounded by the structure it accepts: one entry per Pauli
+    term, occupation blocks of dimension at most eight on at most eight
+    active modes, and the gaps of their eigenvalues. ADAPT passes the
+    compiler plan that its planning admitted, and a direct call checks the
+    generator's fields (``_snapshot_generator``), so no work limit of its own
+    applies.
+
     Returns:
         A read-only mapping. ``method`` is ``pauli_insertion_shift``, whose
         ``terms`` list each nonidentity ``pauli_label`` with its real
@@ -234,23 +242,13 @@ def _generator_shift_rule(
         ``optimize_product`` applies.
     """
     if compilation_plan is None:
-        generator = _snapshot_generator(generator, max_bytes=max_bytes, max_products=max_products)
+        generator = _snapshot_generator(generator)
     elif (
         type(compilation_plan) is not _GeneratorCircuitPlan
         or compilation_plan.generator is not generator
     ):
         raise ValueError("shift rule requires its exact admitted generator/compiler association")
-    rows, q = generator.pauli_terms, generator.num_qubits
-    # Untuned allowances for the insertion-rule table: per Pauli term its
-    # q-character label and about 128 bytes of mapping entries, and q + 8
-    # operations to read and copy it, plus a fixed 512 bytes and 32 operations.
-    _check_generator_work(
-        max_bytes,
-        max_products,
-        payload_bytes=len(rows) * (q + 128) + 512,
-        work=len(rows) * (q + 8) + 32,
-    )
-    if any(c.real != 0 for _, c in rows):
+    if any(c.real != 0 for _, c in generator.pauli_terms):
         raise ValueError("shift rule requires an anti-Hermitian generator")
     elementary = tuple(
         MappingProxyType(
@@ -283,36 +281,18 @@ def _generator_shift_rule(
         return MappingProxyType(insertion)
     try:
         if compilation_plan is None or compilation_plan.kind == "commuting":
-            _require_default_double(generator, max_bytes=max_bytes, max_products=max_products)
+            _require_default_double(generator)
     except _UnsupportedDefaultGenerator:
         # Only an inapplicable default-family recipe can select this existing
         # insertion alternative. Budget/dependency failures propagate unchanged.
-        plan = compilation_plan or _plan_generator_circuit(
-            generator, max_bytes=max_bytes, max_products=max_products
-        )
+        plan = compilation_plan or _plan_generator_circuit(generator, max_bytes=None, max_products=None)
         if plan.kind != "commuting":
             raise ValueError("measured optimization requires a default GSD or commuting generator")
         return MappingProxyType(insertion)
     if compilation_plan is not None and compilation_plan.occupation_blocks:
         active, blocks = compilation_plan.active_modes, compilation_plan.occupation_blocks
     else:
-        active, blocks = _active_occupation_blocks(
-            generator, max_bytes=max_bytes, max_products=max_products
-        )
-    entries = sum(len(indices) ** 2 for indices, _ in blocks)
-    eigen_count = sum(len(indices) for indices, _ in blocks)
-    # Bytes: 64 per block entry for -i*B and eigvalsh workspace copies of
-    # complex128 data, and 32 per eigenvalue. Work: k**3 per dense Hermitian
-    # eigensolve of a k-by-k block, one pass over the entries, and a sort of
-    # the eigenvalues.
-    _check_generator_work(
-        max_bytes,
-        max_products,
-        payload_bytes=64 * entries + 32 * eigen_count,
-        work=sum(len(indices) ** 3 for indices, _ in blocks)
-        + entries
-        + eigen_count * (eigen_count.bit_length() + 1),
-    )
+        active, blocks = _active_occupation_blocks(generator)
     eigenvalues = [value for _, block in blocks for value in np.linalg.eigvalsh(-1j * block)]
     max_block = max((len(indices) for indices, _ in blocks), default=0)
     scale = max((abs(value) for value in eigenvalues), default=0.0)
@@ -327,15 +307,6 @@ def _generator_shift_rule(
         return result
 
     spectrum = distinct(eigenvalues)
-    # Every pair of distinct eigenvalues gives one candidate gap: 32 bytes
-    # each, and a sort of the candidates.
-    candidates = len(spectrum) * (len(spectrum) - 1) // 2
-    _check_generator_work(
-        max_bytes,
-        max_products,
-        payload_bytes=32 * candidates,
-        work=candidates * (candidates.bit_length() + 2),
-    )
     frequencies = distinct(
         spectrum[j] - left
         for i, left in enumerate(spectrum)
@@ -344,13 +315,6 @@ def _generator_shift_rule(
     )
     if not frequencies:
         return MappingProxyType(insertion)
-    f = len(frequencies)
-    # The f-by-f system sum_mu 2 sin(Omega_l x_mu) w_mu = Omega_l: 64 bytes per
-    # matrix entry for the matrix and its LU copy, 128 per frequency for the
-    # vectors, and f**3 for the dense solve plus the entrywise setup.
-    _check_generator_work(
-        max_bytes, max_products, payload_bytes=64 * f * f + 128 * f, work=f**3 + 8 * f * f + 8 * f
-    )
     shifts = (2 * np.arange(len(frequencies)) + 1) * pi / (2 * max(frequencies))
     weights = np.linalg.solve(2 * np.sin(np.outer(frequencies, shifts)), frequencies)
     generalized = {
@@ -375,11 +339,43 @@ def _generator_shift_rule(
     )
 
 
-def optimize_product(*, options, execution, selected, starting, evaluate, completed_round, rules):
+def optimize_product(*, options, execution, selected, starting, evaluate, completed_round, rules, identity_shift, scale):
     """Run one fresh BFGS minimization and return ``(message, success)``.
 
     The caller keeps the best point and the query record. An exhausted
     evaluation allowance returns ``("evaluation_budget_exhausted", False)``.
+
+    BFGS minimizes ``fbar(theta) = (E(theta) - c)/Omega`` with gradient
+    ``(grad E)/Omega``, where ``c`` is ``identity_shift`` and ``Omega > 0`` is
+    ``scale``, both read from the Plan's recorded values, so Omega is the
+    original Problem's scale in every round. The classical joint callback, the
+    objective of the circuit modes and their generalized and insertion
+    shift-rule Jacobians all deliver these values, because a gradient tolerance
+    and a unit first inverse Hessian applied to raw energies depend on the
+    energy unit. Saved angles are dimensionless and are never scaled. Only what
+    BFGS receives is scaled: ``evaluate`` keeps recording the physical energy
+    E, and the caller's best point and queries stay physical. Omega = 0 never
+    reaches this function, because ``drive_adapt`` ends such a run after the
+    reference.
+
+    For the centered energy scale `Omega = ||H - tr(H) I/d||_F / sqrt(d) > 0`, BFGS applies the stopping test `max_j |g_j| <= 1e-5 * Omega` to the computed product-state derivatives `g_j = dE_product/dtheta_j` in the selected dimensionless angle coordinates; this stationarity heuristic does not bound the residual or ground-energy error, and optimization can end before the test is met.
+
+    The physical threshold grows with Omega, so it is not a local precision
+    independent of system size. For sampled shift-rule estimates the test
+    applies to the estimated gradient and is no confidence statement about the
+    true one.
+
+    Under ``H' = aH + bI`` with a > 0, ``c' = ac + b`` and
+    ``Omega' = a Omega``, so ``fbar' = fbar`` and ``grad fbar' = grad fbar``.
+    With identical ordered numerical generators and identical dimensionless
+    parameter coordinates, and the same reference, starting parameters,
+    dimensionless tolerances, line-search settings, evaluation budget and
+    restart policy, the optimizer makes the same queries and reaches the same
+    parameters in exact arithmetic. Circuit modes also need the corresponding
+    raw outcomes. Finite precision, independently drawn shots, tied or
+    degenerate eigenspaces and a restart with a different history are outside
+    this exact equality, and a large identity offset can still lose information
+    when ``E - c`` is formed.
 
     Zheng et al. (2024), arXiv:2312.07691v3, run their optimization rounds with
     SciPy BFGS (Table III caption, p. 8) on the ansatz parameters every m
@@ -396,10 +392,10 @@ def optimize_product(*, options, execution, selected, starting, evaluate, comple
     initial = np.asarray(starting, dtype=float)
 
     def objective(values):
-        return evaluate(tuple(map(float, values)), role="objective")
+        return (evaluate(tuple(map(float, values)), role="objective") - identity_shift) / scale
 
     def jacobian(values):
-        """Return the measured gradient ``dE/dtheta_j`` for every selected angle.
+        """Return the measured gradient ``(dE/dtheta_j)/scale`` for every selected angle.
 
         Each component uses the rule of its generator
         (``_generator_shift_rule``). The generalized rule gives
@@ -437,10 +433,11 @@ def optimize_product(*, options, execution, selected, starting, evaluate, comple
                     ]
                     terms.append(term["coefficient"] * (energies[0] - energies[1]))
             derivatives.append(fsum(terms))
-        return np.asarray(derivatives)
+        return np.asarray(derivatives) / scale
 
     def energy_and_gradient(values):
-        return evaluate(tuple(map(float, values)), role="objective", gradient=True)
+        energy, gradient = evaluate(tuple(map(float, values)), role="objective", gradient=True)
+        return (energy - identity_shift) / scale, gradient / scale
 
     try:
         if execution != "classical":
@@ -451,7 +448,7 @@ def optimize_product(*, options, execution, selected, starting, evaluate, comple
             method="BFGS",
             jac=True if execution == "classical" else jacobian,
             callback=lambda _: completed_round(),
-            options={"maxiter": options.optimize_rounds_n},
+            options={"maxiter": options.optimize_rounds_n, "gtol": BFGS_NORMALIZED_GTOL},
         )
         return str(result.message), bool(result.success)
     except _EvaluationBudgetExhausted:

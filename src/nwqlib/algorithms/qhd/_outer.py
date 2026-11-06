@@ -15,18 +15,24 @@ round, this module also states how the refinement's stop decides the round
 
 from dataclasses import dataclass
 
+from nwqlib._limits import known_sum
+
 # Counts that an inner Run's trace supplies (``run_counts``) and that the
 # cumulative limits subtract (``round_limits``).
 RUN_COUNTS = ("circuit_preparations", "circuit_attempts", "completed_circuit_attempts", "shots",
               "completed_shots", "data_bytes", "evolution_work", "construction_work", "synthesis_work")
-USED_COUNTS = ("circuit_preparations", "circuit_attempts", "shots", "data_bytes", "synthesis_work")
+USED_COUNTS = ("circuit_preparations", "circuit_attempts", "shots", "data_bytes")
 
 
-def check_arguments(qhd, execution, shots, seed, limits, *, executed=True):
+def check_arguments(qhd, execution, shots, seed, limits, *, backend=None, executed=True):
     """Check the arguments that a layer shares with ``nwqlib.solve``.
 
     ``execution`` None means ``"quantum"``, and ``limits`` None the
-    ExecutionLimits defaults. A QHD with ``initial_state_preparation="none"``
+    ExecutionLimits defaults. A quantum ``backend`` that may charge for its
+    circuits and shots fills their unset budgets here
+    (``execution.with_paid_budgets``), so the budgets cover the whole layer
+    and every round's Run receives their remainder rather than budgets of
+    its own. A QHD with ``initial_state_preparation="none"``
     plans a resource-only construction that no round can execute, so it is
     refused before the first round, unless the caller only plans
     (``executed=False``, ``constrained.plan_augmented_lagrangian``).
@@ -35,7 +41,7 @@ def check_arguments(qhd, execution, shots, seed, limits, *, executed=True):
         ``(execution, limits)`` with those defaults applied.
     """
     from nwqlib.algorithms.protocol import ApplicabilityError
-    from nwqlib.execution import ExecutionLimits
+    from nwqlib.execution import ExecutionLimits, with_paid_budgets
     from nwqlib.scientist import _check_shots
 
     execution = "quantum" if execution is None else execution
@@ -45,6 +51,8 @@ def check_arguments(qhd, execution, shots, seed, limits, *, executed=True):
     if seed is not None and (type(seed) is not int or seed < 0):
         raise ValueError("seed must be a nonnegative integer or None")
     limits = ExecutionLimits() if limits is None else limits
+    if execution == "quantum":
+        limits = with_paid_budgets(limits, backend)
     if executed and qhd.initial_state_preparation == "none":
         raise ApplicabilityError("initial_state_preparation='none' plans a resource-only QHD construction, "
                                  "which no round can execute")
@@ -77,14 +85,13 @@ def round_limits(limits, used, shots):
     ``limits`` caps the whole run cumulatively, and ``used`` holds the
     ``USED_COUNTS`` of the rounds so far. A Run caps its circuit preparations
     and its circuit attempts separately by ``max_total_circuits``, so the
-    remainder subtracts the larger of the two totals. Shots, data bytes and
-    synthesis work subtract their totals. The per-Run caps (qubits,
-    simulator memory, completion metadata, direct amplitudes) pass through
-    unchanged.
+    remainder subtracts the larger of the two totals. Shots and data bytes
+    subtract their totals. The per-Run caps (qubits, simulator memory, direct
+    amplitudes) pass through unchanged.
     For either quantum or classical execution, this check requires a remaining
     circuit allowance of at least one, a remaining shot allowance of at least
-    ``shots`` (one when ``shots is None``), and remaining data-byte and
-    synthesis-work allowances of at least one each.
+    ``shots`` (one when ``shots is None``), and a remaining data-byte
+    allowance of at least one.
     A remainder that passes this test can still be too small for the amounts
     that the Run sets aside, which the Run then refuses.
 
@@ -104,13 +111,13 @@ def round_limits(limits, used, shots):
     from nwqlib.execution import ExecutionLimits
 
     circuits = max(used["circuit_preparations"], used["circuit_attempts"])
-    left = dict(max_total_circuits=limits.max_total_circuits - circuits,
-                max_total_shots=limits.max_total_shots - used["shots"],
-                max_data_bytes=limits.max_data_bytes - used["data_bytes"],
-                max_synthesis_work=limits.max_synthesis_work - used["synthesis_work"])
-    needed = dict(max_total_circuits=1, max_total_shots=shots or 1, max_data_bytes=1, max_synthesis_work=1)
+    spent = dict(max_total_circuits=circuits, max_total_shots=used["shots"], max_data_bytes=used["data_bytes"])
+    # An unset limit (None) leaves no limit for the next round either.
+    left = {name: None if getattr(limits, name) is None else getattr(limits, name) - amount
+            for name, amount in spent.items()}
+    needed = dict(max_total_circuits=1, max_total_shots=shots or 1, max_data_bytes=1)
     short = [f"{name} has {left[name]} left of {getattr(limits, name)}"
-             for name in left if left[name] < needed[name]]
+             for name in left if left[name] is not None and left[name] < needed[name]]
     if short:
         return None, "the cumulative limits cannot fund another round: " + ", ".join(short)
     kept = {name: getattr(limits, name) for name in ExecutionLimits.model_fields
@@ -269,8 +276,10 @@ def run_counts(trace, reason=None):
                     shots=sum(event.shots for event in trace.events),
                     completed_shots=sum(event.shots for event in completed),
                     data_bytes=trace.data_bytes, evolution_work=trace.host_work_reserved,
-                    construction_work=trace.construction_work_reserved + trace.host_preparation_work_reserved,
-                    synthesis_work=trace.synthesis_work_reserved), ()
+                    construction_work=known_sum(trace.construction_work_reserved, trace.host_preparation_work_reserved),
+                    synthesis_work=trace.synthesis_work), (
+            () if trace.construction_work_reserved is not None else
+            (("construction_work", "a definition that the inner Run built has unknown construction work"),))
     if reason is None:
         return dict.fromkeys(RUN_COUNTS, 0), ()
     return dict.fromkeys(RUN_COUNTS), tuple((name, reason) for name in RUN_COUNTS)
@@ -293,8 +302,9 @@ def law_count(plan, metric, circuits, reason=None):
     With one or more the value is that of the cost rule (``ResourceLaw``) with that metric of
     the block that planning chose in ``plan``, the CX upper bound for
     ``"cx"`` and the arbitrary-rotation count for
-    ``"arbitrary_rotations"`` (``resources.rotation_law``, or the binary
-    encoding's upper bound on rotation gates), for one circuit and not
+    ``"arbitrary_rotations"``, the upper bound on rotation gates of either
+    encoding (``resources.onehot_rotation_bound``,
+    ``method.QHD._select_binary_native``), for one circuit and not
     multiplied by shots. A Qiskit state preparation has neither count in the
     record, so the value is then None with that reason. Summed over the
     rounds or levels of a quantum run whose Runs each prepared at most one

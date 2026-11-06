@@ -184,6 +184,14 @@ class QHDEvolutionBound(Record):
     work: Count
 
 
+def _nearest(value):
+    """Return the binary64 number nearest the exact rational ``value``, or None beyond the binary64 range."""
+    try:
+        return float(value)
+    except OverflowError:
+        return None
+
+
 def _upward(value):
     """Return the least binary64 number not below the exact rational ``value``, or inf beyond the range.
 
@@ -374,7 +382,7 @@ def _graph_constants(grid):
     """Return ``(r_E, r_O)``, the row-sum bounds of the nested layer commutators on the K-point graph.
 
     The second-order compiler applies the odd-indexed links for dt/2, the
-    even-indexed links for dt and the odd ones again (``kinetic.KineticCompiler``),
+    even-indexed links for dt and the odd ones again (``onehot_schedule.hopping_layers``),
     so the odd layer O is the outer factor. With the unit adjacencies
     ``E_0``, ``O_0`` of the two layers, ``r_E = max_p sum_q |[E_0, [E_0, O_0]]_pq|``
     and ``r_O`` likewise with the layers swapped. The layers of variable j

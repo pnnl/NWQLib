@@ -86,16 +86,16 @@ def test_annotation_snapshot_preserves_shared_stored_base_and_modifier_order(mon
 def test_native_array_budget_precedes_finite_scan_and_copy(monkeypatch):
     circuit = QuantumCircuit(1)
     circuit.append(UnitaryGate(np.eye(2, dtype=complex)), [0], copy=False)
-    # Census: circuit 32+16, global phase 16, instruction 16+8, gate 32 and
-    # the 64-byte complex array, 184 bytes. The finite-check mask is freed
-    # before the array is copied, so exactly 184 bytes admit the snapshot.
-    _, census = snapshot_circuit(circuit, max_bytes=184)
-    assert census == 184
-    # One byte less rejects after the scalar objects fit, before any matrix work.
+    # Estimate: 256 bytes for the instruction and for the qubit, and the
+    # 64-byte complex array, 576 bytes. The finite-check mask is freed before
+    # the array is copied, so exactly 576 bytes admit the snapshot.
+    _, estimate = snapshot_circuit(circuit, max_bytes=576)
+    assert estimate == 576
+    # One byte less rejects after the circuit term fits, before any matrix work.
     monkeypatch.setattr("nwqlib.blocks._qiskit_intake.np.isfinite",
                         lambda *a, **k: pytest.fail("array work started before its budget"))
     with pytest.raises(ValueError, match="bytes"):
-        snapshot_circuit(circuit, max_bytes=183)
+        snapshot_circuit(circuit, max_bytes=575)
 
 
 def family_encoding(family,metadata):
@@ -113,3 +113,55 @@ def test_native_family_law_preserves_asserted_domain():
     assert law.value.value==pytest.approx(20.,rel=1e-15, abs=0)
     assert law.evidence.kind=="user_assertion"
     assert law.evidence.source.version == "2"
+
+
+def test_selected_native_encoding_keeps_its_structural_facts():
+    """Selection keeps the Hermiticity and involution facts that QSP evolution and walk choices read.
+
+    The Hermitian band -1, 2, -1 on four points is built as a full
+    involution, so all three facts are True; the copied payload is what a
+    Program later constructs, and losing them would turn proved premises
+    into unknown ones. The Hermitian 2x2 matrix [[1, 0.5], [0.5, -1]]
+    routes to a dense dilation, whose block is Hermitian but whose unitary
+    has no involution proof, so its third fact stays unknown instead of
+    taking the True of the Pauli candidate it was compared with.
+    """
+    from nwqlib.subroutines.block_encoding import BandSpecification, build_block_encoding
+    from nwqlib.subroutines.block_encoding.core import STRUCTURE_FACT_KEYS
+
+    encoding = build_block_encoding(BandSpecification(offsets=(-1, 0, 1), coefficients=(-1., 2., -1.), num_qubits=2))
+    shift = np.roll(np.eye(4), 1, axis=0)
+    selected = select_block_encoding("band", encoding, operator=ingest_dense(2*np.eye(4) - shift - shift.T))
+    payload = construct_block_encoding(selected)
+    assert {key: payload.metadata.get(key) for key in STRUCTURE_FACT_KEYS} == dict.fromkeys(STRUCTURE_FACT_KEYS, True)
+    hermitian = np.array([[1., .5], [.5, -1.]])
+    dense = build_block_encoding(hermitian)
+    assert dense.implementation == "dense_dilation"
+    payload = construct_block_encoding(select_block_encoding("dense", dense, operator=ingest_dense(hermitian)))
+    assert [payload.metadata.get(key) for key in STRUCTURE_FACT_KEYS] == [True, True, None]
+
+
+def test_stored_standard_gates_are_copied_without_the_callers_gate_objects(monkeypatch):
+    # A standard gate is copied from the gate, parameters and label that the
+    # circuit stores, so a caller's later change to a gate object it appended
+    # with copy=False leaves the snapshot unchanged. With a distinct object per
+    # instruction the bytes and the action equal those of the copy through
+    # Python gate objects.
+    from qiskit.circuit.library import CRZGate, CXGate, RZGate
+    from qiskit.quantum_info import Operator
+    from nwqlib.blocks import _qiskit_intake
+
+    rz, crz, labelled = RZGate(.6), CRZGate(.4), CXGate().to_mutable()
+    labelled.label = "tag"
+    circuit = QuantumCircuit(2)
+    for gate, qubits in ((rz, [0]), (crz, [0, 1]), (labelled, [1, 0]), (CXGate(), [0, 1]), (RZGate(-.3), [1])):
+        circuit.append(gate, qubits, copy=False)
+    snapshot, size = snapshot_circuit(circuit)
+    with monkeypatch.context() as patched:
+        patched.setattr(_qiskit_intake, "_stock_gates", lambda: {})
+        objects, object_size = snapshot_circuit(circuit)
+    expected = Operator(objects).data
+    assert size == object_size
+    rz.params[0], crz.params[0], crz.base_gate.params[0] = 1.2, 9., 9.
+    np.testing.assert_array_equal(Operator(snapshot).data, expected)
+    assert [item.label for item in snapshot.data] == [None, None, "tag", None, None]

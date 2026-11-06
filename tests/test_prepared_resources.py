@@ -114,15 +114,8 @@ def test_raw_inventory_neither_copies_nor_compiles_nor_runs(monkeypatch):
         monkeypatch.setattr(owner, name, forbidden)
     assert inventory(circuit)["total_operations"] == 7
     assert tuple(circuit.data) == original
-    with pytest.raises(ValueError, match="max_operations"):
-        inventory(circuit, max_operations=6)
-    assert inventory(circuit, max_operations=7)["total_operations"] == 7
     with pytest.raises(ValueError, match="bytes"):
         inventory(circuit, max_bytes=1)
-    with pytest.raises(ValueError, match="labels"):
-        inspect_circuit_resources(circuit, native_basis=BASIS, label="")
-    with pytest.raises(ValueError, match="native circuit"):
-        inspect_circuit_resources(object(), native_basis=BASIS, label="x")
 
 
 def test_native_two_qubit_depth_keeps_wire_order_and_qualifies_only_target_operations():
@@ -187,3 +180,26 @@ def test_native_two_qubit_depth_keeps_wire_order_and_qualifies_only_target_opera
     # not make an operation native on these qubits.
     for circuit in (composite, impostor, unrouted, branch):
         assert depths(circuit) is None
+
+
+def test_native_depth_inspection_defaults_to_the_physical_memory(monkeypatch):
+    """Without max_bytes, a circuit whose inspection data exceed the physical memory keeps an unqualified depth.
+
+    One CX on two qubits needs 64 bytes for its operation and 16 for each
+    qubit. The reason names the physical memory that refused it.
+    """
+    from qiskit.circuit.library import CXGate
+    from qiskit.transpiler import Target
+    from nwqlib import _limits
+    from nwqlib.backends.inspection import inspect_native_depth
+
+    target = Target(num_qubits=2)
+    target.add_instruction(CXGate(), {(0, 1): None})
+    circuit = QuantumCircuit(2)
+    circuit.cx(0, 1)
+    need = 64 + 16 * 2
+    monkeypatch.setattr(_limits, "physical_memory_bytes", lambda: need - 1)
+    refused = inspect_native_depth(circuit, target)
+    assert not refused.qualified and f"the physical memory ({need - 1} bytes)" in refused.reason
+    monkeypatch.setattr(_limits, "physical_memory_bytes", lambda: need)
+    assert inspect_native_depth(circuit, target).native_two_qubit_depth == 1

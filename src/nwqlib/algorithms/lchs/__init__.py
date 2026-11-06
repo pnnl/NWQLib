@@ -4,7 +4,8 @@ from importlib import import_module
 
 _EXPORT_GROUPS = {
     "method": ("LCHS",),
-    "primary_records": ("LCHSAnalysis",),
+    "primary_records": ("LCHSAnalysis", "LCHSPairProgress"),
+    "analysis": ("sampled_pair_progress",),
     "verification": ("LCHSVerification",),
     "refinement": ("LCHSRefinement",),
     "time_independent_terms": ("cartesian_decomposition",),

@@ -262,3 +262,29 @@ def test_method_tolerances_give_check_verdicts(case, passing, failing):
             spec.content_id for spec in selected.verification_checks(result)]
         statuses.append(attached.checks[-1].status)
     assert statuses == ["PASS", "FAIL"]
+
+
+def test_projected_gram_checks_keep_the_exact_hermiticity_defect(monkeypatch):
+    """The Hermiticity defect is exact where a binary64 subtraction would round it to the threshold.
+
+    With S_01 = 1 and S_10 = -2**-54, the real part of (S - S†)_01 is
+    1 + 2**-54, which binary64 subtraction rounds to 1. At tolerance 1 the
+    exact defect fails the check. The PSD deficit is the negated stored
+    minimum, exact in binary64, so the spectrum (-2**-1074, 0.5) gives
+    2**-1074 and a nonnegative spectrum gives 0.
+    """
+    from nwqlib.evidence.verification import ProjectedDiagnostics
+
+    result = nwqlib.solve(nwqlib.Eigenproblem(A=np.diag([1.0, -1.0])),
+                          method=FixedGCIM(basis=([1, 0], [0, 1])))
+    tiny = 2.0**-54
+    assert 1.0 - (-tiny) == 1.0
+    options = ProjectedVerificationOptions(
+        name="projected", comparisons=("gram_hermiticity", "gram_psd_deficit"), tolerance=1.0)
+    for spectrum, deficit in (((-2.0**-1074, 0.5), Fraction(1, 2**1074)), ((0.1, 0.2), 0)):
+        diagnostics = ProjectedDiagnostics(((0.0, 1.0), (-tiny, 0.0)), spectrum, None, None)
+        monkeypatch.setattr(type(result), "projected_diagnostics", lambda self, d=diagnostics: d)
+        _, facts = result.verify(checks=options)
+        assert [ratio(fact) for fact in facts] == [1 + Fraction(1, 2**54), deficit]
+        cert = certificate(result).with_verification(result, options=options, evidence=facts)
+        assert tuple(check.status for check in cert.checks) == ("FAIL", "PASS")

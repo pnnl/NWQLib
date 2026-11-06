@@ -1,33 +1,49 @@
-"""Qiskit construction of the QHD circuit that planning chose, from the blocks recorded in its Plan.
+"""Qiskit construction of the QHD circuit that planning chose, from the data recorded in its Plan.
 
 The circuit is built from the data of the Plan, the reconstruction's initial
-amplitudes, compiled step blocks, support tables (binary) and physical phase,
+amplitudes, support tables, step rows, compiled schedule and physical phase,
 with the grid rebuilt from the Problem's bounds and the Method's options. The
-objective is not evaluated and the schedule is not recompiled, so a loaded Plan
-yields the circuit whose resources planning counted.
+objective is not evaluated, and the one-hot blocks are derived from the
+recorded data with the arithmetic of planning, so a loaded Plan yields the
+circuit whose resources planning counted.
 """
 
 from .grid import OneHotGrid
-from nwqlib.blocks.selection import _no_arguments
+from .initial_state import chain_links
+from .onehot_schedule import derivation_bytes
+from nwqlib.blocks.selection import NATIVE_POSITION_BYTES, _no_arguments
 from nwqlib.subroutines.hamiltonian_evolution.pauli_ir import (
     PauliEvolutionBlock,
     PauliEvolutionTerm,
 )
 
+# Coarse bytes per Aer native position of a whole QHD circuit at the peak of its
+# construction and lowering, with the gate definition and the flattened circuit
+# together. Fresh-process footprint growth was 972 to 1208 bytes per position for
+# one-hot K = 20 and 26 up to 10**7 positions, and 1604 to 2740 for binary K = 256
+# and K = 64, d = 2 (Qiskit 2.6.0, Aer 0.18.0). These are estimates, not bounds.
+ONEHOT_POSITION_BYTES = 1024
+BINARY_POSITION_BYTES = 2048
 
-def raw_blocks(reconstruction):
-    """Yield the evolution blocks of the Plan's ``QHDBlock`` records one at a time, in circuit order.
 
-    A kinetic record becomes its XX and YY terms on the recorded pair with
-    the recorded coefficient, and keeps its pair and angle. A projector
-    record keeps its support and angle, so the direct ``ir_product``
-    classical evaluation reads both kinds without parsing labels. Each block
-    is rebuilt when it is used, so the circuit construction and the
-    ``ir_product`` classical evaluation (``theory._run_ir_product``) hold one
+def raw_blocks(reconstruction, method, grid):
+    """Yield the evolution blocks of a one-hot Plan one at a time, in circuit order.
+
+    The blocks of each step are derived from the Plan's tables, step rows
+    and projector providers (``onehot_schedule.OneHotSchedule.blocks``),
+    with one tile of table entries in memory at a time. A kinetic block
+    becomes its XX and YY terms on its pair with its coefficient, and keeps
+    its pair and angle. A projector block keeps its support and angle, so
+    the direct ``ir_product`` classical evaluation reads both kinds without
+    parsing labels. The circuit construction and the ``ir_product``
+    classical evaluation (``theory._run_ir_product``) therefore hold one
     block at a time instead of a copy of every block.
     """
-    for group in reconstruction.steps:
-        for block in group:
+    from .onehot_schedule import OneHotSchedule
+
+    schedule = OneHotSchedule.of(reconstruction, method, grid)
+    for step in range(len(reconstruction.step_weights)):
+        for block in schedule.blocks(step):
             if block.kind == "kinetic":
                 left, right = block.support
                 terms = tuple(
@@ -48,88 +64,165 @@ def raw_blocks(reconstruction):
             )
 
 
-def _binary_native_bytes(reconstruction, method, d):
-    """Return the bytes set aside for the known QHD circuit graph and one block's construction scratch.
+def _state_preparation_positions(width):
+    """Return the Aer native positions of Qiskit's ``StatePreparation`` on ``width`` qubits, 2**(width+1) - width - 2.
 
-    Count C circuit containers, Q local wire positions, G gate/instruction
-    positions, A qubit-argument positions and V scalar-parameter positions.
-    The qualified graph allowance is 65536+4096*C+512*Q+2048*G+32*A+64*V
-    on CPython 3.12.14 and Qiskit 2.5.2. Two graph allowances permit source
-    and appended-copy coexistence. These rates count named objects and
-    storage, not process RSS or arbitrary SDK synthesis. Revisit when the
-    builder, the copying of gate definitions or the parameter representation
-    changes, or a measured workload falls outside the checked range
-    (docs/ENGINEERING_CONSTANTS.md).
-
-    A nonzero dense n-qubit diagonal has E=2**n entries. It adds n+1
-    circuits of total width q=n+n*(n+1)//2, 2*E+n-2 gate positions,
-    q+3*E-5 arguments and 3*E-2 parameters. Its outer and multiplexor
-    gates store E+(E-1) phase parameters, and up to E-1 Rz parameters
-    appear in their definitions. A Walsh diagonal uses at most cx+r
-    instructions, 2*cx+r arguments and r parameters. Remove the QFT pair's
-    CX/rotation counts before applying that Walsh count. Each kinetic block
-    also adds the gates of the forward and inverse QFTs, H, CP and swap.
-
-    Structured preparation contributes d*b H gates. StatePreparation
-    contributes d gates and d*K complex parameters, with its later lazy
-    synthesis outside this constructor. Both callers exclude the resource-only
-    recipe first (``method.QHD._select_binary_native``, ``construct_qhd``).
-    A zero dense block adds no graph but keeps its padding scratch allowance.
-
-    The scratch is 65536+(320+L(n_max))*E_max plus
-    256*n_max*(1+digits(max(0,d*b-1))) for labels/qubit lists. It permits
-    padded floats, wrapping/transform arrays, Gray indices and controls,
-    schedule pairs, and the two Walsh tolist lists. L is
-    _integer_storage. Built-in immutable SDK-singleton definitions and
-    prior process-global caches are outside the counted graph.
+    Measured on dense and one-hot vectors of 2, 3, 4 and 6 qubits (Qiskit
+    2.6.0, Aer 0.18.0). A uniform vector, whose rotations vanish, has only
+    ``width`` positions, which is small next to the rest of a binary circuit.
     """
-    from .binary import _integer_storage
+    return (2 << width) - width - 2
 
+
+def _onehot_positions(reconstruction, method, d):
+    """Return the Aer native positions of a one-hot QHD circuit from the Plan's block counts.
+
+    A hopping block lowers to 14 positions. A projector block on s qubits is
+    one multi-controlled phase, or for the diagonal provider
+    (``structured_number_projector_provider``) 2**s - 2 CX and 2**s - 1 RZ.
+    The structured preparation has d X and one CRY and one CX per emitted
+    link (``initial_state.chain_links``). This count equals the lowered circuit
+    at K = 4, 8 and 20 with Qiskit 2.6.0 and Aer 0.18.0.
+    """
+    schedule = reconstruction.onehot
+    providers = {p.support_size: p.provider for p in schedule.providers}
+    positions = 14 * schedule.hopping_blocks + sum(
+        count * ((2 << s) - 3 if providers[s] == "diagonal_synthesis" else 1)
+        for s, count in schedule.projector_blocks)
+    if method.initial_state_preparation == "structured":
+        positions += d + 2 * sum(chain_links(vector) for vector in reconstruction.initial_amplitudes)
+    elif method.initial_state_preparation == "qiskit_state_preparation":
+        positions += d * _state_preparation_positions(method.num_grid_points)
+    return positions
+
+
+def _onehot_native_bytes(reconstruction, method, d):
+    """Return a coarse estimate of the bytes of building and lowering a one-hot QHD circuit.
+
+    The circuit counts ``ONEHOT_POSITION_BYTES`` per position
+    (``_onehot_positions``). Each ``StatePreparation`` keeps its ``2**K`` complex
+    amplitudes, and the blocks of each step are derived with the transient
+    storage of ``onehot_schedule.derivation_bytes``. Planning records the
+    estimate as the preparation workspace (``method.QHD._select_native``),
+    the Run compares it with ``max_bytes`` (``_construction_memory``), and
+    ``construct_qhd`` checks it before it allocates the circuit for a caller
+    outside a Run.
+    """
+    schedule = reconstruction.onehot
+    k = method.num_grid_points
+    preparation = 16 * d * (1 << k) if method.initial_state_preparation == "qiskit_state_preparation" else 0
+    return (ONEHOT_POSITION_BYTES * _onehot_positions(reconstruction, method, d) + preparation
+            + derivation_bytes(k, d, (p.support_size for p in schedule.providers)))
+
+
+def _binary_positions(reconstruction, method, d):
+    """Return the Aer native positions of a binary QHD circuit from the Plan's block counts.
+
+    The structured preparation has d b H gates. A kinetic block adds its
+    forward and inverse QFTs, one position for each H, CP and swap, in place
+    of the pair's CX and rotations that its recorded counts include. A
+    dense diagonal lowers to exactly its CX and rotations, and an all-zero
+    table to none. A Walsh diagonal has at most its CX and rotations, since
+    Aer keeps a weight-two parity rotation as one RZZ and the recorded count
+    includes its two CX.
+    """
     k = method.num_grid_points
     bits = k.bit_length() - 1
     cutoff = method.binary_synthesis.aqft_cutoff
     m = bits - 1 if cutoff is None else min(cutoff, bits - 1)
     cp = m * bits - m * (m + 1) // 2
-    swaps = bits // 2 if method.binary_synthesis.qft_bit_reversal == 'swap' else 0
-    pair_cx, pair_rot = 4 * cp + 6 * swaps, 6 * cp
-    circuits, wires, gates, args, params = 1, d * bits, 0, 0, 0
-    if method.initial_state_preparation == 'structured':
-        gates += d * bits
-        args += d * bits
-    elif method.initial_state_preparation == 'qiskit_state_preparation':
-        gates += d
-        args += d * bits
-        params += d * k
-    largest = k
-    widest = bits
+    swaps = bits // 2 if method.binary_synthesis.qft_bit_reversal == "swap" else 0
+    positions = 0
+    if method.initial_state_preparation == "structured":
+        positions = d * bits
+    elif method.initial_state_preparation == "qiskit_state_preparation":
+        positions = d * _state_preparation_positions(bits)
+    pair = 2 * (bits + cp + swaps) - (4 * cp + 6 * swaps + 6 * cp)
     for group in reconstruction.steps:
         for block in group:
-            n = bits * len(block.variables)
-            e = 1 << n
-            largest, widest = max(largest, e), max(widest, n)
-            kinetic = block.kind == 'binary_kinetic'
-            if kinetic:
-                gates += 2 * (bits + cp + swaps)
-                args += 2 * (bits + 2 * cp + 2 * swaps)
-                params += 2 * cp
-            cx = block.cx - (pair_cx if kinetic else 0)
-            rotations = block.rotations - (pair_rot if kinetic else 0)
-            if block.synthesis == 'dense_diagonal':
-                if rotations:
-                    local_wires = n + n * (n + 1) // 2
-                    circuits += n + 1
-                    wires += local_wires
-                    gates += 2 * e + n - 2
-                    args += local_wires + 3 * e - 5
-                    params += 3 * e - 2
-            else:
-                gates += cx + rotations
-                args += 2 * cx + rotations
-                params += rotations
-    graph = 65536 + 4096 * circuits + 512 * wires + 2048 * gates + 32 * args + 64 * params
+            positions += block.cx + block.rotations + (pair if block.kind == "binary_kinetic" else 0)
+    return positions
+
+
+def _binary_native_bytes(reconstruction, method, d):
+    """Return a coarse estimate of the bytes of a binary QHD circuit and one block's construction arrays.
+
+    The circuit counts ``BINARY_POSITION_BYTES`` per position
+    (``_binary_positions``), 16384 bytes for its circuit and register objects,
+    the allowance of the dense syntheses
+    (``_dense_synthesis.controlled_synthesis_size``), and for
+    ``StatePreparation`` its d*K complex amplitudes. These fixed allowances
+    count twice, for the source and its appended copy.
+    Both callers exclude the resource-only recipe first
+    (``method.QHD._select_binary_native``, ``construct_qhd``).
+
+    The scratch is 65536+(320+L(n_max))*E_max plus
+    256*n_max*(1+digits(max(0,d*b-1))) for labels/qubit lists. It permits
+    padded floats, wrapping/transform arrays, Gray indices and controls,
+    schedule pairs, and the two Walsh tolist lists. L is
+    _integer_storage.
+    """
+    from .binary import _integer_storage
+
+    k = method.num_grid_points
+    bits = k.bit_length() - 1
+    amplitudes = 16 * d * k if method.initial_state_preparation == "qiskit_state_preparation" else 0
+    widest = max((bits * len(block.variables) for group in reconstruction.steps for block in group),
+                 default=bits)
+    largest = 1 << widest
     scratch = (65536 + (320 + _integer_storage(widest)) * largest
                + 256 * widest * (1 + len(str(max(0, d * bits - 1)))))
-    return 2 * graph + scratch
+    return (BINARY_POSITION_BYTES * _binary_positions(reconstruction, method, d)
+            + 2 * (16384 + amplitudes) + scratch)
+
+
+def _binary_held_bytes(reconstruction, method, d):
+    """Return the bytes that a binary construction holds beside its model, and the model's reservation.
+
+    The held bytes are the Plan's source records and ``_binary_native_bytes``.
+    The reservation is that of ``binary._model_reservation``, ``(model, latest,
+    build, use)``.
+    """
+    from .binary import _model_reservation
+    from .method import _binary_source_reservation
+
+    k = method.num_grid_points
+    specs = tuple((int(t.values.array.size), len(t.support)) for t in reconstruction.support_values)
+    source_bytes, _ = _binary_source_reservation(d, k, specs, method.num_steps, method.trotter_order)
+    parts = _model_reservation(
+        d, k.bit_length() - 1, specs,
+        cutoff=method.binary_synthesis.aqft_cutoff,
+        swaps=method.binary_synthesis.qft_bit_reversal == "swap",
+        potential_walsh=method.binary_synthesis.potential != "dense_diagonal")
+    return source_bytes + _binary_native_bytes(reconstruction, method, d), parts
+
+
+def _binary_workspace_bytes(reconstruction, method, d):
+    """Return the coarse bytes of a binary construction, its held bytes, model and largest use."""
+    held, parts = _binary_held_bytes(reconstruction, method, d)
+    return held + parts[0] + parts[1] + max(parts[2:])
+
+
+def _construction_memory(reconstruction, method, d):
+    """Return ``(native_bytes, definition_bytes)`` of the QHD block for ``SelectedBlock.bind``.
+
+    The Plan's preparation workspace is split so that the Run's comparison with
+    ``max_bytes`` sees the same total. The flattened circuit that a prepared
+    handle holds until it is released counts ``NATIVE_POSITION_BYTES`` per
+    position, and the rest of the estimate belongs to the gate definition that the
+    Run holds. Planning and archive rebinding share this function. A
+    resource-only recipe builds no circuit, so it has no estimate.
+    """
+    if method.initial_state_preparation == "none":
+        return None, None
+    if method.encoding == "binary":
+        total, positions = (_binary_workspace_bytes(reconstruction, method, d),
+                            _binary_positions(reconstruction, method, d))
+    else:
+        total, positions = (_onehot_native_bytes(reconstruction, method, d),
+                            _onehot_positions(reconstruction, method, d))
+    native = NATIVE_POSITION_BYTES * positions
+    return native, total - native
 
 
 def construct_qhd(block, arguments, method_context):
@@ -146,7 +239,14 @@ def construct_qhd(block, arguments, method_context):
     (``QHDReconstruction.initial_amplitudes``).
     One-hot (``d*K`` qubits): the structured amplitude chain or Qiskit
     ``StatePreparation`` (``initial_state.append_initial_state``), then each
-    fused XX+YY hopping and number-projector block in the Plan's order. Binary
+    fused XX+YY hopping and number-projector block in the Plan's order
+    (``raw_blocks``). The recorded projector providers must be those of the
+    tables' support sizes, and the emitted blocks must have the recorded
+    counts by kind and support size (``QHDOneHotSchedule``), or the
+    construction raises, because a circuit with other blocks would not be
+    the circuit that the Plan's CX and rotation counts describe. Its byte
+    estimate (``_onehot_native_bytes``) is checked against ``max_bytes``
+    before the circuit is allocated, also for a loaded Plan. Binary
     (``d*b`` qubits): the structured H layer or Qiskit ``StatePreparation``
     (``initial_state.append_binary_initial_state``), then the Plan's binary
     blocks (``append_binary_steps``). Adding the recorded ``physical_phase`` to
@@ -166,23 +266,17 @@ def construct_qhd(block, arguments, method_context):
     grid = OneHotGrid(variables, bounds, options.num_grid_points, options.include_boundary_points,
                       options.boundary)
     if options.encoding == "binary":
-        from .binary import _construction_cache_capacity, _model_reservation
-        from .method import _binary_source_reservation
+        from .binary import _construction_cache_capacity
 
-        specs = tuple((int(t.values.array.size), len(t.support))
-                      for t in reconstruction.support_values)
-        source_bytes, _ = _binary_source_reservation(
-            grid.num_variables, options.num_grid_points, specs,
-            options.num_steps, options.trotter_order)
-        native_held = source_bytes + _binary_native_bytes(reconstruction, options, grid.num_variables)
-        parts = _model_reservation(
-            grid.num_variables, options.num_grid_points.bit_length() - 1, specs,
-            cutoff=options.binary_synthesis.aqft_cutoff,
-            swaps=options.binary_synthesis.qft_bit_reversal == "swap",
-            potential_walsh=options.binary_synthesis.potential != "dense_diagonal")
+        native_held, parts = _binary_held_bytes(reconstruction, options, grid.num_variables)
         _construction_cache_capacity(
             options.max_bytes, held_bytes=native_held,
             model_bytes=parts[0], latest_bytes=parts[1], build_bytes=parts[2], use_bytes=parts[3])
+    else:
+        from nwqlib._limits import check_memory
+
+        check_memory(_onehot_native_bytes(reconstruction, options, grid.num_variables), options.max_bytes,
+                     "QHD one-hot circuit construction")
     circuit = QuantumCircuit(reconstruction.width, name="qhd")
     amplitudes = tuple(np.asarray(vector, dtype=float) for vector in reconstruction.initial_amplitudes)
     if options.encoding == "binary":
@@ -190,9 +284,21 @@ def construct_qhd(block, arguments, method_context):
         append_binary_initial_state(circuit, grid, bits, amplitudes, recipe=options.initial_state_preparation)
         append_binary_steps(circuit, reconstruction, options, grid, held_bytes=native_held)
     else:
+        from collections import Counter
+
+        from .onehot_schedule import projector_providers
+
+        recorded = reconstruction.onehot
+        if recorded.providers != projector_providers(reconstruction.support_values):
+            raise ValueError("QHD one-hot projector providers differ from those of the Plan's support sizes")
         append_initial_state(circuit, grid, amplitudes, recipe=options.initial_state_preparation)
-        for compact in raw_blocks(reconstruction):
+        # Emitted blocks by support size, with 0 for the hopping blocks.
+        emitted = Counter()
+        for compact in raw_blocks(reconstruction, options, grid):
             append_pauli_evolution_block(circuit, compact)
+            emitted[0 if compact.kind == "kinetic" else len(compact.support)] += 1
+        if +emitted != +Counter({0: recorded.hopping_blocks, **dict(recorded.projector_blocks)}):
+            raise ValueError("QHD one-hot blocks differ from the Plan's recorded block counts")
     circuit.global_phase += reconstruction.physical_phase
     return circuit
 

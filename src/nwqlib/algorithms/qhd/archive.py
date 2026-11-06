@@ -241,13 +241,16 @@ def load(saved, files):
         (kernel,) = plan.construction.kernels
         blocks = (BoundKernel._bind(plan, kernel, lambda: _execute_theory(plan, kernel)),)
     else:
-        from .native import construct_qhd
+        from .native import _construction_memory, construct_qhd
 
+        native_bytes, definition_bytes = _construction_memory(reconstruction, method, len(problem.variables))
         blocks = (
             SelectedBlock.bind(
                 plan.construction.selections[0],
                 payload=(reconstruction, method, problem.bounds, problem.variable_names),
                 constructor=construct_qhd,
+                native_bytes=native_bytes,
+                definition_bytes=definition_bytes,
             ),
         )
     return plan._bind(blocks=blocks)

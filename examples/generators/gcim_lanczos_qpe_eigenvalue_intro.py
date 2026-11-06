@@ -212,9 +212,9 @@ show_card(result, E_FCI, references, molecule, host_cost, circuit_cost, seconds)
 # - **Input.** A Qiskit `SparsePauliOp`, or a dense or sparse matrix for exact evaluation. The chemistry helper builds the Pauli sum from a geometry with PySCF and OpenFermion.
 # - **Initial state.** The methods start from a state with a sizable overlap with the ground state, here the Hartree–Fock state.
 # - **Output.** `result.eigenvalue` is the smallest eigenvalue of a projected problem, in the unit of the `Eigenproblem`.
-# - **Size.** Exact evaluation holds state vectors of the full Hamiltonian in classical memory. As circuits, the Aer simulator accepts 20 qubits by default (Section 4).
+# - **Size.** Exact evaluation holds state vectors of the full Hamiltonian in classical memory. As circuits, local simulation must fit the computer's memory (Section 4).
 #
-# The cell plans QCELS, a quantum phase estimation (QPE) method for the same eigenvalue problem (Go deeper D), on the dense 256 × 256 matrix of the chain. `max_work` limits the classical work of QCELS. Work is a nominal measure of classical computation that NWQLib derives from the problem sizes by formula ([work units](../docs/glossary.md#work-units)). Its units combine estimates of arithmetic and of circuit construction, and they are neither a uniform count of scalar operations nor a time. With `max_work` set to 100,000,000 for this demonstration (the default is 1,000,000,000), planning refuses it before any evaluation. The remedy is the default `max_work`, and the solve takes under a second.
+# The cell plans QCELS, a quantum phase estimation (QPE) method for the same eigenvalue problem (Go deeper D), on the dense 256 × 256 matrix of the chain. `max_work` limits the classical work of QCELS. Work is a nominal measure of classical computation that NWQLib derives from the problem sizes by formula ([work units](../docs/glossary.md#work-units)). Its units combine estimates of arithmetic and of circuit construction, and they are neither a uniform count of scalar operations nor a time. With `max_work` set to 100,000,000 for this demonstration (the default sets no limit), planning refuses it before any evaluation. The remedy is the default `max_work`, and the solve takes under a second.
 
 # %%
 from nwqlib import Eigenproblem
@@ -331,19 +331,20 @@ show_table([(step.iteration, "Hartree–Fock state" if step.iteration == 0 else 
 #
 # ## 4. How large can I go?
 #
-# **The local simulator, the circuit limit and the work caps set the size. For ADAPT, `plan` and `estimate` give only the footprint of one evaluation, because ADAPT chooses its circuits from earlier results.** The table lists the limits this run had and the chain's use of them.
+# **The memory of the local simulator sets the size, and other limits apply only where you or the backend set them. For ADAPT, `plan` and `estimate` give only the footprint of one evaluation, because ADAPT chooses its circuits from earlier results.** The table lists the limits this run had and the chain's use of them.
 #
 # [Planning at scale](resource_estimation_at_scale.ipynb) plans a fixed GCiM trial basis at 80 to 100 qubits, sizes no simulator holds, and there `estimate` gives the total settings, shots and CX gates.
 
 # %%
 limits = trace.limits
 show_table([
-    ("Qubits the local simulator accepts", limits.max_simulation_qubits,
-     f"Default. A pair circuit of this chain uses {molecule.num_qubits + 1}"),
-    ("Circuits per run", limits.max_total_circuits,
-     f"Default max_total_circuits. This run as circuits needs {pair_circuits(basis_states)}"),
-    ("Basis states", method.max_basis_size, f"Default max_basis_size, two per iteration. This run uses {basis_states}"),
-    ("Scalar products per evaluation", method.max_products,
+    ("Simulator memory cap", "Physical memory (default)" if limits.simulator_memory_mb is None else f"{limits.simulator_memory_mb:,} MiB",
+     f"Default simulator_memory_mb. The {molecule.num_qubits + 1} qubits of a pair circuit hold a "
+     f"{format_bytes(16 << (molecule.num_qubits + 1))} complex128 state"),
+    ("Circuits per run", "No limit on Aer (default)" if limits.max_total_circuits is None else f"{limits.max_total_circuits:,}",
+     f"Default max_total_circuits, which is 512 on a backend that may charge. This run as circuits needs {pair_circuits(basis_states)}"),
+    ("Basis states", 2 * method.max_iterations, f"At most two per iteration of max_iterations. This run uses {basis_states}"),
+    ("Scalar products per evaluation", "No limit (default)" if method.max_products is None else f"{method.max_products:,}",
      "Default max_products. It also covers planning the chain as circuits"),
     ("Exact evaluation: memory of known buffers", format_bytes(amount(host_cost, "known_memory", "host")),
      "Footprint of one evaluation from estimate, not measured"),
@@ -367,7 +368,7 @@ show_table([
 # - **Hamiltonian.** A Qiskit `SparsePauliOp`, in which qubit 0 is the rightmost character of each label. The 15 coefficients are the Jordan–Wigner coefficients rounded to eight decimals, in the spin-orbital order of `build_gcim_chemistry_problem`. A dense or sparse matrix works for exact evaluation ([Supply inputs](../docs/inputs.md)).
 # - **Initial state.** `ingest_occupation("1100", num_qubits=4)` prepares the basis state with qubits 0 and 1 occupied, listing qubit 0 first. A product state, a vector or a Qiskit circuit also works.
 # - **Pool.** `pool="spin_adapted_sd"` with `n_spatial_orbitals=2` assumes the interleaved order of the chemistry helper, with the two spins of orbital p on qubits 2p and 2p + 1. For a Hamiltonian that is not molecular, start with Lanczos or QCELS, or pass your own generators ([GCiM guide](../docs/algorithms/gcim.md)).
-# - **Size limits.** Both solves run as circuits on the Aer simulator. Lanczos adds qubits that address the Pauli terms, and each ADAPT pair circuit adds one ancilla. The default limit of 512 circuits allows 15 ADAPT iterations with exact readout.
+# - **Size limits.** Both solves run as circuits on the Aer simulator. Lanczos adds qubits that address the Pauli terms, and each ADAPT pair circuit adds one ancilla. Aer sets no circuit limit by default. On a backend that may charge, the default limit of 512 circuits allows 15 ADAPT iterations with exact readout.
 # - **Output.** `my_lanczos.eigenvalue` and `my_adapt.eigenvalue`, in hartree here. With exact matrix elements each lies at or above the ground-state energy but does not certify it.
 
 # %%
@@ -448,9 +449,7 @@ show_table([
 #
 # NWQLib fixes each arbitrary orbital sign when it builds the Hamiltonian, which removes the dependence on the eigensolver's sign choices. A rotation within a subspace of degenerate orbitals, or rounding that decides between generators whose gradients tie in exact arithmetic, can still change the sequence of iterations.
 #
-# `MAX_ITERATIONS` caps the run. The ADAPT-GCiM paper stops a run once the energy has changed by less than $10^{-6}$ Ha in ten consecutive iterations, its setting for H₄, or in fewer iterations when 20% of the unselected pool members, rounded up, is smaller. NWQLib applies this rule within the cap.
-#
-# With `MAX_ITERATIONS = 32`, the largest value the default cap of 64 basis states allows, the rule stops this run at iteration 18, ten iterations after the energy reached FCI.
+# `MAX_ITERATIONS` caps the run. The ADAPT-GCiM paper stops a run once the energy has changed by less than $10^{-6}$ Ha in ten consecutive iterations, its setting for H₄, or in fewer iterations when 20% of the unselected pool members, rounded up, is smaller. NWQLib applies this rule within the cap, with the tolerance set to $10^{-6}$ of the operator's [energy scale](../docs/algorithms/gcim.md#energy-thresholds-and-units).
 #
 # </details>
 #
@@ -497,9 +496,9 @@ show_table([
 # %% [markdown]
 # The two runs agree to rounding and select the same generator. For H₂ one iteration is exact, because the ground state lies in the span of the Hartree–Fock state and the doubly excited state that the first generator adds. This run checks the circuits, not the convergence.
 #
-# The chain as circuits fits the default `max_products`, and its 136 circuits fit the default `ExecutionLimits(max_total_circuits=512)`. With `shots=1000` the matrix elements are measured in the grouped settings of Appendix A, and each gradient screening needs one setting per group of qubit-wise commuting terms of its commutators.
+# The default `max_products=None` sets no work cap, and the default `ExecutionLimits` set no circuit limit on Aer, while the chain's 136 circuits also fit the default of 512 on a backend that may charge. With `shots=1000` the matrix elements are measured in the grouped settings of Appendix A, and each gradient screening needs one setting per group of qubit-wise commuting terms of its commutators.
 #
-# Under the default limits, such a run reaches the limit of 512 circuits before it ends, and `solve` refuses the circuit that would exceed it with a message that names the limit to raise. `limits=ExecutionLimits(max_total_circuits=..., max_total_shots=...)`, with `ExecutionLimits` from `nwqlib.execution`, must cover the larger totals.
+# On Aer such a run has no default circuit or shot limit. On a backend that may charge, whose defaults are 512 circuits and 1,000,000 shots, it reaches the limit of 512 circuits before it ends, and `solve` refuses the circuit that would exceed it with a message that names the limit to raise. `limits=ExecutionLimits(max_total_circuits=..., max_total_shots=...)`, with `ExecutionLimits` from `nwqlib.execution`, must then cover the larger totals.
 #
 # ### C. When the energy becomes exact, and another overlap cutoff
 #

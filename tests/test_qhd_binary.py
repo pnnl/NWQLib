@@ -172,8 +172,14 @@ def test_binary_circuit_equals_independent_product_at_three_bits(model):
     assert np.linalg.norm(operator - _oracle(problem, method), 2) <= _allowance(gates, 64)
 
 
-@pytest.mark.parametrize("reversal", ["relabel"])
-def test_binary_public_routes_match_the_oracle_state(reversal):
+def _one_qubit_problem():
+    # One variable on K = 2 points, whose whole register is one qubit and one H gate acts on the whole state.
+    x = sp.Symbol("x", real=True)
+    return Optimization(objective=x**2 / 3 + x / 7 + sp.Rational(1, 9), variables=(x,), bounds=((0.0, 1.7),))
+
+
+@pytest.mark.parametrize("build, k", [(_problem, 4), (_one_qubit_problem, 2)])
+def test_binary_public_routes_match_the_oracle_state(build, k):
     """Native amplitudes, native exact probabilities and the classical ir_product state follow the oracle.
 
     The oracle state is the oracle operator applied to the uniform state,
@@ -187,23 +193,24 @@ def test_binary_public_routes_match_the_oracle_state(reversal):
     the kernel's own first-order budget (``theory.binary_product_state_error``,
     below 1e-12 here).
     """
-    problem = _problem()
-    method = _method(4, kinetic_model="finite_difference", keep_state=True,
-                     binary_synthesis=BinarySynthesis(qft_bit_reversal=reversal))
-    expected = _oracle(problem, method) @ np.full(16, 0.25, dtype=complex)
+    problem = build()
+    variables, dimension = len(problem.variables), k ** len(problem.variables)
+    method = _method(k, kinetic_model="finite_difference", keep_state=True,
+                     binary_synthesis=BinarySynthesis(qft_bit_reversal="relabel"))
+    expected = _oracle(problem, method) @ np.full(dimension, dimension**-0.5, dtype=complex)
     native = solve(problem, method=method, seed=7)
-    state = native.data.artifact(native.artifact).array[_register_permutation(2, 4)]
+    state = native.data.artifact(native.artifact).array[_register_permutation(variables, k)]
     product = solve(problem, method=method.revise(theory_flavor="ir_product"), execution="classical", seed=7)
     probabilities = solve(problem, method=method.revise(keep_state=False), seed=7)
     _, gates = _evolution_operator(native.plan)
-    tolerance = _allowance(gates, 16)
+    tolerance = _allowance(gates, dimension)
     assert np.linalg.norm(state - expected) <= tolerance
     assert np.linalg.norm(product.data.artifact(product.artifact).array - expected) <= tolerance
-    grid_probabilities = (np.abs(expected) ** 2).reshape(4, 4)
+    grid_probabilities = (np.abs(expected) ** 2).reshape((k,) * variables)
+    marginals = [grid_probabilities.sum(axis=tuple(a for a in range(variables) if a != j)) for j in range(variables)]
     for result in (native, probabilities):
         assert result.invalid_mass == 0 and result.valid_mass == pytest.approx(1, abs=tolerance)
-        assert np.max(np.abs(np.array(result.marginals) - [grid_probabilities.sum(1), grid_probabilities.sum(0)])
-                      ) <= 2 * tolerance
+        assert np.max(np.abs(np.array(result.marginals) - marginals)) <= 2 * tolerance
     # The explicit IR comparison restricts the stored native state by the same
     # permutation, so the circuit agrees with the emitted product. Both states
     # lie within the tolerance of the oracle, so they differ by at most twice
@@ -294,7 +301,7 @@ def test_aqft_bound_covers_the_truncated_conjugation():
     fourier = np.exp(-2j * np.pi * np.outer(range(k), range(k)) / k) / np.sqrt(k)
     exact = fourier.conj().T @ np.diag(np.exp(-1j * total_time * energies)) @ fourier
     bounds = []
-    for cutoff in range(6):
+    for cutoff in np.arange(6):
         method = QHD(encoding="binary", boundary="periodic", num_grid_points=k,
                      num_steps=1, trotter_order=1, total_time=total_time, schedule=QuadraticSchedule(gamma=0.0),
                      binary_synthesis=BinarySynthesis(aqft_cutoff=cutoff))
@@ -433,3 +440,20 @@ def test_spectral_kinetic_refuses_an_overflowing_nyquist_energy(encoding, execut
     with pytest.raises(ValueError, match=r"Nyquist energy pi\*\*2/\(2 h\*\*2\), which is not a finite"):
         plan(Optimization(objective=x**2, variables=(x,), bounds=((0.0, 6e-154),)), method=method,
              execution=execution, seed=7)
+
+
+def test_binary_model_cache_is_capped_whatever_room_the_limit_leaves():
+    """A limit far above the model's baseline leaves its optional cache at CONSTRUCTION_CACHE_BYTES.
+
+    A cache hit returns the construction a miss would build, so the cache saves
+    repeated synthesis only, and a limit as large as the physical memory does
+    not grow it. A limit 100 bytes above the baseline leaves those 100 bytes.
+    """
+    from nwqlib.algorithms.qhd.binary import CONSTRUCTION_CACHE_BYTES, BinaryModel
+
+    selected = plan(_problem(), method=_method(4), execution="quantum", seed=7)
+    grid, tables = _grid(selected), selected.reconstruction.support_values
+    large = BinaryModel(grid, selected.method.revise(max_bytes=10**15), tables)
+    assert large._cache_capacity == CONSTRUCTION_CACHE_BYTES
+    tight = BinaryModel(grid, selected.method.revise(max_bytes=large._local_bytes + 100), tables)
+    assert tight._cache_capacity == 100

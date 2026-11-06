@@ -38,6 +38,12 @@ def test_factor_limits_refuse_before_work(monkeypatch):
         data.to_pauli(max_products=2)
     with pytest.raises(ValueError, match="max_bytes"):
         data.to_pauli(max_bytes=100)
-    monkeypatch.setattr(df, "_freeze_array", lambda *a: pytest.fail("snapshot before input admission"))
+    # Three one-entry arrays: the input check counts 10 bytes per entry, 30. A -0.0 in the last one
+    # needs its copy beside all three snapshots, 8 + 8 + 16 = 32, and then has the identity of +0.0.
+    positive = supplied(weight=0.0, max_bytes=30)
+    with pytest.raises(ValueError, match="negative zero normalization"):
+        supplied(weight=-0.0, max_bytes=30)
+    assert supplied(weight=-0.0, max_bytes=32).manifest == positive.manifest
+    monkeypatch.setattr(df, "_freeze_numbers", lambda *a: pytest.fail("snapshot before input admission"))
     with pytest.raises(ValueError, match="max_bytes"):
         supplied(max_bytes=1)

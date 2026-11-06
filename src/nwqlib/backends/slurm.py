@@ -412,6 +412,18 @@ class SlurmLauncher:
         if not isinstance(payload, bytes) or len(payload) > max_input_bytes:
             raise ValueError("prepared runner payload exceeds its input byte allowance")
 
+    def admit_data(self, payload, *, max_input_bytes, run):
+        """Check the file work and the scheduler reply of one submission against the Run's data limit.
+
+        One payload write plus one read per native rank, and one write of the
+        script, whose length the nil UUID gives. Scheduler internals are outside
+        this explicit file-work inventory.
+        """
+        script = self.profile.script(str(UUID(int=0)), max_input_bytes=max_input_bytes).encode()
+        ranks = self.profile.nodes * self.profile.ranks_per_node
+        run.check_data((1 + ranks) * len(payload) + len(script))
+        run.check_data(self.max_response_bytes)
+
     def launch(self, payload, *, submission_id, max_input_bytes, run):
         """Run ``admit``, then write the spool files once and call ``sbatch --parsable`` once.
 
@@ -421,16 +433,12 @@ class SlurmLauncher:
         before any scheduler call.
         """
         self.admit(payload, max_input_bytes=max_input_bytes)
+        self.admit_data(payload, max_input_bytes=max_input_bytes, run=run)
         return self._submit(payload, submission_id=submission_id, max_input_bytes=max_input_bytes, run=run)
 
     def _submit(self, payload, *, submission_id, max_input_bytes, run):
-        """Write the spool files and call sbatch once for a payload that ``admit`` accepted."""
+        """Write the spool files and call sbatch once for a payload that ``admit`` and ``admit_data`` accepted."""
         script = self.profile.script(submission_id, max_input_bytes=max_input_bytes).encode()
-        # One payload write plus one read per native rank. The script is written
-        # once. Scheduler internals are outside this explicit file-work inventory.
-        ranks = self.profile.nodes * self.profile.ranks_per_node
-        payload_bytes = (1 + ranks) * len(payload) + len(script)
-        run.check_data(payload_bytes)
         directory = Path(self.profile.spool) / submission_id
         # An unresolved accepted request keeps its directory. Never resubmit it.
         directory.mkdir(parents=True, exist_ok=False)
@@ -497,6 +505,13 @@ class SlurmLauncher:
         """Send one ``scancel`` for the original cluster and job. A later refresh reads the outcome."""
         self._directory(locator)
         self._command(["scancel", f"--clusters={locator.cluster}", locator.job_id], run)
+
+
+# Slurm job states (squeue/sacct, JOB STATE CODES). An active job can still produce
+# its output. These others end it without one, so a missing file will not appear
+# for them as it can for COMPLETED.
+_ACTIVE_STATES = frozenset({"PENDING", "RUNNING", "CONFIGURING", "COMPLETING"})
+_ENDED_WITHOUT_RESULT = frozenset({"BOOT_FAIL", "DEADLINE", "FAILED", "NODE_FAIL", "OUT_OF_MEMORY", "PREEMPTED", "TIMEOUT"})
 
 
 class NWQSimSlurmBackend(Record):
@@ -634,17 +649,24 @@ class NWQSimSlurmBackend(Record):
         native, = natives
         self._launcher().admit(native.payload, max_input_bytes=self.max_input_bytes)
 
-    def launch(self, natives, *, submission_id, run):
-        """Submit the request that ``admit_batch`` accepted and return its job locator.
+    def admit_submission(self, natives, *, run):
+        """Check the spool files, the scheduler reply and the runner's output against the Run's data limit.
 
-        After the intent is saved, only the Run's checks of its remaining data
-        allowance, the spool writes and the one sbatch call remain.
+        ``submit_detached`` calls this before it saves the submission intent, so
+        a refusal leaves no submission or exposure in the Run. The runner writes
+        its output once, within ``max_output_bytes``.
+        """
+        native, = natives
+        self._launcher().admit_data(native.payload, max_input_bytes=self.max_input_bytes, run=run)
+        run.check_data(self.max_output_bytes)
+
+    def launch(self, natives, *, submission_id, run):
+        """Submit the request that ``admit_batch`` and ``admit_submission`` accepted and return its job locator.
+
+        After the intent is saved, only the spool writes and the one sbatch call remain.
         """
         self._runner().admit_batch(natives)
         native, = natives
-        # The common owner has persisted the intent/exposure before this call.
-        # Native output is written once within this admitted combined byte cap.
-        run.check_data(self.max_output_bytes)
         return self._launcher()._submit(native.payload, submission_id=submission_id,
             max_input_bytes=self.max_input_bytes, run=run)
 
@@ -657,9 +679,14 @@ class NWQSimSlurmBackend(Record):
     def refresh(self, locator, natives, *, run):
         """Combine one scheduler query with the NWQ-Sim result decoder.
 
-        A missing result file keeps the job refreshable, pending while the
-        scheduler reports an active state and uncertain otherwise. An ambiguous
-        scheduler response stays uncertain. Otherwise a visible
+        A missing result file keeps the job refreshable. It is pending while the
+        scheduler reports an active state, and cancelled when the scheduler says
+        so. A state that ends a job without its output (``_ENDED_WITHOUT_RESULT``)
+        is uncertain and terminal without a result, so ``Run.wait`` stops. COMPLETED
+        stays uncertain without that mark, because the file can appear later on a
+        shared file system. An ambiguous scheduler response stays uncertain. These
+        rest on the documented states and offline scheduler responses, not on a live
+        site. Otherwise a visible
         packet is decoded by the NWQ-Sim adapter, and a nonzero Slurm exit code
         or signal is passed to it as a failure. A valid packet can be saved
         while accounting is still delayed.
@@ -675,9 +702,13 @@ class NWQSimSlurmBackend(Record):
         if status.result_path is None:
             # Even a terminal allocation can precede visibility of its native
             # packet. Leave it refreshable and do not invent an evolution count.
-            uncertain = status.failure is not None or status.state not in {"PENDING", "RUNNING", "CONFIGURING", "COMPLETING"}
-            return BackendRefresh("uncertain" if uncertain else "acknowledged",
-                provider_status=provider_status, failure=status.failure or "native terminal result unavailable")
+            if status.failure is None and status.state in _ACTIVE_STATES:
+                return BackendRefresh("acknowledged", provider_status=provider_status)
+            failure = status.failure or "native terminal result unavailable"
+            if status.state.startswith("CANCELLED"):
+                return BackendRefresh("cancelled", provider_status=provider_status, failure=failure)
+            return BackendRefresh("uncertain", provider_status=provider_status, failure=failure,
+                                  terminal_without_result=status.state in _ENDED_WITHOUT_RESULT)
         if status.state == "uncertain":
             return BackendRefresh("uncertain", provider_status=provider_status, failure=status.failure)
         run.check_data(self.max_output_bytes)

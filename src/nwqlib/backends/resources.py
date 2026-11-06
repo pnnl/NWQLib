@@ -1,26 +1,22 @@
-"""Standard gate classes, representative sampled blocks and CX-count formulas for dense unitaries and block encodings."""
+"""Standard gate classes and CX-count formulas for dense unitaries and block encodings."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from functools import cache
-from typing import TYPE_CHECKING, Any, Mapping
-
-if TYPE_CHECKING:
-    from qiskit import QuantumCircuit
-
-from nwqlib._validation import integer
+from typing import Any, Mapping
 
 
 @cache
 def _standard_gate_classes():
-    """Classes of Qiskit's standard gates, built once per process.
+    """Classes of Qiskit's standard gates by gate name, built once per process.
 
     Intake of supplied Qiskit circuits (``blocks._qiskit_intake``) starts its
-    set of library gate classes from this one.
+    set of library gate classes from these classes, and native depth
+    inspection (``inspection.inspect_native_depth``) reads a standard gate's
+    class from its name.
     """
     from qiskit.circuit.library import get_standard_gate_name_mapping
-    return frozenset(gate.base_class for gate in get_standard_gate_name_mapping().values())
+    return {name: gate.base_class for name, gate in get_standard_gate_name_mapping().items()}
 
 
 def dense_unitary_cx_qsd_upper_bound(total_qubits: int) -> int:
@@ -76,17 +72,20 @@ def block_encoding_per_query_cx(
 
     if implementation == "banded":
         counts = plan_detail.get("periodic_gate_counts", plan_detail)
-        # One shared QFT/inverse-QFT pair on n system qubits. Each transform has
-        # n(n-1)/2 controlled phases at two CX each and n//2 swaps at three CX
-        # each. The remaining terms are the multiplexor, diagonal and PREP
-        # censuses recorded by the banded construction.
+        # At most one shared QFT/inverse-QFT pair on n system qubits. Each
+        # transform has n(n-1)/2 controlled phases at two CX each and n//2
+        # swaps at three CX each. The remaining terms are the multiplexor,
+        # diagonal and PREP censuses recorded by the banded construction and,
+        # for a Hermitian specification, the multi-controlled X gates of its
+        # paired labels (block_encoding.banded._band_gate_counts).
         return (
-            2.0 * system_qubits * (system_qubits - 1)
-            + 6 * (system_qubits // 2)
+            int(counts["qft_pairs"])
+            * (2.0 * system_qubits * (system_qubits - 1) + 6 * (system_qubits // 2))
             + int(counts["ucrz_multiplexor_gates"])
             * int(counts["ucrz_basis_cx_per_gate"])
             + int(counts["control_diagonal_basis_cx"])
             + int(counts["prep_pair_cx"])
+            + int(counts["paired_label_cx"])
         )
     if implementation in ("pauli_lcu", "multiplexed_pauli"):
         return float(
@@ -98,22 +97,3 @@ def block_encoding_per_query_cx(
     if implementation == "dense_dilation":
         return dense_unitary_cx_qsd_upper_bound(system_qubits + 1)
     return None
-
-
-@dataclass(frozen=True, kw_only=True)
-class SampledBlock:
-    """One representative circuit block and its multiplicity in the represented work.
-
-    Args:
-        name: Human-readable block name.
-        circuit: Representative block circuit.
-        multiplicity: Nonnegative integer count of this block in the represented work.
-    """
-
-    name: str
-    circuit: QuantumCircuit
-    multiplicity: int
-
-    def __post_init__(self) -> None:
-        """Check that ``multiplicity`` is a nonnegative integer."""
-        object.__setattr__(self, "multiplicity", integer(self.multiplicity, "multiplicity", 0))

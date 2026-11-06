@@ -12,11 +12,18 @@ declared quantum and classical lifecycle.
 
 import math
 
+from nwqlib.core.records import STORABLE_INTEGER_BOUND, storable_integer
+
 from .expressions import Binary, Constant, ExprRef, ParameterRef, number, topological
 from .records import (
     AdaptiveLoop, Allocate, BlockCall, Branch, ClassicalStage, CoherentRegion,
-    Measure, MeasurementBatch, Parallel, Program, Readiness, Release, Repeat, Reset, Sequence,
+    Measure, MeasurementBatch, Parallel, Readiness, Release, Repeat, Reset, Sequence,
 )
+
+
+# Integers that a saved record cannot hold (core.records.storable_integer).
+UNSTORABLE_INTEGER = ("integer growth exceeds the integers a saved record can hold, "
+                      "above -10**4299 and below 10**4300")
 
 
 def unique(items, key, what):
@@ -39,124 +46,6 @@ def children(node):
     if isinstance(node, Branch):
         return (node.when_true, node.when_false)
     return ()
-
-
-class AdmissionStepsExceeded(ValueError):
-    """A Program's kept field slots (record fields and tuple entries) or admission work exceed ``AdmissionLimits.max_steps``.
-
-    A Method whose ``max_admission_steps`` field sets the limit catches this
-    type to name that field (``admission_refusal``,
-    ``admitted_program``). Raised inside Program construction, it reaches the
-    caller wrapped in Pydantic's ValidationError, whose ``errors()`` entry
-    keeps it as ``ctx["error"]``.
-
-    Attributes:
-        stage: ``"stored field inventory"`` or ``"admission work"``.
-        need: For the stored field inventory, the complete count of kept
-            field slots. A ``max_steps`` of at least this value passes the
-            inventory, and later admission, preparation and circuit
-            construction can still need more. For admission work, the count
-            when the check stopped. Work is counted before the item it pays
-            for, so the complete count is at least this value, and this
-            value is not guaranteed to pass.
-        ceiling: The ``max_steps`` that was exceeded.
-        complete: Whether ``need`` is the complete count of its stage
-            (true for the stored field inventory only).
-    """
-
-    def __init__(self, stage, need, ceiling):
-        self.stage, self.need, self.ceiling = stage, need, ceiling
-        self.complete = stage == "stored field inventory"
-        if self.complete:
-            super().__init__(f"{stage} exceeds max_steps={ceiling}: {need} counted, the complete inventory")
-        else:
-            super().__init__(f"{stage} exceeds max_steps={ceiling}: at least {need} counted when the check stopped")
-
-
-class AdmissionDefinitionsExceeded(ValueError):
-    """A Program keeps more definitions and declarations than ``AdmissionLimits.max_definitions``.
-
-    The count is the complete number of kept definitions, expressions,
-    parameters, registers, classical values and signatures, taken before any
-    table is built. No Method option sets this shared limit.
-
-    Attributes:
-        need: The complete count.
-        ceiling: The ``max_definitions`` that was exceeded.
-    """
-
-    def __init__(self, need, ceiling):
-        super().__init__(f"kept definitions exceed max_definitions={ceiling}: {need} counted")
-        self.need, self.ceiling = need, ceiling
-
-
-def limit_exceeded(error, kinds=(AdmissionStepsExceeded, AdmissionDefinitionsExceeded)):
-    """Return the exceeded-limit error of the given ``kinds`` that a Program construction error carries, or None.
-
-    Pydantic wraps an error raised in the Program validator and keeps the
-    original as ``ctx["error"]`` of its ``errors()`` entry.
-    """
-    if isinstance(error, kinds):
-        return error
-    from pydantic import ValidationError
-    if isinstance(error, ValidationError):
-        for item in error.errors():
-            found = item.get("ctx", {}).get("error")
-            if isinstance(found, kinds):
-                return found
-    return None
-
-
-def admission_refusal(option, exceeded, *, subject="the Program"):
-    """Write the error message of an exceeded limit, naming that limit.
-
-    For ``AdmissionStepsExceeded``, ``option`` is the public spelling of the
-    Method field that sets ``max_steps``, such as
-    ``"FixedGCIM.max_admission_steps"``. The message names the stage, its
-    counted need and the limit. For the stored field inventory the
-    need is the complete count, and that value passes the inventory. For
-    admission work it is the lower bound reached when the check stopped.
-    Neither value is guaranteed to pass, because later admission,
-    preparation and circuit construction can need more. For
-    ``AdmissionDefinitionsExceeded`` the message names the shared
-    ``AdmissionLimits.max_definitions``, the complete count and the limit.
-    """
-    if isinstance(exceeded, AdmissionDefinitionsExceeded):
-        return ValueError(
-            f"{subject} keeps {exceeded.need} definitions, expressions, parameters, registers, classical "
-            f"values and signatures, exceeding AdmissionLimits.max_definitions={exceeded.ceiling}. This "
-            "shared IR limit has no Method option; select a smaller construction")
-    if exceeded.complete:
-        return ValueError(
-            f"{subject} exceeds {option}={exceeded.ceiling}: its {exceeded.stage} counts {exceeded.need} kept "
-            f"field slots, the complete inventory. Raise {option} to at least {exceeded.need} to pass this "
-            "inventory; later admission, preparation and lowering can need more. This changes the "
-            "metadata-work allowance, not the selected quantum operations")
-    return ValueError(
-        f"{subject} exceeds {option}={exceeded.ceiling}: its {exceeded.stage} counted at least "
-        f"{exceeded.need} units when the check stopped. Raise {option} to at least {exceeded.need}; "
-        "the complete count was not measured, and later admission stages can need more. This changes the metadata-work allowance, "
-        "not the selected quantum operations")
-
-
-def admitted_program(option, max_steps, **fields):
-    """Construct a Program with ``AdmissionLimits(max_steps=max_steps)`` or raise an error naming ``option``.
-
-    A Method whose field ``max_admission_steps`` sets its Programs' limit
-    builds them here, so an oversized Program is refused as a ValueError
-    naming that field (``admission_refusal``), and a Program above the
-    shared ``max_definitions`` is refused naming that limit, not as a
-    Pydantic validation error.
-    """
-    from pydantic import ValidationError
-    from .expressions import AdmissionLimits
-    try:
-        return Program(**fields, limits=AdmissionLimits(max_steps=max_steps))
-    except ValidationError as error:
-        exceeded = limit_exceeded(error)
-        if exceeded is None:
-            raise
-        raise admission_refusal(option, exceeded) from error
 
 
 def check_program(program):
@@ -198,20 +87,17 @@ class _Admission:
     value binds it.
 
     Work is counted by ``tick`` before the collection or context it pays for
-    is built, against ``AdmissionLimits.max_steps`` (ENGINEERING_CONSTANTS.md,
-    "Shared Program admission limits"). Visits are cached per distinct
+    is built, and Readiness reports the count. Visits are cached per distinct
     (node, register states, available classical values, binding, protected
     registers) context, so cost follows the kept graph and its distinct
     contexts, never Repeat counts or setting multiplicity. The resource fold
-    reuses one instance and raises ``step_limit`` in proportion to the work
-    measured here.
+    reuses one instance and continues its count.
 
     Attributes:
         p: The Program under admission.
         limits: Its AdmissionLimits.
         steps: Admission work counted so far, including expression evaluations.
         evaluations: Expression evaluations, reported separately in Readiness.
-        step_limit: Work limit, ``limits.max_steps`` unless the code using this instance raises it.
         blockers: Unresolved requirements collected so far.
         nodes: Definition ID to node.
         expr: Expression ID to expression value.
@@ -231,33 +117,16 @@ class _Admission:
     """
 
     def __init__(self, program):
-        """Index the Program's tables, rejecting an oversized or ambiguous Program first.
+        """Index the Program's tables, rejecting a duplicate name in any table first.
 
-        The field walk counts every kept record and tuple field of the Program
-        and rejects it when the complete count exceeds ``max_steps``, before any
-        table is built. Duplicate names in any table are rejected. Definitions, expressions,
-        parameters, registers, classical values and signatures together must
-        not exceed ``max_definitions``. Nothing here depends on bindings.
-        ``setup`` and ``check`` do the structural and lifecycle work.
+        Nothing here depends on bindings. ``setup`` and ``check`` do the
+        structural and lifecycle work.
         """
         self.p = program
         self.limits = program.limits
         self.steps = 0
         self.evaluations = 0
         self.blockers = set()
-        # Count all kept record/tuple slots, including edges, settings and ports.
-        # This does not expand references or serialize nested identities. An
-        # inventory above max_steps is counted to its end, so the refusal
-        # reports the complete count. No table is built for it.
-        stored_slots = 0
-        def reserve(amount):
-            nonlocal stored_slots
-            stored_slots += amount
-        from .expressions import walk_kept
-        for _ in walk_kept(program, reserve):
-            pass
-        if stored_slots > self.limits.max_steps:
-            raise AdmissionStepsExceeded("stored field inventory", stored_slots, self.limits.max_steps)
         self.definitions = unique(program.definitions, "id", "definition")
         self.expression_definitions = unique(program.expressions, "id", "expression")
         self.nodes = {key: value.node for key, value in self.definitions.items()}
@@ -266,30 +135,18 @@ class _Admission:
         self.registers = unique(program.registers, "name", "register")
         self.classical = unique(program.classical, "name", "classical value")
         self.signatures = unique(program.signatures, "name", "signature")
-        inventory = (program.definitions, program.expressions, program.parameters,
-                     program.registers, program.classical, program.signatures)
-        if sum(map(len, inventory)) > self.limits.max_definitions:
-            raise AdmissionDefinitionsExceeded(sum(map(len, inventory)), self.limits.max_definitions)
         self.contexts = {}
         self.memo = {}
         self.groups = {}
-        # Program admission work is bounded by max_steps. A consumer that repeats
-        # the admitted traversal with more work per step, such as the resource
-        # fold, sets its own limit from the work this check measured.
-        self.step_limit = self.limits.max_steps
 
     def tick(self, amount=1):
-        """Count work before doing it, so an oversized Program is rejected before the work is done."""
+        """Count work before doing it."""
         self.steps += amount
-        if self.steps > self.step_limit:
-            if self.step_limit == self.limits.max_steps:
-                raise AdmissionStepsExceeded("admission work", self.steps, self.step_limit)
-            raise ValueError("resource fold work exceeds its limit proportional to Program admission work")
 
     def bounded(self, value):
-        """Accept an exact integer within max_integer_bits or a finite real."""
-        if type(value) is int and value.bit_length() > self.limits.max_integer_bits:
-            raise ValueError("integer growth exceeds max_integer_bits")
+        """Accept an exact integer that a saved record can hold or a finite real."""
+        if type(value) is int and not storable_integer(value):
+            raise ValueError(UNSTORABLE_INTEGER)
         if type(value) is float and not math.isfinite(value):
             raise ValueError("expression result is nonfinite")
         return value
@@ -347,7 +204,8 @@ class _Admission:
         a dangling reference cannot hide behind an unreached branch. It orders
         the node and expression DAGs within the depth limit, types every
         expression, and checks signatures, port order and aliasing, Parallel
-        disjointness, range-axis endpoints and setting bindings. It also
+        disjointness, range-axis endpoints, and setting and Program bindings
+        that would fix an axis parameter. It also
         records which nodes contain a MeasurementBatch, which fixes the
         terminal/outer distinction for observation kinds. Nothing here depends
         on parameter values, so a Plan runs it once and reuses the index for
@@ -406,6 +264,8 @@ class _Admission:
             unique(signature.parameters, "name", "formal parameter")
             for port in signature.quantum:
                 self.integer_ref(port.width)
+        # A range axis takes every value of its grid, so the Program cannot also fix it.
+        bound = {item.parameter for item in self.p.bindings}
         # Check all references, including unused definitions. Lifecycle is contextual.
         for node in self.nodes.values():
             if isinstance(node, Parallel):
@@ -477,6 +337,8 @@ class _Admission:
                 for name, axis in axes.items():
                     if name not in self.params or self.params[name].domain != "integer":
                         raise ValueError("range axis requires an integer parameter")
+                    if name in bound:
+                        raise ValueError("Program bindings conflict with range axes")
                     for endpoint in (axis.start, axis.stop - 1, axis.step):
                         self.bounded(endpoint)
                     self.params[name].admit(axis.start)
@@ -493,9 +355,9 @@ class _Admission:
         A missing parameter evaluates to None, meaning unknown, and never to
         zero or false. A false constraint is rejected, while an unknown constraint
         or width becomes a blocker. An integer multiplication is rejected before
-        the product is formed when the operand bit lengths prove that it exceeds
-        ``max_integer_bits``. A product only one bit over the limit can be
-        formed and is then rejected by ``bounded``.
+        the product is formed when the operand bit lengths prove that a saved
+        record cannot hold it. A product that the bit lengths do not decide is
+        formed and then checked by ``bounded``.
         Results are cached per binding, which keeps width scans at one per
         distinct context however many settings share it.
         """
@@ -523,12 +385,13 @@ class _Admission:
                 elif item.op == "multiply":
                     # Bound before multiplication allocates its potentially huge integer.
                     # For nonzero integers bit_length(a*b) >= bit_length(a) +
-                    # bit_length(b) - 1, so this rejects every product that must
-                    # exceed the limit. A product one bit over is formed and
-                    # rejected by bounded() below.
+                    # bit_length(b) - 1, so when that sum exceeds the bit length of
+                    # STORABLE_INTEGER_BOUND the product cannot be stored and is
+                    # rejected unformed. Any other product is formed and checked
+                    # by bounded() below.
                     if (type(left) is int and left and right
-                            and left.bit_length() + right.bit_length() - 1 > self.limits.max_integer_bits):
-                        raise ValueError("integer growth exceeds max_integer_bits")
+                            and left.bit_length() + right.bit_length() - 1 > STORABLE_INTEGER_BOUND.bit_length()):
+                        raise ValueError(UNSTORABLE_INTEGER)
                     value = left * right
                 elif item.op == "ceildiv":
                     # ceil(a/b) = -floor(-a/b) for b > 0, exact on Python integers.

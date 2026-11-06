@@ -13,19 +13,19 @@ paper's states ``exp(Gamma(Z_p))|Phi>`` at discretized generator coordinates
 ``Z_p`` (Eq. (10), discretized in Eq. (17)).
 """
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from nwqlib._limits import ResourceLimitError, exceeds, memory_limit
 
-from math import fsum, isfinite
+from math import fsum, isfinite, sqrt
 from typing import Annotated, ClassVar, Literal
 import numpy as np
 from pydantic import Field, StrictBool, model_validator
 from nwqlib.algorithms.protocol import Method, AlgorithmDescriptor, ApplicabilityError
 from nwqlib.algorithms._eigen_inputs import (
+    _mean_diagonal,
     eigen_operator,
     eigen_state,
     state_direction,
     preparation_requirements,
-    DEFAULT_CONVERSION_WORK,
 )
 from nwqlib.algorithms._eigen_support import matched_chunks, host_construction
 from nwqlib._projected_eigensolver import (
@@ -73,12 +73,12 @@ from nwqlib.ir import (
     Parameter,
     ParameterRef,
     PortMap,
+    Program,
     Register,
     Release,
     Sequence,
     Setting,
 )
-from nwqlib.ir.validation import admitted_program
 from .pencil import (
     _projected_solve_bytes,
     _projected_solve_work,
@@ -336,7 +336,13 @@ class PencilSampling(Record):
     2, spend `B - B_p` exactly and need not be the integer minimum of the
     local variance. The local variance is no confidence bound. It
     leaves out the noise of the pilot estimates, a change of kept rank at
-    the cutoff, near-degenerate Ritz values and device bias.
+    the cutoff, near-degenerate Ritz values and device bias. It can also
+    understate the error when the kept rank does not change, because a
+    setting with few shots can form an entry of S and the lowest Ritz value
+    depends nonlinearly on S. At the same total shots the allocation can
+    lower the median error and raise the large errors, as the
+    [GCiM guide](../../algorithms/gcim.md#pilot-and-main-shot-allocation)
+    measures.
     When the pilot solve fails, a pilot Ritz value or coefficient is not
     finite, the two lowest offset-free Ritz values of the pilot solve
     (`ProjectedPencil.offset_free_eigenvalues`) are equal, a v_s is unusable
@@ -358,12 +364,13 @@ class PencilSampling(Record):
     either stage because the main shots are not known at planning, so it
     can refuse a budget whose actual allocation would fit. A refusal names
     the limit to raise or the parameters to reduce. `ADAPT` knows its final
-    basis only after its growth, so its planning makes both checks before
-    the first query on the largest basis the Plan can reach. With m* grouped
-    settings in that basis, `total_shots` must be at least 4m*, and the
-    grouped analysis of one stage of `total_shots` shots on it is checked
-    against `max_bytes` and `max_products`. The split and the allocation of
-    an ADAPT run use the m settings of the basis it ends with, and m <= m*.
+    basis only after its growth. Its planning requires `total_shots` of at
+    least 4m* for the m* grouped settings of the largest basis the Plan can
+    reach, because the budget cannot change once growth has paid for its
+    shots. The grouped analysis of one stage is checked against `max_bytes`
+    and `max_products` on the basis that growth ends with, before the first
+    pilot shot. The split and the allocation of an ADAPT run use the m
+    settings of that basis, and m <= m*.
     For `FixedGCIM` and `QFD`, because the main stage chooses its shots from
     the pilot, `prepare(plan, settings="all")` is rejected, and
     `prepare(plan)` prepares the next setting.
@@ -602,7 +609,7 @@ def resolve_acquisition(requested, *, execution, shots, acquires, real_reason, s
     ``ApplicabilityError``, before any count or construction depends on the
     rule. The default reason refuses, because a FixedGCIM state and the QFD
     step have no such chain. Their pair rules (``fixed_pair_preparations``,
-    ``qfd.construction.macro_uses``) read every value other than
+    ``qfd.construction.pair_preparations``) read every value other than
     ``"prefix"`` as controlled pairs, so without this refusal they would
     plan controlled pairs under a vacuum label. ADAPT passes its structural
     eligibility of the admitted pool (``adapt._admit_generator_routes``).
@@ -787,31 +794,48 @@ class FixedGCIMReconstruction(Record):
 
     @model_validator(mode="after")
     def _sampled_partition(self):
-        """Require recorded groups to partition the nonidentity rows into qubit-wise-commuting bases."""
+        """Require recorded groups to partition the nonidentity rows into qubit-wise-commuting bases.
+
+        Each group's rows form a byte matrix of their letters, ``I`` below
+        ``X``, ``Y`` and ``Z`` in ASCII, so a column is qubit-wise commuting
+        when its entries are ``I`` or its largest letter, and that largest
+        letter of every column is the group's basis.
+        """
         if not self.groups:
             return self
         rows = self.nonidentity_terms
         indices = [i for group in self.groups for i in group.indices]
         if sorted(indices) != list(range(len(rows))):
             raise ValueError("GCIM groups must partition the nonidentity rows exactly once")
+        letters = _letter_matrix(rows, self.num_qubits)
         for group in self.groups:
             if not group.indices or len(group.basis) != self.num_qubits:
                 raise ValueError("GCIM group has an empty membership or wrong basis width")
-            basis = ["I"] * self.num_qubits
-            for i in group.indices:
-                for bit, letter in enumerate(rows[i][0]):
-                    if letter != "I":
-                        if basis[bit] not in ("I", letter):
-                            raise ValueError("GCIM group is not qubit-wise commuting")
-                        basis[bit] = letter
-            if group.basis != "".join(basis):
+            members = letters[list(group.indices)]
+            basis = members.max(axis=0)
+            if not ((members == ord("I")) | (members == basis)).all():
+                raise ValueError("GCIM group is not qubit-wise commuting")
+            if group.basis != basis.tobytes().decode("ascii"):
                 raise ValueError("GCIM group basis differs from its Pauli rows")
         return self
 
     def _identity_row(self):
-        """Return the index of the all-identity row, or None."""
-        rows = np.flatnonzero(~self.terms.labels.array.any(axis=1))
-        return int(rows[0]) if rows.size else None
+        """Return the index of the all-identity row, or None.
+
+        The rows of ``terms`` are distinct and in increasing order with I
+        coded 0, so only the first row can be the identity.
+        """
+        labels = self.terms.labels.array
+        return 0 if len(labels) and not labels[0].any() else None
+
+    def _nonidentity_count(self):
+        """Return the number of nonidentity rows without forming them."""
+        return len(self.terms.labels.array) - (self._identity_row() is not None)
+
+    def _nonidentity_coefficient_array(self):
+        """Return the nonidentity coefficients in stored order as a view of the float64 coefficient array."""
+        coefficients = self.terms.coefficients.array
+        return coefficients if self._identity_row() is None else coefficients[1:]
 
     def settings(self):
         """Return the planned sampled settings ``(name, i, j, quadrature, group)`` of the complete pencil."""
@@ -826,15 +850,13 @@ class FixedGCIMReconstruction(Record):
     @property
     def nonidentity_terms(self):
         """The nonidentity rows as ``((label, coefficient), ...)`` in stored order."""
-        row = self._identity_row()
-        return tuple(item for index, item in enumerate(self.terms.rows()) if index != row)
+        rows = self.terms.rows()
+        return rows if self._identity_row() is None else rows[1:]
 
     @property
     def nonidentity_coefficients(self):
         """The nonidentity coefficients in stored order, without forming labels."""
-        row = self._identity_row()
-        coefficients = self.terms.coefficients.array
-        return tuple(float(c) for index, c in enumerate(coefficients.tolist()) if index != row)
+        return tuple(self._nonidentity_coefficient_array().tolist())
 
 
 class ScalarEstimate(Record):
@@ -979,6 +1001,110 @@ class SampledPairVariance(Record):
     covariance: tuple[Real | None, Real | None]
     physical_h: tuple[Real | None, Real | None]
     variance_negative: StrictBool
+
+
+class OverlapNoiseEstimate(Record):
+    """Empirical size of the sampling noise in the overlap matrix S of a sampled pencil.
+
+    `FixedGCIMResult.overlap_noise`, `QFDResult.overlap_noise` and
+    `ADAPTResult.overlap_noise` compute it from the saved `group_moments` and
+    `sampled_pair_variances`, with no new measurement, and `overlap_cutoff`
+    changes neither it nor anything it reads. Compare it with
+    `ProjectedPencil.overlap_eigenvalues`: an overlap direction whose eigenvalue
+    lies below it may be dominated by noise. The default cutoff does not use it,
+    and it changes no energy, kept rank, stopping decision or assessment. Cutting
+    at this value is a tradeoff and not a repair, because discarding a real
+    direction adds bias.
+
+    `frobenius_rms` is ``sqrt(2 sum_(i<j) sum_q V_S(i,j,q))`` over the measured
+    quadratures q of each off-diagonal entry. For N shots of one setting with
+    ancilla mean m, ``V = (1 - m**2)/(N - 1)`` is the unbiased estimate of the
+    variance of that sample mean, and independent repeats of a setting pool as
+    ``sum_a w_a**2 V_a`` with ``w_a = N_a/sum_b N_b``
+    (`SampledPairVariance.overlap`). The diagonal of S is algebraic one, and
+    each entry above it also fills its conjugate entry below, which gives the
+    factor 2 in ``E||S_est - S||_F**2 = 2 sum_(i<j) (Var Re S_ij + Var Im S_ij)
+    + ||Bias||_F**2``. That identity has no cross terms between entries, so it
+    needs no independence between pairs. The square root of an estimated variance
+    is not an unbiased RMS. The value is also not a bound on the perturbation of
+    this realization, a confidence interval for the energy or an accuracy
+    statement.
+
+    The fields below are read-only.
+
+    Attributes:
+        status: `"available"` when `frobenius_rms` is computed. `"algebraic"` for a
+            one-dimensional pencil, whose overlap has no measured entry, with value
+            0. `"unavailable"` when a measured entry has no variance estimate or
+            the data are incomplete, with `reason`. A missing value is never
+            replaced by 0. The variances that exist stay in the Result: each
+            measurement's in `group_moments[*].overlap_variance`, and, once
+            every planned setting has data, the pooled ones in
+            `sampled_pair_variances`. A measurement's variance is not a pooled
+            entry, and repeats of a setting pool with the weights above rather
+            than by a plain sum. `"not_applicable"` when no overlap was sampled,
+            as for exact readout or classical execution.
+        frobenius_rms: The value above in the overlap's dimensionless units, 0 for
+            `"algebraic"`, otherwise None unless `"available"`.
+        reason: Why the value is unavailable or not applicable, otherwise None.
+        population: Which measurements the variances describe, or None without
+            sampled data. `"fixed_design"`: measurements of a basis fixed in
+            advance, where the variance estimate is unbiased for independent shots.
+            `"main_after_pilot"`: main-stage measurements of `PencilSampling`,
+            without the pilot, and for `ADAPT` conditional on the basis that other
+            measurements selected. `"adaptive_reuse"`: `ADAPT` measurements that
+            also selected the basis or stopped its growth, so selection bias is
+            possible and the fixed-basis reading does not apply.
+        measured_quadratures: Off-diagonal quadratures that were measured, decided
+            by the settings rather than by the mean, so a measured mean of exactly
+            0 counts.
+        structural_zero_quadratures: Imaginary quadratures of measured pairs that a
+            real-only Plan does not measure and that contribute nothing. It is 0
+            on a Plan that measures both parts, where an imaginary setting with
+            no data yet is pending rather than structural.
+        observed_zero_quadratures: Measured quadratures whose estimated variance is
+            0, for example every shot giving m = +1 or -1, also before the pencil
+            is complete. A quadrature with no variance estimate does not count.
+            This does not show that the true variance is 0, so a small value at
+            few shots can understate the noise.
+        minimum_shots: Fewest pooled shots of a measured quadrature, or None.
+        maximum_shots: Most pooled shots of a measured quadrature, or None.
+    """
+
+    status: Literal["available", "algebraic", "unavailable", "not_applicable"]
+    frobenius_rms: Nonnegative | None = None
+    reason: Text | None = None
+    population: Literal["fixed_design", "main_after_pilot", "adaptive_reuse"] | None = None
+    measured_quadratures: Count = 0
+    structural_zero_quadratures: Count = 0
+    observed_zero_quadratures: Count = 0
+    minimum_shots: Count | None = None
+    maximum_shots: Count | None = None
+
+    def _summary(self):
+        """Return the lines of a Result's text that state this estimate and what it supports."""
+        if self.status == "not_applicable":
+            return []
+        if self.status == "algebraic":
+            return ["Overlap sampling noise: 0, because a one-dimensional pencil has an algebraic overlap."]
+        if self.status == "unavailable":
+            return [f"Overlap sampling noise: unavailable ({self.reason}). The variance of each measurement, where it "
+                    "has one, is in group_moments[*].overlap_variance, and complete pooled entries, when present, are "
+                    "in sampled_pair_variances."]
+        return [f"Overlap sampling noise (empirical RMS, Frobenius norm): {self.frobenius_rms:.6g}, over "
+                f"{self.measured_quadratures} measured quadratures with {self.minimum_shots} to "
+                f"{self.maximum_shots} shots, {self.observed_zero_quadratures} of them with an observed variance of "
+                f"0. {_NOISE_POPULATION_TEXT[self.population]} Compare it with overlap_eigenvalues. It is a "
+                "diagnostic, not a perturbation bound or an accuracy statement."]
+
+
+_NOISE_POPULATION_TEXT = {
+    "fixed_design": "Its variances describe measurements of a basis fixed in advance.",
+    "main_after_pilot": ("Its variances describe the main-stage measurements without the pilot, and for ADAPT are "
+                         "conditional on the basis that other measurements selected."),
+    "adaptive_reuse": ("Its variances describe the same ADAPT measurements that selected the basis, so selection "
+                       "bias is possible."),
+}
 
 
 class PairEstimate(Record):
@@ -1316,7 +1442,7 @@ def processed_pauli_enclosure(reconstruction):
     """
     try:
         with np.errstate(over="ignore"):
-            radius = fsum(float(np.nextafter(abs(c), np.inf)) for c in reconstruction.nonidentity_coefficients)
+            radius = fsum(np.nextafter(np.abs(reconstruction._nonidentity_coefficient_array()), np.inf))
             if radius:
                 radius = float(np.nextafter(radius, np.inf))
             center = reconstruction.identity_shift
@@ -1367,29 +1493,6 @@ def _exact_overlap_allowance(basis_size, pair_bounds):
             return None
         errors[left, right] = errors[right, left] = bound
     return entrywise_gram_allowance(errors)
-
-
-def _mean_diagonal(operator, *, max_bytes):
-    """Return ``c = trace(A)/d``, the identity component a classical projection removes from A.
-
-    For Pauli input this is the identity coefficient, exactly the identity
-    component of the Pauli expansion. For dense and CSR/CSC input it is the
-    mean of the stored diagonal, formed as for eigen_operator's mean-trace
-    padding. Other representations give zero and keep their action. Any c
-    gives the same Ritz values in exact arithmetic, since the solve adds it
-    back. The mean diagonal is the mean eigenvalue, so it lies in
-    [lambda_min, lambda_max] and ``||A - cI||_2 <= lambda_max - lambda_min``,
-    a bound that an identity offset of A does not change.
-    """
-    representation = operator.reference.representation
-    d = operator.basis.dimension
-    if representation == "pauli":
-        identity = "I" * (d.bit_length() - 1)
-        return fsum(c.real for label, c in operator.pauli_terms().labels(max_bytes=max_bytes)
-                    if label == identity)
-    if representation in ("dense", "csr", "csc"):
-        return fsum(operator._data.diagonal().real / d)
-    return 0.0
 
 
 def _offset_free_requirements(operator, count, shift):
@@ -1826,8 +1929,8 @@ def _check_projected_solve_work(b, cap, what, owner="FixedGCIM"):
     analysis against the same field.
     """
     work = _projected_solve_work(b)
-    if work > cap:
-        raise ValueError(
+    if exceeds(work, cap):
+        raise ResourceLimitError(
             f"{what} needs {work} work units for basis size {b}, exceeding max_analysis_work={cap}. "
             f"Raise {owner}.max_analysis_work to at least {work} or reduce the basis size."
         )
@@ -1843,28 +1946,30 @@ def _pencil_admission(method, q, b, terms, nonidentity, shots, quadratures, labe
     pair route and ``quadratures`` the resolved quadratures. ``groups`` is
     the recorded QWC partition of a sampled Plan, empty otherwise, and
     ``e`` the number of settings: exact pair reductions or grouped
-    measurements. ``label`` starts the messages of the population, byte and
-    planned-analysis checks.
+    measurements. ``label`` starts the messages of the byte and planned-analysis
+    checks.
 
     The projected solve and the one-group analysis floor are known
     requirements before the actual grouping and setting construction.
     Planning charges the grouped-pass law one chunk of m = min(s, 2**(n+1))
     bins for each of the K settings of every group on the P = b(b+1)/2
     pairs (copies=K). The planned work of G groups exceeds that of one
-    group by K(G - 1)[m(c + 44) + 23], so for L > 0 and 1 <= G <= L one
+    group by K(G - 1)m(c + 44), so for L > 0 and 1 <= G <= L one
     group of all L terms bounds it from below before grouping. Only that
     work is used, and the single group need not be a valid partition.
-    Grouping, the projected solve and the grouped analysis are checked one
-    after another against max_analysis_work, so the limit they need is the
-    largest of their works, not their sum.
+    The projected solve and the grouped analysis are checked one after
+    another against max_analysis_work, so the limit they need is the larger
+    of their works, not their sum. The QWC grouping counts Pauli-word
+    comparisons, a different unit, and is checked only for its arrays
+    against max_bytes (``sampled_groups``).
 
     Under ``sampling``, the Method's ``PencilSampling``, ``shots`` is the
     two-shot marker of a counts Plan and no stage's tables are known, so
     neither check reads it as a setting's shots. The floor charges each of
     the K settings two bins, the stage minimum, and stays a work floor: for
     every grouping that the budget admits, the stage bound below exceeds it
-    by ``(U - 2K)(c + 44) + (4w + 4)(U L_max - 2KL) + 23K(G - 1)``, with no
-    oriented view. The m = e settings are split by ``pilot_split``, which
+    by ``(U - 2K)(c + 44) + (4w + 4)(U L_max - 2KL)``, with no oriented
+    view. The m = e settings are split by ``pilot_split``, which
     refuses a budget below 4m, and the planned check charges both stages
     with the stage-budget form of ``grouped_pass_requirements`` at
     ``S = max(B_p, B_main)``, since that bound grows with S.
@@ -1872,13 +1977,12 @@ def _pencil_admission(method, q, b, terms, nonidentity, shots, quadratures, labe
     owner = type(method).__name__
     solve_need = _projected_solve_work(b)
     if shots and nonidentity:
-        per_group, pairs = sampled_setting_count(b, 1, quadratures), b * (b + 1) // 2
+        per_group = sampled_setting_count(b, 1, quadratures)
         bins = 2 if sampling else min(shots, 1 << (q + 1))
         _, analysis_floor = grouped_pass_requirements(
-            q, ((nonidentity, bins),), nonidentity, b, settings=per_group, pairs=pairs, oriented=False,
-            copies=per_group)
-        if max(solve_need, analysis_floor) > method.max_analysis_work:
-            raise ValueError(
+            q, ((nonidentity, bins),), nonidentity, b, oriented=False, copies=per_group)
+        if exceeds(max(solve_need, analysis_floor), method.max_analysis_work):
+            raise ResourceLimitError(
                 f"{owner} known analysis requirements need at least "
                 f"{max(solve_need, analysis_floor)} work units, exceeding "
                 f"max_analysis_work={method.max_analysis_work}. "
@@ -1889,11 +1993,6 @@ def _pencil_admission(method, q, b, terms, nonidentity, shots, quadratures, labe
     groups = sampled_groups(terms, q, method) if shots and nonidentity else ()
     e = ((sampled_setting_count(b, len(groups), quadratures) if shots else pair_count(b, nonidentity))
          if nonidentity else 0)
-    if e > method.max_experiments:
-        raise ValueError(
-            f"{label} acquisition population {e} exceeds max_experiments={method.max_experiments} "
-            "before expansion"
-        )
     if sampling:
         stage = max(pilot_split(sampling.total_shots, sampling.pilot_fraction, e))
     # Bytes: the projected-solve allowance of the b-by-b pencil plus an
@@ -1913,12 +2012,12 @@ def _pencil_admission(method, q, b, terms, nonidentity, shots, quadratures, labe
         # of `stage` shots can store, and C = K G = M (grouped_pass_requirements).
         analysis_bytes, analysis_work = grouped_pass_requirements(
             q, [(len(group.indices), min(stage, 1 << (q + 1))) for group in groups], nonidentity, b,
-            settings=per_group * len(groups), pairs=pairs, oriented=False, copies=per_group, shot_total=stage)
-        for field, need, limit in (("max_bytes", analysis_bytes, method.max_bytes),
+            oriented=False, copies=per_group, shot_total=stage)
+        for field, need, limit in (("max_bytes", analysis_bytes, memory_limit(method.max_bytes)),
                                    ("max_analysis_work", max(solve_need, analysis_work), method.max_analysis_work)):
-            if need > limit:
+            if exceeds(need, limit):
                 unit = "data bytes" if field == "max_bytes" else "work units"
-                raise ValueError(
+                raise ResourceLimitError(
                     f"{label} planned grouped analysis of one PencilSampling stage of at most {stage} shots needs "
                     f"at most {need} {unit}, exceeding {field}={limit}. This conservative planning bound over "
                     "the stage budget can refuse an allocation that would fit. Before any shot, raise "
@@ -1933,11 +2032,11 @@ def _pencil_admission(method, q, b, terms, nonidentity, shots, quadratures, labe
         # every later pass.
         analysis_bytes, analysis_work = grouped_pass_requirements(
             q, [(len(group.indices), bins) for group in groups], sum(len(group.indices) for group in groups),
-            b, settings=per_group * len(groups), pairs=pairs, oriented=False, copies=per_group)
+            b, oriented=False, copies=per_group)
         _check_bytes(analysis_bytes, method.max_bytes, f"{label} planned grouped analysis")
         known = max(solve_need, analysis_work)
-        if known > method.max_analysis_work:
-            raise ValueError(
+        if exceeds(known, method.max_analysis_work):
+            raise ResourceLimitError(
                 f"{label} planned grouped analysis needs at most {known} work units "
                 f"for one acquisition per setting, the known complete analysis "
                 f"requirement, exceeding max_analysis_work={method.max_analysis_work}. "
@@ -1951,30 +2050,28 @@ def sampled_groups(table, q, method):
     """Return the recorded QWC partition of the nonidentity rows of ``table``.
 
     The rows are partitioned by the deterministic first-fit grouping
-    ``PauliTerms.group(strategy="qwc")``, whose comparison and array counts
-    are checked against ``max_bytes`` and ``max_analysis_work`` of
-    ``method``, the planning FixedGCIM or QFD, before any setting is
-    expanded. Each group's basis carries the single non-I letter of its
+    ``PauliTerms.group(strategy="qwc")``, whose arrays are checked against
+    ``max_bytes`` of ``method``, the planning FixedGCIM or QFD, before any
+    setting is expanded. Each group's basis carries the single non-I letter of its
     members on every qubit of the union of their supports.
     """
     rows = tuple((p, c) for p, c in table.rows() if p != "I" * q)
     if not rows:
         return ()
     packed = pauli_table(rows, num_qubits=q, max_bytes=method.max_bytes)
-    partition = packed.group(strategy="qwc", max_bytes=method.max_bytes,
-                             max_comparisons=method.max_analysis_work,
-                             limit_name=f"{type(method).__name__}.max_analysis_work")
-    answer = []
-    for indices in partition.groups:
-        basis = ["I"] * q
-        for j in indices:
-            for k, letter in enumerate(rows[j][0]):
-                if letter != "I":
-                    if basis[k] not in ("I", letter):
-                        raise ValueError("group is not QWC")
-                    basis[k] = letter
-        answer.append(SampledGroup(basis="".join(basis), indices=indices))
-    return tuple(answer)
+    partition = packed.group(strategy="qwc", max_bytes=method.max_bytes)
+    # The grouping is qubit-wise commuting, so each column's largest letter is
+    # the group's basis letter. FixedGCIMReconstruction._sampled_partition
+    # checks that property at every construction and load, so this producer
+    # does not check it again. Removing that check needs a check here first.
+    letters = _letter_matrix(rows, q)
+    return tuple(SampledGroup(basis=letters[list(indices)].max(axis=0).tobytes().decode("ascii"), indices=indices)
+                 for indices in partition.groups)
+
+
+def _letter_matrix(rows, q):
+    """Return the ASCII letters of the labels of ``rows``, one row of ``q`` bytes per Pauli row."""
+    return np.frombuffer("".join(label for label, _ in rows).encode("ascii"), dtype=np.uint8).reshape(len(rows), q)
 
 
 def pencil_pairs(b):
@@ -2116,60 +2213,43 @@ def group_requirements(c, terms, entries):
     return 8 * (w + 15) * entries + 8 * terms, entries * (c + 44 + (4 * w + 4) * terms) + terms * ((c - 1) * w + 1)
 
 
-def grouped_pass_requirements(num_qubits, chunks, terms, basis_size, *, settings, pairs, oriented, copies=1,
-                              shot_total=None):
+def grouped_pass_requirements(num_qubits, chunks, terms, basis_size, *, oriented, copies=1, shot_total=None):
     """Return the logical ``(bytes, work)`` of one grouped analysis pass over count chunks.
 
     ``chunks`` lists ``(L_a, m_a)`` descriptors of the chunks of the pass:
     the term count of a chunk's group and its stored bins, explicit
     zero-count bins included. ``copies``, a positive integer k, repeats
     every descriptor k times without expanding the list, so J descriptors
-    describe C = kJ chunks. ``settings`` is the number M of settings the
-    pass requests, ``pairs`` the number P of distinct upper-triangle pairs
-    with at least one of them, and ``oriented`` whether the pass builds a
+    describe C = kJ chunks. ``oriented`` says whether the pass builds a
     second, oriented ``GroupMoment`` for every chunk. With c = n + 1,
-    w = ceil(c/64), L nonidentity terms, T = sum_a L_a over the C chunks and
-    C_eff = max(C, M),
+    w = ceil(c/64), L nonidentity terms and T = sum_a L_a over the C chunks,
 
-        B = sum_a 8(w + 1)m_a + max_a(112m_a + 8L_a)
-            + 8 sum_a(L_a + 16) + (n + 16)L + 512b**2
-            + o 8(T + 16C) + 8(8C_eff + 24M + 37P),
-        W = sum_a W_a + L(n + 1) + 32b**2 + 16b**3
-            + o(T + 2C) + 23C_eff + 22P,
+        B = sum_a 8(w + 1)m_a + max_a(112m_a + 8L_a) + 8T + (n + 16)L
+            + 512b**2 + o 8T,
+        W = sum_a W_a + L(n + 1) + 32b**2 + 16b**3 + oT,
 
-    with o = 1 for an oriented view. The first line of each comes from
+    with o = 1 for an oriented view. The terms come from
     ``group_requirements``: decoded arrays summed over the chunks, the
-    largest workspace of one reduction (zero without chunks), a logical
-    allowance for each canonical contribution's scalars and indices, the
-    once-decoded labels and coefficients, and the b-state projected solve.
-    The oriented view holds each contribution's L_a label means and 16
-    scalar and index slots, and orienting an imaginary row negates at most
-    L_a label means, its H0 mean and its overlap mean. ``pooled_statistics``
-    and pair assembly hold, in 8-byte slots, 8 per chunk (row, weight,
-    variance and contribution references and weighted scratch), 24 per
-    setting (the shared setting key, five pooled scalars, the shot total,
-    the estimate's value, shot count and name, the group index, two scratch
-    views and a pair-descriptor reserve) and 37 per pair (the pair key, the
-    H0 and S components and result references, the variance record, six
-    two-element reconstruction lists and the returned aggregate). Their work
-    is 17C + 16P arithmetic and writes (weights, weighted first moments,
-    variance and covariance fields, sums across groups, physical-H
-    variances and the H0 and S writes) plus 6C + 6P availability and
-    negative-variance scans. With missing data C can be below M. Pooling
-    then forms at most min(C, M) settings and C rows before it reports the
-    missing settings, which C_eff covers.
+    largest workspace of one reduction (zero without chunks), the label
+    means of each canonical contribution, the once-decoded labels and
+    coefficients, and the b-state projected solve. The oriented view holds
+    each contribution's L_a label means again, and orienting an imaginary
+    row negates at most L_a of them. The law counts these dominant arrays
+    and operations. The small Python records that pooling and pair assembly
+    keep for each chunk, setting and pair are not counted. They are small
+    beside the count arrays, and they approach those arrays only when each
+    setting has so few bins that the pass is small.
 
     Repetition multiplies the decoded arrays, the canonical contributions
     and sum_a W_a by k, with C and T. The workspace maximum is that of the
     listed descriptors, zero for an empty list, and the label and
-    projected-solve terms do not depend on the chunks. M, P and o are the
-    caller's complete values, so C_eff = max(kJ, M), not k max(J, M).
-    Runtime passes list their actual chunks with k = 1. FixedGCIM planning
-    lists one ``(L_g, m)`` per group with k = K, the settings of each group
+    projected-solve terms do not depend on the chunks. Runtime passes list
+    their actual chunks with k = 1. FixedGCIM planning lists one
+    ``(L_g, m)`` per group with k = K, the settings of each group
     (``sampled_setting_count`` with one group: b**2 with both parts and
-    b(b+1)/2 with real parts only), M = KG, P = b(b+1)/2 and o = 0. These
-    describe one chunk of m = min(s, 2**c) bins per setting of the complete
-    pencil, and the law then takes O(G) steps.
+    b(b+1)/2 with real parts only), and o = 0. These describe one chunk of
+    m = min(s, 2**c) bins per setting of the complete pencil, and the law
+    then takes O(G) steps.
 
     The law holds for any pass: the complete pencil or a subset of its
     pairs, real-only or complex quadratures, unequal shot counts and
@@ -2177,34 +2257,32 @@ def grouped_pass_requirements(num_qubits, chunks, terms, basis_size, *, settings
     bounds on the bins of tables not yet acquired bound the pass. The
     allowance covers the decoded arrays of the pass population, one
     reduction workspace, the canonical contributions, the oriented view
-    when built, pooling and pair assembly, the labels and the projected
-    solve. It is a logical model in the units of ``group_requirements``,
-    not the process's resident memory, and covers neither other passes nor
-    the history of the Run.
+    when built, the labels and the projected solve. It is a logical model
+    in the units of ``group_requirements``, not the process's resident
+    memory, and covers neither other passes nor the history of the Run.
     ``adapt_acquisition._keep_current`` releases the cached moments of
     chains outside the current basis and active queries. Saved observations
     and the immutable reconstruction are checked separately.
 
     ``shot_total=S`` bounds one fresh measurement stage of S shots whose
-    count tables do not exist yet, as the planning of ``PencilSampling``
-    needs, where the shots of each setting follow from the pilot. Its
-    premises: every setting of the pass has exactly one count table, the
-    stage's shots sum to S, and ``readout_shape`` and ``_decoded_chunk``
-    keep the stored bins of a table of N_a shots at m_a <= min(N_a, 2**c),
-    explicit zero bins included. Then sum_a m_a <= U, max_a m_a <= H and
-    sum_a L_a m_a <= L_max U with H = min(S, 2**c), U = min(S, M 2**c) and
-    L_max the largest listed L_a. The caller lists every descriptor with the
-    bins H and makes C = kJ equal to M: one ``(L_g, H)`` per group with
-    k = K for G >= 1 groups, and one ``(0, H)`` with k = M and P the
-    off-diagonal pairs for a pencil without nonidentity terms. The decoded
-    arrays are then charged for U = min(S, k sum_J H) bins, the bin-free
-    work ``L_a{(c - 1)w + 1}`` of each descriptor is multiplied by k, and the
+    count tables do not exist yet, as ``PencilSampling`` needs, where the
+    shots of each setting follow from the pilot. Its premises: every
+    setting of the pass has exactly one count table, the stage's shots sum
+    to S, and ``readout_shape`` and ``_decoded_chunk`` keep the stored bins
+    of a table of N_a shots at m_a <= min(N_a, 2**c), explicit zero bins
+    included. Then sum_a m_a <= U, max_a m_a <= H and
+    sum_a L_a m_a <= L_max U with H = min(S, 2**c), U = min(S, M 2**c) for
+    the M settings and L_max the largest listed L_a. The caller lists every
+    descriptor with the bins H and makes C = kJ equal to M: one
+    ``(L_g, H)`` per group with k = K for G >= 1 groups, and one ``(0, H)``
+    with k = M for a pencil without nonidentity terms. The decoded arrays
+    are then charged for U = min(S, k sum_J H) bins, the bin-free work
+    ``L_a{(c - 1)w + 1}`` of each descriptor is multiplied by k, and the
     bin work ``U{c + 44 + (4w + 4)L_max}`` is added once, so that
 
-        B = 8(w + 1)U + 112H + 8L_max + 8(T + 16M) + (n + 16)L + 512b**2
-            + o 8(T + 16M) + 8(32M + 37P),
+        B = 8(w + 1)U + 112H + 8L_max + 8T + (n + 16)L + 512b**2 + o 8T,
         W = U{c + 44 + (4w + 4)L_max} + T{(c - 1)w + 1} + L(n + 1)
-            + 32b**2 + 16b**3 + o(T + 2M) + 23M + 22P,
+            + 32b**2 + 16b**3 + oT,
 
     with the workspace maximum and L_max not multiplied by k and the other
     terms as above. Each replaced term is an upper bound, so the result
@@ -2223,27 +2301,24 @@ def grouped_pass_requirements(num_qubits, chunks, terms, basis_size, *, settings
         raise ValueError("copies must be a positive integer")
     c = num_qubits + 1
     w = (c + 63) // 64
-    decoded = workspace = records = work = count = labels = binned = longest = 0
+    decoded = workspace = work = labels = binned = longest = 0
     for size_terms, bins in chunks:
         size, cost = group_requirements(c, size_terms, bins)
         decoded += 8 * (w + 1) * bins
         workspace = max(workspace, size - 8 * (w + 1) * bins)
-        records += 8 * (size_terms + 16)
         work += cost if shot_total is None else group_requirements(c, size_terms, 0)[1]
-        count += 1
         labels += size_terms
         binned += bins
         longest = max(longest, size_terms)
-    decoded, records, work, count, labels = (copies * x for x in (decoded, records, work, count, labels))
+    decoded, work, labels = (copies * x for x in (decoded, work, labels))
     if shot_total is not None:
         stored = min(shot_total, copies * binned)
         decoded = 8 * (w + 1) * stored
         work += group_requirements(c, longest, stored)[1] - group_requirements(c, longest, 0)[1]
-    pooled, view = max(count, settings), int(oriented)
-    return (decoded + workspace + records + (num_qubits + 16) * terms + _projected_solve_bytes(basis_size)
-            + view * 8 * (labels + 16 * count) + 8 * (8 * pooled + 24 * settings + 37 * pairs),
-            work + terms * c + _projected_solve_work(basis_size)
-            + view * (labels + 2 * count) + 23 * pooled + 22 * pairs)
+    view = int(oriented)
+    return (decoded + workspace + 8 * labels + (num_qubits + 16) * terms + _projected_solve_bytes(basis_size)
+            + view * 8 * labels,
+            work + terms * c + _projected_solve_work(basis_size) + view * labels)
 
 
 def reduce_group(chunk, setting, *, rows, members, num_qubits):
@@ -2408,6 +2483,76 @@ def pooled_statistics(settings, moments, identity_shift, *, pools=None):
     return tuple(estimates), missing, pairs, tuple(variances)
 
 
+def overlap_noise_estimate(moments, variances, *, basis_size, population, quadratures, missing=0):
+    """Return the ``OverlapNoiseEstimate`` of a sampled pencil from its saved moments and pooled variances.
+
+    The measured quadratures are the off-diagonal group-zero settings present
+    in ``moments``, which ``reduce_group`` gives the overlap role.
+    ``quadratures`` is the Plan's resolved choice. Under ``"real"`` the Plan has
+    no imaginary row, so each measured pair counts one structural zero. Under
+    ``"complex"`` an imaginary setting absent from ``moments`` is pending, so
+    absence alone never makes a structural zero. Each ``V_a`` is nonnegative and
+    each ``w_a`` positive, so a setting's pooled variance ``sum_a w_a**2 V_a`` is
+    0 exactly when every ``V_a`` is 0. The observed zeros therefore come from
+    ``moments`` and need no pooled record, which a partly collected pencil
+    lacks. The pooled variance is
+    ``SampledPairVariance.overlap``, the same weights as the S estimate
+    (``pooled_statistics``), and its sum over those quadratures enters
+    ``sqrt(2 sum)``. Pooling assumes independent chunks, so a contribution listed
+    twice for one setting leaves the value unavailable, and a one-shot chunk
+    leaves its variance None. ``missing`` counts the planned settings with no
+    data. This is O(pairs) arithmetic on saved records.
+    """
+    if basis_size == 1:
+        return OverlapNoiseEstimate(status="algebraic", frobenius_rms=0.0, population=population)
+    settings = {}
+    for row in moments:
+        if row.pair[0] != row.pair[1] and row.group == 0:
+            settings.setdefault((row.pair, row.quadrature), []).append(row)
+    shots = [sum(row.shots for row in rows) for rows in settings.values()]
+    pairs = {pair for pair, _ in settings}
+    counts = dict(
+        population=population,
+        measured_quadratures=len(settings),
+        structural_zero_quadratures=len(pairs) if quadratures == "real" else 0,
+        observed_zero_quadratures=sum(all(row.overlap_variance == 0 for row in rows) for rows in settings.values()),
+        minimum_shots=min(shots, default=None),
+        maximum_shots=max(shots, default=None),
+    )
+    overlap = {row.pair: row.overlap for row in variances}
+    values = [overlap[pair][("real", "imag").index(quadrature)] if pair in overlap else None
+              for pair, quadrature in settings]
+
+    def unavailable(reason):
+        return OverlapNoiseEstimate(status="unavailable", reason=reason, **counts)
+
+    if missing:
+        return unavailable(f"{missing} planned settings have no data")
+    if len(pairs) != basis_size * (basis_size - 1) // 2:
+        return unavailable("the group moments do not cover every off-diagonal overlap entry")
+    if any(len({row.contribution_id for row in rows}) != len(rows) for rows in settings.values()):
+        return unavailable("one observation is listed twice for a setting, so it is not an independent repeat")
+    if None in values:
+        return unavailable(f"{values.count(None)} of {len(values)} measured overlap quadratures have no variance "
+                           "estimate, which needs more than one shot in each measurement")
+    return OverlapNoiseEstimate(status="available", frobenius_rms=sqrt(2 * fsum(values)), **counts)
+
+
+def fixed_pencil_noise(result, reconstruction):
+    """Return the ``OverlapNoiseEstimate`` of a FixedGCIM or QFD Result, whose basis no measurement selects."""
+    plan = result.plan
+    if plan.execution != "quantum" or plan.shots is None:
+        return OverlapNoiseEstimate(status="not_applicable", reason="exact readout or classical execution samples "
+                                                                    "no overlap")
+    if not reconstruction._nonidentity_count():
+        return OverlapNoiseEstimate(status="not_applicable", reason="a multiple of the identity has no overlap to "
+                                                                    "measure")
+    return overlap_noise_estimate(
+        result.group_moments, result.sampled_pair_variances, basis_size=reconstruction.basis_size,
+        population="fixed_design" if plan.method.sampling is None else "main_after_pilot",
+        quadratures=reconstruction.acquisition.quadratures or "complex", missing=len(result.missing))
+
+
 def read_groups(chunks, settings, *, members, rows, num_qubits, basis_size, max_bytes, max_analysis_work,
                 label="GCIM"):
     """Check one complete grouped analysis pass against the limits, then reduce every count chunk.
@@ -2421,7 +2566,7 @@ def read_groups(chunks, settings, *, members, rows, num_qubits, basis_size, max_
     is checked before the first histogram decode, from the stored bin
     count ``len(chunk.values)`` of each chunk (explicit zero-count bins
     included), by the per-chunk law of ``grouped_pass_requirements`` for
-    the M settings on their P pairs, L = ``len(rows)`` terms and the
+    L = ``len(rows)`` terms and the
     ``basis_size`` solve: bytes against ``max_bytes`` and work against
     ``max_analysis_work``. Repeated measurements enter its sums separately.
     The moments are returned in chunk order as reduced, without a second
@@ -2431,10 +2576,9 @@ def read_groups(chunks, settings, *, members, rows, num_qubits, basis_size, max_
     expected = {s[0]: s for s in settings}
     size, used = grouped_pass_requirements(
         num_qubits, ((len(members[expected[chunk.experiment][-1]]), len(chunk.values)) for chunk in chunks),
-        len(rows), basis_size, settings=len(expected), pairs=len({s[1:3] for s in expected.values()}),
-        oriented=False)
+        len(rows), basis_size, oriented=False)
     _check_bytes(size, max_bytes, f"{label} grouped count arrays and scalar payload")
-    if used > max_analysis_work:
+    if exceeds(used, max_analysis_work):
         raise ValueError(f"{label} grouped analysis needs {used} work units, exceeding "
                          f"max_analysis_work={max_analysis_work}")
     moments = []
@@ -2481,6 +2625,8 @@ class FixedGCIMResult(Result):
             measurement, in measurement order.
         sampled_pair_variances: For a complete sampled pencil, the pooled
             sample-mean variances and overlap–H0 covariance of each pair.
+            `overlap_noise` summarizes the overlap part as an
+            [`OverlapNoiseEstimate`][nwqlib.algorithms.gcim.fixed_basis.OverlapNoiseEstimate].
         pencil: The [`ProjectedPencil`][nwqlib.algorithms.gcim.fixed_basis.ProjectedPencil]
             with the projected matrices and solve diagnostics, or None for
             partial data or a scalar identity target. Under `PencilSampling`
@@ -2527,7 +2673,18 @@ class FixedGCIMResult(Result):
             lines.extend(self.pencil._sampled_summary())
         if self.shot_allocation is not None:
             lines.append(self.shot_allocation._summary(self.pencil))
+        if self._plan is not None:
+            lines.extend(self.overlap_noise._summary())
         return lines
+
+    @property
+    def overlap_noise(self):
+        """The empirical overlap noise of this Result, an [`OverlapNoiseEstimate`][nwqlib.algorithms.gcim.fixed_basis.OverlapNoiseEstimate].
+
+        It reads the saved moments and variances, so it measures nothing and does
+        not change with `analyze(overlap_cutoff=...)`.
+        """
+        return fixed_pencil_noise(self, self.plan.reconstruction)
 
     def validate_plan(self, plan: Plan) -> None:
         """Reject this Result unless its value and pencil follow from ``plan``.
@@ -2561,12 +2718,12 @@ class FixedGCIMResult(Result):
         rec = plan.reconstruction
         # A sampled Plan with nonidentity terms acquires exactly the settings
         # of its recorded group partition and resolved quadratures.
-        if plan.execution == "quantum" and plan.shots is not None and rec.nonidentity_coefficients and (
+        if plan.execution == "quantum" and plan.shots is not None and rec._nonidentity_count() and (
             not rec.groups
             or tuple(e.name for e in plan.experiments) != tuple(s[0] for s in rec.settings())
         ):
             raise ValueError("GCIM sampled Plan differs from its declared group settings")
-        grouped = plan.execution == "quantum" and plan.shots is not None and bool(rec.nonidentity_coefficients)
+        grouped = plan.execution == "quantum" and plan.shots is not None and rec._nonidentity_count() > 0
         if not grouped and (rec.groups or self.group_moments or self.sampled_pair_variances):
             raise ValueError("GCIM group statistics belong only to a sampled Plan with nonidentity terms")
         if grouped and self.pairs:
@@ -2576,7 +2733,7 @@ class FixedGCIMResult(Result):
         # not evidence of a scalar operator.
         if (
             plan.execution == "quantum"
-            and not plan.reconstruction.nonidentity_coefficients
+            and not plan.reconstruction._nonidentity_count()
             and self.eigenvalue != plan.reconstruction.identity_shift
         ):
             raise ValueError("GCIM identity eigenvalue differs from its exact constant")
@@ -2603,7 +2760,7 @@ class FixedGCIMResult(Result):
         ``nwqlib.evidence.energy_shift`` compares two such endpoints without
         new measurements.
         """
-        from nwqlib.evidence.energy_shift import EnergyEndpoint, _operator_payload
+        from nwqlib.evidence.energy_shift import EnergyEndpoint, _operator_table
 
         plan = self.plan
         operator = plan._native["operator"]
@@ -2619,7 +2776,7 @@ class FixedGCIMResult(Result):
             order=plan.reconstruction.basis_size,
             sector=plan.problem.sector,
             frame=plan.output.frame(plan.problem),
-            **_operator_payload(operator, max_bytes=plan.method.max_bytes),
+            **_operator_table(operator, max_bytes=plan.method.max_bytes),
             value=self.eigenvalue,
             analyzer=None if self.origin is None else self.origin.analyzer,
         )
@@ -2724,34 +2881,36 @@ def solve_pencil(hamiltonian, overlap, *, cutoff, sampled, enclosure=None, ident
 
 
 def pair_reduction_allowance(method, plan, observation, label="GCIM"):
-    """Check the summed pair work and one point's workspace, and return the point's remaining work allowance.
+    """Check one point's pair workspace and return the point's remaining work allowance, or None for no limit.
 
     The exact pair route of FixedGCIM and QFD calls it from the Method
     ``method``'s ``reduction_allowance``, and the limits are its
-    ``max_classical_products`` and ``max_bytes``. The summed registered work
-    of all the Plan's pair reductions, computed once per Plan object and
-    cached, is checked against ``max_classical_products`` first. A Plan
-    whose sum exceeds the limit is rejected here, before the point's
-    preparation work is counted and before any circuit runs. The workspace
-    check then rejects a point whose ``pair_bytes`` exceeds ``max_bytes``.
-    The allowance returned for one point is the limit less the registered
-    work of every other pair reduction of the Plan. Each preparation is
-    checked separately against this value, and the cumulative limit holds
-    because the work of all pairs was checked together, when each pair is
-    computed once. A repeated computation of a pair registers its work
-    again, which this Plan-level total does not count. The total is read
-    from the Plan's cache, never changed, so the check may run several
-    times for one point without recomputing the sum. ``label`` starts the
-    messages.
+    ``max_classical_products`` and ``max_bytes``. The workspace check
+    rejects a point whose ``pair_bytes`` exceeds ``max_bytes``. Without
+    ``max_classical_products`` it returns None, and no pair work is
+    computed. With it, the summed registered work of all the Plan's pair
+    reductions, computed once per Plan object and cached, is checked
+    against the limit first. A Plan whose sum exceeds the limit is rejected
+    here, before the point's preparation work is counted and before any
+    circuit runs. The allowance returned for one point is the limit less
+    the registered work of every other pair reduction of the Plan. Each
+    preparation is checked separately against this value, and the
+    cumulative limit holds because the work of all pairs was checked
+    together, when each pair is computed once. A repeated computation of a
+    pair registers its work again, which this Plan-level total does not
+    count. The total is read from the Plan's cache, never changed, so the
+    check may run several times for one point without recomputing the
+    sum. ``label`` starts the messages.
     """
     import json
     from .pair_reducer import pair_bytes, pair_work
 
-    pair_work_total = _pair_work_total(plan)
-    if pair_work_total > method.max_classical_products:
+    limit = method.max_classical_products
+    pair_work_total = None if limit is None else _pair_work_total(plan)
+    if limit is not None and pair_work_total > limit:
         raise ValueError(
             f"{label} pair reductions exceed max_classical_products: registered work {pair_work_total}, "
-            f"max_classical_products={method.max_classical_products}. "
+            f"max_classical_products={limit}. "
             f"Raise {type(method).__name__}.max_classical_products to at least {pair_work_total}."
         )
     own = 0
@@ -2759,8 +2918,9 @@ def pair_reduction_allowance(method, plan, observation, label="GCIM"):
         if item.kind == "reduction":
             parameters = json.loads(item.parameters)
             _check_bytes(pair_bytes(parameters), method.max_bytes, f"{label} pair reduction workspace")
-            own += pair_work(parameters)
-    return int(max(0, method.max_classical_products - (pair_work_total - own)))
+            if limit is not None:
+                own += pair_work(parameters)
+    return None if limit is None else int(max(0, limit - (pair_work_total - own)))
 
 
 def exact_pair_pencil(method, plan, data, rec, cutoff, label="GCIM"):
@@ -2788,7 +2948,7 @@ def exact_pair_pencil(method, plan, data, rec, cutoff, label="GCIM"):
     from .pair_reducer import entry_bounds, pooled_bound
 
     b = rec.basis_size
-    terms = len(rec.nonidentity_coefficients)
+    terms = rec._nonidentity_count()
     pairs = {(left, right): [] for left, right in pair_acquisitions(b, terms)}
     receipts = {receipt.content_id: receipt for receipt in data.receipts}
     ids = []
@@ -2908,43 +3068,26 @@ class FixedGCIM(Method):
             eigenvalues above it are kept for the solve.
         max_basis_size: Default `64`. Largest accepted number of trial
             states, checked before pairs are formed.
-        max_experiments: Default `100_000`. Largest number of measurement
-            settings: exact pair reductions, or sampled group settings.
-        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
-            the known bytes of conversion, the pair table, the grouped count
-            analysis and the projected solve, and on each exact pair
-            reduction's workspace, checked when that pair is prepared.
-        max_analysis_work: Default `1_000_000_000`. Limit on the work of the
-            projected matrices and eigensolve, of the comparisons that form
-            qubit-wise commuting groups, and of each pass of the grouped count
-            analysis. Sampled planning checks the worst-case pass for one
-            measurement per setting before it builds circuits, and analysis
-            checks the stored counts again before decoding them. The default
-            is ten times the other work defaults because that planning bound
-            is conservative ([Engineering constants](../../ENGINEERING_CONSTANTS.md),
-            row "Sampled FixedGCIM analysis admission").
-        max_classical_products: Default `100_000_000`. Limit on the counted
-            classical work of basis preparation and projection, and on the
-            summed classical work of the exact pair reductions.
+        max_bytes: Default `None`, the physical memory of this computer.
+            Limit on the known bytes of conversion, the pair table, the
+            grouped count analysis and the projected solve, and on each
+            exact pair reduction's workspace, checked when that pair is
+            prepared.
+        max_analysis_work: Default `None`, no limit. Optional limit on the
+            work of the projected matrices and eigensolve and of each pass
+            of the grouped count analysis. Sampled planning checks the
+            worst-case pass for one measurement per setting before it builds
+            circuits, and analysis checks the stored counts, which repeated
+            measurements can enlarge, before decoding them.
+        max_classical_products: Default `None`, no limit. Optional limit on
+            the counted classical work of basis preparation and projection,
+            and on the summed classical work of the exact pair reductions.
         input_conversion: Default `"auto"`, which keeps Pauli input as it
             is and, for quantum execution, converts an explicit dense matrix
             of original dimension at most 16 to Pauli form. Classical
             execution uses the supplied matrix representation. `"dense_pauli"`
             also permits the conversion of sparse matrices and of larger dense
-            matrices, within `max_conversion_work` and `max_bytes`.
-        max_conversion_work: Default `100_000_000`. Limit on the counted
-            work of operator-to-Pauli conversion, including the conversion
-            that `input_conversion="auto"` selects.
-        max_admission_steps: Default `10_000_000`. Upper limit on the
-            planning work of checking each `Program` that the method builds
-            (NWQLib's description of a circuit as named steps). It caps the
-            number of stored fields of a `Program` and the work units of one
-            check of it. Summing a `Program`'s resource counts may use up to
-            24 times this value. A larger `Program` is rejected with a
-            ValueError that names this field, the planning stage that exceeded
-            the limit and its count. Raising the limit permits a larger check and changes no
-            quantum operation
-            ([planning work limit](../../development/program_checks.md#planning-work-limit)).
+            matrices, within `max_bytes`.
         acquisition: Default `PencilAcquisition()`. How quantum execution
             measures H and S
             ([`PencilAcquisition`][nwqlib.algorithms.gcim.fixed_basis.PencilAcquisition]).
@@ -3035,18 +3178,15 @@ class FixedGCIM(Method):
     schema_version: Literal[3] = 3
     basis: Annotated[tuple[StateData, ...], Field(min_length=1)]
     overlap_cutoff: Annotated[Real, Field(gt=0)] = 1e-12
-    # max_basis_size, max_experiments, max_analysis_work and
-    # max_classical_products are untuned workload ceilings on derived counts,
-    # checked before expansion (docs/ENGINEERING_CONSTANTS.md). Revisit for an
-    # explicitly intended larger basis or classical workload.
+    # max_basis_size is an untuned ceiling on the basis, checked before pairs
+    # are formed (docs/ENGINEERING_CONSTANTS.md). The optional work and
+    # count limits set none by default (nwqlib._limits.exceeds), and
+    # max_bytes=None means the physical memory (nwqlib._limits.memory_limit).
     max_basis_size: PositiveInt = 64
-    max_experiments: PositiveInt = 100_000
-    max_bytes: PositiveInt = DEFAULT_MAX_BYTES
-    max_analysis_work: PositiveInt = 1_000_000_000
-    max_classical_products: PositiveInt = 100_000_000
+    max_bytes: PositiveInt | None = None
+    max_analysis_work: PositiveInt | None = None
+    max_classical_products: PositiveInt | None = None
     input_conversion: Literal["auto", "dense_pauli"] = "auto"
-    max_conversion_work: PositiveInt = DEFAULT_CONVERSION_WORK
-    max_admission_steps: PositiveInt = 10_000_000
     acquisition: PencilAcquisition = PencilAcquisition()
     max_native_two_qubit_depth: Count | None = None
     sampling: PencilSampling | None = None
@@ -3082,13 +3222,12 @@ class FixedGCIM(Method):
         # of docs/ENGINEERING_CONSTANTS.md.
         b = len(self.basis)
         if b > self.max_basis_size:
-            raise ValueError(f"basis has {b} states, more than FixedGCIM.max_basis_size={self.max_basis_size}, before pair expansion")
+            raise ResourceLimitError(f"basis has {b} states, more than FixedGCIM.max_basis_size={self.max_basis_size}, before pair expansion")
         operator = eigen_operator(
             problem,
             output,
             max_bytes=self.max_bytes,
             input_conversion=self.input_conversion,
-            max_conversion_work=self.max_conversion_work,
         )
         basis = tuple(eigen_state(state, problem, max_bytes=self.max_bytes) for state in self.basis)
         basis_record = FixedGCIMBasis(preparations=tuple(state.preparation for state in basis))
@@ -3148,9 +3287,7 @@ class FixedGCIM(Method):
                 node=Sequence(children=tuple(exp.batch for exp in experiments)),
             )
         )
-        program = admitted_program(
-            "FixedGCIM.max_admission_steps",
-            self.max_admission_steps,
+        program = Program(
             root="root",
             definitions=tuple(definitions),
             registers=registers,
@@ -3189,11 +3326,12 @@ class FixedGCIM(Method):
             error_model=eigen_error_model(components, METHOD),
         )
         if e and not shots:
-            # The summed registered work of the pair reductions is recorded
-            # once in the Plan's cache. reduction_allowance admits it against
-            # max_classical_products, the Method's host-work limit, when a
-            # pair is prepared, and funds each point from this ledger.
-            _pair_work_total(plan)
+            # Under an explicit max_classical_products, the Method's host-work
+            # limit, the summed registered work of the pair reductions is
+            # recorded once in the Plan's cache. reduction_allowance admits it
+            # when a pair is prepared and funds each point from this ledger.
+            if self.max_classical_products is not None:
+                _pair_work_total(plan)
             return plan._bind(blocks=blocks, operator=operator, basis=basis,
                               pair_table=_pair_table(operator))
         return plan._bind(blocks=blocks, operator=operator, basis=basis)
@@ -3205,7 +3343,7 @@ class FixedGCIM(Method):
         check_native_depth_cap(prepared, self.max_native_two_qubit_depth)
 
     def reduction_allowance(self, plan, point, *, observation, width, run):
-        """Check the summed pair work and a point's workspace, and return the remaining allowance (``pair_reduction_allowance``)."""
+        """Check a point's workspace and, under ``max_classical_products``, the summed pair work, and return the remaining allowance or None (``pair_reduction_allowance``)."""
         return pair_reduction_allowance(self, plan, observation)
 
     def prepare_all_refusal(self):
@@ -3275,7 +3413,7 @@ class FixedGCIM(Method):
         """
         b = len(self.basis)
         if b > self.max_basis_size:
-            raise ValueError(f"basis has {b} states, more than FixedGCIM.max_basis_size={self.max_basis_size}, before projected acquisition")
+            raise ResourceLimitError(f"basis has {b} states, more than FixedGCIM.max_basis_size={self.max_basis_size}, before projected acquisition")
         operator = eigen_operator(problem, output, max_bytes=self.max_bytes, as_pauli=False)
         basis = tuple(
             eigen_state(s, problem, max_bytes=self.max_bytes, pad=False) for s in self.basis
@@ -3292,8 +3430,9 @@ class FixedGCIM(Method):
         work += sum(w for _, w in preparation if w is not None)
         _check_bytes(known_bytes, self.max_bytes, "classical projected matrices")
         _check_projected_solve_work(b, self.max_analysis_work, "projected solve")
-        if work > self.max_classical_products:
-            raise ValueError("classical projected matrices exceed max_classical_products")
+        if exceeds(work, self.max_classical_products):
+            raise ResourceLimitError(f"classical projected matrices exceed max_classical_products: they need {work}, "
+                                     f"max_classical_products={self.max_classical_products}")
         labels = tuple(
             f"{matrix}_{i}_{j}_{part}"
             for matrix in ("h", "s")
@@ -3307,7 +3446,6 @@ class FixedGCIM(Method):
             labels,
             work=work,
             frames=tuple("physical" if name.startswith("h_") else "unit" for name in labels),
-            admission=("FixedGCIM.max_admission_steps", self.max_admission_steps),
             description="classical H0=V†(A-cI)V with c=trace(A)/d and S=V†V on normalized "
             "preparation columns; "
             + (
@@ -3372,7 +3510,7 @@ class FixedGCIM(Method):
                 self.max_bytes,
                 "classical GCIM projections",
             )
-            if kernel.invocation_work > self.max_classical_products:
+            if exceeds(kernel.invocation_work, self.max_classical_products):
                 raise ValueError("classical GCIM projections exceed max_classical_products")
             # Contiguous columns let np.vdot conjugate inside the reduction,
             # so no conjugate copy of V is formed.
@@ -3468,9 +3606,9 @@ class FixedGCIM(Method):
                 ),
                 facts=exact_readout_sampling(plan, data.observations, random_draws=False),
             )._attach(plan, data)
-        if plan.shots is None and rec.nonidentity_coefficients:
+        if plan.shots is None and rec._nonidentity_count():
             return self._analyze_pairs(plan, data, cutoff)
-        if rec.nonidentity_coefficients:
+        if rec._nonidentity_count():
             return self._analyze_groups(plan, data, cutoff)
         # A scalar identity target has no acquisition, so its value is the
         # identity coefficient and no overlap is calculated.

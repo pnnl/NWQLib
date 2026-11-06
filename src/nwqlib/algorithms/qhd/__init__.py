@@ -26,6 +26,7 @@ _OWNERS = {
     **dict.fromkeys(("circuit_resources", "run_resources", "QHDCircuitResources", "QHDSynthesisProjection",
                      "QHDErrorSource", "QHDRunResources", "QHDRunEntry"), "resources"),
     **dict.fromkeys(("evolution_bound", "QHDEvolutionBound"), "evolution_bounds"),
+    "step_blocks": "onehot_schedule",
     **dict.fromkeys(
         ("BoxRefinement", "RefinementLevel", "RefinementResources", "BoxRefinementResult", "StallSplit"),
         "refinement_records",

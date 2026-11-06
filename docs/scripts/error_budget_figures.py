@@ -226,7 +226,7 @@ def print_qls():
     print("  solver", result.plan.method.solver, "degree", rec.degree)
     print("  alpha", rec.alpha, "kappa_be", rec.kappa_be, "polynomial_kappa", rec.polynomial_kappa)
     print("  epsilon_inv", result.plan.method.epsilon_inv, "rescale s", rec.polynomial.rescale)
-    print("  stored residual bound (certificate)", repr(rec.polynomial.certificate))
+    print("  residual check value of the polynomial", repr(rec.polynomial.residual_check_value))
     print("  phase-fit residual bound delta", repr(rec.phase_error))
     print("  phase term kappa_poly s delta / ||y_ref||",
           f"{rec.polynomial_kappa * rec.polynomial.rescale * rec.phase_error / norm:.3g}")
@@ -235,14 +235,14 @@ def print_qls():
     exact = np.array([25 / 28, 5 / 28])
     print("  relative error against (25/28, 5/28)",
           repr(float(np.linalg.norm(result.x - exact) / np.linalg.norm(exact))))
-    print("QLS compact ring: q, epsilon_inv, degree, stored residual bound, delta, qubits, CX")
+    print("QLS compact ring: q, epsilon_inv, degree, residual check value, delta, qubits, CX")
     for q in QLS_SIZES:
         for tolerance in QLS_TOLERANCES:
             selected = plan(qls_problem(q), method=QLS(epsilon_inv=tolerance), seed=SEED)
             workload = estimate(selected, context=CX)
             rec = selected.reconstruction
             cx = workload.quantity("cx")
-            print("  ", q, tolerance, rec.degree, f"{rec.polynomial.certificate:.6g}",
+            print("  ", q, tolerance, rec.degree, f"{rec.polynomial.residual_check_value:.6g}",
                   f"{rec.phase_error:.2g}",
                   workload.quantity("logical_width", location="logical_device").fact.value.numerator,
                   f"{number(cx.fact.value):,.0f}", cx.interpretation)

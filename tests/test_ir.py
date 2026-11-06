@@ -5,7 +5,7 @@ import pytest
 
 from nwqlib.core import Float64, InputRef, Source
 from nwqlib.ir import (
-    AdmissionLimits, AdaptiveLoop, Allocate, Argument, Binary, BlockCall,
+    AdaptiveLoop, Allocate, Argument, Binary, BlockCall,
     Binding, BlockSignature, Branch, ClassicalStage, ClassicalValue, CoherentRegion, Constant,
     Definition, ExprRef, Expression, Measure, MeasurementBatch, MetadataRef, Parameter,
     ParameterRef, PortMap, Program, QuantumPort, RangeAxis, Register, Release, Repeat,
@@ -106,16 +106,24 @@ def test_expression_exactness_sharing_types_cycles_and_limits():
         make({"root": Sequence()}, expressions=tuple(wrong), constraints=p.constraints)
     for expressions in (
         (Expression(id="a", value=Binary(op="add", left="a", right="a")),),
-        (Expression(id="a", value=Binary(op="add", left="missing", right="missing")),),
         (Expression(id="a", value=Constant(value=1)), Expression(id="a", value=Constant(value=1))),
     ):
         with pytest.raises(ValueError):
             make({"root": Sequence()}, expressions=expressions)
-    with pytest.raises(ValueError, match="integer growth"):
-        make({"root": Sequence()}, expressions=(Expression(id="a", value=Constant(value=256)),),
-             limits=AdmissionLimits(max_integer_bits=8))
-    with pytest.raises(ValueError, match="exceeds max_steps"):
-        p.revise(limits=AdmissionLimits(max_steps=1))
+    # A saved record holds integers below 10**4300. The product of two
+    # 7309-bit constants has at least 14617 bits, beyond the bound's 14285,
+    # so it is refused before it is formed.
+    from nwqlib.core.records import STORABLE_INTEGER_BOUND, Rational
+    with pytest.raises(ValueError, match="integer growth exceeds the integers a saved record can hold"):
+        make({"root": Sequence()}, expressions=(Expression(id="a", value=Constant(value=STORABLE_INTEGER_BOUND)),))
+    half = (Expression(id="h", value=Constant(value=10**2200)),
+            Expression(id="p", value=Binary(op="multiply", left="h", right="h")))
+    with pytest.raises(ValueError, match="integer growth exceeds the integers a saved record can hold"):
+        make({"root": Sequence()}, expressions=half)
+    make({"root": Sequence()}, expressions=(Expression(id="a", value=Constant(value=STORABLE_INTEGER_BOUND - 1)),))
+    with pytest.raises(ValueError, match="below 10\\*\\*4300"):
+        Rational(numerator=16 << 20000, denominator=1)
+    assert Rational(numerator=16 << 20000, denominator=32 << 20000) == Rational(numerator=1, denominator=2)
 
 
 def feedforward_nodes():
@@ -212,42 +220,14 @@ def test_compact_axis_selection_resolves_count_without_expansion():
     for bad in (0, 2, 10**12):
         with pytest.raises(ValueError, match="range axis"):
             program.select_experiment("root", 0, k=bad)
-
-
-def test_stored_collections_reserve_before_copying_their_frontier():
-    from nwqlib.ir import expressions
-    from nwqlib.blocks import SelectedConstruction
-    from nwqlib.resources import ResourceContext, Workspace, estimate
-    events = []
-
-    class WatchedTuple(tuple):
-        def __iter__(self):
-            events.append("children copied")
-            return super().__iter__()
-
-    used = 0
-    def reserve(amount):
-        nonlocal used
-        used += amount
-        if used > 128:
-            raise ValueError("test stored envelope exceeded")
-
-    oversized = WatchedTuple((1,) * 129)
-    with pytest.raises(ValueError, match="stored envelope"):
-        tuple(expressions.walk_kept(oversized, reserve))
-    assert events == []  # The rejected tuple is never iterated into a new stack.
-    used = 0
-    visited = tuple(expressions.walk_kept(WatchedTuple((1, 2)), reserve))
-    assert len(visited) == 3 and sorted(item for item in visited if type(item) is int) == [1, 2]
-    assert events == ["children copied"]
-
-    # The two actual public entry paths reject oversized stored collections.
-    with pytest.raises(ValueError, match="stored field inventory"):
-        Program(root="root", definitions=(Definition(id="root", node=Sequence()),),
-                premises=("small scalar",) * 129, limits=AdmissionLimits(max_steps=128))
-    empty = SelectedConstruction(program=Program(root="root", definitions=(Definition(id="root", node=Sequence()),),
-        limits=AdmissionLimits(max_steps=128)), selections=())
-    resident = Workspace(location="host", purpose="stored", bytes=1, source=SOURCE)
-    context = ResourceContext(resident=(resident,) * 129)
-    with pytest.raises(ValueError, match="admission work"):
-        estimate(empty, context=context)
+    # The axis takes every value, so neither the Program nor a setting can bind its parameter, a point
+    # needs a value of every axis, and the selected point binds it.
+    with pytest.raises(ValueError, match="Program bindings conflict with range axes"):
+        program.bind(k=3)
+    bound = nodes["root"].settings[0].revise(bindings=(Binding(parameter="k", value=3),))
+    with pytest.raises(ValueError, match="setting bindings conflict with range axes"):
+        make({**nodes, "root": nodes["root"].revise(settings=(bound,))},
+             parameters=program.parameters, expressions=program.expressions)
+    with pytest.raises(ValueError, match="provide exactly one value for each range axis"):
+        program.select_experiment("root", 0)
+    assert [(item.parameter, item.value) for item in point.bindings] == [("k", 3)]

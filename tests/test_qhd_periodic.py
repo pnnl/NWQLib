@@ -8,7 +8,7 @@ import pytest
 import sympy as sp
 
 from nwqlib._validation import expm_multiply_state_error
-from nwqlib.algorithms.qhd import QHD, QuadraticSchedule
+from nwqlib.algorithms.qhd import QHD, QuadraticSchedule, step_blocks
 from nwqlib.algorithms.qhd import method as owner
 from nwqlib.problems import Optimization
 from nwqlib.scientist import plan, solve
@@ -206,7 +206,7 @@ def test_periodic_hopping_blocks_restrict_to_the_circulant_stencil(d, k):
 
     onehot = [sum(1 << (j * k + i) for j, i in enumerate(indices))
               for indices in itertools.product(range(k), repeat=d)]
-    for step in selected.reconstruction.steps:
+    for step in (step_blocks(selected, s) for s in range(len(selected.reconstruction.step_weights))):
         assert {b.kind for b in step} == {"kinetic"}
         assert len(step) == d * (k + k // 2)
         generator = sum(b.time_step * b.coefficient * (two_qubit(pauli_x, *b.support)

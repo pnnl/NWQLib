@@ -18,23 +18,14 @@ classical numerical model use this polynomial.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import ceil, log, sqrt
+from math import atanh, ceil, exp, log, sqrt
 
 import numpy as np
+from scipy.fft import dct
 
-from nwqlib._linalg_laws import least_squares_work
-from nwqlib._validation import integer
-from nwqlib.operators.access import DEFAULT_INPUT_BYTES, _check_bytes
-from nwqlib.subroutines.qsp.inverse import _FitCost
+from nwqlib.operators.access import _check_bytes
+from nwqlib.subroutines.qsp.inverse import _filter_complement
 from nwqlib.subroutines.qsp.phases import chebyshev_grid
-
-
-# K is exactly an even polynomial of degree 2*ell in x, so least squares on
-# more than 2*ell + 1 Chebyshev nodes recovers its coefficients up to
-# rounding. The fit uses max(2001, 8(d+1)) nodes. The floor 2001 is an
-# untuned sample count, registered in docs/ENGINEERING_CONSTANTS.md. Revisit
-# with a changed polynomial family, degree range or fit workload.
-_KR_CONSTRUCTION_GRID_POINTS = 2001
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -128,38 +119,7 @@ def plan_kernel_reflection(kappa_be: float, eta: float) -> KernelReflectionPolyn
     )
 
 
-def kernel_reflection_cost(plan) -> _FitCost:
-    """Return the bytes and work counted for computing the kernel-reflection polynomial of one plan.
-
-    With degree ``d = 2 ell`` and ``n = max(2001, 8 (d + 1))`` fit nodes,
-    ``peak_bytes`` counts 8-byte entries:
-
-    - ``3 n (d + 1)``: the Chebyshev-Vandermonde matrix built inside
-      ``chebfit``, its column-scaled copy and the copy that ``lstsq``
-      factorizes, which are alive together.
-    - ``12 n``: node, filter and target vectors, including the Clenshaw
-      recurrence vectors of ``chebval``.
-    - ``4 (d + 1)``: coefficient vectors.
-
-    With d and n as defined above and ``ell = plan.kr_ell``, ``work`` adds
-    ``least_squares_work(n, d + 1)``, NWQLib's work formula for
-    ``numpy.linalg.lstsq`` on the ``n x (d + 1)`` design matrix, and
-    ``8 n (d + 1)`` for the Vandermonde matrix, the degree-``ell`` filter
-    evaluation and the scaling. LAPACK workspace is excluded.
-    """
-    d = plan.degree
-    n = max(_KR_CONSTRUCTION_GRID_POINTS, 8 * (d + 1))
-    return _FitCost(
-        coefficients=d + 1,
-        peak_bytes=8*(3*n*(d+1)+12*n+4*(d+1)),
-        work=least_squares_work(n, d + 1) + 8*n*(d+1),
-    )
-
-
-def _realize_kernel_reflection(
-    plan: KernelReflectionPolynomial,
-    *, max_degree=256, max_work=1_000_000_000, max_bytes=DEFAULT_INPUT_BYTES,
-) -> KernelReflectionPolynomial:
+def _realize_kernel_reflection(plan: KernelReflectionPolynomial, *, max_bytes=None) -> KernelReflectionPolynomial:
     """Compute the Chebyshev coefficients of a sizing plan.
 
     The polynomial's integer half-degree is
@@ -172,11 +132,17 @@ def _realize_kernel_reflection(
     ``F(x) = T_ell((1 + Delta^2 - 2x^2)/(1 - Delta^2)) / T_ell((1 + Delta^2)/(1 - Delta^2))``
     of Eq. (52) and map it affinely into
     ``K(x) = (2F(x) - 1 + F(Delta)) / (1 + F(Delta))`` of Eq. (62), with
-    ``K(0)=1`` and approximately ``-1`` off the kernel. The Chebyshev
-    coefficients of ``K`` come from a least-squares fit of these exact
-    values. Odd coefficients are then set to zero and the even ones divided
-    by the fitted ``K(0)``, so the coefficient table has exact even parity and
-    ``K(0) = 1`` up to rounding.
+    ``K(0)=1`` and approximately ``-1`` off the kernel. Equivalently
+    ``K = 1 - 2G/(1 + F(Delta))`` with ``G = 1 - F``, which
+    ``inverse._filter_complement`` evaluates without cancellation. ``K``
+    has degree ``2 ell``, so the DCT-II of its values at the ``2 ell + 1``
+    Chebyshev zeros, divided by ``2 ell + 1`` with half weight for ``c_0``,
+    gives its Chebyshev coefficients in exact arithmetic. Odd coefficients
+    are then set to zero and the even ones divided by the represented
+    ``K(0)``, so the coefficient table has exact even parity and
+    ``K(0) = 1`` up to rounding. The work and storage are ``O(ell log ell)``
+    and ``O(ell)``; ``max_bytes=None`` checks the arrays against the
+    physical memory.
 
     The argument ``z(x) = (1 + Delta^2 - 2x^2)/(1 - Delta^2)`` maps
     ``Delta <= |x| <= 1`` onto ``[-1, 1]`` and ``|x| < Delta`` onto
@@ -194,48 +160,25 @@ def _realize_kernel_reflection(
     through Eq. (63).
     """
 
-    if plan.degree > integer(max_degree, "max_degree", 1):
-        raise ValueError(f"kernel reflection degree exceeds max_degree={max_degree}")
-    cost = kernel_reflection_cost(plan)
-    _check_bytes(cost.peak_bytes, max_bytes, "kernel reflection coefficient fit")
-    if cost.work > integer(max_work, "max_work", 1):
-        raise ValueError(f"kernel reflection coefficient fit exceeds max_work={max_work}")
-    kappa_be = plan.kappa_be
-    eta = plan.kr_eta
     ell = plan.kr_ell
-    degree = 2 * ell
-    delta = 1.0 / kappa_be
-
-    def _filter(values: np.ndarray) -> np.ndarray:
-        """Evaluate the filter ``F`` of Dalzell arXiv:2406.12086v2, Eq. (52), at the points ``values``."""
-        z_values = (1.0 + delta**2 - 2.0 * values**2) / (1.0 - delta**2)
-        # Denominator T_ell(z0) for z0 > 1, by the closed form of Eq. (54).
-        denominator = np.cosh(
-            ell * np.arccosh((1.0 + delta**2) / (1.0 - delta**2))
-        )
-        # Numerator T_ell(z(x)), evaluated as the Chebyshev series with one unit
-        # coefficient.
-        basis = np.zeros(ell + 1)
-        basis[ell] = 1.0
-        return np.polynomial.chebyshev.chebval(z_values, basis) / denominator
-
-    fit_points = max(_KR_CONSTRUCTION_GRID_POINTS, 8 * (degree + 1))
-    x_values = chebyshev_grid(fit_points)
-    filter_values = _filter(x_values)
-    filter_delta = float(_filter(np.asarray([delta]))[0])
-    # Eq. (62): K = (2F - 1 + F(Delta)) / (1 + F(Delta)).
-    target_values = (2.0 * filter_values - 1.0 + filter_delta) / (1.0 + filter_delta)
-    coefficients = np.polynomial.chebyshev.chebfit(x_values, target_values, degree)
-    # K is even in x, so the fitted odd coefficients are rounding residue.
+    points = 2 * ell + 1
+    _check_bytes(8 * 8 * points, max_bytes, "kernel reflection coefficients")
+    delta = 1.0 / plan.kappa_be
+    # F(Delta) = 1/T_ell(z0) = sech(B), B = ell arccosh(z0) = 2 ell artanh(Delta).
+    e = exp(-2 * ell * atanh(delta))
+    filter_delta = 2 * e / (1 + e * e)
+    values = 1 - 2 * _filter_complement(chebyshev_grid(points), delta, ell) / (1 + filter_delta)
+    coefficients = dct(values, type=2) / points
+    coefficients[0] /= 2
+    # K is even in x, so the odd coefficients are rounding residue.
     coefficients[1::2] = 0.0
-    # Rescale the even coefficients so that K(0) = 1 after the least-squares fit.
     coefficients[0::2] /= np.polynomial.chebyshev.chebval(0.0, coefficients)
 
     return KernelReflectionPolynomial(
         coefficients=tuple(float(value) for value in coefficients),
         kr_ell=ell,
-        kappa_be=kappa_be,
-        kr_eta=eta,
+        kappa_be=plan.kappa_be,
+        kr_eta=plan.kr_eta,
     )
 
 

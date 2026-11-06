@@ -13,8 +13,6 @@ That check reads no payload bytes, and it keeps a mismatched file from being
 read as data of the wrong shape.
 """
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
-
 from pathlib import Path
 import shutil
 
@@ -28,7 +26,7 @@ from nwqlib.execution import ExecutionTrace, ObservationView, PreparedArtifact
 # field change may instead bump that Method's archive format when load_result
 # checks it before validating the concrete Result. read_report checks shared
 # metadata, leaving Method-owned fields and archive formats uninterpreted.
-RESULT_FORMAT = "nwqlib.result/15"
+RESULT_FORMAT = "nwqlib.result/17"
 
 
 def _validate_recorded_data(plan_id, observations, trace, receipts, manifests):
@@ -166,14 +164,10 @@ def _validate_selection(plan, data):
             if experiment.batch is None:
                 observation = experiment.observation
             else:
-                from nwqlib._prepared_execution import _named_admission_refusal
-                from nwqlib.ir.validation import AdmissionStepsExceeded, _Admission
+                from nwqlib.ir.validation import _Admission
                 admission = _Admission(construction.program)
-                try:
-                    admission.admitted().require_ready()
-                    _, observation = experiment._resolved_observation(admission, construction_id=construction.content_id)
-                except AdmissionStepsExceeded as error:
-                    raise _named_admission_refusal(plan, error, "data validation") from error
+                admission.admitted().require_ready()
+                _, observation = experiment._resolved_observation(admission, construction_id=construction.content_id)
             if receipt.construction_id != construction.content_id or receipt.observation != observation:
                 raise ValueError("saved preparation differs from its selected construction/readout")
 
@@ -228,7 +222,8 @@ def load_data(data, files, method):
     observations = ObservationView.model_validate(data["observations"])
     trace = ExecutionTrace.model_validate(data["trace"])
     receipts = tuple(PreparedArtifact.model_validate(row) for row in data["receipts"])
-    store = ArtifactStore(max_bytes=DEFAULT_MAX_BYTES)
+    # The store holds exactly the saved artifacts, whatever data limit the Run that saved them had.
+    store = ArtifactStore(max_bytes=sum(manifest.data_bytes for manifest in manifests))
     store._restore(manifests)
     for manifest, item in zip(manifests, data["artifacts"], strict=True):
         array = files.read_array(item["array"])
@@ -261,7 +256,7 @@ def save_result(result, path):
     result_type = getattr(result.plan.method, "result_type", None)
     if result_type is not type(result):
         raise TypeError("Method.result_type must name this concrete Result owner")
-    files = ArchiveFiles(path, DEFAULT_MAX_BYTES)
+    files = ArchiveFiles(path, None)
     files.path.mkdir()
     try:
         files.write_json("result.json", dict(format=RESULT_FORMAT,

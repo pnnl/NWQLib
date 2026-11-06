@@ -45,7 +45,6 @@ def test_flat_counter_follows_minimum_user_and_twenty_percent_limits(pool_size, 
         gradient_norm_floor=0,
         t_user=patience,
         max_iterations=20,
-        max_basis_size=40,
     )
     # All changes are flat, starting with the reference-to-first-basis change.
     # With 34 members and cap10, step5 has threshold5.8 and step6 has5.6.

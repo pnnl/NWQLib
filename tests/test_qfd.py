@@ -373,9 +373,9 @@ def test_requested_power_order_keeps_the_reference_energy_through_save_load_and_
     from nwqlib.blocks.lowering import lower_qiskit
 
     rows = (("I", .25), ("X", .5), ("Z", .75))
-    method = QFD(initial_state=ingest_occupation((0,), num_qubits=1), time_step=2.0, powers=(1, 0, 3),
+    method = QFD(initial_state=ingest_occupation((0,), num_qubits=1), time_step=2.0, powers=np.array([1, 0, 3]),
                  steps_per_time_step=2)
-    result = solve(Eigenproblem(A=ingest_pauli(rows, num_qubits=1)), method=method, execution="quantum", seed=5)
+    result = solve(Eigenproblem(A=ingest_pauli(rows, num_qubits=1)), method=method, execution="quantum", seed=np.int64(5))
     plan = result.plan
     assert plan.reconstruction.reference_index == 1 and plan.method.powers == (1, 0, 3)
     stored = plan.reconstruction
@@ -506,6 +506,10 @@ def test_pencil_sampling_takes_the_estimate_and_reference_energy_from_the_main_s
     (reference,) = [e for e in result.estimates if e.experiment == "group_0_0_real_0"]
     assert set(reference.contribution_ids) <= set(result.contribution_ids)
     assert result.reference_energy == result.pencil.hamiltonian[0][0].real == reference.value
+    noise = result.overlap_noise
+    assert (noise.status, noise.population, noise.measured_quadratures) == ("available", "main_after_pilot", 2)
+    assert (noise.minimum_shots, noise.maximum_shots) == tuple(
+        f(c.returned_shots for c in stage(1) if c.experiment.startswith("group_0_1_")) for f in (min, max))
 
     def fail(*args, **kwargs):
         pytest.fail("loading or reanalysis measured or allocated again")
@@ -519,6 +523,52 @@ def test_pencil_sampling_takes_the_estimate_and_reference_energy_from_the_main_s
     for source in (result, loaded):
         again = source.analyze(overlap_cutoff=1e-3)
         assert again.shot_allocation == allocation and again.analysis_cutoff == 1e-3
+        assert again.overlap_noise == noise
+
+
+def test_a_stopped_complex_qfd_keeps_its_pending_imaginary_quadrature_out_of_the_structural_zeros(monkeypatch):
+    """A complex QFD Run stopped after 20 of its 27 settings has real parts whose imaginary parts are still pending.
+
+    The noise record reads the resolved quadratures of the nested pencil reconstruction, so it counts no structural
+    zero although a measured pair has no imaginary setting yet. The expected settings come from the planned order,
+    and the variances that exist are those of the raw counts.
+    """
+    import nwqlib._prepared_execution as prepared_execution
+    from nwqlib.execution import Run
+    from test_gcim_production import _overlap_noise_from_counts
+
+    target = ingest_pauli((("ZI", .5), ("IZ", -.3), ("XX", .2), ("YZ", .1)), num_qubits=2)
+    chosen = nwqlib.plan(Eigenproblem(A=target),
+                         method=QFD(initial_state=ingest_occupation((1, 0), num_qubits=2), time_step=.3, powers=(0, 1, 2),
+                                    steps_per_time_step=2),
+                         execution="quantum", shots=64, seed=11)
+    names, stop = [experiment.name for experiment in chosen.experiments], 20
+    assert len(names) == 27
+    measured = {tuple(name.split("_")[1:4]) for name in names[:stop]
+                if name.split("_")[1] != name.split("_")[2] and name.endswith("_0")}
+    assert {(i, j) for i, j, part in measured if part == "real"} - {(i, j) for i, j, part in measured if part == "imag"}
+    prepare_item, prepared = prepared_execution._prepare_static_item, []
+
+    def limited(*args, **kwargs):
+        prepared.append(1)
+        if len(prepared) > stop:
+            raise RuntimeError("stopped part way")
+        return prepare_item(*args, **kwargs)
+
+    monkeypatch.setattr(prepared_execution, "_prepare_static_item", limited)
+    with Run(chosen, progress=False) as run:
+        with pytest.raises(RuntimeError, match="stopped part way"):
+            run.resume()
+        partial = chosen.method.analyze(chosen, run.data, settings={})
+    noise = partial.overlap_noise
+    _, variances = _overlap_noise_from_counts(partial.data.observations.chunks)
+    assert partial.missing == tuple(names[stop:]) and partial.sampled_pair_variances == ()
+    assert (noise.status, noise.frobenius_rms, noise.reason) == ("unavailable", None, "7 planned settings have no data")
+    assert (noise.measured_quadratures, noise.structural_zero_quadratures) == (len(measured), 0)
+    assert noise.observed_zero_quadratures == sum(value == 0 for value in variances)
+    assert [row.overlap_variance for row in partial.group_moments if row.overlap_variance is not None] == pytest.approx(
+        [float(value) for value in variances], rel=1e-14, abs=0)
+    assert "group_moments" in str(partial)
 
 
 def test_phase_of_the_evolved_state_reaches_the_positive_imaginary_overlap():
@@ -674,59 +724,6 @@ def test_invalid_power_schedules_are_refused_at_planning():
     with pytest.raises(ApplicabilityError, match="execution='quantum'"):
         nwqlib.plan(problem, method=QFD(initial_state=reference, time_step=.1, powers=(0, 1)),
                     execution="classical", seed=1)
-
-
-@pytest.mark.parametrize("shots, calls", ((None, 2000), (10, 3000)))
-def test_uses_of_v_in_all_circuits_are_limited_before_the_circuits_are_described(shots, calls, monkeypatch):
-    """Powers (0, 1000) call V 1000 times in the diagonal circuit of power 1000 and 1000 times in the pair circuit.
-
-    With exact readout that is 2000 uses. Sampled with the one group of
-    A = Z, the off-diagonal pair is measured in two ancilla bases, so
-    3000 uses. One use more than `max_admission_steps` refuses the Plan
-    before any pair recipe is built and names the count. At a limit equal
-    to the count, the uses pass, and the Program check that follows
-    refuses the larger Program.
-
-    The same limit bounds the circuit instructions of the distinct
-    evolution blocks. For A = X + Z, the powers (0, 1) and r = 1000
-    order-2 substeps, one substep rotates about X, Z, Z and X. V has one
-    instruction per rotation, 4r in all. Its controlled form wraps the
-    controlled RZ of each X rotation in two H, 3 instructions, and controls
-    each Z rotation directly, 1 instruction, so 8r. The Plan uses these two
-    blocks, 12r = 12000 instructions, with exact readout and with 10 shots
-    alike, although the sampled Plan has 8 settings in two groups and two
-    quadratures. A limit of 11999 refuses the Plan and names the count,
-    12000 admits it, and the reference alone, powers (0,), plans with
-    r = 10**12 because it uses no evolution block.
-    """
-    problem = Eigenproblem(A=ingest_pauli((("Z", 1.0),), num_qubits=1))
-    reference = ingest_occupation((0,), num_qubits=1)
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("QFD expanded its pair recipes before refusing the uses of V")
-
-    with monkeypatch.context() as patch:
-        patch.setattr("nwqlib.algorithms.qfd.method.power_pair_recipes", forbidden)
-        with pytest.raises(ValueError, match=f"call V or its adjoint {calls} times in all"):
-            nwqlib.plan(problem, method=QFD(initial_state=reference, time_step=.1, powers=(0, 1000),
-                                            max_admission_steps=calls - 1),
-                        execution="quantum", shots=shots, seed=1)
-    with pytest.raises(ValueError, match="the Program exceeds QFD.max_admission_steps"):
-        nwqlib.plan(problem, method=QFD(initial_state=reference, time_step=.1, powers=(0, 1000),
-                                        max_admission_steps=calls), execution="quantum", shots=shots, seed=1)
-
-    evolution = Eigenproblem(A=ingest_pauli((("X", 1.0), ("Z", 1.0)), num_qubits=1))
-    with pytest.raises(ValueError, match=r"take 12000 circuit instructions in all, exceeding "
-                                         r"QFD\.max_admission_steps=11999\."):
-        nwqlib.plan(evolution, method=QFD(initial_state=reference, time_step=.1, powers=(0, 1),
-                                          steps_per_time_step=1000, max_admission_steps=11999),
-                    execution="quantum", shots=shots, seed=1)
-    admitted = nwqlib.plan(evolution, method=QFD(initial_state=reference, time_step=.1, powers=(0, 1),
-                                                 steps_per_time_step=1000, max_admission_steps=12000),
-                           execution="quantum", shots=shots, seed=1)
-    assert (len(admitted.reconstruction.pencil.groups), len(admitted.experiments)) == ((2, 8) if shots else (0, 3))
-    nwqlib.plan(evolution, method=QFD(initial_state=reference, time_step=.1, powers=(0,), steps_per_time_step=10**12),
-                execution="quantum", shots=shots, seed=1)
 
 
 def test_native_depth_limit_refuses_a_controlled_pair_deeper_than_every_basis_state(
@@ -1159,7 +1156,19 @@ def test_chemistry_generator_projects_the_stored_one_body_pair_and_qfd_keeps_the
     hamiltonian = [("IIII", -.3), ("IIIZ", .4), ("IIZI", .4), ("ZIZI", .1), ("IXZX", .05), ("IYZY", .05)]
     data = _chemistry_data(h, v, hamiltonian)
     before = (h.copy(), v.copy(), data.hamiltonian.copy())
-    terms, diagnostics = chemistry_evolution_terms(data)
+    # The helper reads c_B from its kept canonical table, so it maps no fermionic word to Pauli words.
+    from unittest.mock import patch
+    from nwqlib.operators._fermion import FermionTerms
+
+    mapped, to_pauli = [], FermionTerms.to_pauli
+
+    def counted(self, **kwargs):
+        mapped.append(self)
+        return to_pauli(self, **kwargs)
+
+    with patch.object(FermionTerms, "to_pauli", counted):
+        terms, diagnostics = chemistry_evolution_terms(data)
+    assert mapped == []
     fermions = terms.fermion_terms()
 
     def rows(generator):
@@ -1258,3 +1267,57 @@ def test_fermionic_generators_outside_the_block_domain_are_refused_at_planning()
                  evolution_terms=ingest_fermion([(1.0, [(0, 1), (0, 0)])], num_modes=2))
     with pytest.raises(ApplicabilityError, match="accepts no requested Problem sector"):
         nwqlib.plan(sector, method=method, execution="quantum", seed=1)
+
+
+def _aer_positions(circuit):
+    from qiskit_aer import AerSimulator
+    from nwqlib.backends.qiskit_aer import _AerDecompose, _lower_aer_circuit
+
+    lowered, _ = _lower_aer_circuit(circuit, _AerDecompose(AerSimulator().target))
+    return len(lowered.data)
+
+
+@pytest.mark.parametrize("label", ["XI", "ZZ", "XY"])
+def test_memory_of_each_evolution_form_follows_its_native_positions(tmp_path, label):
+    # Aer's lowering of the built block is the independent count. Controlling a weight-one word or a ZZ costs
+    # more native positions than the uncontrolled rotation, and XY costs the same in both forms, so a law shared
+    # between the forms would get the order wrong. A reloaded Plan keeps each estimate, which is not saved.
+    from nwqlib._choice_archive import ArchiveFiles, load_plan, save_plan
+    from nwqlib.algorithms.qfd.construction import construct_evolution
+    from nwqlib.blocks.selection import NATIVE_POSITION_BYTES
+
+    A = ingest_pauli(((label, .3), ("IZ", .1)) if label != "ZZ" else ((label, .3),), num_qubits=2)
+    selected = nwqlib.plan(Eigenproblem(A=A), method=QFD(initial_state=ingest_occupation((1, 0), num_qubits=2),
+                                                         time_step=.1, powers=(0, 1), steps_per_time_step=3),
+                           execution="quantum", shots=1, seed=7)
+    blocks = {b.record.choice: b for b in selected.blocks if b.record.implementation.name.startswith("qfd")
+              and b.record.choice in ("forward", "controlled_forward")}
+    native = {choice: _aer_positions(construct_evolution(b, (), None)) for choice, b in blocks.items()}
+    law = {choice: b._native_bytes / NATIVE_POSITION_BYTES for choice, b in blocks.items()}
+    assert set(law) == {"forward", "controlled_forward"}
+    assert np.sign(law["controlled_forward"] - law["forward"]) == np.sign(native["controlled_forward"] - native["forward"])
+    assert all(native[choice] / 2 <= law[choice] <= 2 * native[choice] for choice in law)
+    loaded = load_plan(save_plan(selected, ArchiveFiles(tmp_path, 4_000_000)), ArchiveFiles(tmp_path, 4_000_000))
+    assert [(b._native_bytes, b._definition_bytes) for b in loaded.blocks] == [
+        (b._native_bytes, b._definition_bytes) for b in selected.blocks]
+
+
+def test_prepare_refuses_the_memory_of_a_long_evolution_before_building_it(monkeypatch):
+    # Two thousand substeps of this generator keep more than 64000 native positions, about 13 MB at 200 bytes each,
+    # so max_bytes=10**6 refuses before a block is built. Twenty substeps under a limit of 10**7 are prepared.
+    from nwqlib.algorithms.qfd import construction
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("the evolution block was built before the memory comparison")
+
+    A = ingest_pauli((("ZI", .5), ("IZ", -.3), ("XX", .2), ("YZ", .1)), num_qubits=2)
+    def chosen(**fields):
+        return nwqlib.plan(Eigenproblem(A=A), method=QFD(initial_state=ingest_occupation((1, 0), num_qubits=2),
+                                                         time_step=.1, powers=(0, 1), **fields),
+                           execution="quantum", shots=1, seed=7)
+    with monkeypatch.context() as patch:
+        patch.setattr(construction, "construct_evolution", forbidden)
+        with pytest.raises(ValueError, match=r"needs about \d+ bytes.*max_bytes=1000000"):
+            nwqlib.prepare(chosen(steps_per_time_step=2000, max_bytes=10**6), settings="all", progress=False)
+    with nwqlib.prepare(chosen(steps_per_time_step=20, max_bytes=10**7), settings="all", progress=False).run as run:
+        assert run.trace.preparations > 0

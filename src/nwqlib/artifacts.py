@@ -1,6 +1,6 @@
 """Immutable saved arrays, each with the record of the measurement or computation that produced it."""
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from nwqlib._limits import exceeds
 
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -224,12 +224,16 @@ def probability_readout(values, indices=None, *, width):
     count D of a dense marginal and its nonzero count s are different
     quantities.
 
-    The total is ``math.fsum`` of the saved values, computed once here and
-    saved, so the unit endpoint ``fsum(p_j) <= fl(1+w)`` of
-    ``ObservationChunk.validate_unit_bound`` is the exact acceptance
-    predicate. ``np.sum`` with the same comparison could change acceptance for
-    a total at the endpoint. It is O(m) scalar conversion work, and it creates
-    no per-bin records. Zero-width probabilities stay invalid.
+    The total is ``math.fsum`` of the saved values, their correctly rounded
+    sum, computed once here and saved. ``ObservationChunk.validate_unit_bound``
+    compares it with ``fl(1+w)``. The correctly rounded sum depends only on
+    the saved values, not on the summation order or on NumPy's reduction
+    layout, so this record field is the same in every environment. The
+    window w holds for any summation tree, so the soundness of the check does
+    not depend on how the total is formed. ``np.sum`` with the same
+    comparison could change acceptance for a total at the endpoint. The sum
+    is O(m) scalar conversion work, and it creates no per-bin records.
+    Zero-width probabilities stay invalid.
 
     Returns:
         ``(indices, values, summary)``: the stored uint64 indices (None when
@@ -444,8 +448,8 @@ class ArtifactStore:
     (``run.sqlite``, the SQLite file in which a Run records each step).
     """
 
-    def __init__(self, *, max_bytes=DEFAULT_MAX_BYTES):
-        """Create an empty store with a limit of ``max_bytes`` array bytes.
+    def __init__(self, *, max_bytes=None):
+        """Create an empty store with a limit of ``max_bytes`` array bytes, or none when it is None.
 
         ``_persistence`` is None for a standalone store. A Run installs its
         reservation and saving callbacks there, so each array commits in
@@ -454,8 +458,8 @@ class ArtifactStore:
         that returns ``(read_chunks, chunk_bytes)`` for a manifest whose bytes
         its run log holds, or None, so a restored array is read on first use.
         """
-        if type(max_bytes) is not int or max_bytes < 0:
-            raise ValueError("artifact storage requires a finite nonnegative byte cap")
+        if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+            raise ValueError("artifact storage requires None or a nonnegative integer byte cap")
         self._cap = max_bytes
         self._data_bytes = 0
         self._handles = {}
@@ -502,7 +506,8 @@ class ArtifactStore:
     def _set_limit(self, max_bytes):
         """Apply an already recorded Run limit amendment without resetting usage."""
         with self._lock:
-            if type(max_bytes) is not int or max_bytes < self._cap or max_bytes < self._data_bytes:
+            if (max_bytes is not None and (type(max_bytes) is not int or self._cap is None or max_bytes < self._cap
+                                           or max_bytes < self._data_bytes)):
                 raise ValueError("artifact data cap can only increase and must cover existing data")
             self._cap = max_bytes
 
@@ -582,7 +587,7 @@ class ArtifactStore:
             buffer = self._hydrated.get(manifest.digest)
             if buffer is None or len(buffer) != manifest.data_bytes:
                 size = manifest.data_bytes
-                if size > self._cap:
+                if exceeds(size, self._cap):
                     raise ValueError("saved array exceeds the admitted data cap")
                 count = (size + chunk_bytes - 1) // chunk_bytes
                 data = bytearray(size)
@@ -616,17 +621,19 @@ class ArtifactStore:
         """Reject ``data_bytes`` more array bytes when saved plus new bytes would exceed the limit."""
         if type(data_bytes) is not int or data_bytes < 0:
             raise ValueError("data capacity requires nonnegative integer bytes")
-        if self._data_bytes + data_bytes > self._cap:
+        if exceeds(self._data_bytes + data_bytes, self._cap):
             raise ValueError(f"array publication needs {data_bytes} bytes with {self._data_bytes} already stored; limit is {self._cap}")
 
-    def _publish(self, array, *, output, provenance, private=False):
+    def _publish(self, array, *, output, provenance, private=False, finite=False):
         """Save one declared array as immutable little-endian data.
 
         An ``ArrayOutput`` is complex128 or float64. A ``ReadoutArray`` is
-        float64 or uint64 and has had its value checks
-        (``probability_readout``) before it arrives here. Shape and dtype
-        are checked before any copy. Nonfinite values of an
-        ``ArrayOutput`` are rejected. The check reads the array in blocks of at most
+        float64 or uint64. Shape and dtype are checked before any copy.
+        Nonfinite values are rejected unless ``finite=True``, which a caller
+        passes only for an array whose values it has already checked:
+        ``probability_readout`` checks a readout array, and
+        ``reduce_amplitudes`` checks its selected amplitudes and returns only
+        finite entries. The check reads the array in blocks of at most
         ``_FINITE_CHECK_ENTRIES`` entries (one operator row when a row is
         longer), so its Boolean scratch does not grow with the array. A Run
         reserves the bytes against the acquisition's output reservation before
@@ -662,8 +669,7 @@ class ArtifactStore:
         output.validate_array(array)
         with self._lock:
             self.check_capacity(array.nbytes)
-            if array.dtype.kind in "fc" and type(output) is not ReadoutArray:
-                # A readout array's values were checked by probability_readout.
+            if array.dtype.kind in "fc" and not finite:
                 _check_finite_blocks(array)
             reservation = None if self._persistence is None else self._persistence[0](array.nbytes, provenance)
             dtype = np.dtype(output.storage_dtype)

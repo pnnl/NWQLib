@@ -5,23 +5,20 @@ No source code is ever evaluated.
 
 from typing import Annotated, Literal
 
-from pydantic import Field, StrictInt, model_validator
+from pydantic import Field, model_validator
 
-from nwqlib.core.records import Float64, PositiveInt, Record, Text
+from nwqlib.core.records import StrictInteger, Float64, PositiveInt, Record, Text
 
-NonnegativeInt = Annotated[StrictInt, Field(ge=0)]
-Value = StrictInt | Float64
+NonnegativeInt = Annotated[StrictInteger, Field(ge=0)]
+Value = StrictInteger | Float64
 
 
 def walk_kept(value, reserve):
     """Yield every Record, tuple and scalar reachable from value, counting each collection first.
 
     ``reserve(n)`` is called with a Record's field count or a tuple's length
-    before its children are pushed on the stack, so a ``reserve`` that
-    raises rejects an over-budget collection by its length before it is
-    iterated or copied. Program admission (``ir/validation.py::_Admission``)
-    instead only counts in ``reserve`` and compares the total after the walk,
-    so its error reports the complete stored field inventory. A local ID
+    before its children are pushed on the stack, so the caller counts the
+    work of the walk before it is done. A local ID
     string is yielded as data and never resolved, so a shared definition is
     not expanded.
     """
@@ -40,47 +37,24 @@ def walk_kept(value, reserve):
 
 
 class AdmissionLimits(Record):
-    """Limits on the size of a Program's stored structure and on the work of checking it.
+    """The limit on the depth of a Program's references.
 
-    Pass it as `limits=` to [`Program`][nwqlib.ir.records.Program]. Every
-    argument is optional. A caller can make a Program's metadata arbitrarily
-    large or deep, and these limits make the structural check and the resource
-    estimate reject it before their work or memory passes a fixed size. They
-    limit the stored structure and the checking work, never the size of the
-    workload the Program describes, and repeat counts and range lengths are not
-    expanded. A Method with a `max_admission_steps` setting uses it as
-    `max_steps` of its Programs, and [Program checks](../development/program_checks.md) explains how planning
-    work is counted.
+    Pass it as `limits=` to [`Program`][nwqlib.ir.records.Program]. The
+    checking work and the stored structure of a Program grow linearly with
+    the Program, which is already in memory, and have no limit. Repeat counts
+    and range lengths are never expanded.
+    [Program checks](../development/program_checks.md) explains how the
+    check counts its work.
 
     Attributes:
-        max_definitions: Default `1_000_000`. Positive limit on the stored
-            definitions, expressions, parameters, registers, classical values and
-            signatures together. This limit covers a sampled FixedGCIM
-            plan with three basis states and a 20-qubit, 8,083-term molecular
-            Hamiltonian in 1,285 measurement groups, with 11,565 circuits and 25,731
-            declarations when both the real and imaginary parts are measured,
-            and real-only measurement needs fewer. It has over sixfold margin
-            over the 161,691 declarations of singleton grouping (the Program
-            inventory row of
-            [Engineering constants](../ENGINEERING_CONSTANTS.md)). Stored-field and
-            checking-work limits apply independently, and no space is reserved from
-            this limit alone.
         max_depth: Default `128`, also the largest accepted value. Limit on the
             longest chain of references, which is also the recursion limit of the
             lifecycle check.
-        max_steps: Default `100000`. Positive limit on the checking work units of
-            one check, and separately on the number of stored fields.
-        max_integer_bits: Default `4096`. Positive limit on the bit length of any
-            integer the check accepts. A sum or product computed during the
-            check can exceed it by one bit before the check rejects it.
     """
 
     # Reasons and revisit conditions: ENGINEERING_CONSTANTS.md, "Shared Program
-    # admission limits". They bound the stored planning inventory, not dynamic work.
-    max_definitions: PositiveInt = 1_000_000
+    # admission limits".
     max_depth: Annotated[PositiveInt, Field(le=128)] = 128
-    max_steps: PositiveInt = 100000
-    max_integer_bits: PositiveInt = 4096
 
 
 class Parameter(Record):

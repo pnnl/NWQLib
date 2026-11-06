@@ -90,7 +90,7 @@ class OneHotGrid:
         ``-0.5/(h*h)`` (``theory.restricted_kinetic_sparse``,
         ``method._schrodinger_kinetic_bounds``) and the hopping coefficient
         ``-w/(4.0*h*h)`` with the schedule weight w
-        (``kinetic.KineticCompiler``), and the running phase total and the
+        (``onehot_schedule.hopping_layers``), and the running phase total and the
         binary kinetic table divide by ``h**2``. Each variable's spacing h must
         therefore be finite and positive, ``h*h`` and ``h**2`` normal binary64
         numbers, ``(4 h) h`` finite and ``0.25/(h*h)`` normal, that is at least

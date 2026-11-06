@@ -58,7 +58,7 @@ t                  None  unavailable
 
 Replace `A`, `b`, the observable and `shots` with your own. The [QLS guide](algorithms/qls.md#plan-and-estimate-beyond-simulation) plans and estimates a structured system with `2**40` unknowns in the same way.
 
-`estimate` combines the costs declared by the planned construction. A cost rule (`ResourceLaw`) states a count for a specified resource context. `estimate` builds no circuit, transpiles nothing, calls no backend and does not choose another construction. A logical estimate is therefore distinct from an inventory of a prepared circuit ([Inspect a prepared circuit](#explicit-native-inspection)), from execution and from provider billing. LCHS can also count representative circuits of its construction ([LCHS guide](algorithms/lchs.md#resource-inspection)).
+`estimate` combines the costs declared by the planned construction. A cost rule (`ResourceLaw`) states a count for a specified resource context. `estimate` builds no circuit, transpiles nothing, calls no backend and does not choose another construction. A logical estimate is therefore distinct from an inventory of a prepared circuit ([Inspect a prepared circuit](#explicit-native-inspection)), from execution and from provider billing. LCHS also lists the same costs block by block ([LCHS guide](algorithms/lchs.md#resource-inspection)).
 
 ## Read the labels {#meaning-of-each-quantity}
 
@@ -93,7 +93,10 @@ For exact arithmetic, read `fact.value`, a `Rational` (`numerator`, `denominator
 
 Labels arise in these common cases:
 
-- A branch contributes the larger of its alternatives, so the count becomes an upper bound. NWQLib infers no branch probability and no expected number of rounds.
+- A branch contributes the larger of its alternatives, so the count becomes an upper bound, unless every alternative has the same exact count, which stays exact. NWQLib infers no branch probability and no expected number of rounds.
+- `logical_depth`, `t_depth` and `non_clifford_depth` read the order of the Program as a serial schedule, so each is an upper bound on the depth of the circuit. Two gates on separate qubits count as two steps, except inside an explicit `Parallel`.
+- A memory peak built from declared `Workspace` bytes is an `estimate`, because a declaration is not an observed allocation.
+- `adaptive_rounds` and `classical_work` count the `AdaptiveLoop` rounds and classical stages that the Program declares, as `population` says. A Method's controller and analysis outside the Program are not counted, so an RWPE Plan reports zero for both although a classical update follows each measured bit. Its `settings`, `shots` and CX count do cover all `max_steps` measured circuits. T, depth and arbitrary-rotation counts stay unavailable, because the feedback angles are not known before running.
 - An adaptive method's per-round cost stays unavailable unless an explicit `resource_envelope` of its adaptive loop (`nwqlib.ir.AdaptiveLoop`) asserts a uniform bound per round over the history. The work and workspace of its decision rule stay separate missing costs.
 - `expected_operations` needs a probability model and stays unavailable without one.
 - In a batch with a parameter range, a cost that changes along the range stays unavailable, and a cost that does not change is multiplied by the number of points. NWQLib does not enumerate the range.
@@ -116,7 +119,7 @@ Each register of a `Program`, NWQLib's description of a circuit as named steps, 
 
 A CX count is a formula or an estimate from the rules of the planned blocks. It is not a count of gates in a built circuit and does not include hardware routing. A block without a CX rule leaves the total unavailable, and a CX bound supplies no T, rotation, depth or workspace counts. The [source map](#source-map) lists the published counts behind these rules.
 
-A Toffoli count and a T decomposition are alternative bases, and neither is converted into the other. An arbitrary rotation gets no fixed T count without its synthesis precision (`precision=`) and synthesis rule (`synthesis=`). A fault-tolerant cost rule can give a conditional estimate for a block without an executable circuit.
+A Toffoli count and a T decomposition are alternative bases, and neither is converted into the other. An arbitrary rotation gets no fixed T count without its synthesis precision (`precision=`) and synthesis rule (`synthesis=`). With `synthesis=TYPICAL_ROTATION_SYNTHESIS` in the `clifford_t` basis, an arbitrary phase on one qubit of a block's gate list gets the leading-term estimate `ceil(3*log2(1/precision))` T gates ([Estimate fault-tolerant resources](fault-tolerant-resources.md#project-a-resource-estimate-without-compiling)). A fault-tolerant cost rule can give a conditional estimate for a block without an executable circuit.
 
 A one-qubit phase is classified by its recorded angle. An angle of 0, ±pi/2, ±pi, ±3pi/2 or ±2pi is a Clifford gate, and ±pi/4 is a T or T-inverse gate. The comparison is exact, so an angle near these values stays an arbitrary rotation. For example, a controlled preparation of `[i, 0]` is an S gate on its control, with zero non-Clifford depth.
 
@@ -205,7 +208,7 @@ Nonempty `transpile_options` compiles one separate copy and counts that. The ori
 
 `prepared.circuits` creates independent copies of every circuit, and `prepared.circuit(index)` copies one. Use the indexed inspection above to count without those copies.
 
-`max_operations=100000` bounds the inspected and compiled operations, and `max_bytes=10_000_000_000` bounds the known bytes of the options, the operation counts and the circuit copy. Options must be finite scalars, lists or dictionaries without cycles, nested at most 64 deep. The output of a compilation that expands beyond `max_operations` is refused after compiling. These limits do not bound the compiler workspace, the data Qiskit already holds or the process memory, which stay unknown.
+`max_bytes` bounds the known bytes of the options, the operation counts and the circuit copy, and its default `None` uses the physical memory of the computer. Options must be finite scalars, lists or dictionaries without cycles, nested at most 64 deep. This limit does not bound the compiler workspace, the data Qiskit already holds or the process memory, which stay unknown.
 
 ## How the estimator counts {#how-the-estimator-counts}
 
@@ -229,4 +232,3 @@ NWQLib's own counting rules (how counts combine, how unknowns propagate, readout
 | Pauli readout basis uses the SELECT bound without the sign diagonal | NWQLib derivation | Docstring of the code | `blocks.selection.pauli_readout_cx_bound` |
 | Controlled direct PREP bound | NWQLib derivation | ENGINEERING_CONSTANTS.md, "Controlled direct PREP slot bound" | `_preparation_laws.direct_preparation_controlled_cx_bound` |
 | Gate positions of the uniform superposition over M contiguous basis states. For M that is not a power of two, M = sum of 2^(l_j) over j = 0..k with l_0 < ... < l_k and k >= 1, and the preparation uses one RY, k X, l_0 H, l_k-l_0 open controlled H and k-1 open controlled RY, where a controlled H needs one CX and a controlled RY two. For M = 2^r, the preparation uses r H gates | Shukla and Vedula, arXiv:2306.11747v2, which Qiskit `UniformSuperpositionGate` implements. The per-gate expansions (two H and four phase gates around the CX of a controlled H, two RY with the two CX of a controlled RY, two X per open control) are Qiskit 2.6.0's gate definitions | Algorithm 1 (p. 4), gate counts in Sec. 2.5 (p. 14) and CX constructions in Fig. 6 (pp. 15-16) | `_preparation_laws._uniform_superposition_gate_slots` |
-| Work limit of an estimate | NWQLib engineering limit | ENGINEERING_CONSTANTS.md, "Shared Program admission limits" | `resources.records.FOLD_WORK_PER_ADMISSION_STEP` |

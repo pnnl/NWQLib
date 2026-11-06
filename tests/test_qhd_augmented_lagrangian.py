@@ -209,6 +209,21 @@ def test_default_most_probable_rounds_follow_an_independent_restricted_evolution
     assert result.iterations[0].evaluation.indices != result.results[0].candidate_indices
 
 
+def test_unset_round_budgets_stay_unset_unless_the_backend_may_charge():
+    """Unset circuit and shot budgets pass to every round unset, except that a charging backend sets them once."""
+    from types import SimpleNamespace
+    from nwqlib.algorithms.qhd._outer import check_arguments, round_limits
+
+    used = dict(circuit_preparations=3, circuit_attempts=5, shots=40, data_bytes=10, synthesis_work=0)
+    funded, reason = round_limits(ExecutionLimits(), used, 64)
+    assert reason is None and (funded.max_total_circuits, funded.max_total_shots) == (None, None)
+    _, local = check_arguments(_qhd(), "quantum", 64, 1, None, backend=None)
+    _, paid = check_arguments(_qhd(), "quantum", 64, 1, None, backend=SimpleNamespace(kind="ibm"))
+    assert (local.max_total_circuits, paid.max_total_circuits, paid.max_total_shots) == (None, 512, 10**6)
+    funded, reason = round_limits(paid, used, 64)
+    assert reason is None and (funded.max_total_circuits, funded.max_total_shots) == (507, 10**6 - 40)
+
+
 def test_cumulative_limits_and_inner_failure_keep_the_completed_rounds():
     equality = ConstrainedOptimization(objective=F, variables=(x, y), bounds=BOX, equalities=(x + y,))
     # One circuit per quantum round: two circuits, or 128 shots at 64 per round, fund two rounds, and
@@ -233,7 +248,7 @@ def test_cumulative_limits_and_inner_failure_keep_the_completed_rounds():
     failing = _solve(offgrid, **{**options, "qhd": _qhd(total_time=0.1, keep_state=False,
                                                          max_work=(max(work[:k]) + work[k]) // 2)})
     assert failing.termination == "inner_failed"
-    assert failing.record.failure.startswith("ValueError") and "set QHD(max_work=" in failing.record.failure
+    assert failing.record.failure.startswith("ResourceLimitError") and "set QHD(max_work=" in failing.record.failure
     assert len(failing.iterations) == k + 1 and failing.results[k] is None
     stopped = failing.iterations[k]
     assert stopped.evaluation is None and stopped.plan_id is None
@@ -392,6 +407,14 @@ def test_active_disk_constraint_reaches_the_feasible_grid_minimum():
     _assert_every_grid_point_observed(result)
     assert result.termination == "feasible_complementary"
     reference = constrained_grid_minimum(result)
+    # The reference has no work limit by default. An explicit max_work admits exactly its counted
+    # work, also as a NumPy integer or beyond int64, and refuses one unit less.
+    for limit in (reference.work, np.int64(reference.work), 2**70):
+        assert constrained_grid_minimum(result, max_work=limit) == reference
+    with pytest.raises(ValueError, match=f"above max_work={reference.work - 1} "):
+        constrained_grid_minimum(result, max_work=reference.work - 1)
+    with pytest.raises(ValueError, match="max_work"):
+        constrained_grid_minimum(result, max_work=0)
     axis = [0.0 + (i + 1) * (1.0 / 5) for i in range(4)]
     value, point = _feasible_grid_minimum(sp.lambdify((x, y), F), [("ineq", sp.lambdify((x, y), disk))],
                                           (axis, axis), 1e-9)
@@ -763,10 +786,9 @@ def test_the_three_inequality_forms_and_automatic_selection_by_execution_route()
                                      options=AugmentedLagrangian(inequality_form="auto"), seed=7)[1]
     assert kept.forms == ("phr",) and not kept.trials[0].accepted
     assert kept.trials[0].trial_cx > kept.trials[0].current_cx and kept.trials[0].trial_work > kept.trials[0].current_work
-    # With Qiskit's state preparation the constructions record no CX law. Under max_work = 3866, the slack form's
-    # resource-inspection census, which quantum binary planning admits, the PHR form of
-    # G = sum_(a=1..4) (u**a + v**a) - 4 next to F = -G**2/2 is refused and the slack form, whose expansion
-    # cancels G**2, is admitted. A trial without a CX law does not replace a refused PHR form, so automatic
+    # With Qiskit's state preparation the constructions record no CX law. Under max_work = 3866 the PHR form of
+    # G = sum_(a=1..4) (u**a + v**a) - 4 next to F = -G**2/2 is refused, since its symbolic tables and binary
+    # compilation need 4288 units, and the slack form, whose expansion cancels G**2, is admitted. A trial without a CX law does not replace a refused PHR form, so automatic
     # selection keeps it and the round raises its refusal.
     g = sum(u**a + v**a for a in range(1, 5)) - 4
     law_free = ConstrainedOptimization(objective=-g**2 / 2, variables=(u, v), bounds=((0.0, 1.0),) * 2,
@@ -778,6 +800,103 @@ def test_the_three_inequality_forms_and_automatic_selection_by_execution_route()
     with pytest.raises(ValueError, match="requires"):
         plan_augmented_lagrangian(law_free, qhd=tight, options=AugmentedLagrangian(inequality_form="auto"),
                                   execution="quantum", seed=7)
+
+
+@pytest.mark.parametrize("encoding", ["binary", "one_hot"])
+def test_automatic_selection_under_a_planning_work_limit_keeps_the_admitted_plan(encoding):
+    # A max_work that admits exactly one of the two representations, in each orientation. Native construction
+    # bytes are checked by the constructor, so the refusals here are planning refusals of work. The round keeps
+    # the admitted representation's Plan, so QHD plans once per representation and never again for the round.
+    method = BINARY if encoding == "binary" else QHD(num_grid_points=4, num_steps=2, total_time=0.3)
+    auto, calls, original = AugmentedLagrangian(inequality_form="auto"), [], QHD.plan
+
+    def counted(self, *args, **kwargs):
+        calls.append(self)
+        return original(self, *args, **kwargs)
+
+    def select(problem, limit, form=auto):
+        calls.clear()
+        with patch.object(QHD, "plan", counted):
+            return plan_augmented_lagrangian(problem, qhd=method.revise(max_work=limit), execution="quantum",
+                                             options=form, seed=7)
+
+    # Six variables under one affine constraint: the PHR form's native construction needs 394,234 (binary) or
+    # 570,086 (one-hot) work units after its tables are formed, and every stage of the slack conversion at most
+    # 18,946. Under 300,000 the current form is refused at that stage and the conversion is accepted. Its table
+    # count stays exact.
+    family = _affine_family(6)
+    reference = plan_augmented_lagrangian(family, qhd=method, execution="quantum", options=auto, seed=7)[1]
+    _, chosen, planned = select(family, 300_000)
+    trial, = chosen.trials
+    assert len(calls) == 2 and chosen.forms == ("slack",) and trial.accepted and trial.current_work is None
+    assert trial.reason == "the current planning was refused and the trial's is admitted"
+    assert chosen.table_evaluations == reference.table_evaluations and chosen.table_evaluations_unavailable is None
+    forced = select(family, 300_000, AugmentedLagrangian(inequality_form="slack"))[2]
+    assert planned.content_id == forced.content_id
+    # Two variables under u + v <= 1/2: the PHR form needs at most 642 (one-hot) or 1,936 (binary) units in every
+    # stage, while the slack conversion needs 1,677 for its one-hot construction, after its tables, or 3,840 for
+    # its binary table and compilation stage, before them. A limit between keeps the PHR form. The binary trial
+    # is refused at that table admission, which precedes its planning, so QHD plans only the PHR form.
+    u, v = sp.symbols("u v", real=True)
+    small = ConstrainedOptimization(objective=(u - sp.Rational(1, 2)) ** 2 + (v - sp.Rational(1, 2)) ** 2,
+                                    variables=(u, v), bounds=((0.0, 1.0),) * 2,
+                                    inequalities=(u + v - sp.Rational(1, 2),))
+    limit = 1_950 if encoding == "binary" else 1_000
+    _, kept, planned = select(small, limit)
+    trial, = kept.trials
+    assert len(calls) == (1 if encoding == "binary" else 2)
+    assert kept.forms == ("phr",) and not trial.accepted and trial.trial_work is None
+    assert trial.reason == "the trial's planning was refused"
+    forced = select(small, limit, AugmentedLagrangian(inequality_form="phr"))[2]
+    assert planned.content_id == forced.content_id
+    unlimited = plan_augmented_lagrangian(small, qhd=method, execution="quantum", options=auto, seed=7)[1]
+    assert kept.table_evaluations == (forced.reconstruction.support_evaluations if encoding == "binary"
+                                      else unlimited.table_evaluations)
+
+
+def test_selection_bounds_count_four_work_and_three_byte_categories_per_representation(monkeypatch):
+    # Automatic selection admits each representation's symbolic and running-total work once, and the
+    # representation's compact quantum Plan reuses that admission, so it opens at most four work categories and
+    # three byte categories, the construction's bytes being checked only when a kept Plan's circuit is built.
+    # One round without refinement reuses the kept representation's Plan: a = 4, t_W = 4m and t_B = 3m.
+    from nwqlib.algorithms.qhd import constrained
+    from nwqlib.algorithms.qhd.method import _ADMITTED_SYMBOLIC
+
+    u, v = sp.symbols("u v", real=True)
+    problem = ConstrainedOptimization(objective=(u - sp.Rational(1, 2)) ** 2 + (v - sp.Rational(1, 2)) ** 2,
+                                      variables=(u, v), bounds=((0.0, 1.0),) * 2,
+                                      inequalities=(u + v - sp.Rational(1, 2), u - v / 2))
+    qhd = BINARY.revise(max_work=10**7, max_bytes=10**10)
+    options = AugmentedLagrangian(inequality_form="auto", max_iterations=1)
+    calls, admit = [], QHD._admit_symbolic_work
+
+    def counted(self, inner, compact):
+        reused = _ADMITTED_SYMBOLIC.get()
+        calls.append((inner.content_id, compact, reused is not None
+                      and reused[0] == (self.content_id, inner.content_id, bool(compact))))
+        return admit(self, inner, compact)
+
+    with patch.object(QHD, "_admit_symbolic_work", counted):
+        result = solve_augmented_lagrangian(problem, qhd=qhd, options=options, execution="quantum", seed=7)
+    m, w, b = 2, qhd.max_work, qhd.max_bytes
+    assert len(result.iterations[0].representation.trials) == m
+    assert (result.record.admitted_work_bound, result.record.admitted_bytes_bound) == ((4 + 4 * m + 1) * w,
+                                                                                       (4 + 3 * m) * b)
+    # Every representation is expanded once, and its Plan takes the reuse branch.
+    compact = [call for call in calls if call[1]]
+    represented = {identity for identity, _, _ in compact}
+    assert len(represented) == m + 1
+    for identity in represented:
+        assert sorted(reused for other, _, reused in compact if other == identity) == [False, True]
+    # With refinement every level plans apart from the selection: t_W = 4 (m + 1) and t_B = 3 (m + 1), with
+    # a = 4 for physical levels and a = 6 for search-model levels, which expand their unscaled objective first.
+    for scaling, a in (("physical", 4), ("search_model", 6)):
+        refinement = BoxRefinement(scaling=scaling, max_levels=2)
+        assert constrained._admitted_bounds(qhd, options, refinement, "quantum", m) == (
+            (a * 2 + 4 * (m + 1) + 1) * w, (a * 2 + 3 * (m + 1)) * b)
+    # Without automatic selection there is no trial.
+    assert constrained._admitted_bounds(qhd, AugmentedLagrangian(max_iterations=1), None, "quantum", m) == (
+        5 * w, 4 * b)
 
 
 def test_forced_slack_rounds_keep_the_phr_update_at_the_projected_point():

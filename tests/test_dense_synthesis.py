@@ -299,13 +299,13 @@ def test_dense_synthesis_size_bounds_the_kept_instructions_and_the_traced_peak(n
         assert peak <= working
 
 
-def test_basis_lowering_admits_its_syntheses_before_the_first_one(monkeypatch):
+def test_basis_lowering_lists_its_syntheses_before_the_first_one(monkeypatch):
     # The rewrite synthesizes each distinct dense matrix once. Here that is
     # two three-qubit unitaries, one of them also nested in a composite, and
     # one two-qubit unitary. A one-qubit unitary keeps Qiskit's exact
-    # definition. A charge that refuses stops the rewrite before any
-    # synthesis starts. A Run's charge receives their summed law once,
-    # before the first synthesis.
+    # definition. The census lists them without synthesizing anything, so
+    # their summed law is known before the first synthesis.
+    from nwqlib.subroutines._dense_synthesis import admit_dense_syntheses
     from nwqlib.subroutines.qiskit_compat import dense_synthesis_widths, exact_dense_unitaries
 
     first, second = random_unitary(8, seed=31).data, random_unitary(8, seed=32).data
@@ -317,34 +317,25 @@ def test_basis_lowering_admits_its_syntheses_before_the_first_one(monkeypatch):
     circuit.append(UnitaryGate(second), [0, 1, 2])
     circuit.append(UnitaryGate(random_unitary(4, seed=33).data), [0, 1])
     circuit.append(UnitaryGate(random_unitary(2, seed=34).data), [2])
-    assert sorted(dense_synthesis_widths(circuit)) == [2, 3, 3]
+    widths = dense_synthesis_widths(circuit)
+    assert sorted(widths) == [2, 3, 3]
     need = 2 * _dense_synthesis_work(3) + _dense_synthesis_work(2)
     calls = _counted_syntheses(monkeypatch)
-
-    def refuse(work, operation):
-        raise ValueError(f"{operation} refused")
-
-    with pytest.raises(ValueError, match="refused"):
-        exact_dense_unitaries(circuit, charge=refuse)
+    assert admit_dense_syntheses(widths, max_work=None, max_bytes=None, operation="rewrite")[1] == need
     assert calls == []
     exact_dense_unitaries(circuit)
     assert sorted(calls) == [2, 3, 3]
-    charges = []
-    exact_dense_unitaries(circuit, charge=lambda work, operation: charges.append(work))
-    assert charges == [need]
 
 
-def test_noisy_aer_run_admits_dense_synthesis_against_its_limit(monkeypatch):
+def test_noisy_aer_run_records_its_dense_synthesis(monkeypatch):
     # A noise model's basis omits Aer's unitary instruction, so preparing
-    # this supplied state circuit synthesizes its three-qubit unitary. The
-    # Run's max_synthesis_work refuses one unit below that synthesis before
-    # it starts and admits it at the law.
+    # this supplied state circuit synthesizes its three-qubit unitary, and
+    # the Run's trace records the work of that synthesis by its law.
     import nwqlib
     from qiskit_aer.noise import NoiseModel
     from nwqlib import Expectation
     from nwqlib.algorithms.expectation import ExpectationMethod
     from nwqlib.backends import AerBackend
-    from nwqlib.execution import ExecutionLimits
     from nwqlib.operators import ingest_pauli
     from nwqlib.problems.inputs import state_input
 
@@ -353,12 +344,9 @@ def test_noisy_aer_run_admits_dense_synthesis_against_its_limit(monkeypatch):
     problem = Expectation(state=state_input(state), observable=ingest_pauli((("ZZZ", 1.0),), num_qubits=3))
     chosen = nwqlib.plan(problem, method=ExpectationMethod(), shots=16, seed=7)
     backend = AerBackend.from_noise_model(NoiseModel(basis_gates=["cx", "rz", "sx", "x"]))
-    need = _dense_synthesis_work(3)
     calls = _counted_syntheses(monkeypatch)
-    with pytest.raises(ValueError, match="max_synthesis_work"):
-        nwqlib.prepare(chosen, backend=backend, limits=ExecutionLimits(max_synthesis_work=need - 1))
-    assert calls == []
-    prepared = nwqlib.prepare(chosen, backend=backend, limits=ExecutionLimits(max_synthesis_work=need))
+    prepared = nwqlib.prepare(chosen, backend=backend)
+    assert prepared.run.trace.synthesis_work == _dense_synthesis_work(3)
     prepared.run.close()
     assert calls == [3]
 

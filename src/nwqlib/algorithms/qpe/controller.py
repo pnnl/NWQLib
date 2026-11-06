@@ -16,11 +16,10 @@ The width needs no storage because Eq. (7b) makes it a function of the
 processed-step count (numerical.rwpe_scale). A restart reads the checkpoint
 and resumes at the saved step with the saved point and seed. It never
 replays earlier observations or reconstructs the trajectory, and a
-completed observation updates the mean exactly once. Creating the
-iteration state adds 2 work units. Choosing a point and applying an update
-each add 32 work units to Checkpoint.work, which is checked against
-Method.max_work before the step runs. The iteration state counts as 256
-bytes against Method.max_bytes.
+completed observation updates the mean exactly once. Each step is scalar
+arithmetic with no array of its own, so the loop checks no limits. The
+algorithm parameter max_steps bounds the number of steps, and the Run
+charges their execution.
 
 The loop has no consistency checks or unwinding, which the paper adds in
 Algorithm 2. numerical.rwpe_estimate states what that omission means for
@@ -68,7 +67,6 @@ class Checkpoint(Record):
         plan_id: Content hash of the original Plan, which fixes the prior and time schedule.
         mean: Gaussian mean in unwrapped phase radians.
         processed: Number of observations already incorporated in the mean.
-        work: Cumulative work units of the iteration loop counted against this Plan.
         pending: Saved next experiment, feedback and backend seed, if any.
         last_attempt: Identifier of the last observation incorporated, so it cannot update twice.
     """
@@ -76,7 +74,6 @@ class Checkpoint(Record):
     plan_id: ContentID
     mean: Real
     processed: Count
-    work: Count = 0
     pending: Pending | None = None
     last_attempt: Text | None = None
 
@@ -103,10 +100,7 @@ def _state(plan, run):
     if saved is None:
         if run.trace.events:
             raise ValueError("RWPE cannot infer missing controller state from observations")
-        plan.method._admit(2, 256)
-        state = Checkpoint(
-            plan_id=plan.content_id, mean=plan.method.prior_mean, processed=0, work=2
-        )
+        state = Checkpoint(plan_id=plan.content_id, mean=plan.method.prior_mean, processed=0)
         run.checkpoint(state)
     else:
         state = Checkpoint.model_validate(saved)
@@ -115,7 +109,6 @@ def _state(plan, run):
         or state.processed > plan.method.max_steps
     ):
         raise ValueError("RWPE checkpoint differs from its original selected Plan and steps")
-    plan.method._admit(state.work, 256)
     if state.pending is not None:
         power, feedback = query_at(
             plan,
@@ -142,17 +135,13 @@ def _checkpoint(run, state):
 def _pending(plan, run, state):
     """Choose and save the next query unless one is pending or all steps are done.
 
-    The work count is saved before the choice is computed, and the chosen
-    power, feedback and backend seed are saved before preparation, so a
-    restart reuses the same point and seed. The time 1/sigma_k must equal the
+    The chosen power, feedback and backend seed are saved before
+    preparation, so a restart reuses the same point and seed. The time 1/sigma_k must equal the
     planned query power, which planned_power_schedule fixed from the same
     rwpe_scale.
     """
     if state.pending is not None or state.processed == plan.method.max_steps:
         return state
-    work = state.work + 32
-    plan.method._admit(work, 256)
-    state = _checkpoint(run, state.revise(work=work))
     power, feedback = numerical.rwpe_choose(
         state.mean, numerical.rwpe_scale(plan.method.prior_std, state.processed)
     )
@@ -223,9 +212,7 @@ def prepare_rwpe(plan, *, run):
 def run_rwpe(plan, *, run):
     """Apply each completed one-bit update exactly once, and leave an unresolved step pending.
 
-    Planning/reporting never replays the update history. Per-step Gaussian
-    work is counted before it runs and survives an interrupted update. The
-    current mean, pending seed and point, and Run RNG states stay unchanged
+    Planning/reporting never replays the update history. The current mean, pending seed and point, and Run RNG states stay unchanged
     until the corresponding new checkpoint has been saved.
     """
     from .method import _samples, _analysis
@@ -283,11 +270,8 @@ def run_rwpe(plan, *, run):
         if plan.execution == "quantum" and sample.shots != 1:
             raise ValueError("RWPE requires one returned Bernoulli datum per update")
         run.collect(chunk)
-        # Charge the next Gaussian update before computing it. Publish its mean
-        # and processed count together so a completed sample is not applied twice.
-        work = state.work + 32
-        plan.method._admit(work, 256)
-        state = _checkpoint(run, state.revise(work=work))
+        # Publish the mean and processed count together so a completed sample
+        # is not applied twice.
         if plan.execution == "quantum":
             datum = sample.ones
         else:
@@ -328,7 +312,6 @@ def run_rwpe(plan, *, run):
         gaussian=RWPEGaussian(mean=state.mean,
             standard_deviation=numerical.rwpe_scale(plan.method.prior_std, state.processed)),
         processed=state.processed,
-        controller_work=state.work,
         stop_reason=stop,
     )
     run.progress("analyze", 1, 1)

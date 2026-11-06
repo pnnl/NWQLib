@@ -11,11 +11,12 @@ table including zeros and duplicates, ``g = min(L, d)`` and
 ``t = min(d, 1024)``. For one state that is already complex128 and a packed
 table, that function gives
 
-    B_A = 33d + 24L + 16g + 8 + max(9L, 96t),
+    B_A = 33d + 254L + 1282 + max(9L, 96t),
     W_A = 2dL + dg + 2d + 4L + g.
 
 The 33d term includes input, output and the bytes set aside for the finite
-mask. Group metadata and rotated coefficients remain in memory during the
+mask. The Python containers that group the rows and hold the rotated
+coefficients, 254L + 1282 bytes at most, remain in memory during the
 action. The 9L preprocessing peak and the 96t retry tile enter as one
 maximum. The work includes group metadata, the three L-row preprocessing
 passes, the attempted grouped action and a full possible ordered retry.
@@ -50,6 +51,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from nwqlib._limits import ResourceLimitError
 from nwqlib.operators._pauli import PauliTerms, apply_terms, pauli_action_requirements
 from nwqlib.operators.access import _check_bytes, _check_products
 from nwqlib.subroutines.fermionic_pool import GENERATOR_TAYLOR_DEGREE, _taylor_steps
@@ -67,7 +69,8 @@ def pack_action_rows(rows, q):
     the action on the same rows given as labels.
     """
     if not 0 <= q < 63:
-        raise ValueError("ADAPT full-state action requires 0 <= q < 63")
+        raise ResourceLimitError(f"ADAPT's full-state action on {q} qubits holds 2**{q} amplitudes, more than a signed "
+                                 f"64-bit index addresses and any memory holds")
     x = np.zeros((len(rows), 1), np.uint64)
     z = np.zeros_like(x)
     c = np.empty(len(rows), np.complex128)
@@ -123,14 +126,13 @@ def packed_exponential(table, state, theta):
     return vector
 
 
-def build_action_tables(inputs, q, *, max_bytes, max_products, other_live=0):
+def build_action_tables(inputs, q, *, max_bytes, max_products):
     """Build the Plan's packed tables before classical queries, counting the packing work once.
 
     R counts the H0 rows, the generator rows and their unit-coefficient
     insertion rows. Packing counts ``R(q + 4)`` pass units against
     ``max_products``. The permanent logical size is 32R bytes. Setting aside
-    64R bytes beside ``other_live`` covers all immutable copies and one set
-    of working rows. The immutable processed full Hamiltonian already holds
+    64R bytes covers all immutable copies and one set of working rows. The immutable processed full Hamiltonian already holds
     its packed table, and a dense or sparse Hamiltonian has no H0 table. This
     private cache contains no state vector, Run, preparation record or query
     result. Returns the dict
@@ -144,7 +146,7 @@ def build_action_tables(inputs, q, *, max_bytes, max_products, other_live=0):
     rows = len(h0) + 2 * sum(len(g.pauli_terms) for g in inputs.pool)
     work = rows * (q + 4)
     _check_products(work, max_products)
-    _check_bytes(other_live + 64 * rows, max_bytes, "ADAPT packed action tables")
+    _check_bytes(64 * rows, max_bytes, "ADAPT packed action tables")
     answer = dict(
         h0=pack_action_rows(h0, q) if pauli else None,
         generators=tuple(pack_action_rows(g.pauli_terms, q) for g in inputs.pool),
@@ -176,25 +178,6 @@ def action_sizes(inputs, d):
     sizes.extend(action_requirements(d, len(g.pauli_terms))[0] for g in inputs.pool)
     sizes.append(action_requirements(d, 1)[0])
     return tuple(sizes)
-
-
-def restored_record_allowance(inputs, rec):
-    """Recompute on load the logical record size of the classical reconstruction.
-
-    This is the ``other_live`` that ``adapt_inputs.prepare_adapt_inputs``
-    passes to ``build_action_tables``. It covers the generator records, the Pauli
-    identity bytes of every stored row and four copies of the
-    reconstruction's fixed JSON shell.
-    """
-    from nwqlib.operators.inputs import _pauli_identity_bytes
-    from .adapt_inputs import _generator_record_bytes, _reconstruction_fixed_json
-
-    fixed = _generator_record_bytes(inputs.pool)
-    rows = sum(len(g.pauli_terms) for g in inputs.pool) + len(rec.terms)
-    omitted = {"schema_version", "parent_id", "pool", "terms", "groups", "energy_groups"}
-    fields = {key: getattr(rec, key) for key in type(rec).model_fields if key not in omitted}
-    shell = _reconstruction_fixed_json(fields, pool_size=len(inputs.pool), term_count=len(rec.terms))
-    return fixed + rows * _pauli_identity_bytes(rec.num_qubits) + 4 * shell
 
 
 def query_work(plan, experiment, program):

@@ -9,12 +9,13 @@ python -m nwqlib algorithms
 ```
 
 ```text
-adapt_gcim@4: eigenvalue
+adapt_gcim@5: eigenvalue
 chebyshev_lanczos@5: eigenvalue
 finite_pauli_expectation@2: normalized_expectation, quadratic_form
-fixed_gcim@4: eigenvalue
+fixed_gcim@5: eigenvalue
 lchs@3: solution, state_vector, norm_squared, quadratic_form, normalized_expectation, samples
 qcels@1: eigenphase, eigenvalue
+qfd@1: eigenvalue
 qhd@2: optimization_candidate
 qls@2: solution, state_vector, norm_squared, quadratic_form, normalized_expectation, samples
 rfe@2: eigenphase, eigenvalue

@@ -8,12 +8,14 @@ The k-grid comes from the same kernel and quadrature rules as the dense route,
 using the analytic norm bound for ||L||.
 """
 
+from nwqlib._limits import ResourceLimitError, exceeds
 from cmath import phase
 from dataclasses import dataclass, fields, replace
 from fractions import Fraction
 from hashlib import sha256
-from math import inf, isfinite, nextafter, sqrt
+from math import inf, isfinite
 
+from nwqlib._numerics import complex_magnitude_upper
 from nwqlib._preparation_laws import direct_preparation_cx_bound, direct_preparation_controlled_cx_bound
 from nwqlib._validation import finite_real
 from nwqlib.blocks.records import BlockSemantics, SelectedDefinition
@@ -25,11 +27,17 @@ from nwqlib.operators.access import _check_bytes
 from nwqlib.resources.records import ResourceLaw, Workspace
 from nwqlib.subroutines.trotterization.error_budget import _smallest_step_count, _upward_float
 from .parameters import _feed_selected_value
-from .providers import LCHSProblemContext, _resolve_coefficient_context
+from .providers import LCHSProblemContext, _resolve_coefficient_context, lifted_magnitudes
+from .solution_error_budget import unit_angle
 
 
 SOURCE = Source(name="lchs.periodic", version="1", domain="periodic mass/diffusion and alternating imaginary potential",
     reference="A=mass I+diffusion(2I-S-S†)+i potential Z0; analytic PSD; fixed symmetric Strang")
+
+# Kept bytes per Aer native position of a periodic circuit. The older-code sweep
+# measured 1.6, 1.1 and 0.98 KB of RSS growth per position at q=10, T=1, 3, 10.
+# Registered in ENGINEERING_CONSTANTS.
+_NATIVE_POSITION_BYTES = 1024
 
 
 @dataclass(frozen=True)
@@ -37,9 +45,12 @@ class _PeriodicPayload:
     """Planned periodic scalars shared by both circuit blocks and the saved archive.
 
     half_angles are the per-address even-bond rotation angles of one half
-    step. phases combine each coefficient's argument with its identity
-    evolution phase. parameter_id is periodic_identity of the other fields,
-    and both blocks record it as the content hash of their input.
+    step. phases combine each raw coefficient's argument with its identity
+    evolution phase, which is first reduced through its unit phase
+    (``solution_error_budget.unit_angle``) so that a large identity phase
+    cannot absorb the coefficient argument. parameter_id is
+    periodic_identity of the other fields, and both blocks record it as the
+    content hash of their input.
     """
 
     operator: object
@@ -87,7 +98,8 @@ def _construction_law(q, a, steps):
     shifts = 2 * steps
     qft_cp = shifts * q * (q - 1)
     qft_swaps = shifts * 2 * (q // 2)
-    cx = 3 * steps * (p if a else 0) + 2 * qft_cp + 3 * qft_swaps + max(0, p - 2)
+    multiplexor_cx = 3 * steps * (p if a else 0) + max(0, p - 2)
+    cx = multiplexor_cx + 2 * qft_cp + 3 * qft_swaps
     rotations = 3 * steps * p + 2 * steps + shifts * q + p - 1
     phases = 3 * qft_cp
     h = 6 * steps + 2 * shifts * q
@@ -101,38 +113,38 @@ def _construction_law(q, a, steps):
     payload = 192 * p + 64 * slots + 16 * q
     work = items + payload // 8 + controlled_cx + 4 * p * (a + 1)
     return dict(address_qubits=a, projected_cx=base_cx, projected_controlled_cx=controlled_cx,
-        construction_logical_bytes=payload, construction_work=work)
+        construction_logical_bytes=payload, construction_work=work,
+        native_positions=qft_cp + qft_swaps + multiplexor_cx + rotations + h)
 
 
+def _leaf_memory(payload, *, phase_only):
+    """Return the ``SelectedBlock.bind`` memory estimates of one periodic leaf, for selection and for a reload.
 
+    Each call of a leaf stays in the flattened Aer circuit as top-level native
+    positions, counted by operation class from _construction_law and not from
+    its ``slots``, because Aer keeps a cp or swap as one position. The address
+    phase has p - 1 rz and max(0, p - 2) cx. One Strang step has the rest: the
+    2*q*(q-1) cp, 4*floor(q/2) swap and 2q phases of a QFT pair, 6 + 4q h, 3p cx
+    and the 3p + 2 rz of its rotations, an upper count because a multiplexor
+    omits a zero Walsh angle. The Program's Repeat multiplies a step by r. One
+    built definition is taken as one occurrence's size.
 
-def _magnitude_up(value):
-    """Return an exact rational at least ``|value|`` for a complex LCU coefficient with finite parts.
-
-    With ``s = max(|Re c|, |Im c|)`` and ``l = min(|Re c|, |Im c|)``,
-    ``|c| = s sqrt(1 + (l/s)**2)``, exactly zero for s = 0. The ratio, its
-    square and the sum are each rounded to nearest and stepped one binary64
-    number up, and the square root, which IEEE 754 rounds correctly, is
-    stepped up as well, so each factor bounds its exact value from above,
-    subnormal intermediates included. The ratio lies in [0, 1] and the root's
-    argument near [1, 2], so no step leaves the binary64 range, and the
-    product with s is formed exactly, so the magnitude need not be a binary64
-    number. Ordinary ``abs(c)`` has no such upward-rounding guarantee.
+    ``_NATIVE_POSITION_BYTES`` is a coarse estimate of the kept bytes per
+    position, not a bound on process memory.
     """
-    real, imag = abs(value.real), abs(value.imag)
-    if not (isfinite(real) and isfinite(imag)):
-        raise ValueError(f"periodic LCHS coefficient {value!r} is not finite")
-    large, small = max(real, imag), min(real, imag)
-    if large == 0:
-        return Fraction(0)
-    ratio = nextafter(small / large, inf) if small else 0.0
-    square = nextafter(ratio * ratio, inf) if ratio else 0.0
-    root = nextafter(sqrt(nextafter(1.0 + square, inf) if square else 1.0), inf)
-    return Fraction(large) * Fraction(root)
+    q = payload.operator.periodic_stencil().num_qubits
+    a = len(payload.amplitudes).bit_length()-1
+    p = 1 << a
+    phase = p - 1 + max(0, p - 2)
+    positions = phase if phase_only else _construction_law(q, a, 1)["native_positions"] - phase
+    return dict(native_bytes=positions*_NATIVE_POSITION_BYTES, definition_bytes=positions*_NATIVE_POSITION_BYTES)
 
 
 def select_periodic_parameters(operator, *, elapsed, method):
     """Select scalar/branch data from the analytic periodic L norm.
+
+    Planning (``selection._route``) has already refused a Method other than
+    fixed second-order trotter with auto/structured SELECT and direct PREP.
 
     Each branch generator k*L + H splits into an identity part
     k*(mass + 2*diffusion), applied as an address phase, and three Strang
@@ -172,12 +184,14 @@ def select_periodic_parameters(operator, *, elapsed, method):
     n = ceil(B/eps) (r = 1 when B = 0). B depends only on the planned grid,
     T and the stencil, so r is chosen after the grid and before the
     construction limits (max_trotter_steps, then the construction formula's
-    max_bytes and max_select_work) are applied.
+    max_select_work) are applied. Planning builds no circuit, so the bytes of
+    the circuit are compared only at preparation (_leaf_memory), and a plan or
+    estimate of a large stencil needs none of that memory.
 
     Evaluation. B is an exact rational: T, the diffusion and potential
     coefficients and the nodes k_j are binary64 values read exactly, a_j
     and the polynomial are formed exactly, and |c_j| is replaced by the exact
-    upper value of ``_magnitude_up``. No intermediate can round to zero or
+    upper value of ``_numerics.complex_magnitude_upper``. No intermediate can round to zero or
     overflow, and a float a_j need not be representable for T**3*W_q to be.
     The inversion is exact rational arithmetic on B
     and eps (trotterization.error_budget._smallest_step_count, shared with
@@ -196,11 +210,6 @@ def select_periodic_parameters(operator, *, elapsed, method):
     execution or readout roundoff, which have separate components.
     """
     parameters = operator.periodic_stencil()
-    if (method.hamiltonian_evolution_backend != "trotter" or method.trotter_order != 2
-            or method.lcu_select_implementation not in {"auto", "structured"}):
-        raise ValueError("periodic LCHS requires fixed second-order trotter and auto/structured SELECT")
-    if method.initial_state_preparation != "direct" or method.lcu_state_preparation != "direct":
-        raise ValueError("periodic LCHS uses direct basis/product/input and coefficient PREP")
     elapsed = finite_real(elapsed, "elapsed time")
     if elapsed <= 0:
         raise ValueError("periodic LCHS requires positive elapsed time")
@@ -215,7 +224,7 @@ def select_periodic_parameters(operator, *, elapsed, method):
     a = (len(plan.coefficients)-1).bit_length()
     # B = T**3 * sum_j |c_j|*W_q(a_j,p), exactly relative to stored floats.
     diffusion, potential = Fraction(parameters.diffusion), abs(Fraction(parameters.potential))
-    exact = Fraction(elapsed)**3*sum((_magnitude_up(complex(c))*
+    exact = Fraction(elapsed)**3*sum((complex_magnitude_upper(complex(c))*
         ((node_diffusion**3/2 if q >= 3 else 0)
          + 4*node_diffusion**2*potential/3 + node_diffusion*potential**2/3)
         for k,c in zip(plan.nodes,plan.coefficients,strict=True)
@@ -224,24 +233,23 @@ def select_periodic_parameters(operator, *, elapsed, method):
     if steps is None:
         # Smallest r >= 1 with B/r**2 <= tolerance.
         steps = _smallest_step_count(exact,method.trotter_synthesis_tolerance,2)
-        if steps > method.max_trotter_steps:
-            raise ValueError(
+        if method.max_trotter_steps is not None and steps > method.max_trotter_steps:
+            raise ResourceLimitError(
                 f"periodic Strang synthesis needs {steps} steps for "
                 f"trotter_synthesis_tolerance={method.trotter_synthesis_tolerance!r}, "
                 f"above max_trotter_steps={method.max_trotter_steps}"
             )
     counts = _construction_law(q,a,steps)
     required_work = counts["construction_work"]
-    required_bytes = counts["construction_logical_bytes"]
-    if required_work > method.max_select_work or required_bytes > method.max_bytes:
-        raise ValueError(
+    if exceeds(required_work, method.max_select_work):
+        raise ResourceLimitError(
             f"periodic Strang construction for q={q}, address_qubits={a}, steps={steps} "
-            f"requires {required_work} work units and {required_bytes} bytes, "
-            f"with max_select_work={method.max_select_work} and max_bytes={method.max_bytes}"
+            f"requires {required_work} work units, above max_select_work={method.max_select_work}. "
+            "Raise max_select_work or reduce the construction"
         )
     amplitudes = plan.prep_amplitudes(max_bytes=method.max_bytes)
     angles = tuple(-elapsed/steps*k*parameters.diffusion for k in plan.nodes)
-    phases = tuple(phase(c)-elapsed*k*(parameters.mass+2*parameters.diffusion)
+    phases = tuple(phase(c)+unit_angle(-elapsed*k*(parameters.mass+2*parameters.diffusion))
         for k,c in zip(plan.nodes,plan.coefficients,strict=True))
     if not all(isfinite(value) for value in (*angles,*phases,elapsed/steps*parameters.potential)):
         raise ValueError('periodic LCHS selected rotations and phases must be finite')
@@ -253,15 +261,33 @@ def select_periodic_parameters(operator, *, elapsed, method):
     return replace(payload,parameter_id=periodic_identity(payload,method)),counts
 
 
+def _coefficient_mass(plan):
+    """Return the raw coefficient one-norm sum_j |c_j| as a PhysicalScale.
+
+    The magnitudes are formed after the exact lift of
+    ``providers.lifted_magnitudes`` and the lift is removed as a power of
+    two, so a subnormal complex coefficient keeps its magnitude. The
+    PREP amplitudes are normalized by the same lifted sum, and
+    ``coefficient_l1_norm`` is only its rounded binary64 display.
+    """
+    from math import fsum
+    from nwqlib.problems.inputs import PhysicalScale, compose_recovery
+    magnitudes, lift = lifted_magnitudes(plan.coefficients)
+    return compose_recovery(fsum(magnitudes), PhysicalScale(mantissa=.5, exponent=1-lift))
+
+
 def _component_facts(payload, *, problem):
     """Report the periodic circuit-path stages with the analytic PSD assumption.
 
     L is PSD by construction, so there is no shift and every PSD recovery
     factor exp(shift*t) is one. Direct PREP stages are exact zero, and the
-    Strang bound is the trotter_synthesis stage.
+    Strang bound is the trotter_synthesis stage. The input norm and gamma
+    stay PhysicalScale values, so each physical stage is composed before its
+    one binary64 conversion and stays reported whenever it is
+    representable, even if the norm alone is not.
     """
     from .analysis import fact
-    from .solution_error_budget import _build_lchs_application_record,_stage_manifest,circuit_stage_bounds
+    from .solution_error_budget import _build_lchs_application_record,circuit_stage_bounds
     from .time_independent_terms import _unusable_kernel_stage_names
     from nwqlib.problems.inputs import compose_recovery
     from nwqlib.problems.records import Solution
@@ -269,16 +295,11 @@ def _component_facts(payload, *, problem):
     raw.update(psd_shift=0.,approximate_lchs_error_bound=payload.coefficient_plan.quadrature.approximate_lchs_error_bound)
     frame = Solution().frame(problem)
     scale = problem.initial_state.preparation.physical_scale
-    if scale.as_float() is None:
-        return tuple(fact(name,frame,0. if name in {'initial_state_preparation','lcu_coefficient_preparation'} else None,
-            reason='physical input norm is not representable',source=SOURCE)
-            for name in _stage_manifest(backend='trotter',inhomogeneous=False,circuit=True))
     application = _build_lchs_application_record(raw,final_time=payload.elapsed,start_time=0.,
-        weight=scale.as_float(),input_norm=1.,backend='trotter',synthesis_error_bound=payload.synthesis_bound)
-    recovery = compose_recovery(payload.coefficient_plan.coefficient_l1_norm,scale)
+        weight=1.,input_norm=scale,backend='trotter',synthesis_error_bound=payload.synthesis_bound)
     values = circuit_stage_bounds(raw,applications=(application,),backend='trotter',inhomogeneous=False,
-        psd_premise_satisfied=True,gamma=recovery.as_float(),delta_lcu=0.,input_preparation_output_error_bound=0.,
-        unusable_stages=_unusable_kernel_stage_names(raw))
+        psd_premise_satisfied=True,gamma=compose_recovery(_coefficient_mass(payload.coefficient_plan),scale),
+        delta_lcu=0.,input_preparation_output_error_bound=0.,unusable_stages=_unusable_kernel_stage_names(raw))
     return tuple(fact(name,frame,value,reason=reason or 'selected periodic component unavailable',source=SOURCE)
         for name,(value,reason) in values.items())
 
@@ -318,7 +339,8 @@ def _select_periodic_leaf(name,payload,*,basis,phase_only):
         workspace=(Workspace(location='host',purpose='workspace',bytes=one['construction_logical_bytes'],source=SOURCE),
                    Workspace(location='host',purpose='workspace',bytes=None,source=SOURCE)))
     return SelectedBlock.bind(record,payload=payload,
-        constructor=construct_periodic_phase if phase_only else construct_periodic_step)
+        constructor=construct_periodic_phase if phase_only else construct_periodic_step,
+        **_leaf_memory(payload,phase_only=phase_only))
 
 
 def plan_periodic(method,problem,*,output,shots,rng):
@@ -327,8 +349,6 @@ def plan_periodic(method,problem,*,output,shots,rng):
     from nwqlib.problems.inputs import compose_recovery
     from .primary_records import LCHSReconstruction
     from .quantum import finish_quantum_plan,observable_terms,select_vector_preparation
-    if problem.source is not None:
-        raise ValueError('PeriodicStencil LCHS currently has a homogeneous Strang realization')
     payload,counts = select_periodic_parameters(problem.A,elapsed=problem.elapsed_time,method=method)
     q,a = problem.A.periodic_stencil().num_qubits,counts['address_qubits']
     success,coordinates = tuple(range(a)),tuple(range(a,a+q))
@@ -336,7 +356,7 @@ def plan_periodic(method,problem,*,output,shots,rng):
     quad = payload.coefficient_plan.quadrature
     reconstruction = LCHSReconstruction(elapsed_time=problem.elapsed_time,dimension=problem.dimension,encoded_dimension=1<<q,
         initial_scale=problem.initial_state.preparation.physical_scale,
-        recovery=compose_recovery(payload.coefficient_plan.coefficient_l1_norm,problem.initial_state.preparation.physical_scale),
+        recovery=compose_recovery(_coefficient_mass(payload.coefficient_plan),problem.initial_state.preparation.physical_scale),
         success_bits=success,system_bits=coordinates,terms=terms,
         coefficient_l1_norm=payload.coefficient_plan.coefficient_l1_norm,physical_branches=quad.physical_node_count,
         padded_branches=1<<a,selected_backend='trotter',selected_select='periodic_strang',psd_premise='analytic_periodic',
@@ -345,8 +365,9 @@ def plan_periodic(method,problem,*,output,shots,rng):
         step_counts=(payload.steps,)*len(payload.coefficient_plan.nodes))
     prep = problem.initial_state.preparation
     _check_bytes(prep.payload_bytes,method.max_bytes,'periodic input PREP')
-    if prep.work > method.max_select_work:
-        raise ValueError('periodic input PREP exceeds max_select_work')
+    if exceeds(prep.work, method.max_select_work):
+        raise ResourceLimitError(f'periodic input PREP exceeds max_select_work: it needs {prep.work} work units, '
+                                 f'max_select_work={method.max_select_work}')
     blocks = [select_preparation('initial_prep',problem.initial_state,per_bit=True)]
     definitions = [Definition(id='initial_prep',node=BlockCall(signature='initial_prep',
         ports=tuple(PortMap(port=f'system_{j}',wire=f'bit_{bit}') for j,bit in enumerate(coordinates))))]

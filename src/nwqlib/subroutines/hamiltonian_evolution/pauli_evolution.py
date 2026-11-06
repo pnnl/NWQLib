@@ -114,83 +114,26 @@ def structured_number_projector_provider(support_size: int) -> dict[str, Any]:
     return {"provider": "mcphase", "cx": mcphase_cx}
 
 
-# Fixed capacity of each caller's wrapped-phase cache. Reuse depends on call order.
-# Eviction bounds the cache independently of the number of compilation steps and angles,
-# and an evicted angle is computed again on its next use. Registered in
-# docs/ENGINEERING_CONSTANTS.md. Revisit when measured wrap cost warrants a different
-# storage allowance.
-WRAPPED_PHASE_CACHE_ENTRIES = 64
+def wrapped_projector_phase(angle: float) -> float:
+    """Return the absolute wrapped phase ``|numpy.angle(numpy.exp(-1j*angle))|`` of a projector's phase diagonal.
 
-
-def wrapped_projector_phase(angle: float, support_size: int, cache: dict) -> float:
-    """Return the absolute wrapped phase of a projector on support_size qubits.
-
-    With s=support_size, the calculation uses the same 2**s phase array and
-    NumPy operations as the circuit construction of
-    `append_number_projector_phase`: phases=(0,...,0,-angle), followed by
-    numpy.angle(numpy.exp(1j*phases)). The final entry is reproduced bit for
-    bit. Range selection accepts an exactly zero wrapped phase and requires
-    a nonzero phase to remain normal after its power-of-two scaling.
-
-    The QHD potential compiler (``algorithms/qhd/potential.py``) and each
-    rotation-count call of ``algorithms/qhd/resources.py`` hold separate
-    caches. Within either cache, an equal (float(angle).hex(), int(s)) key
-    reuses the cached scalar while that entry is present. The two callers
-    compute the same wrapped value but do not share entries.
-
-    cache is the caller's dictionary. For a cache initialized
-    empty and populated only by this helper, at most
-    WRAPPED_PHASE_CACHE_ENTRIES entries remain after a call. A miss computes
-    the original array-shaped wrap, inserts one Python float and its key,
-    and evicts the oldest inserted entry if the capacity is exceeded.
-    Insertion can briefly hold one extra entry. Hits do not refresh the
-    insertion order. An evicted key is recomputed on its next occurrence,
-    so the capacity bounds storage without guaranteeing a hit rate. Each
-    miss has work proportional to 2**s. On a miss, the numerical array
-    peak is 40*2**s bytes, consisting of the real phase array and simultaneous
-    complex input and output of exp. wrapped_phase_workspace_bytes adds the
-    qualified fixed allowance for the bounded cache, insertion overlap and
-    NumPy bookkeeping. The potential compiler counts this workspace as one of
-    its successive phases (``algorithms/qhd/method.py``) and clears its cache
-    after compiling a step. The one-hot rotation count
-    (``algorithms/qhd/resources.py``) counts its own cache and one miss
-    together with its source records and the buffers its caller holds.
+    `append_number_projector_phase` puts -angle in the last entry of a 2**s
+    phase diagonal with zeros elsewhere, and
+    ``_multiplexors.append_control_diagonal_phases`` wraps every entry with
+    ``numpy.angle(numpy.exp(1j*phases))``. The wrap is elementwise, so a
+    one-entry array applies the same NumPy operations to the same value. On
+    CPython 3.12.14 and NumPy 2.5.2 (macOS arm64) it equalled the last entry
+    of the 2**s array bit for bit for 300,000 angles at each of s = 4, 5 and
+    6, the sizes that use the diagonal. QHD reads it to omit a block whose
+    wrap is exactly zero, to require the scaled wrap to stay normal and to
+    count the diagonal's rotation magnitudes, so a platform whose vectorized
+    exp or angle rounded the array differently would change a rotation
+    magnitude in its last bit and those two tests only at the end of the
+    normal binary64 range.
     """
     import numpy as np
 
-    key = (float(angle).hex(), int(support_size))
-    if key in cache:
-        return cache[key]
-    phases = np.zeros(2**support_size)
-    phases[-1] = -float(angle)
-    wrapped = abs(float(np.angle(np.exp(1.0j * phases))[-1]))
-    cache[key] = wrapped
-    if len(cache) > WRAPPED_PHASE_CACHE_ENTRIES:
-        del cache[next(iter(cache))]
-    return wrapped
-
-
-def wrapped_phase_workspace_bytes(entries):
-    """Return the bytes of one wrapped-phase cache and one cache miss for one caller.
-
-    entries is the largest 2**s used by that caller, or zero when no wrap is
-    reached. A miss keeps one float64 array and two complex128 arrays at
-    its numerical peak, 40*entries bytes. The 65536-byte engineering
-    allowance covers the bounded dictionary, at most 65 scalar entries
-    during insertion, dictionary resize overlap and fixed NumPy bookkeeping
-    on the qualified CPython 3.12.14 / NumPy 2.5.2 stack.
-
-    With E = entries, the lifetimes of ``numpy.angle(numpy.exp(1.0j * phases))``
-    are: the product by i holds ``phases`` and one complex128 array (24E),
-    exp holds ``phases`` with its complex128 input and output (40E), and
-    angle holds ``phases``, the exp output and the float64 result (32E). One
-    miss runs at a time, so no factor of the cache capacity multiplies 40E.
-    The fixed term is an engineering allowance: a 65-entry inventory of key
-    tuples, finite-float hex strings, integers and floats is below 12.3 KB
-    before dictionary storage, and fill/churn peaks including miss scratch
-    were below 20 KB on that stack.
-    """
-    return 65536 + 40 * int(entries) if entries else 0
+    return abs(float(np.angle(np.exp(1.0j * np.array([-float(angle)])))[0]))
 
 
 def append_number_projector_phase(
@@ -371,7 +314,8 @@ def _hopping_parameter(time_step: float, coefficient: float) -> float:
 
     Qiskit defines ``XXPlusYYGate(theta) = exp(-i theta (XX + YY)/4)``. The
     product ``2 dt c`` is formed first, in the evaluation order of the
-    stored angle of a QHD hopping block (``kinetic.KineticCompiler``), and
+    angle of a QHD hopping block (``algorithms/qhd/onehot_schedule.py``,
+    ``hopping_layers``), and
     then doubled, which is exact unless it overflows. A finite theta is
     therefore twice that angle in every range. Forming ``4 dt`` first would
     overflow for a large dt even where theta is finite.

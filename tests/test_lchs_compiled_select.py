@@ -1,6 +1,8 @@
 """Independent selected QSP composition, recovery, phase and resource relations."""
 from __future__ import annotations
 from collections import Counter
+from functools import reduce
+from itertools import product
 import numpy as np
 import pytest
 import scipy.linalg
@@ -9,7 +11,6 @@ from qiskit.circuit import ControlledGate
 from qiskit.circuit.library import UnitaryGate
 from qiskit_aer import AerSimulator
 from conftest import _encoded_block
-import nwqlib.algorithms.lchs.native as native_module
 from nwqlib.subroutines.block_encoding import build_block_encoding
 from nwqlib.subroutines.qsp import build_control_diagonal_generator_encoding,compiled_select_resource_law
 from nwqlib.subroutines.qsp.evolution import build_qsp_evolution_encoding
@@ -307,31 +308,289 @@ def test_compiled_select_gate_count_law_conformance(route) -> None:
 
 @pytest.mark.parametrize('scale',[1e-9,1.,1e9])
 def test_selected_qsp_pruned_h_and_near_antihermitian_l_keep_original_scale(scale,monkeypatch):
-    from types import SimpleNamespace
+    """A fully pruned H keeps its mass in the generator error; a pruned L is refused before any phase work.
+
+    H = scale*1e-26 X is below the relative Pauli cutoff 1e-12 of the
+    largest coefficient of L = scale*diag(1e-9, 2e-9), so the joint
+    generator has no H child. The omitted D_Q (x) I (x) H has norm at most
+    ||H|| = scale*1e-26, which must enter delta_S once at every scale, and
+    the selected row's child term is T_e*delta_S. With L below the cutoff
+    instead, planning refuses before coherent selection or phase fitting.
+    """
     from nwqlib import LinearDynamics,plan
-    from nwqlib.algorithms.lchs import LCHS,ProviderConfig
-    from nwqlib.subroutines.qsp import evolution
+    from nwqlib.algorithms.lchs import LCHS,ProviderConfig,coherent_selection
     method=LCHS(hamiltonian_evolution_backend='qsp_block_encoding',
         k_quadrature=ProviderConfig(implementation='signed_binary_uniform',parameters={'num_qubits':2,'lsb_position':-1}))
     l_part=scale*np.diag([1e-9,2e-9])
     noise=scale*1e-26*np.array([[0.,1.],[1.,0.]])
     chosen=plan(LinearDynamics(A=l_part+1j*noise,initial_state=[1,0],time=.1/scale),method=method)
-    selected=chosen._native['native_data'].qsp_plan
-    assert selected['part_plans'][1].implementation=='exact_zero'
-    assert selected['part_plans'][2]==pytest.approx(scale*1e-26,rel=3e-15,abs=0)
+    prepared=chosen._native['native_data'].qsp_plan
+    generator=prepared.generator
+    assert 'h_child' not in generator.components and generator.target_operator_is_hermitian is True
+    assert generator.error_terms['omitted_part']==pytest.approx(scale*1e-26,rel=3e-15,abs=0)
+    assert generator.error_bound-generator.error_terms['homogeneous']==pytest.approx(scale*1e-26,rel=1e-10,abs=0)
+    assert prepared.error['child']==prepared.evolution_time*generator.error_bound
     assert sum(r.width for r in chosen.construction.program.registers)<=13
-    seen=[]
-    def capture(encoding,**kwargs):
-        assert kwargs['_prepared'] is selected['prepared_evolution']
-        assert encoding.metadata['target_operator_is_hermitian'] is True
-        assert encoding.metadata['encoded_operator_is_hermitian'] is True
-        seen.append(encoding.error_bound)
-        return SimpleNamespace(circuit=encoding.circuit)
-    monkeypatch.setattr(evolution,'build_qsp_evolution_encoding',capture)
-    native_module.build_selected_evolution(selected)
-    clean=dict(selected,physical_h_diagonal=np.zeros_like(selected['physical_h_diagonal']))
-    native_module.build_selected_evolution(clean)
-    assert seen[0]-seen[1]==pytest.approx(scale*1e-26,rel=1e-10,abs=0)
-    monkeypatch.setattr(evolution,'prepare_qsp_evolution',lambda **kw: pytest.fail('pruned L reached phase fitting'))
+    monkeypatch.setattr(coherent_selection,'select_coherent_route',
+                        lambda *a,**kw: pytest.fail('pruned L reached coherent selection'))
     with pytest.raises(ValueError,match='nonzero Hermitian part L'):
         plan(LinearDynamics(A=scale*1e-26*np.eye(2)+1j*l_part,initial_state=[1,0],time=.1/scale),method=method)
+
+
+def test_compiled_qsp_planning_checks_kept_children_not_select_tables():
+    """Planning a dense L + iH on the QSP backend checks the Pauli transforms and the kept children.
+
+    For the tridiagonal L = 2I - S - S^T and H = 0.3(S + S^T) on 7 qubits,
+    S the shift, the Pauli transforms keep a small part of the d**2
+    possible words, and planning forms no SELECT table. The Plan is made
+    under max_bytes=4_000_000, far below the 50,561,024 bytes of two
+    full-support children with their SELECT tables. 2,110,000 bytes cover
+    the 128*d**2 = 2,097,152 bytes held for L, H, their coefficients and the
+    dense reserve and the labels of the kept words of L, and refuse their
+    planning arrays.
+    """
+    from nwqlib import LinearDynamics, NormSquared, plan
+    from nwqlib.algorithms.lchs import LCHS
+
+    d = 1 << 7
+    shift = np.diag(np.ones(d - 1), 1)
+    a = 2 * np.eye(d) - shift - shift.T + 0.3j * (shift + shift.T)
+    state = np.zeros(d, complex)
+    state[0] = 1
+
+    def make(max_bytes):
+        return plan(LinearDynamics(A=a, initial_state=state, time=0.5),
+                    method=LCHS(hamiltonian_evolution_backend="qsp_block_encoding", max_bytes=max_bytes),
+                    output=NormSquared(), shots=100, seed=1)
+
+    assert make(4_000_000).method.max_bytes == 4_000_000
+    with pytest.raises(ValueError, match="block-encoding Pauli planning arrays"):
+        make(2_110_000)
+
+
+@pytest.mark.parametrize("first, second, needed, operation", (
+    ("band", "band", 36, "compact LCHS generator children"),
+    ("pauli", "band", 206, "block-encoding Pauli planning arrays"),
+    ("band", "pauli", 242, "block-encoding Pauli planning arrays")))
+def test_compact_children_charge_the_first_child_once_under_either_byte_limit(first, second, needed, operation,
+                                                                               monkeypatch):
+    """The second compact child is planned beside the first child's m(q+16) bytes, counted once.
+
+    On q = 2, the centered band parts keep two bands and the Pauli part three words, so a completed first child
+    holds 36 or 54 bytes. The band planner forms no array, so two band children need exactly the 36 held bytes,
+    and a Pauli child needs its planning arrays beside its labels and the held bytes. The same number of bytes
+    suffices as the physical memory under max_bytes=None and as an explicit cap, and one byte less refuses both.
+    """
+    from types import SimpleNamespace
+    import nwqlib._limits as limits
+    from nwqlib.algorithms.lchs.compiled_selection import _compiled_qsp_compact_part_plans
+    from nwqlib.operators import ingest_band, ingest_pauli
+    parts = {"pauli": ingest_pauli((("XI", .2), ("IX", .1), ("YY", .3)), num_qubits=2),
+             "band": ingest_band((-1, 0, 1), (-.3, .7, -.3), num_qubits=2)}
+    hamiltonian = ingest_band((-1, 1), (-.2j, .2j), num_qubits=2) if second == "band" else parts["pauli"]
+    generator = SimpleNamespace(num_qubits=2, dissipative=parts[first], hamiltonian=hamiltonian)
+    for memory in (needed, needed - 1):
+        monkeypatch.setattr(limits, "physical_memory_bytes", lambda memory=memory: memory)
+        for cap in (None, memory):
+            if memory == needed:
+                assert all(_compiled_qsp_compact_part_plans(generator, unitary=False, max_bytes=cap,
+                                                            max_select_work=None)[:2])
+            else:
+                with pytest.raises(ValueError, match=f"{operation} needs about {needed} bytes"):
+                    _compiled_qsp_compact_part_plans(generator, unitary=False, max_bytes=cap, max_select_work=None)
+
+
+def test_compiled_qsp_children_plan_their_kept_words_and_reuse_a_settled_dense_part(monkeypatch):
+    """Each child of a dense L + iH encodes its kept operator, and a settled dense child forms no Pauli term.
+
+    On three qubits a part with more than d**2/2 = 32 kept Pauli words is a
+    dense dilation from the word count alone. A full-support part is then
+    planned from the part itself. A word pruned at the shared cutoff 1e-12
+    of the largest coefficient leaves the dense child the matrix of the
+    kept words, and its error bound adds the pruned magnitude. An H below
+    the cutoff is the exact-zero child whose mass is returned. A periodic
+    band stays banded, and a tridiagonal part keeps its Pauli words. Each
+    child's block, built from its Plan, is its kept operator over alpha. The
+    work of the full-support pair is (64*q + 64)*d**2 for the two transforms,
+    the pruning and both intake scans, plus the singular values of H, and
+    one unit less is refused.
+    """
+    from qiskit.quantum_info import Operator
+    from nwqlib._linalg_laws import singular_values_work
+    from nwqlib.algorithms.lchs.compiled_selection import _compiled_qsp_part_plans
+    from nwqlib.subroutines import pauli_decomposition
+    from nwqlib.subroutines.block_encoding.core import block_encoding_top_left, build_block_encoding_from_plan
+
+    q, d = 3, 8
+    built = Counter()
+    initialize = pauli_decomposition.PauliTerm.__init__
+
+    def counted(self, **kwargs):
+        built["terms"] += 1
+        initialize(self, **kwargs)
+    monkeypatch.setattr(pauli_decomposition.PauliTerm, "__init__", counted)
+
+    def children(l_part, h_part, limit=None):
+        built.clear()
+        return _compiled_qsp_part_plans(l_part, h_part, l_norm=float(np.linalg.norm(l_part, 2)), max_select_work=limit)
+
+    def assert_block(plan, operator):
+        circuit = build_block_encoding_from_plan(plan).circuit
+        block = block_encoding_top_left(Operator(circuit).data, num_ancillas=plan.num_ancillas)
+        np.testing.assert_allclose(plan.alpha * block, operator, atol=1e-13, rtol=0)
+
+    one = {"I": np.eye(2), "X": np.array([[0, 1], [1, 0]]), "Y": np.array([[0, -1j], [1j, 0]]),
+           "Z": np.diag([1, -1])}
+    labels = ["".join(letters) for letters in product("IXYZ", repeat=q)]
+    word = {label: np.kron(np.kron(one[label[0]], one[label[1]]), one[label[2]]) for label in labels}
+
+    l_part, h_part = _seeded_l_h(d, 5)
+    l_plan, h_plan, omitted, work = children(l_part, h_part)
+    assert built["terms"] == 0 and omitted == 0.0
+    assert l_plan.source is l_part and h_plan.source is h_part
+    assert (l_plan.implementation, l_plan.decomposition, l_plan.alpha) == (
+        "dense_dilation", None, float(np.linalg.norm(l_part, 2)))
+    assert work == (64*q + 64)*d*d + singular_values_work(d)
+    with pytest.raises(ValueError, match="exceeds max_work"):
+        children(l_part, h_part, work - 1)
+    assert children(l_part, h_part, work)[3] == work
+    for plan, part in ((l_plan, l_part), (h_plan, h_part)):
+        assert_block(plan, part)
+
+    # 41 kept words of L, one word at 1e-16 of the identity coefficient 1.
+    kept = np.eye(d) + sum((j % 7 + 1) / 64 * word[label] for j, label in enumerate(labels[1:41]))
+    l_plan, h_plan, omitted, _ = children(kept + 1e-16 * word[labels[41]], h_part)
+    assert built["terms"] == 0 and l_plan.implementation == "dense_dilation"
+    assert l_plan.error_bound >= 1e-16 and h_plan.source is h_part
+    assert_block(l_plan, kept)
+
+    h_small = 1e-15 * h_part
+    l_plan, h_plan, omitted, _ = children(l_part, h_small)
+    assert built["terms"] == 0 and h_plan.implementation == "exact_zero"
+    assert omitted == pytest.approx(sum(abs(np.trace(word[label] @ h_small)) / d for label in labels), rel=1e-12)
+
+    shift = np.roll(np.eye(d), 1, axis=1)
+    tridiagonal = 0.3 * (np.diag(np.ones(d - 1), 1) + np.diag(np.ones(d - 1), -1))
+    l_plan, h_plan, _, _ = children(2 * np.eye(d) - shift - shift.T, tridiagonal)
+    assert l_plan.implementation == "banded"
+    assert l_plan.detail["structure_detection"] == "detected_from_pauli_decomposition"
+    assert h_plan.implementation == "multiplexed_pauli"
+    assert {term.label for term in h_plan.decomposition.terms} == {
+        label for label in labels if abs(np.trace(word[label] @ tridiagonal)) > 1e-12}
+    assert_block(l_plan, 2 * np.eye(d) - shift - shift.T)
+    assert_block(h_plan, tridiagonal)
+
+
+def test_compiled_qsp_dense_children_reuse_the_counted_words_and_the_unpruned_part(monkeypatch):
+    """A dense child is not transformed again or rebuilt from terms when its matrix is already at hand.
+
+    On four qubits a child with more than d**2/2 = 128 kept words is dense
+    by that count. With all 256 words of L and H each part is transformed
+    once. A 180-word L whose other words include one below the shared cutoff
+    adds one inverse transform and no forward one. Neither forms a Pauli
+    term, packs words or converts terms to a matrix, the auto records carry
+    the kept count, and the unpruned children match plan_block_encoding of
+    their parts, with the pruned mass named in the error evaluation. Those
+    coefficients are random normals, so the transform of
+    the 180-word part has rounding-level words at absent positions, which
+    the cutoff prunes too, and the record still counts the 180 kept words. A
+    64-word L with dyadic coefficients has no such words. Its terms are
+    compared, and the comparison selects the dense dilation. Unpruned, it
+    uses the part itself. With one more word pruned, its kept operator is
+    rebuilt from the terms once, normalized by its own norm, and the ledger
+    adds the m*d**2 rebuild and the singular values.
+    """
+    from qiskit.quantum_info import Operator
+    from nwqlib._linalg_laws import singular_values_work
+    from nwqlib.algorithms.lchs.compiled_selection import _compiled_qsp_part_plans
+    from nwqlib.operators import _pauli
+    from nwqlib.subroutines import pauli_decomposition
+    from nwqlib.subroutines.block_encoding import core, plan_block_encoding
+    from nwqlib.subroutines.block_encoding.core import block_encoding_top_left, build_block_encoding_from_plan
+
+    q, d = 4, 16
+    rng = np.random.default_rng(17)
+    one = {"I": np.eye(2), "X": np.array([[0, 1], [1, 0]]), "Y": np.array([[0, -1j], [1j, 0]]),
+           "Z": np.diag([1, -1])}
+    labels = ["".join(letters) for letters in product("IXYZ", repeat=q)]
+    order = ["IIII", *(labels[k] for k in rng.permutation(np.arange(1, d * d)))]
+
+    def word(label):
+        return reduce(np.kron, (one[letter] for letter in label)).astype(complex)
+
+    def pauli_sum(values, tiny=None):
+        """Return a part with the first len(values) words, plus the next word at ``tiny`` times the largest, and its kept operator."""
+        kept = sum(value * word(label) for value, label in zip(values, order))
+        extra = 0 if tiny is None else tiny * np.abs(values).max() * word(order[len(values)])
+        return kept + extra, kept
+
+    calls = Counter()
+
+    def counted(name, function):
+        def traced(*args, **kwargs):
+            calls[name] += 1
+            return function(*args, **kwargs)
+        return traced
+    for owner, name in ((_pauli, "_block_transform"), (core, "_block_transform"), (_pauli, "_inverse_block_transform"),
+                        (core, "_coefficient_masks"), (pauli_decomposition.PauliDecomposition, "to_sparse_pauli_op")):
+        monkeypatch.setattr(owner, name, counted(name, getattr(owner, name)))
+    initialize = pauli_decomposition.PauliTerm.__init__
+
+    def counted_term(self, **kwargs):
+        calls["PauliTerm"] += 1
+        initialize(self, **kwargs)
+    monkeypatch.setattr(pauli_decomposition.PauliTerm, "__init__", counted_term)
+
+    def children(l_part, h_part, *, l_norm):
+        calls.clear()
+        l_plan, h_plan, _, work = _compiled_qsp_part_plans(l_part, h_part, l_norm=l_norm, max_select_work=None)
+        return l_plan, h_plan, work
+
+    def assert_block(plan, operator):
+        circuit = build_block_encoding_from_plan(plan).circuit
+        block = block_encoding_top_left(Operator(circuit).data, num_ancillas=plan.num_ancillas)
+        np.testing.assert_allclose(plan.alpha * block, operator, atol=1e-13, rtol=0)
+
+    l_part, _ = pauli_sum(rng.normal(size=256))
+    h_part, _ = pauli_sum(rng.normal(size=256))
+    l_norm = float(np.linalg.norm(l_part, 2))
+    l_plan, h_plan, _ = children(l_part, h_part, l_norm=l_norm)
+    assert calls == Counter({"_block_transform": 2})
+    for plan, part, normalization in ((l_plan, l_part, l_norm), (h_plan, h_part, None)):
+        public = plan_block_encoding(part, normalization=normalization)
+        assert plan.source is part and plan.requested_implementation == "auto"
+        assert (plan.alpha, plan.error_bound) == (public.alpha, public.error_bound)
+        for key in ("term_count", "prep_pair_cx", "selection_reason", "normalization_records"):
+            assert plan.detail[key] == public.detail[key]
+        assert plan.detail["term_count"] == 256
+        assert plan.detail["error_evaluation"] == (
+            f"{public.detail['error_evaluation']}, plus the pruned Pauli-coefficient mass")
+    assert_block(l_plan, l_part)
+
+    pruned_part, kept = pauli_sum(rng.normal(size=180), tiny=1e-14)
+    l_plan, _, _ = children(pruned_part, np.zeros((d, d)), l_norm=float(np.linalg.norm(pruned_part, 2)))
+    assert calls == Counter({"_block_transform": 2, "_inverse_block_transform": 1})
+    assert l_plan.implementation == "dense_dilation" and l_plan.detail["term_count"] == 180
+    assert l_plan.detail["selection_reason"].startswith("auto selected dense_dilation: the PREP pair of the 180-term")
+    assert l_plan.alpha == pytest.approx(np.linalg.norm(kept, 2), rel=1e-13)
+    assert l_plan.error_bound >= np.abs(pruned_part - kept).max()
+    assert_block(l_plan, kept)
+
+    dyadic = (np.arange(64) % 7 + 1) / 64
+    l_part, _ = pauli_sum(dyadic)
+    l_norm = float(np.linalg.norm(l_part, 2))
+    l_plan, _, unpruned_work = children(l_part, np.zeros((d, d)), l_norm=l_norm)
+    assert l_plan.implementation == "dense_dilation" and l_plan.decomposition.terms
+    assert calls["to_sparse_pauli_op"] == 0 and calls["PauliTerm"] >= 64 and l_plan.source is l_part
+    public = plan_block_encoding(l_part, normalization=l_norm)
+    assert (l_plan.alpha, l_plan.error_bound) == (public.alpha, public.error_bound)
+    np.testing.assert_array_equal(l_plan.source, public.source)
+    assert_block(l_plan, l_part)
+
+    pruned_part, kept = pauli_sum(dyadic, tiny=1e-14)
+    l_plan, _, pruned_work = children(pruned_part, np.zeros((d, d)), l_norm=l_norm)
+    assert l_plan.implementation == "dense_dilation" and calls["to_sparse_pauli_op"] == 1
+    assert l_plan.alpha == pytest.approx(np.linalg.norm(kept, 2), rel=1e-13)
+    assert l_plan.error_bound >= np.abs(pruned_part - kept).max()
+    assert pruned_work - unpruned_work == 64 * d * d + singular_values_work(d)
+    assert_block(l_plan, kept)

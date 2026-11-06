@@ -1,6 +1,6 @@
 """Explicit physical-vector reference comparisons for an LCHS Result."""
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from nwqlib._limits import memory_limit
 
 from math import isfinite
 from sys import float_info
@@ -62,7 +62,12 @@ class LCHSVerification(Record):
             discrepancy. `"selected_grid"` reproduces the saved finite sum,
             with its nodes and product-formula steps, so its discrepancy
             excludes the kernel-integral, k- and Duhamel-quadrature and
-            product-formula errors.
+            product-formula errors. With a product-formula backend, a term
+            whose coefficient, multiplied by its time weight and PSD growth
+            factor, leaves the normal binary64 range, as with the subnormal
+            coefficients of a signed-binary grid of very small spacing, can
+            be lost from this reference, which then reports a discrepancy
+            even when the solution is correct.
         name: Default `"reference_error"`. Name of the reported discrepancy
             and prefix of its companion values.
         metric: Default `"absolute_l2"`, the norm `||u - u_ref||_2` without a
@@ -80,15 +85,15 @@ class LCHSVerification(Record):
         max_rhs_calls: Default `None`. Upper limit on RK45 right-hand-side
             evaluations. Required for `"ivp"` and `"ivp_closed_form"` and
             refused otherwise.
-        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Upper
-            limit on the known arrays of this call.
-        max_dense_work: Default `1e8` (`100_000_000`). Upper limit on the
+        max_bytes: Default `None`, the physical memory of this computer.
+            Upper limit on the known arrays of this call.
+        max_dense_work: Default `None`, no work limit. Upper limit on the
             counted dense work of this call. For `"selected_grid"` it also
             covers reading the saved product-formula node table and the
             node actions.
-        max_node_evaluations: Default `4096`. Upper limit on the number of
-            k nodes times operator applications evaluated.
-        max_pf_operations: Default `100_000`. Upper limit on the
+        max_node_evaluations: Default `None`, no limit. Upper limit on the
+            number of k nodes times operator applications evaluated.
+        max_pf_operations: Default `None`, no limit. Upper limit on the
             product-formula rotations or elementary gates that
             `"selected_grid"` evaluates.
 
@@ -109,10 +114,10 @@ class LCHSVerification(Record):
     rtol: Annotated[Real, Field(gt=0)] | None = None
     atol: Annotated[Real, Field(gt=0)] | None = None
     max_rhs_calls: PositiveInt | None = None
-    max_bytes: PositiveInt = DEFAULT_MAX_BYTES
-    max_dense_work: PositiveInt = 100_000_000
-    max_node_evaluations: PositiveInt = 4096
-    max_pf_operations: PositiveInt = 100_000
+    max_bytes: PositiveInt | None = None
+    max_dense_work: PositiveInt | None = None
+    max_node_evaluations: PositiveInt | None = None
+    max_pf_operations: PositiveInt | None = None
 
     @model_validator(mode="after")
     def _reference_parameters(self):
@@ -240,18 +245,25 @@ def _consistency_frame(plan):
         conditioning="signed physical IVP and closed-form references for the same original inputs")
 
 
-def _admit_publication(checks, frames, arguments):
-    """Check the bytes of the facts and record that this check returns against max_bytes.
+def _admit_publication(checks, frames, arguments, counts):
+    """Check the bytes of the facts and record that this check returns against the memory limit.
 
     The check runs before any reference work, so an oversized output is
-    refused before that work is spent.
+    refused before that work is spent. ``counts`` names the call counts
+    that the record adds to ``arguments`` after the work.
     """
     from nwqlib._run_journal import _json_bound
+    limit = memory_limit(checks.max_bytes)
+    if limit is None:
+        return
+    # Each count is sized as 2**64, whose decimal width exceeds any count
+    # that a call can reach.
+    arguments = (*arguments, *((name, 1 << 64) for name in counts))
     # Reserve 16 times the inputs' JSON byte bound for two fact copies,
     # one receipt and their nested source/frame identities.
     # The fixed 8192 bytes cover the record envelope that does not scale with
-    # the inputs (registered in ENGINEERING_CONSTANTS).
-    size = 16*_json_bound((checks, frames, arguments), checks.max_bytes) + 8192
+    # the inputs.
+    size = 16*_json_bound((checks, frames, arguments), limit) + 8192
     _check_bytes(size, checks.max_bytes, "LCHS verification scalar output")
 
 
@@ -262,6 +274,7 @@ def _publish(plan, result, checks, manifest, metrics, arguments, *, invocation_i
     ``specs`` are the CheckSpecs the caller declared for the Result it
     validated at entry, so this step does not validate it again.
     """
+    from .analysis import component_assumptions
     source = checks.source
     raw = []
     for name, frame, value, reason in metrics:
@@ -273,6 +286,9 @@ def _publish(plan, result, checks, manifest, metrics, arguments, *, invocation_i
                 raise ValueError("LCHS norm, discrepancy and bound facts must be nonnegative")
             fields.update(availability="concrete", value=Float64(value=float(value)),
                 evidence=Evidence(kind="numerical_estimate", source=source))
+            # A refined component bound is the same ideal relation as the planned one.
+            if name in ideal_bounds:
+                fields.update(assumptions=component_assumptions(plan.reconstruction.psd_premise))
         raw.append(FramedFact(frame=frame, bindings=plan.construction.program.bindings,
             failure_probability=0. if name in ideal_bounds and value is not None and isfinite(value) else None,
             fact=Fact(**fields)))
@@ -390,12 +406,11 @@ def verify(plan, result, *, checks):
             (name+".absolute_l2", absolute_frame, None, "reference consistency is unavailable"),
             (name+".reference_norm", absolute_frame.revise(metric="l2"), None, "closed-form norm is unavailable")]
     reference_dimension = d if grid is None else plan.reconstruction.encoded_dimension
-    arguments = _arguments(checks, elapsed, d, {name:checks.max_dense_work for name in counts},
-                           reference_dimension=reference_dimension)
+    arguments = _arguments(checks, elapsed, d, {}, reference_dimension=reference_dimension)
     if grid is not None:
         from .selected_grid import grid_arguments
         arguments += grid_arguments(grid)
-    _admit_publication(checks, tuple((name, frame, reason) for name, frame, _, reason in metrics), arguments)
+    _admit_publication(checks, tuple((name, frame, reason) for name, frame, _, reason in metrics), arguments, counts)
     # Select the requested reference only after admitting its output/work
     # record. The reference choice determines which extra numerical work runs.
     invocation_id = verification_invocation()

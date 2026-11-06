@@ -8,7 +8,7 @@ from typing import Literal
 
 from nwqlib.core.records import Float64, Rational
 
-from ._work import DEFAULT_MAX_INTEGER_BITS, ExactArithmetic
+from ._work import exact
 from .error_model import FramedFact, predicate_frame, scalar
 
 
@@ -69,7 +69,6 @@ def resolve_scalar_bound(
     conditions: Iterable[FramedFact | bool | None] = (),
     assumptions: Iterable[str] = (),
     work_per_unit: int | float | Fraction | Rational | Float64 | None = None,
-    max_integer_bits: int = DEFAULT_MAX_INTEGER_BITS,
 ) -> ScalarBoundResult:
     """Find the smallest integer n with `e_0 + c/n <= epsilon` (or `c/sqrt(n)`) in a finite range.
 
@@ -111,8 +110,6 @@ def resolve_scalar_bound(
         assumptions (Iterable[str]): Further assumptions stated as text.
         work_per_unit (number | None): Declared work per unit of n,
             multiplied by the chosen n.
-        max_integer_bits (int): Bit limit of the exact arithmetic. Default
-            4096.
 
     Returns:
         bound (ScalarBoundResult): The chosen n, its status, a rational upper
@@ -122,17 +119,14 @@ def resolve_scalar_bound(
         ValueError: If `minimum`, `maximum` or `fixed` is not a positive
             integer in order, `decay` is another value, a quantity is
             negative, the framed quantities disagree in frame or parameter
-            point, a condition is not a boolean predicate, an assumption is
-            not a nonempty string, or an exact intermediate value needs more
-            than `max_integer_bits` bits.
+            point, a condition is not a boolean predicate, or an assumption
+            is not a nonempty string.
     """
-    arithmetic = ExactArithmetic(max_integer_bits=max_integer_bits)
     for name, value in (("minimum", minimum), ("maximum", maximum), ("fixed", fixed)):
         if name == "fixed" and value is None:
             continue
         if type(value) is not int or value < 1:
             raise ValueError(f"{name} must be a positive integer")
-        arithmetic.fraction(value)
     if minimum > maximum or fixed is not None and not minimum <= fixed <= maximum:
         raise ValueError("finite integer domain and fixed value must agree")
     if decay not in {"inverse", "inverse_sqrt"}:
@@ -153,16 +147,16 @@ def resolve_scalar_bound(
             extra.extend(value.fact.assumptions)
             for binding in value.bindings:
                 prior = restrictions.setdefault(binding.parameter, binding.value)
-                if arithmetic.fraction(prior) != arithmetic.fraction(binding.value):
+                if exact(prior) != exact(binding.value):
                     raise ValueError("bound quantities have conflicting parameter restrictions")
                 extra.append(f"supplied bound requires {binding.parameter}={binding.value}")
-            number = scalar(value, arithmetic)
+            number = scalar(value)
         else:
-            number = None if value is None else arithmetic.fraction(value)
+            number = None if value is None else exact(value)
         if number is not None and number < 0:
             raise ValueError(f"{name} must be nonnegative")
         values.append(number)
-    work = None if work_per_unit is None else arithmetic.fraction(work_per_unit)
+    work = None if work_per_unit is None else exact(work_per_unit)
     if work is not None and work < 0:
         raise ValueError("work_per_unit must be nonnegative")
     conditional = bool(assumptions) or bool(extra)
@@ -195,7 +189,7 @@ def resolve_scalar_bound(
             blocked = ("inapplicable", "a supplied premise is false")
 
     def result(n, status, reason, bound=None):
-        declared = None if n is None or work is None else arithmetic.multiply(work, Fraction(n))
+        declared = None if n is None or work is None else work * Fraction(n)
         return ScalarBoundResult(n, status, reason, bound, conditions, assumptions, declared)
 
     if blocked is not None:
@@ -203,7 +197,7 @@ def resolve_scalar_bound(
     if any(value is None for value in values):
         return result(None, "unresolved", "a supplied coefficient, tolerance or fixed contribution is unavailable")
     c, epsilon, fixed_part = values
-    allowance = arithmetic.subtract(epsilon, fixed_part)
+    allowance = epsilon - fixed_part
     if allowance < 0 or allowance == 0 and c > 0:
         return result(None, "infeasible", "fixed error exhausts the available tolerance")
     if c == 0:
@@ -212,23 +206,22 @@ def resolve_scalar_bound(
         # For the docstring's scalar model, put a = allowance > 0.
         # From c/n <= a obtain n >= c/a. From c/sqrt(n) <= a obtain
         # n >= (c/a)^2 for c,a>0. Exact rational ceiling has no search grid.
-        ratio = arithmetic.divide(c, allowance)
-        threshold = ratio if decay == "inverse" else arithmetic.multiply(ratio, ratio)
+        ratio = c / allowance
+        threshold = ratio if decay == "inverse" else ratio * ratio
         quotient, remainder = divmod(threshold.numerator, threshold.denominator)
         required = max(minimum, quotient + bool(remainder))
-        arithmetic.fraction(required)
     n = required if fixed is None else fixed
     if n < required or n > maximum:
         return result(None, "infeasible", "no permitted integer meets the supplied bound")
     if decay == "inverse" or c == 0:
-        bound = arithmetic.add(fixed_part, arithmetic.divide(c, Fraction(n)))
+        bound = fixed_part + c / Fraction(n)
     else:
         # floor(sqrt(n)) <= sqrt(n), so c/floor(sqrt(n)) bounds the
         # irrational term above. The exact inversion also proves that the
         # docstring's e(n) <= epsilon. The minimum of these two rational
         # upper bounds remains conservative.
-        coarse = arithmetic.add(fixed_part, arithmetic.divide(c, Fraction(isqrt(n))))
-        bound = coarse if arithmetic.le(coarse, epsilon) else epsilon
+        coarse = fixed_part + c / Fraction(isqrt(n))
+        bound = coarse if coarse <= epsilon else epsilon
     return result(n, "conditional" if conditional else "resolved",
                   "sufficient for the supplied scalar model only; no total-accuracy claim", bound)
 

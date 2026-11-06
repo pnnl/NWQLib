@@ -91,7 +91,7 @@ INCONCLUSIVE
 
 Both checks pass their own threshold, and the assessment stays INCONCLUSIVE, because a check concerns its own scalar only. The returned `facts` attach only with the options object that produced them. To use another tolerance, run `result.verify` again with the new options.
 
-Exact comparisons check the bit length of each numerator and denominator against `max_integer_bits`, default 4096, before every operation, and refuse rather than round ([engineering constants](../ENGINEERING_CONSTANTS.md#exact-evidence-integer-representation)). This limits the size of exact numbers, not time or memory.
+Exact comparisons use rational arithmetic and never round a value at its threshold ([engineering constants](../ENGINEERING_CONSTANTS.md#exact-evidence-integer-representation)).
 
 ## Verification options
 

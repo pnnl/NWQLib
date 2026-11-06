@@ -141,6 +141,36 @@ def test_binary_mean_variance_and_finite_interval_are_different():
     assert anytime.interval.status == "conditional"
 
 
+def test_stored_counts_beyond_binary64_keep_their_mean_and_an_interval_of_positive_width():
+    """Two supplied bins of about 10**400 and 10**2500 counts each are analyzed without any shot.
+
+    For n = 2*10**400 + 1 the Hoeffding radius sqrt(2 log 40 / n) is about 1.92e-200, evaluated from
+    logarithms because n exceeds binary64, and the exact variance is saved. For n = 2*10**2500 + 1 the
+    radius underflows, so the exact endpoints are rounded outward with the smallest subnormal radius and
+    the interval keeps a positive width around the mean, which rounds to zero. The exact mean is
+    slightly negative, so the outward lower end lies two subnormals below zero. The exact variance of
+    that population has a denominator of about 7500 digits, beyond what a saved record holds, and is
+    unavailable with its reason. Beta posterior shapes cannot hold either count.
+    """
+    for k in (400, 2500):
+        data = population("stored bins", 10**k, 10**k + 1)
+        _, point = infer(data)
+        assert point.raw_mean == float(Fraction(-1, 2 * 10**k + 1))
+        _, hoeffding = infer(data, "hoeffding")
+        lower, upper = hoeffding.interval.lower, hoeffding.interval.upper
+        assert hoeffding.interval.status == "conditional" and lower < 0 < upper
+        if k == 400:
+            assert lower == -upper and upper == pytest.approx(sqrt(2 * log(40) / 2) * 10.0**-200, rel=1e-12)
+            assert Fraction(point.empirical_variance.numerator, point.empirical_variance.denominator) == Fraction(
+                4 * 10**k * (10**k + 1), (2 * 10**k + 1) ** 2 * 2 * 10**k)
+        else:
+            # The exact mean is slightly negative, so the outward lower end is two subnormals below zero.
+            assert (lower, upper) == (-1e-323, 5e-324) and point.empirical_variance is None
+            assert any("saved record" in reason for reason in point.unavailable)
+        _, beta = infer(data, "beta")
+        assert beta.interval.status == "unavailable" and beta.point is None
+
+
 def test_beta_special_case_prior_domain_and_unknown_model(monkeypatch):
     """A Beta(2,1) posterior gives analytic square-root quantiles, while unsupported priors must
     not reach inversion.
@@ -563,3 +593,54 @@ def test_result_save_load_and_reanalysis_share_original_counts(injected, tmp_pat
     revised = loaded.analyze()
     assert revised.value == result.value and revised.statistics == result.statistics
     assert revised.origin.invocation_id != result.origin.invocation_id and injected.calls == before
+
+
+def test_sampled_value_and_raw_value_are_checked_on_every_route(injected, tmp_path):
+    """Reanalysis and loading keep the value, and both saved values are checked at attachment.
+
+    Without mitigation the Hoeffding point is the raw mean. With mitigation
+    the corrected point differs from the raw mean. A Result whose value or
+    raw value was changed is refused when it is attached, whether it was
+    solved, reanalyzed or loaded.
+    """
+    hoeffding = BinaryInferenceOptions(method="hoeffding", sampling_model="iid_bernoulli")
+    for mitigation, payloads, folder in (
+        (None, {"group_0": {"0": 75, "1": 25}}, "raw"),
+        (BinaryReadoutMitigation(calibration_shots=100),
+         {"science_0": {"0": 75, "1": 25}, "zero_0": {"0": 95, "1": 5}, "one_0": {"0": 5, "1": 95}}, "mitigated"),
+    ):
+        injected.payloads = payloads
+        choice = make_choice(terms=(("Z", 1.0), ("I", 0.25)), inference=hoeffding, mitigation=mitigation)
+        solved = nwqlib.solve(choice)
+        assert (solved.value == solved.statistics.raw_value) == (mitigation is None)
+        again = solved.analyze()
+        assert again.value == solved.value
+        loaded = nwqlib.load_result(solved.save(tmp_path / folder))
+        assert loaded.value == solved.value
+        for result in (solved, again, loaded):
+            for changed in (result.revise(value=result.value + 0.25), result.revise(
+                    statistics=result.statistics.revise(raw_value=result.statistics.raw_value + 0.25))):
+                with pytest.raises(ValueError, match="physical expectation value differs"):
+                    changed._attach(result.plan, result.data)
+
+
+def test_a_family_beyond_binary64_has_its_rounded_member_probability():
+    """alpha = delta/F is the exact quotient rounded once, so F beyond binary64 does not overflow.
+
+    With 10,000 zeros and 10,000 ones and delta = 0.05, F = 10**309 gives the subnormal alpha = 5e-311, and the
+    Hoeffding radius sqrt(2 log(2/alpha) / n) agrees with an 80-digit evaluation of the exact alpha. F = 10**400
+    makes alpha underflow to zero, and the interval is unavailable with its reason.
+    """
+    from decimal import Decimal, localcontext
+
+    data = population("balanced bins", 10_000, 10_000)
+    for family in (2, 10**309):
+        _, result = infer(data, "hoeffding", family=family)
+        with localcontext() as context:
+            context.prec = 80
+            alpha = Decimal.from_float(0.05) / family
+            radius = float((2 * (2 / alpha).ln() / 20_000).sqrt())
+        assert result.interval.status == "conditional"
+        assert result.interval.upper == pytest.approx(radius, rel=1e-13, abs=0)
+    _, result = infer(data, "hoeffding", family=10**400)
+    assert result.interval.status == "unavailable" and "unrepresentable in binary64" in result.interval.reason

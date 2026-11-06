@@ -4,18 +4,27 @@ ACL denotes An, Childs, and Lin, "Quantum algorithm for linear non-unitary
 dynamics with near-optimal dependence on all parameters", arXiv:2312.03916,
 https://arxiv.org/abs/2312.03916. ACL equation numbers in this module refer to
 arXiv:2312.03916v2. Low-Somma denotes Low and Somma, "Optimal quantum
-simulation of linear non-unitary dynamics", arXiv:2508.19238v2. ATAP denotes
+simulation of linear non-unitary dynamics", arXiv:2508.19238v2. Apel-Berntson
+denotes Apel and Berntson, arXiv:2610.03669v1, a preprint whose peer-review
+status is unconfirmed. ATAP denotes
 Trefethen, Approximation Theory and Approximation Practice,
 ISBN 978-1-61197-239-9, Chapter 19 (https://www.chebfun.org/ATAP/chap19.m).
 
 A kernel-quadrature pair turns an LCHS representation of exp(-A*T) as an integral of
 g(k)*exp(-i*T*(k*L+H)) over real k, with A = L + iH, into finite real nodes
 k_j and complex coefficients c_j. The representation is exact for the ACL
-kernels (Eqs. (6) and (60)) and approximate for Low-Somma (their Eq. (8)).
-The pair accounts for two error components, the kernel-integral error and the
+kernels (Eqs. (6) and (60)) and approximate for Low-Somma (their Eq. (8))
+and for the compact Apel-Berntson kernel on (-R, R).
+The pair accounts for its error components, the kernel-integral error and the
 finite k-quadrature error. For Eq. (7) the kernel-integral error is the tail beyond
 the cutoff. For Low-Somma it is epsilon_lchs of their Theorem 2, which also
-covers the approximate representation and so is not a pure tail. Branch
+covers the approximate representation and so is not a pure tail. For
+Apel-Berntson it is the continuous allowance of their Theorem 4 and
+Proposition 10, and the tanh-sinh rule bounds its step and truncation
+separately (their Theorem 8 at the default radius, which
+docs/algorithms/lchs_derivations.md adapts to a supplied radius). Weights prepared
+at fixed nodes (coefficient_artifact.py) replace both stages by one residual
+bound of the whole finite sum. Branch
 synthesis, state preparation and physical recovery are bounded separately.
 
 The default pair is the Eq. (7) kernel with beta = 0.75 and composite Gauss
@@ -31,16 +40,21 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from math import asinh, ceil, cos, exp, expm1, fsum, isfinite, isnan, lgamma, log, nextafter, pi, sqrt
+from fractions import Fraction
+from math import (asin, asinh, atan, ceil, cos, exp, expm1, frexp, fsum, hypot, inf, isfinite, isnan, ldexp, lgamma,
+                  log, log1p, nextafter, pi, sin, sinh, sqrt, tan)
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
 import numpy as np
+from scipy.special import roots_legendre
 
 from operator import index as integer_index
 
+from nwqlib._limits import ResourceLimitError, byte_allowance, exceeds, memory_limit, optional_limit
 from nwqlib._validation import finite_real, integer
-from nwqlib.operators.access import DEFAULT_INPUT_BYTES, _check_bytes
+from nwqlib.operators.access import _check_bytes
+from nwqlib.algorithms.lchs.coefficient_artifact import LCHSDiscreteWeightArtifact
 from nwqlib.algorithms.lchs.provider_config import (
     ProviderConfig,
     ProviderParameter,
@@ -94,6 +108,28 @@ def _deep_freeze(value: Any) -> Any:
     return value
 
 
+def _read_only_vector(values: Any, dtype: Any) -> np.ndarray:
+    """Return values as a read-only array of dtype whose bytes cannot change, sharing an already frozen array."""
+    from nwqlib.operators.inputs import _freeze_array
+
+    return _freeze_array(np.asarray(values, dtype=dtype))
+
+
+def _fields_equal(left: Any, right: Any) -> bool:
+    """Compare two records of the same dataclass field by field, an array field by its dtype and exact elements."""
+    if left.__class__ is not right.__class__:
+        return NotImplemented
+    for field_name in left.__dataclass_fields__:
+        first, second = getattr(left, field_name), getattr(right, field_name)
+        if isinstance(first, np.ndarray) or isinstance(second, np.ndarray):
+            if not (isinstance(first, np.ndarray) and isinstance(second, np.ndarray)
+                    and first.dtype == second.dtype and np.array_equal(first, second)):
+                return False
+        elif first is not second and first != second:
+            return False
+    return True
+
+
 def _detached_plain(value: Any) -> Any:
     """Return detached plain dictionaries and lists for serialization."""
 
@@ -106,6 +142,7 @@ def _detached_plain(value: Any) -> Any:
 
 KernelResolver = Callable[[Mapping[str, ProviderParameter]], Mapping[str, ProviderParameter]]
 KernelCoefficient = Callable[[float, Mapping[str, Any]], complex]
+KernelCoefficients = Callable[[np.ndarray, Mapping[str, Any]], np.ndarray]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -121,6 +158,10 @@ class LCHSKernelProvider:
             using the resolved pair context. Quadrature weights are multiplied separately.
         fixed_parameters: Read-only formula constants, such as Low-Somma j=2 and y=1,
             which are not user-adjustable provider parameters.
+        coefficients: Default None. Callable evaluating the same kernel at a
+            float64 array of k values with the same pair context and
+            returning their complex values in order. When it is None, a
+            coefficient plan calls `coefficient` once per node.
     """
 
     name: str
@@ -128,6 +169,7 @@ class LCHSKernelProvider:
     resolve_parameters: KernelResolver
     coefficient: KernelCoefficient
     fixed_parameters: Mapping[str, ProviderParameter]
+    coefficients: KernelCoefficients | None = None
 
     def __post_init__(self) -> None:
         if not self.name or not self.formula_id:
@@ -143,21 +185,44 @@ class LCHSKernelProvider:
 class LCHSProblemContext:
     """Problem scalars available to provider planning.
 
+    Providers read only these scalars, never an operator, state or circuit.
+
     Attributes:
-        final_time: Evolution duration T in the units paired with A in exp(-T A).
-        epsilon: Requested finite-construction tolerance. The default Gauss selector
-            splits it equally between kernel truncation and quadrature. Other
-            physical-output error contributions are bounded separately.
-        l_norm: Numerical spectral-norm estimate of the prepared Hermitian L used in
-            exp(-i T (k L + H)). T*l_norm is dimensionless.
+        final_time: Largest elapsed time T_e of any application of the finite
+            sum, in the units paired with A in exp(-T A). The selected rule
+            serves every elapsed time in [0, T_e], because each pair's bound
+            conditions at T_e also hold at every smaller elapsed time.
+        epsilon: Requested finite-construction tolerance. Without
+            `component_allowances` each pair divides it among its error
+            components by its own rule: the Eq. (7) and composite-Gauss pair
+            gives each of its two components epsilon/2, Low-Somma gives each
+            of its two epsilon/3, Apel-Berntson gives each of its three
+            epsilon/3, and a discrete-weight artifact receives all of it.
+            Other physical-output error contributions are bounded
+            separately. The binary64 rounding admission of the finite sum
+            also uses this tolerance.
+        l_norm: Bound B_Ls on the spectral norm of the processed Hermitian
+            L_s = L + s I that enters exp(-i t (k L_s + H)). The strip and
+            support conditions of the providers need B_Ls >= ||L_s||. The
+            dense planner supplies the eigensolver's spectral norm, whose
+            rounding is not enclosed. T_e*l_norm is dimensionless.
+        component_allowances: Default `None`. Operator-norm allowance of each
+            error component of the chosen pair, by component name, each
+            finite and positive with a sum at most `epsilon`. The Eq. (7)
+            and Low-Somma pairs name `"kernel_approximation"` and
+            `"k_quadrature"`, Apel-Berntson names `"kernel_approximation"`,
+            `"k_discretization"` and `"k_truncation"`, and the discrete-weight
+            pair names `"discrete_residual"`. Pairs without bounds accept
+            none. `None` applies the division described under `epsilon`.
     """
 
     final_time: float
     epsilon: float
     l_norm: float
+    component_allowances: Mapping[str, float] | None = None
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, eq=False)
 class LCHSQuadraturePlan:
     """The k-quadrature rule of an `LCHSCoefficientPlan`: its nodes, weights, address layout and component error bounds.
 
@@ -170,16 +235,20 @@ class LCHSQuadraturePlan:
 
     Attributes:
         nodes: Ordered real k values for the mathematical quadrature, without the
-            padding address slots of the LCU. This order also indexes base_weights.
-        base_weights: Real integration weights before multiplication by the kernel.
+            padding address slots of the LCU, as a read-only float64 array.
+            This order also indexes base_weights.
+        base_weights: Real integration weights before multiplication by the
+            kernel, as a read-only float64 array.
         range_k: Cutoff K of the rule as built and of its available
             component bounds, or the maximum node magnitude for a signed-binary
             grid (zero for the exact unitary reduction). In composite Gauss, K
             specifies the panel interval [-K, K]. The Gauss nodes are interior.
         interval_count_each_side: Gauss panel count on each side of zero. The symmetric
-            uniform rule uses its integer half-range J, and signed/unitary rules use zero.
+            uniform rule uses its integer half-range J, tanh-sinh its half-range
+            N, and signed, discrete-weight and unitary rules use zero.
         node_count: Gauss-Legendre points per panel for composite Gauss. Total points
-            for the signed or symmetric-uniform rule, and one for unitary reduction.
+            for the signed, symmetric-uniform, tanh-sinh and discrete-weight
+            rules, and one for unitary reduction.
         node_order: Description of the node-to-address ordering, including
             computational-basis wraparound for a signed two's-complement grid.
         address_structure: Read-only structural data that the SELECT check and
@@ -200,10 +269,18 @@ class LCHSQuadraturePlan:
             equal to ``range_k / interval_count_each_side``. ``None`` (the default)
             for rules without Gauss panels, including the exact single-unitary
             reduction.
+        kernel_values: Default ``None``. Kernel factor of each node, in node
+            order, when the rule determines it together with the node. The
+            tanh-sinh rule evaluates the Apel-Berntson phase from its
+            parameter xi_n, because an evaluation at the rounded node k_n
+            loses that phase near the endpoints ±R. For an
+            LCHSDiscreteWeightArtifact these are its complex weights, and the
+            base weights are one. A read-only complex128 array, or ``None``
+            when the kernel is evaluated at each node k_j.
     """
 
-    nodes: tuple[float, ...]
-    base_weights: tuple[float, ...]
+    nodes: np.ndarray
+    base_weights: np.ndarray
     range_k: float
     interval_count_each_side: int
     node_count: int
@@ -214,14 +291,20 @@ class LCHSQuadraturePlan:
     approximate_lchs_error_bound: float | None
     quadrature_error_bound: float | None
     h1: float | None = None
+    kernel_values: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         for field_name in self.__dataclass_fields__:
-            object.__setattr__(
-                self,
-                field_name,
-                _deep_freeze(getattr(self, field_name)),
-            )
+            value = getattr(self, field_name)
+            if field_name in ("nodes", "base_weights"):
+                value = _read_only_vector(value, np.float64)
+            elif field_name == "kernel_values":
+                value = None if value is None else _read_only_vector(value, np.complex128)
+            else:
+                value = _deep_freeze(value)
+            object.__setattr__(self, field_name, value)
+
+    __eq__ = _fields_equal
 
 
 QuadratureResolver = Callable[[Mapping[str, ProviderParameter]], Mapping[str, ProviderParameter]]
@@ -269,8 +352,17 @@ class LCHSPairCompatibility:
             None of these by itself certifies a complete physical solution.
         reason: Explanation of the domain in which the pair is allowed, or of
             why its guarantee is absent or rejected.
-        unbudgeted_error_stages: Named approximation stages absent from this pair's
-            budget, such as Trotter synthesis or state preparation.
+        unbudgeted_error_stages: Named approximation stages that receive no
+            share of `approximation_tolerance` from this pair. A pair with
+            component bounds gives each bounded component a share, and it can
+            name other stages, such as Trotter synthesis or state preparation.
+            A pair on `signed_binary_uniform` bounds neither its kernel nor its
+            k quadrature, so it names those two. The planned construction can
+            separately give a synthesis stage an allowance, as
+            `trotter_error_budgeted` does for each node. The tuple is not a
+            complete list: an empty tuple does not mean that every other stage
+            has an allowance. A planned construction that has its own bound for
+            such a stage still reports that bound.
     """
 
     allowed: bool
@@ -279,7 +371,7 @@ class LCHSPairCompatibility:
     unbudgeted_error_stages: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True, kw_only=True, eq=False)
 class LCHSCoefficientPlan:
     """Nodes, weights and coefficients of the finite LCHS sum, shared by every backend.
 
@@ -304,16 +396,27 @@ class LCHSCoefficientPlan:
             normally `"user"` or `"provider_default"`, with a profile
             identifier where one applies.
         derived_parameters: Quantities derived for the pair, such as the
-            Low–Somma `gamma`, `R`, `h` and `J`. A problem without a source
-            also records its PSD-shift compensation here.
-        nodes: Ordered real k values, as in `quadrature`.
+            Low–Somma `gamma`, `R`, `h` and `J`, the Apel–Berntson `mu`,
+            `R`, `Delta`, `eta`, `h`, `N` and component bounds, or the
+            support and residual terms of a discrete-weight artifact.
+            Each error component of the pair records its allowance here as
+            `allowance_<component>`: the explicit `component_allowances`,
+            or by default the share of `epsilon` that `LCHSProblemContext`
+            states. A problem without a source also records here the factor
+            `homogeneous_coefficient_compensation` applied to its
+            coefficients.
+        nodes: Ordered real k values, as in `quadrature`, as a read-only
+            float64 array.
         base_weights: Integration weights before multiplication by the
-            kernel.
-        coefficients: Complex coefficients c_j in node order. For a problem
-            without a source they include the PSD growth factor
-            `exp(shift*T)`, divided by `2**e` when the factor exceeds
-            binary64, and the physical recovery carries `2**e`. Their phases
-            are applied in the SELECT circuit.
+            kernel, as a read-only float64 array.
+        coefficients: Complex coefficients in node order, as a read-only
+            complex128 array. A provider table
+            holds the raw coefficients c_j. For a problem without a source
+            they are `exp(s*T)*c_j*exp(i*phi_j)` for the signed shift s and
+            any extracted scalar phase phi_j, divided by
+            `2**recovery_exponent`, and the physical recovery carries
+            `2**recovery_exponent`. Their phases are applied in the SELECT
+            circuit.
         coefficient_l1_norm: `sum_j |c_j|`, the normalization of the
             coefficient state. It is neither the physical output norm nor an
             error estimate.
@@ -330,6 +433,17 @@ class LCHSCoefficientPlan:
             normalized, padded coefficient-state amplitudes, or `None`.
             `decompose_mps` reuses it only for the same tensor ordering and
             truncation settings.
+        recovery_exponent: Default `0`. The power of two `2**e` that the
+            physical recovery carries outside `coefficients`. For a problem
+            without a source, `e = e' - 1 - k`, with `e'` the binary exponent
+            of `exp(s*T)`, about `floor(s*T/ln 2) + 1`, and `k` (0 to 52) the
+            exact power of two that lifts every nonzero real and imaginary
+            part of the raw table into the normal binary64 range. The
+            coefficients then carry the factor `exp(s*T)*2**-e`, between 1
+            and `2**53`, so none underflows under strong known decay and
+            their magnitudes and phases keep binary64 relative precision.
+            For a table without subnormal parts, `e` is `0` when `exp(s*T)`
+            lies in [1, 2).
     """
 
     requested_lchs_kernel: ProviderConfig
@@ -341,15 +455,22 @@ class LCHSCoefficientPlan:
     lchs_kernel_fixed_parameters: Mapping[str, ProviderParameter]
     kernel_parameter_selection: Mapping[str, str]
     derived_parameters: Mapping[str, ProviderParameter]
-    nodes: tuple[float, ...]
-    base_weights: tuple[float, ...]
-    coefficients: tuple[complex, ...]
+    nodes: np.ndarray
+    base_weights: np.ndarray
+    coefficients: np.ndarray
     coefficient_l1_norm: float
     quadrature: LCHSQuadraturePlan
     compatibility: LCHSPairCompatibility
     mps_decomposition: object | None = None
+    recovery_exponent: int = 0
 
-    def prep_amplitudes(self, *, max_bytes=DEFAULT_INPUT_BYTES):
+    def __post_init__(self) -> None:
+        for field_name, dtype in (("nodes", np.float64), ("base_weights", np.float64), ("coefficients", np.complex128)):
+            object.__setattr__(self, field_name, _read_only_vector(getattr(self, field_name), dtype))
+
+    __eq__ = _fields_equal
+
+    def prep_amplitudes(self, *, max_bytes=None):
         """Return the coefficient-state amplitudes `sqrt(|c_j|/alpha)`, zero-padded.
 
         alpha is `coefficient_l1_norm`, and the array length is the next
@@ -359,8 +480,8 @@ class LCHSCoefficientPlan:
         phases moved from the two preparation oracles into SELECT).
 
         Args:
-            max_bytes (int): Default 10 GB (decimal, `10_000_000_000`
-                bytes). Upper limit on the arrays, 96 bytes per address
+            max_bytes (int | None): Default `None`, the physical memory of this
+                computer. Upper limit on the arrays, 96 bytes per address
                 slot, checked first.
 
         Returns:
@@ -370,16 +491,20 @@ class LCHSCoefficientPlan:
         from nwqlib.subroutines.lcu.data import _coefficient_bookkeeping
         from nwqlib.operators.inputs import _freeze_array
         # Per padded slot: 16 bytes for the complex128 coefficient copy and the
-        # 80 bytes that _coefficient_bookkeeping admits for its own arrays.
+        # 80 bytes of the _coefficient_bookkeeping arrays. The 18 bytes of the
+        # lift scan are released before those arrays exist.
         _check_bytes(96 * (1 << max(0, len(self.coefficients)-1).bit_length()), max_bytes,
                      "coefficient PREP arrays")
-        values = np.asarray(self.coefficients, dtype=np.complex128)
-        _, _, amplitudes, _, _, _ = _coefficient_bookkeeping(
-            values, dimension=1, coefficient_atol=0, max_bytes=max_bytes)
+        # The exact lift 2**k (coefficient_lift) brings subnormal parts into
+        # the normal range before the magnitudes are formed. The amplitudes
+        # sqrt(2**k*|c_j|/(2**k*alpha)) do not depend on it.
+        values = np.array(self.coefficients, dtype=np.complex128)
+        values *= 2.0**coefficient_lift(values)
+        _, _, amplitudes, _, _, _ = _coefficient_bookkeeping(values, dimension=1, coefficient_atol=0)
         return _freeze_array(amplitudes)
 
     def decompose_mps(self, max_bond_dim=None, threshold=1e-14, *, reuse=None,
-                      max_bytes=DEFAULT_INPUT_BYTES, max_svd_work=100_000_000):
+                      max_bytes=None, max_svd_work=None):
         """Return the TT-SVD (MPS) decomposition of the `prep_amplitudes` tensor.
 
         An attached or supplied decomposition is reused only when it was made
@@ -393,9 +518,10 @@ class LCHSCoefficientPlan:
             threshold (float): Singular-value truncation threshold.
             reuse (MPSDecomposition | None): Decomposition to reuse instead
                 of the attached `mps_decomposition`.
-            max_bytes (int): Default 10 GB (decimal, `10_000_000_000`
-                bytes). Upper limit on the known arrays.
-            max_svd_work (int): Upper limit on the counted TT-SVD work.
+            max_bytes (int | None): Default `None`, the physical memory of this
+                computer. Upper limit on the known arrays.
+            max_svd_work (int | None): Default `None`, no limit. Upper limit
+                on the counted TT-SVD work.
 
         Returns:
             decomposition (MPSDecomposition): The TT cores, bond dimensions
@@ -421,7 +547,7 @@ class LCHSCoefficientPlan:
             if reuse is not None:
                 raise ValueError("MPS reuse requires the same normalized tensor, ordering and truncation settings")
         return _decompose_normalized_state(target, max_bond_dim=max_bond_dim, threshold=threshold,
-                                           max_bytes=max_bytes, max_svd_work=max_svd_work)
+            max_bytes=max_bytes, max_svd_work=max_svd_work)
 
     def record(self) -> dict[str, Any]:
         """Return the kernel, quadrature and pair choices with their bounds as a plain dict.
@@ -558,6 +684,11 @@ def composite_gauss_grid(
     base node on [-1, 1] into panel j and scales its weight by h1/2 (ACL
     arXiv:2312.03916v2, Appendix A.4).
 
+    The base nodes and weights are SciPy's binary64 ``roots_legendre`` values,
+    and the map rounds again. The quadrature bound of ``_ellipse_rule`` is for
+    the exact Gauss rule on these panels, so the errors of this construction
+    are reported under ``native_floating_point``, not ``k_quadrature``.
+
     Returns:
         Two float arrays of length 2*m*node_count. The nodes are ordered panel
         by panel from the most negative panel, and within a panel in the
@@ -569,7 +700,8 @@ def composite_gauss_grid(
     if h1 <= 0.0:
         raise ValueError("h1 must be positive")
     node_count = integer(node_count, "node_count", 1)
-    base_nodes, base_weights = np.polynomial.legendre.leggauss(node_count)
+    # The tridiagonal Jacobi rule uses linear workspace, followed by Newton refinement.
+    base_nodes, base_weights = roots_legendre(node_count)
     mapped_weights = 0.5 * h1 * base_weights
     k_nodes: list[float] = []
     for shifted_index in range(2 * interval_count_each_side):
@@ -633,30 +765,63 @@ def eq7_tail_bound(beta, range_k):
     return _positive_bound(log_bound)
 
 
-def _check_quadrature_work(required, max_quadrature_work, subject):
-    """Check one complete quadrature work count against ``LCHS.max_quadrature_work``.
+def _check_quadrature_work(required, max_quadrature_work, subject, ledger=None):
+    """Check one complete quadrature work count against ``LCHS.max_quadrature_work``, where None sets no limit.
 
     ``required`` is the complete work count of the chosen rule, known before
     its node arrays are built. A refusal reports this count and the limit.
+    An admitted count is stored as ``ledger["quadrature_work"]`` when the
+    caller supplied a ledger (``_resolve_coefficient_context``), so provider
+    enumeration can record each candidate's admitted work.
     """
-    if type(max_quadrature_work) is not int or max_quadrature_work < 1:
-        raise ValueError("max_quadrature_work must be a positive integer")
-    if required > max_quadrature_work:
-        raise ValueError(
+    max_quadrature_work = optional_limit(max_quadrature_work, "max_quadrature_work")
+    if exceeds(required, max_quadrature_work):
+        raise ResourceLimitError(
             f"{subject} {required} work units, exceeding "
             f"LCHS.max_quadrature_work={max_quadrature_work}. "
             f"Raise LCHS.max_quadrature_work to at least {required}.")
+    if ledger is not None:
+        ledger["quadrature_work"] = required
 
 
-def _ellipse_rule(problem, beta, range_k):
+def dense_select_slot_refusal(*, time, l_norm, tolerance, branches, limit, total_qubits=None):
+    """Return the refusal of a dense SELECT whose padded address slots exceed ``LCHS.max_dense_select_slots``.
+
+    ``branches`` is the final branch count when ``total_qubits`` is given
+    (``parameters.select_parameters``), and otherwise a lower bound on it
+    known before the grid exists (``_build_composite_gauss``). Padding rounds
+    branches up to a power of two.
+
+    The final check serves every k grid. Raising the limit or using
+    product-formula branches applies to all of them. A shorter time or a looser
+    tolerance can shrink only a grid chosen from those controls, so the message
+    scopes that advice: an explicit grid keeps its size at any time or tolerance.
+    """
+    slots = 1 << (branches-1).bit_length()
+    size = (f"at least {branches} branches and {slots} padded SELECT slots" if total_qubits is None
+            else f"{branches} branches, {slots} padded SELECT slots and {total_qubits} total qubits")
+    return ResourceLimitError(
+        f"LCHS dense SELECT at time={time}, ||L||={l_norm:g}, approximation_tolerance={tolerance:g} "
+        f"needs {size}; max_dense_select_slots={limit}. Raise max_dense_select_slots to at least {slots}, "
+        "select supported multiplexed product-formula evolution with its different approximation and "
+        "cost, or, on a k grid chosen from the time and tolerance, choose a shorter time or a looser "
+        "approximation_tolerance. An explicit k grid such as signed_binary_uniform sets its own size.")
+
+
+def _ellipse_rule(problem, beta, range_k, strip_margin=LCHS_ELLIPSE_STRIP_MARGIN):
     """Select the least-node Q-point Gauss rule using ATAP Theorem 19.3.
 
     ATAP ISBN 978-1-61197-239-9, Theorem 19.3, Eq. (19.8), bounds (n+1)-point
-    Gauss quadrature for n >= 1, so n = Q-1 and Q >= 2. Apply its scalar result
+    Gauss quadrature for n >= 1, so n = Q-1 and Q >= 2. The bound is for the
+    exact Gauss rule, with exact nodes and weights. Apply its scalar result
     to v*F(k)u for arbitrary unit vectors u,v, then take their supremum to
     obtain the same operator-norm bound without a dimension factor.
-    On |Im k| <= b = 1-d, |1-i*k| >= d and
-    Re((1+i*k)**beta) >= 0, so |g(k)| <= 1/(C_beta*d). The evolution factor
+    The strip margin d = ``strip_margin`` lies in (0, 1). For k = x + i*y with
+    |y| <= b = 1-d, Re(1+i*k) = 1-y >= d > 0 and |1-i*k| >= Re(1-i*k) =
+    1+y >= d. The principal power of a number with positive real part has
+    nonnegative real part for 0 < beta < 1, so Re((1+i*k)**beta) >= 0 and
+    |g(k)| <= 1/(C_beta*d). This holds for every d in (0, 1), and d enters b,
+    the ellipse radius and the prefactor together. The evolution factor
     satisfies ||exp(-i*T*(k*L+H))|| <= exp(b*T*||L||), also for noncommuting
     Hermitian L and H. Indeed the Hermitian part of -i*T*(k*L+H) is
     T*Im(k)*L, so the logarithmic-norm bound controls the exponential even
@@ -671,7 +836,12 @@ def _ellipse_rule(problem, beta, range_k):
     violate. The search tries m = 1, 2, ... panels, finds the least Q meeting
     epsilon for each m, and stops once 4*m exceeds the best node count, since
     any rule with m panels has at least 2*m*Q >= 4*m nodes. Ties prefer fewer
-    points per panel. No matrix operations or sampled maximum are used by this
+    points per panel. The search minimizes the node count at this beta, d and K
+    only. It does not order the complete coherent cost: the rightmost node of m
+    panels of Q points is K - (K/(2*m))*(1 - x_max(Q)), with x_max(Q) the
+    largest Gauss-Legendre node, so (m, Q) = (3, 2) has 12 nodes below 14*K/15
+    while (1, 5) has 10 nodes above 0.95*K, and the coherent joint generator
+    is normalized by that largest node magnitude. No matrix operations or sampled maximum are used by this
     scalar selection.
 
     The search has a finite termination bound independent of
@@ -691,6 +861,9 @@ def _ellipse_rule(problem, beta, range_k):
             default pair passes half the construction tolerance).
         beta: Eq. (7) exponent in (0, 1).
         range_k: Cutoff K. The panels tile [-K, K] exactly.
+        strip_margin: The margin d in (0, 1) of the strip |Im k| <= 1 - d,
+            default LCHS_ELLIPSE_STRIP_MARGIN. Provider enumeration
+            (`selection.PROVIDER_FRONTIER`) also tries d = 0.5.
 
     Returns:
         A pair (choice, work). choice is (2*m*Q, Q, m, h, bound): the total
@@ -698,7 +871,9 @@ def _ellipse_rule(problem, beta, range_k):
         K/m, and the quadrature bound in operator norm. work is the scalar
         work counted for the candidate panel counts tried.
     """
-    d = LCHS_ELLIPSE_STRIP_MARGIN
+    d = finite_real(strip_margin, "strip margin d")
+    if not 0 < d < 1:
+        raise ValueError("the Gauss panel strip margin d must lie in (0, 1)")
     b = 1. - d
     scaled_time = finite_real(problem.final_time * problem.l_norm, "T*||L||")
     if (problem.final_time < 0 or problem.l_norm < 0 or scaled_time < 0
@@ -779,6 +954,11 @@ def _eq7_provider_coefficient(k_value: float, context: Mapping[str, Any]) -> com
     return eq7_coefficient(float(context["kernel_parameters"]["beta"]), k_value)
 
 
+def _eq7_provider_coefficients(k_values: np.ndarray, context: Mapping[str, Any]) -> np.ndarray:
+    """Evaluate g(k) of ``_eq7_provider_coefficient`` at an array of k."""
+    return eq7_coefficient(float(context["kernel_parameters"]["beta"]), k_values)
+
+
 def _cauchy_provider_coefficient(
     k_value: float,
     _context: Mapping[str, Any],
@@ -792,6 +972,11 @@ def _cauchy_provider_coefficient(
     kernel pairs only with the uncertified signed-binary grid.
     """
     return complex(1.0 / (pi * (1.0 + k_value**2)))
+
+
+def _cauchy_provider_coefficients(k_values: np.ndarray, _context: Mapping[str, Any]) -> np.ndarray:
+    """Evaluate the Cauchy density of ``_cauchy_provider_coefficient`` at an array of k."""
+    return (1.0 / (pi * (1.0 + k_values**2))).astype(np.complex128)
 
 
 def low_somma_fhat_2(k_value: float, *, gamma: float, c_value: float) -> complex:
@@ -808,12 +993,17 @@ def low_somma_fhat_2(k_value: float, *, gamma: float, c_value: float) -> complex
     raises OverflowError.
     """
 
-    return complex(
-        sqrt(2.0 / pi)
-        * exp(c_value - (k_value**2 + 1.0) / (4.0 * gamma**2))
-        * np.exp(-1.0j * k_value * c_value)
-        / (1.0 + k_value**2)
-    )
+    value = complex(_low_somma_profile(k_value, gamma=gamma, c_value=c_value))
+    if not (isfinite(value.real) and isfinite(value.imag)):
+        raise OverflowError("the Low-Somma profile magnitude is not representable")
+    return value
+
+
+def _low_somma_profile(k_values, *, gamma: float, c_value: float):
+    """Evaluate the profile of ``low_somma_fhat_2`` at a float or a float array of k, nonfinite where it overflows."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        return (sqrt(2.0 / pi) * np.exp(c_value - (k_values**2 + 1.0) / (4.0 * gamma**2))
+                * np.exp(-1.0j * k_values * c_value) / (1.0 + k_values**2))
 
 
 def _low_somma_provider_coefficient(
@@ -832,12 +1022,233 @@ def _low_somma_provider_coefficient(
     ) / sqrt(2.0 * pi)
 
 
+def _low_somma_provider_coefficients(k_values: np.ndarray, context: Mapping[str, Any]) -> np.ndarray:
+    """Evaluate ``_low_somma_provider_coefficient`` at an array of k, nonfinite where the profile overflows."""
+    return _low_somma_profile(k_values, gamma=float(context["derived_parameters"]["gamma"]),
+                              c_value=float(context["kernel_parameters"]["c"])) / sqrt(2.0 * pi)
+
+
+def apel_berntson_kernel(k_value: float, *, radius: float, mu: float, delta: float) -> complex:
+    """Evaluate the compact Apel-Berntson kernel g_R(k) at a real node with |k| < R.
+
+    With R, mu and Delta from the kernel's radius rule,
+    g_R(k) = exp((1-mu)*Delta)/(pi*(1+k**2))
+    * exp(-1j*(Delta/pi)*log((R+k)/(R-k))) on (-R, R), and its integral
+    against exp(-i*t*(k*L_s+H)) approximates exp(-t*(L_s+iH)) within the
+    continuous allowance epsilon_c (Apel and Berntson, arXiv:2610.03669v1,
+    Theorem 4 and Proposition 10). Its magnitude is beta_R times the truncated Cauchy density
+    1/(2*atan(R)*(1+k**2)), with beta_R = (2*atan(R)/pi)*exp((1-mu)*Delta)
+    = mu*exp((1-mu)*Delta).
+
+    The phase uses the real logarithm log1p(k/R) - log1p(-k/R) of the
+    positive ratio (R+k)/(R-k). The lower-half-plane branch of the paper's
+    kernel gives log((k+R)/(k-R)) = pi*sinh(xi) + i*pi under
+    k = R*tanh((pi/2)*sinh(xi)), so the principal complex logarithm of the
+    negative ratio (k+R)/(k-R) must not be used. Near ±R a rounded k loses
+    this phase, and the tanh-sinh rule evaluates it from xi instead.
+
+    Raises:
+        ValueError: If |k| >= R, where the kernel is not defined.
+    """
+
+    if not abs(k_value) < radius:
+        raise ValueError("the Apel-Berntson kernel is defined only for |k| < R")
+    phase = (delta / pi) * (log1p(k_value / radius) - log1p(-k_value / radius))
+    magnitude = exp((1.0 - mu) * delta) / (pi * (1.0 + k_value * k_value))
+    return complex(magnitude * cos(phase), -magnitude * sin(phase))
+
+
+def _apel_provider_coefficient(k_value: float, context: Mapping[str, Any]) -> complex:
+    """Evaluate g_R(k) at the derived R, mu and Delta of the Apel-Berntson pair."""
+    derived = context["derived_parameters"]
+    return apel_berntson_kernel(k_value, radius=float(derived["R"]), mu=float(derived["mu"]),
+                                delta=float(derived["Delta"]))
+
+
+def _resolve_apel_berntson(
+    supplied: Mapping[str, ProviderParameter],
+) -> Mapping[str, ProviderParameter]:
+    """Resolve the kernel radius, `None` (default) for the root rule of Theorem 6 or a finite positive R.
+
+    Without a radius the root of Apel and Berntson, arXiv:2610.03669v1,
+    Theorem 6, gives the radius that minimizes their R*beta. A supplied R selects the
+    minimum-beta kernel of that radius (their Proposition 10), so a
+    planner can choose R for its own cost.
+    """
+    radius = supplied.get("radius")
+    if radius is None:
+        return {"radius": None}
+    radius = float(radius)
+    if not isfinite(radius) or radius <= 0.0:
+        raise ValueError("apel_berntson parameter 'radius' must be finite and positive")
+    return {"radius": radius}
+
+
+def _apel_radius(epsilon_c: float, radius: float | None) -> tuple[float, float, float, int]:
+    """Return mu, R, Delta and the bisection step count of the Apel-Berntson kernel.
+
+    Apel and Berntson, arXiv:2610.03669v1, Theorem 6, with the continuous
+    allowance epsilon_c in (0, 1). Without a radius, mu is the root on
+    (0, 1) of log((1-mu)/epsilon_c) = pi*mu**2/sin(pi*mu) and
+    R = tan(pi*mu/2). The left side decreases from log(1/epsilon_c) > 0 and
+    the right side increases from 0 to infinity, so the root is unique and
+    bisection finds it. With a supplied R, mu = (2/pi)*atan(R), the
+    minimum-beta kernel of that radius (Proposition 10). Both use
+    Delta = log((1-mu)/epsilon_c)/mu, which must be positive, so a supplied
+    R must have 1-mu > epsilon_c. These are binary64 evaluations, and the
+    rounding of mu, R and Delta is not enclosed.
+    """
+    if not 0.0 < epsilon_c < 1.0:
+        raise ValueError("the Apel-Berntson continuous allowance must lie in (0, 1)")
+    log_allowance = log(epsilon_c)
+    steps = 0
+    if radius is None:
+        lower, upper = 0.0, 1.0
+        while True:
+            middle = lower + (upper - lower) / 2
+            if middle == lower or middle == upper:
+                break
+            steps += 1
+            # sin(pi*mu) = sin(pi*(1-mu)) keeps relative accuracy near mu = 1.
+            excess = (log1p(-middle) - log_allowance
+                      - pi * middle * middle / sin(pi * min(middle, 1.0 - middle)))
+            if excess >= 0.0:
+                lower = middle
+            else:
+                upper = middle
+        mu = lower
+        radius = tan(pi * mu / 2)
+    else:
+        mu = 2.0 * atan(radius) / pi
+    delta = (log1p(-mu) - log_allowance) / mu if mu > 0.0 else float("nan")
+    if not (isfinite(radius) and radius > 0.0 and isfinite(delta) and delta > 0.0):
+        raise ValueError(
+            f"Apel-Berntson radius R={radius!r} gives no positive Delta for the continuous allowance "
+            f"{epsilon_c!r}. A supplied R needs (2/pi)*atan(R) < 1 - epsilon_c")
+    return mu, radius, delta, steps
+
+
+def _apel_strip_limit(mu: float, radius: float, delta: float) -> float:
+    """Return the supremum of the strip half-widths eta that the discretization bound allows.
+
+    For a supplied radius, the strip argument behind the bound needs all of
+    eta < pi/6, eta < asin(1-mu), D_eta = 1 - (pi**2/4)*(1+R**2)*sin(eta)**2 > 0
+    and Delta*sin(eta) < pi*cos(eta). For the root-rule radius the paper
+    states the range eta < min(pi/6, asin(2/(pi*sqrt(1+R**2)))), which is the
+    first and third conditions. Each condition holds on an interval
+    [0, limit), so the minimum of the four limits admits only strip widths
+    valid under both statements.
+    """
+    return min(pi / 6, asin(1.0 - mu), asin(2.0 / (pi * hypot(1.0, radius))), atan(pi / delta))
+
+
+def _apel_log_strip_constant(eta: float, mu: float, radius: float, delta: float, scaled_time: float) -> float:
+    """Return log M_eta of the Apel-Berntson discretization bound.
+
+    M_eta = 4*R*exp((1-mu)*Delta + Delta*sin(eta))
+    / (D_eta*(pi*cos(eta) - Delta*sin(eta)))
+    * exp(R*pi*sin(eta)/(2 - pi**2*sin(eta)**2/2) * T_e*B_Ls), from Apel
+    and Berntson, arXiv:2610.03669v1, Theorem 8, with the time and norm of
+    the dissipative part entering through scaled_time = T_e*B_Ls. At a
+    supplied radius this reuses their proof under the conditions of
+    `_apel_strip_limit`.
+    """
+    sine = sin(eta)
+    d_eta = 1.0 - (pi / 2 * hypot(1.0, radius) * sine) ** 2
+    margin = pi * cos(eta) - delta * sine
+    if not (d_eta > 0.0 and margin > 0.0):
+        raise ValueError("Apel-Berntson strip half-width violates D_eta > 0 or Delta*sin(eta) < pi*cos(eta)")
+    return (log(4.0 * radius) + (1.0 - mu) * delta + delta * sine - log(d_eta) - log(margin)
+            + radius * pi * sine / (2.0 - pi * pi * sine * sine / 2.0) * scaled_time)
+
+
+def _log_expm1(value: float) -> float:
+    """Return log(exp(value) - 1) for value > 0 without overflow or cancellation."""
+    return value + log(-expm1(-value))
+
+
+# Each rounding guard below shrinks the tanh-sinh step by this relative
+# amount, or adds one node per side, and gives up after this many tries.
+# They absorb binary64 rounding in the inverted step and truncation
+# formulas, which is a few ulps of a quantity of order one.
+_APEL_ROUNDING_STEP = 2.0**-44
+_APEL_ROUNDING_TRIES = 64
+# The strip half-widths tried are eta_limit*j/_APEL_STRIP_FRACTIONS for
+# j = 1.._APEL_STRIP_FRACTIONS-1. Each try is one scalar inversion of the
+# step and truncation bounds. The resolution of this set is a working
+# choice, not a tuned optimum.
+# ponytail: fixed strip fractions; a bounded scalar minimization of the node count over eta would find its optimum.
+_APEL_STRIP_FRACTIONS = 16
+# Scalar work units charged per radius bisection step and per strip width tried.
+_APEL_SCALAR_STEP_WORK = 32
+
+
+def _apel_tanh_sinh_grid(eta, mu, radius, delta, scaled_time, epsilon_disc, epsilon_trunc):
+    """Return the step h, half-range N and both quadrature bounds of the tanh-sinh rule at one eta.
+
+    Apel and Berntson, arXiv:2610.03669v1, Theorem 8, at the default radius,
+    and its adaptation under `_apel_strip_limit` at a supplied radius, bound
+    the operator error of the finite sum over n = -N..N by
+    2*M_eta/(exp(2*pi*eta/h) - 1) for the step plus (4*R*exp((1-mu)*Delta)/pi)*exp(-pi*sinh(N*h)) for the
+    truncation. Each term is inverted against its allowance:
+    h = 2*pi*eta/log(1 + 2*M_eta/epsilon_disc) and the least N with
+    N*h >= asinh(log(4*R*exp((1-mu)*Delta)/(pi*epsilon_trunc))/pi). Both bounds
+    are then evaluated in log form at the chosen h and N, and the guards
+    make those binary64 values meet their allowances.
+    """
+    log_m = _apel_log_strip_constant(eta, mu, radius, delta, scaled_time)
+    step = 2.0 * pi * eta / float(np.logaddexp(0.0, log(2.0) + log_m - log(epsilon_disc)))
+
+    def discretization(h):
+        return _positive_bound(log(2.0) + log_m - _log_expm1(2.0 * pi * eta / h))
+
+    disc = discretization(step)
+    for _ in range(_APEL_ROUNDING_TRIES):
+        if disc <= epsilon_disc:
+            break
+        step *= 1.0 - _APEL_ROUNDING_STEP
+        disc = discretization(step)
+    log_prefactor = log(4.0 * radius / pi) + (1.0 - mu) * delta
+    half_count = max(0, ceil(asinh((log_prefactor - log(epsilon_trunc)) / pi) / step))
+    trunc = _positive_bound(log_prefactor - pi * sinh(half_count * step))
+    for _ in range(_APEL_ROUNDING_TRIES):
+        if trunc <= epsilon_trunc:
+            break
+        half_count += 1
+        trunc = _positive_bound(log_prefactor - pi * sinh(half_count * step))
+    if disc > epsilon_disc or trunc > epsilon_trunc:
+        raise ValueError("Apel-Berntson tanh-sinh rule cannot establish its allowances numerically")
+    return step, half_count, disc, trunc
+
+
+def _resolve_discrete_weights(
+    supplied: Mapping[str, ProviderParameter],
+) -> Mapping[str, ProviderParameter]:
+    """Resolve `artifact_id`, the content hash of the LCHSDiscreteWeightArtifact whose weights are used.
+
+    The identity is part of the resolved kernel parameters, so a coefficient
+    plan names the prepared weights it was built from. The artifact itself
+    is passed as `coefficient_artifact` when the coefficients are formed.
+    """
+    artifact_id = supplied.get("artifact_id")
+    if not isinstance(artifact_id, str) or not artifact_id.startswith("sha256:"):
+        raise ValueError("discrete_weights parameter 'artifact_id' must be the content_id of an "
+                         "LCHSDiscreteWeightArtifact")
+    return {"artifact_id": artifact_id}
+
+
+def _discrete_weight_coefficient(k_value: float, _context: Mapping[str, Any]) -> complex:
+    """Refuse an evaluation off the artifact nodes, where prepared weights have no kernel."""
+    raise ValueError("discrete weights are defined only at the nodes of their artifact")
+
+
 LCHS_KERNEL_IMPLEMENTATIONS: dict[str, LCHSKernelProvider] = {
     "near_optimal_eq7": LCHSKernelProvider(
         name="near_optimal_eq7",
         formula_id="acl_eq7_v1",
         resolve_parameters=_resolve_eq7,
         coefficient=_eq7_provider_coefficient,
+        coefficients=_eq7_provider_coefficients,
         fixed_parameters=_immutable_map({}),
     ),
     "cauchy_density": LCHSKernelProvider(
@@ -845,6 +1256,7 @@ LCHS_KERNEL_IMPLEMENTATIONS: dict[str, LCHSKernelProvider] = {
         formula_id="cauchy_density_v1",
         resolve_parameters=_resolve_no_parameters,
         coefficient=_cauchy_provider_coefficient,
+        coefficients=_cauchy_provider_coefficients,
         fixed_parameters=_immutable_map({}),
     ),
     "low_somma_f2": LCHSKernelProvider(
@@ -852,7 +1264,24 @@ LCHS_KERNEL_IMPLEMENTATIONS: dict[str, LCHSKernelProvider] = {
         formula_id=LOW_SOMMA_FORMULA_ID,
         resolve_parameters=_resolve_low_somma_f2,
         coefficient=_low_somma_provider_coefficient,
+        coefficients=_low_somma_provider_coefficients,
         fixed_parameters=_immutable_map({"j": 2, "y": 1}),
+    ),
+    "apel_berntson": LCHSKernelProvider(
+        name="apel_berntson",
+        formula_id="apel_berntson_compact_v1",
+        resolve_parameters=_resolve_apel_berntson,
+        coefficient=_apel_provider_coefficient,
+        fixed_parameters=_immutable_map({}),
+    ),
+    # Weights of an LCHSDiscreteWeightArtifact, which the artifact_nodes rule
+    # supplies as kernel values. They exist only at the artifact nodes.
+    "discrete_weights": LCHSKernelProvider(
+        name="discrete_weights",
+        formula_id="fixed_node_discrete_weights_v1",
+        resolve_parameters=_resolve_discrete_weights,
+        coefficient=_discrete_weight_coefficient,
+        fixed_parameters=_immutable_map({}),
     ),
 }
 
@@ -894,14 +1323,16 @@ def _build_composite_gauss(
     problem: LCHSProblemContext,
     resolved: ResolvedProviderConfig,
     pair_context: Mapping[str, Any],
-    max_bytes=DEFAULT_INPUT_BYTES,
-    max_quadrature_work=100_000_000,
+    max_bytes=None,
+    max_quadrature_work=None,
 ) -> LCHSQuadraturePlan:
     """Build the symmetric composite Gauss rule and its available component bounds.
 
     ACL arXiv:2312.03916v2, Eq. (61), defines the panelled k quadrature and
-    Eq. (186) the finite tail bound used to select the cutoff. Each
-    component receives half of the construction tolerance. The Q-point panel
+    Eq. (186) the finite tail bound used to select the cutoff. The tail
+    meets the `kernel_approximation` allowance and the panels the
+    `k_quadrature` allowance, by default half of the construction tolerance
+    each. The Q-point panel
     rule follows Trefethen, Approximation Theory and Approximation Practice,
     ISBN 978-1-61197-239-9, Theorem 19.3, with n=Q-1. The panel search
     divides the tail-certified K into whole panels (h1 = K/m) and selects
@@ -912,34 +1343,58 @@ def _build_composite_gauss(
     For the composite Gauss rule, planning first completes the scalar panel
     search. It stops when the minimum node count of every later panel count exceeds the
     best rule found. It then checks ``max_quadrature_work`` against the
-    search work, 32 units per chosen node and the cubic Gauss-rule
+    search work, 32 units per chosen node and the quadratic Gauss-rule
     construction work, before allocating the node arrays. A refusal names
     the complete work of that rule. The chosen rule has
     ``total = 2*m*Q`` nodes after M candidate panel counts, each counted as 32
-    units, so ``W_quad = 32*M + 32*(2*m*Q) + Q**3``: scalar selection, node,
-    weight and kernel evaluation, and the Q-point Legendre eigensystem.
+    units, so ``W_quad = 32*M + 32*(2*m*Q) + Q**2``: scalar selection, node,
+    weight and kernel evaluation, and the tridiagonal Q-point Legendre rule.
     These are engineering work units, not measured equal-cost operations.
+
+    On a quantum dense_exact route the caller passes
+    ``dense_select_slot_limit`` in ``pair_context``, and a rule whose node
+    count alone already proves the SELECT too large is refused before the
+    Gauss rule is built. The homogeneous SELECT has exactly ``total`` branches.
+    A constant-source dense_exact SELECT uses the compact layout of
+    ``source_selection.select_source_branches``, in which each retained
+    application holds ``total`` slots, zero amplitudes included, and omission
+    removes only whole applications. At least one application remains, so the
+    final count is n = total*A >= total for A >= 1 retained applications.
+    Padding is monotone in n, so 2**ceil(log2(total)) lower-bounds the padded
+    slots that ``parameters.select_parameters`` compares with the same limit. A
+    provisional application count is not a valid factor, because omission can
+    reduce it, so a layout that exceeds the limit only through its applications
+    is left to that later exact check. Classical execution, the product-formula
+    backends and ``resolve_lchs_coefficient_plan`` synthesize no controlled
+    dense exponential per address slot, so they pass None and no slot check
+    applies.
     """
     beta = float(pair_context["kernel_parameters"]["beta"])
     multiplier = float(resolved.parameters["truncation_multiplier"])
-    component_tolerance = finite_real(problem.epsilon / 2, "LCHS component tolerance")
-    if component_tolerance == 0:
-        raise ValueError("LCHS component tolerance is below the positive binary64 range")
-    range_k = finite_real(multiplier * eq7_truncation_range(beta, component_tolerance), "LCHS cutoff")
-    choice, selection_work = _ellipse_rule(replace(problem, epsilon=component_tolerance), beta, range_k)
+    allowances = pair_context["component_allowances"]
+    range_k = finite_real(multiplier * eq7_truncation_range(beta, allowances["kernel_approximation"]),
+                          "LCHS cutoff")
+    # The strip margin d of the Gauss panel bound: the default, or the d = 0.5 of provider enumeration.
+    strip_margin = pair_context["derived_parameters"].get("strip_margin", LCHS_ELLIPSE_STRIP_MARGIN)
+    choice, selection_work = _ellipse_rule(replace(problem, epsilon=allowances["k_quadrature"]), beta, range_k,
+                                           strip_margin)
     total, node_count, interval_count_each_side, h1, quadrature_bound = choice
-    # Bytes: 256 per selected node is an envelope for the float64 node and
-    # weight arrays, their tuple copies in LCHSQuadraturePlan, and the complex
-    # coefficient list and tuple formed later by _resolve_coefficient_context.
-    # 32*Q**2 covers the Q-by-Q float64 Jacobi matrix and eigensolver arrays
-    # inside numpy's leggauss.
-    _check_bytes(256*total + 32*node_count**2, max_bytes, "LCHS quadrature arrays")
+    # Bytes: 128 per selected node is an envelope for the float64 node and
+    # weight arrays and their read-only copies in LCHSQuadraturePlan, and the
+    # complex128 kernel values, coefficients and read-only copy that
+    # _resolve_coefficient_context forms later, with their temporaries.
+    # The base rule uses O(Q) arrays, covered by this node envelope with total >= 2Q.
+    _check_bytes(128*total, max_bytes, "LCHS quadrature arrays")
     # Work: the candidate search, 32 scalar operations per node for the panel
-    # map and kernel evaluation, and Q**3 for the Q-point Legendre eigenproblem.
-    # The per-node 256 bytes and 32 operations are untuned envelopes registered
+    # map and kernel evaluation, and Q**2 for the tridiagonal Legendre rule.
+    # The per-node 128 bytes and 32 operations are untuned envelopes registered
     # in ENGINEERING_CONSTANTS.
-    _check_quadrature_work(selection_work + 32*total + node_count**3, max_quadrature_work,
-                           "LCHS quadrature selection and construction require")
+    _check_quadrature_work(selection_work + 32*total + node_count**2, max_quadrature_work,
+                           "LCHS quadrature selection and construction require", pair_context.get("work_ledger"))
+    slot_limit = pair_context.get("dense_select_slot_limit")
+    if slot_limit is not None and 1 << (total-1).bit_length() > slot_limit:
+        raise dense_select_slot_refusal(time=problem.final_time, l_norm=problem.l_norm, tolerance=problem.epsilon,
+                                        branches=total, limit=slot_limit)
     nodes, weights = composite_gauss_grid(
         interval_count_each_side=interval_count_each_side,
         h1=h1,
@@ -947,8 +1402,8 @@ def _build_composite_gauss(
     )
     approximate_bound = eq7_tail_bound(beta, range_k)
     return LCHSQuadraturePlan(
-        nodes=tuple(float(value) for value in nodes),
-        base_weights=tuple(float(value) for value in weights),
+        nodes=nodes,
+        base_weights=weights,
         range_k=float(range_k),
         interval_count_each_side=interval_count_each_side,
         node_count=node_count,
@@ -966,8 +1421,8 @@ def _build_signed_binary(
     _problem: LCHSProblemContext,
     resolved: ResolvedProviderConfig,
     _pair_context: Mapping[str, Any],
-    max_bytes=DEFAULT_INPUT_BYTES,
-    max_quadrature_work=100_000_000,
+    max_bytes=None,
+    max_quadrature_work=None,
 ) -> LCHSQuadraturePlan:
     """Enumerate two's-complement coefficient nodes in little-endian address order.
 
@@ -982,23 +1437,23 @@ def _build_signed_binary(
     # Validate max_bytes itself, then reject a width whose 2**n node count
     # already exceeds it, so 2**num_qubits is never formed for a huge n.
     _check_bytes(0, max_bytes)
-    if num_qubits >= max_bytes.bit_length():
-        raise ValueError("signed-binary coefficient grid exceeds max_bytes")
+    byte_limit = memory_limit(max_bytes)
+    if byte_limit is not None and num_qubits >= byte_limit.bit_length():
+        raise ResourceLimitError(f"signed-binary coefficient grid of {num_qubits} qubits needs at least "
+                                 f"2**{num_qubits} bytes, exceeding {byte_allowance(max_bytes)}")
     state_count = 2**num_qubits
     # Same per-node byte envelope and per-node scalar work as the composite
     # Gauss builder, with no Legendre eigenproblem.
-    _check_bytes(256*state_count, max_bytes, "signed-binary coefficient grid")
+    _check_bytes(128*state_count, max_bytes, "signed-binary coefficient grid")
     _check_quadrature_work(32*state_count, max_quadrature_work,
-                           "LCHS signed-binary coefficient grid requires")
+                           "LCHS signed-binary coefficient grid requires", _pair_context.get("work_ledger"))
     # The highest address bit has negative weight. Computational-basis order
     # therefore wraps from positive to negative nodes at the sign transition.
     sign_transition = 2 ** (num_qubits - 1)
     delta_k = float(2.0**lsb_position)
-    nodes = tuple(
-        float((state if state < sign_transition else state - state_count) * delta_k)
-        for state in range(state_count)
-    )
-    weights = (delta_k,) * state_count
+    states = np.arange(state_count)
+    nodes = np.where(states < sign_transition, states, states - state_count) * delta_k
+    weights = np.full(state_count, delta_k)
     unsigned_terms = tuple(
         {"qubit": qubit, "coefficient": float(2.0 ** (lsb_position + qubit))}
         for qubit in range(max(0, num_qubits - 1))
@@ -1017,7 +1472,7 @@ def _build_signed_binary(
     return LCHSQuadraturePlan(
         nodes=nodes,
         base_weights=weights,
-        range_k=float(max(abs(value) for value in nodes)),
+        range_k=float(np.max(np.abs(nodes))),
         interval_count_each_side=0,
         node_count=state_count,
         node_order="computational_basis",
@@ -1033,8 +1488,8 @@ def _build_symmetric_uniform_trapezoid(
     _problem: LCHSProblemContext,
     _resolved: ResolvedProviderConfig,
     pair_context: Mapping[str, Any],
-    max_bytes=DEFAULT_INPUT_BYTES,
-    max_quadrature_work=100_000_000,
+    max_bytes=None,
+    max_quadrature_work=None,
 ) -> LCHSQuadraturePlan:
     """Build the symmetric finite rule and record its power-of-two padding.
 
@@ -1048,15 +1503,15 @@ def _build_symmetric_uniform_trapezoid(
     index_limit = int(derived["J"])
     step = float(derived["h"])
     # Same per-node byte envelope and scalar work as the other rules, for 2*J+1 nodes.
-    _check_bytes(256*(2*index_limit+1), max_bytes, "symmetric coefficient grid")
+    _check_bytes(128*(2*index_limit+1), max_bytes, "symmetric coefficient grid")
     _check_quadrature_work(32*(2*index_limit+1), max_quadrature_work,
-                           "LCHS symmetric coefficient grid requires")
-    nodes = tuple(float(index * step) for index in range(-index_limit, index_limit + 1))
+                           "LCHS symmetric coefficient grid requires", pair_context.get("work_ledger"))
+    nodes = np.arange(-index_limit, index_limit + 1) * step
     node_count = 2 * index_limit + 1
     padded_count = 1 << max(0, node_count - 1).bit_length()
     return LCHSQuadraturePlan(
         nodes=nodes,
-        base_weights=(step,) * node_count,
+        base_weights=np.full(node_count, step),
         range_k=radius,
         interval_count_each_side=index_limit,
         node_count=node_count,
@@ -1073,6 +1528,116 @@ def _build_symmetric_uniform_trapezoid(
         padding_count=padded_count - node_count,
         approximate_lchs_error_bound=float(derived["epsilon_lchs"]),
         quadrature_error_bound=float(derived["epsilon_quad"]),
+    )
+
+
+def _build_tanh_sinh(
+    problem: LCHSProblemContext,
+    _resolved: ResolvedProviderConfig,
+    pair_context: Mapping[str, Any],
+    max_bytes=None,
+    max_quadrature_work=None,
+) -> LCHSQuadraturePlan:
+    """Build the Apel-Berntson tanh-sinh nodes, weights and kernel values.
+
+    With phi_R(xi) = R*tanh((pi/2)*sinh(xi)), the nodes are
+    k_n = phi_R(n*h) for n = -N..N with weights h*phi_R'(n*h), and each
+    node's kernel value is g_R(k_n) = exp((1-mu)*Delta)/(pi*(1+k_n**2))
+    * exp(-1j*Delta*sinh(n*h)). The phase uses
+    log((R+k)/(R-k)) = pi*sinh(xi) and so needs no logarithm of the
+    rounded node. Their product is the coefficient c_n of Apel and
+    Berntson, arXiv:2610.03669v1, with the branch of apel_berntson_kernel,
+    and c_{-n} = conj(c_n). phi_R' = R*(pi/2)*cosh(xi)/cosh(u)**2 with
+    u = (pi/2)*sinh(xi) is evaluated in log form, so cosh(u)**2 cannot
+    overflow first.
+
+    The work charge is the profile's scalar selection plus 32 units per
+    node. The byte charge is 160 per node: the 128 of the other rules plus
+    the complex128 kernel values and their read-only copy. Both are checked before any
+    node array is formed.
+    """
+    derived = pair_context["derived_parameters"]
+    half_count, step = int(derived["N"]), float(derived["h"])
+    radius, mu, delta = float(derived["R"]), float(derived["mu"]), float(derived["Delta"])
+    count = 2 * half_count + 1
+    _check_bytes(160 * count, max_bytes, "LCHS tanh-sinh coefficient grid")
+    _check_quadrature_work(int(derived["selection_work"]) + 32 * count, max_quadrature_work,
+                           "LCHS tanh-sinh selection and grid require", pair_context.get("work_ledger"))
+    xi = step * np.arange(-half_count, half_count + 1, dtype=float)
+    inner = (pi / 2) * np.sinh(xi)
+    nodes = radius * np.tanh(inner)
+    # log cosh(x) = logaddexp(x, -x) - log(2).
+    log_weights = (log(step * radius * pi / 2) + np.logaddexp(xi, -xi)
+                   - 2.0 * np.logaddexp(inner, -inner) + log(2.0))
+    weights = np.exp(log_weights)
+    values = (exp((1.0 - mu) * delta) / (pi * (1.0 + nodes * nodes))) * np.exp(-1j * delta * np.sinh(xi))
+    return LCHSQuadraturePlan(
+        nodes=nodes,
+        base_weights=weights,
+        range_k=radius,
+        interval_count_each_side=half_count,
+        node_count=count,
+        node_order="ascending_tanh_sinh",
+        address_structure=_immutable_map({"affine": False, "kind": "explicit_node_table"}),
+        physical_node_count=count,
+        padding_count=0,
+        approximate_lchs_error_bound=float(derived["kernel_allowance"]),
+        quadrature_error_bound=float(derived["discretization_bound"]) + float(derived["truncation_bound"]),
+        kernel_values=values,
+    )
+
+
+def _build_artifact_nodes(
+    problem: LCHSProblemContext,
+    _resolved: ResolvedProviderConfig,
+    pair_context: Mapping[str, Any],
+    max_bytes=None,
+    max_quadrature_work=None,
+) -> LCHSQuadraturePlan:
+    """Use the nodes and weights of an LCHSDiscreteWeightArtifact after checking that they apply.
+
+    The artifact's residual bound holds for exp(-t*(L_s+iH)) whenever
+    t*||L_s|| lies in its support [0, b], so every elapsed time up to T_e is
+    covered when T_e*B_Ls <= b. The product is compared exactly in rational
+    arithmetic. Its bound plus rounding estimate must also meet the
+    `discrete_residual` allowance. Neither check repeats the optimization
+    or the residual evaluation. The bound covers the complete finite sum, so
+    the quadrature component is recorded as an exact zero and the base
+    weights are one.
+    """
+    artifact = pair_context["coefficient_artifact"]
+    residual = artifact.residual
+    if problem.final_time < 0 or problem.l_norm < 0:
+        raise ValueError("discrete weights require nonnegative T_e and B_Ls")
+    if Fraction(problem.final_time) * Fraction(problem.l_norm) > Fraction(residual.support_endpoint):
+        raise ValueError(
+            f"discrete-weight artifact {artifact.content_id} covers T_e*B_Ls <= {residual.support_endpoint!r}, "
+            f"but this problem has T_e*B_Ls = {problem.final_time * problem.l_norm!r}. Prepare weights "
+            "for a support endpoint at least this product")
+    bound = residual.residual_bound + residual.rounding_estimate
+    allowance = pair_context["component_allowances"]["discrete_residual"]
+    if bound > allowance:
+        raise ValueError(
+            f"discrete-weight artifact {artifact.content_id} has residual bound {bound!r} including its "
+            f"rounding estimate, above the discrete_residual allowance {allowance!r}")
+    count = len(artifact.nodes)
+    # Same per-node byte envelope and scalar work as the composite-Gauss rule.
+    _check_bytes(128 * count, max_bytes, "LCHS discrete-weight coefficient table")
+    _check_quadrature_work(32 * count, max_quadrature_work, "LCHS discrete-weight coefficient table requires",
+                           pair_context.get("work_ledger"))
+    return LCHSQuadraturePlan(
+        nodes=artifact.nodes,
+        base_weights=np.ones(count),
+        range_k=max(abs(node) for node in artifact.nodes),
+        interval_count_each_side=0,
+        node_count=count,
+        node_order="artifact_order",
+        address_structure=_immutable_map({"affine": False, "kind": "explicit_node_table"}),
+        physical_node_count=count,
+        padding_count=0,
+        approximate_lchs_error_bound=bound,
+        quadrature_error_bound=0.0,
+        kernel_values=artifact.weights,
     )
 
 
@@ -1095,26 +1660,46 @@ LCHS_K_QUADRATURE_IMPLEMENTATIONS: dict[str, LCHSQuadratureProvider] = {
         resolve_parameters=_resolve_no_parameters,
         build_nodes_and_weights=_build_symmetric_uniform_trapezoid,
     ),
+    "tanh_sinh": LCHSQuadratureProvider(
+        name="tanh_sinh",
+        formula_id="apel_berntson_tanh_sinh_kk3_v1",
+        resolve_parameters=_resolve_no_parameters,
+        build_nodes_and_weights=_build_tanh_sinh,
+    ),
+    "artifact_nodes": LCHSQuadratureProvider(
+        name="artifact_nodes",
+        formula_id="discrete_weight_artifact_nodes_v1",
+        resolve_parameters=_resolve_no_parameters,
+        build_nodes_and_weights=_build_artifact_nodes,
+    ),
 }
 
 
 # Registered kernel-quadrature pairs and the scope of their component bounds.
-# Only (Eq. (7), composite Gauss) is "certified". Its cutoff comes from the
+# (Eq. (7), composite Gauss) is "certified". Its cutoff comes from the
 # Eq. (7) decay of Eqs. (185)-(186) and its panels from the strip bound
 # |g| <= 1/(C_beta*d), so neither law transfers to the Cauchy kernel, whose
 # tail decays only like 1/k**2 (ACL arXiv:2312.03916v2, Eq. (5)). The
 # signed-binary grid is a plain rectangle rule chosen for its affine address
 # structure and carries no bound. Low-Somma's Theorems 2-3
 # (arXiv:2508.19238v2) give both component bounds for their own kernel and
-# trapezoid rule, but the pair does not budget the synthesis and preparation
-# stages, hence "incomplete". An unlisted pair is rejected.
+# trapezoid rule, but the pair's split of the tolerance between those two
+# components does not cover the synthesis and preparation stages, hence
+# "incomplete". This describes the split only: a route can give such a stage its
+# own allowance, and a route that supplies a bound for such a stage reports it
+# (solution_error_budget.circuit_stage_bounds). Apel-Berntson's Theorem 4 and Proposition 10
+# bound its continuous component, Theorem 8 its discretization and truncation
+# components at the default radius, and the
+# discrete-weight residual bounds its whole finite sum, so both are
+# "certified" in the same component sense as Eq. (7). An unlisted pair is
+# rejected.
 LCHS_KERNEL_QUADRATURE_COMPATIBILITY: Mapping[tuple[str, str], LCHSPairCompatibility] = (
     MappingProxyType(
         {
             ("near_optimal_eq7", "composite_gauss"): LCHSPairCompatibility(
                 allowed=True,
                 certificate_status="certified",
-                reason="ACL arXiv:2312.03916v2 Eq.(186) tail and ATAP ISBN 978-1-61197-239-9 Theorem19.3 Q-point ellipse quadrature bounds. Each receives half the construction tolerance. Other physical error components require separate bounds.",
+                reason="ACL arXiv:2312.03916v2 Eq.(186) tail and ATAP ISBN 978-1-61197-239-9 Theorem19.3 Q-point ellipse quadrature bounds, for exact Gauss nodes and weights. Each receives half the construction tolerance. Their binary64 construction and evaluation are reported under native_floating_point. Other physical error components require separate bounds.",
             ),
             ("near_optimal_eq7", "signed_binary_uniform"): LCHSPairCompatibility(
                 allowed=True,
@@ -1145,19 +1730,86 @@ LCHS_KERNEL_QUADRATURE_COMPATIBILITY: Mapping[tuple[str, str], LCHSPairCompatibi
                 ),
                 unbudgeted_error_stages=LOW_SOMMA_UNBUDGETED_STAGES,
             ),
+            ("apel_berntson", "tanh_sinh"): LCHSPairCompatibility(
+                allowed=True,
+                certificate_status="certified",
+                reason=(
+                    "Theorem 4 and Proposition 10 of Apel-Berntson arXiv:2610.03669v1 give the continuous "
+                    "operator-error bound at a fixed radius. Theorem 8 gives the discretization and truncation "
+                    "bounds at the default radius, and NWQLib reuses that proof at a supplied radius under the "
+                    "strip conditions on the LCHS derivations page. Each of these three bounds meets its own "
+                    "allowance. Corollary 9 bounds the coefficient mass of the finite rule, not an operator "
+                    "error. The preprint's peer-review status is unconfirmed. Its coefficient formula and "
+                    "branch were derived independently and checked on two noncommuting 2x2 exponentials. "
+                    "These are component bounds, and other physical error components require separate bounds."
+                ),
+            ),
+            ("discrete_weights", "artifact_nodes"): LCHSPairCompatibility(
+                allowed=True,
+                certificate_status="certified",
+                reason=(
+                    "Local Wiener-norm residual on the artifact support [0, b] (finite cosine sum plus "
+                    "integration-by-parts tail; Ni-Ying arXiv:2606.29848v1 Section 6.1), evaluated in "
+                    "binary64 from the prepared weights with a standard-model rounding estimate. It "
+                    "applies while T_e*B_Ls <= b and covers the whole finite sum, so there is no separate "
+                    "quadrature component. Other physical error components require separate bounds."
+                ),
+            ),
         }
     )
 )
 
 
+# Error components that each pair bounds, by allowance name, and the
+# divisor of the construction tolerance that gives each component its
+# default allowance. A pair without components carries no bound.
+_PAIR_ERROR_COMPONENTS: Mapping[tuple[str, str], tuple[tuple[str, ...], int]] = MappingProxyType({
+    ("near_optimal_eq7", "composite_gauss"): (("kernel_approximation", "k_quadrature"), 2),
+    ("low_somma_f2", "symmetric_uniform_trapezoid"): (("kernel_approximation", "k_quadrature"), 3),
+    ("apel_berntson", "tanh_sinh"): (("kernel_approximation", "k_discretization", "k_truncation"), 3),
+    ("discrete_weights", "artifact_nodes"): (("discrete_residual",), 1),
+})
+
+
+def _component_allowances(problem: LCHSProblemContext, pair_key: tuple[str, str],
+                          pair_label: str) -> Mapping[str, float]:
+    """Return the allowance of each error component of the pair.
+
+    Without explicit `component_allowances`, each component receives the
+    binary64 quotient epsilon/divisor. Explicit allowances must name
+    exactly the pair's components, be finite and positive, and sum to at
+    most epsilon.
+    """
+    names, divisor = _PAIR_ERROR_COMPONENTS.get(pair_key, ((), 1))
+    supplied = problem.component_allowances
+    if supplied is None:
+        if not names:
+            return _immutable_map({})
+        allowance = finite_real(float(problem.epsilon) / divisor, "LCHS component tolerance")
+        if allowance == 0:
+            raise ValueError("LCHS component tolerance is below the positive binary64 range")
+        return _immutable_map({name: allowance for name in names})
+    if set(supplied) != set(names):
+        raise ValueError(f"LCHS provider pair {pair_label} has error components {list(names)}, "
+                         f"but component_allowances names {sorted(supplied)}")
+    allowances = {name: finite_real(supplied[name], f"component allowance {name!r}") for name in names}
+    if any(value <= 0 for value in allowances.values()) or fsum(allowances.values()) > problem.epsilon:
+        raise ValueError(f"LCHS component allowances must be positive with a sum at most epsilon={problem.epsilon!r}")
+    return _immutable_map(allowances)
+
+
 def _resolve_low_somma_pair_profile(
     problem: LCHSProblemContext,
     resolved_kernel: ResolvedProviderConfig,
+    allowances: Mapping[str, float],
 ) -> Mapping[str, ProviderParameter]:
     """Derive gamma, R, h and J from Low and Somma, arXiv:2508.19238v2, Theorems 2-3.
 
-    The tolerance splits as epsilon_lchs = epsilon_quad = epsilon/3, the
+    epsilon_lchs and epsilon_quad are the `kernel_approximation` and
+    `k_quadrature` allowances. By default both are epsilon/3, the
     example split stated before Theorem 4 (arXiv:2508.19238v2, p. 6).
+    Explicit allowances must each lie in (0, 4/15], the range the default
+    split admits.
     Theorem 2 (p. 5) gives
     gamma = sqrt(c + log((1+1/(2*pi))/epsilon_lchs))/c and R = 2*c*gamma**2.
     Theorem 3 (p. 6) needs epsilon_quad <= 4/15, that is epsilon <= 4/5 as in
@@ -1171,13 +1823,15 @@ def _resolve_low_somma_pair_profile(
         realized step h = R/J, and the Theorem 3 step cap h_max.
     """
     epsilon = float(problem.epsilon)
-    if not 0.0 < epsilon <= 4.0 / 5.0:
+    if problem.component_allowances is None and not 0.0 < epsilon <= 4.0 / 5.0:
         raise ValueError(
             "low_somma_f2 + symmetric_uniform_trapezoid requires epsilon in (0, 4/5]"
         )
     c_value = float(resolved_kernel.parameters["c"])
-    epsilon_lchs = epsilon / 3.0
-    epsilon_quad = epsilon / 3.0
+    epsilon_lchs = allowances["kernel_approximation"]
+    epsilon_quad = allowances["k_quadrature"]
+    if not (epsilon_lchs <= 4.0 / 15.0 and epsilon_quad <= 4.0 / 15.0):
+        raise ValueError("low_somma_f2 + symmetric_uniform_trapezoid requires component allowances in (0, 4/15]")
     gamma = (1.0 / c_value) * sqrt(
         c_value + log((1.0 + 1.0 / (2.0 * pi)) / epsilon_lchs)
     )
@@ -1204,14 +1858,254 @@ def _resolve_low_somma_pair_profile(
     )
 
 
+def _resolve_apel_pair_profile(
+    problem: LCHSProblemContext,
+    resolved_kernel: ResolvedProviderConfig,
+    allowances: Mapping[str, float],
+) -> Mapping[str, ProviderParameter]:
+    """Derive the Apel-Berntson kernel and tanh-sinh grid from their three allowances.
+
+    Apel and Berntson, arXiv:2610.03669v1: Theorem 8 for the discretization
+    and truncation bounds at the default radius, with the checked reuse of its
+    proof at a supplied radius (docs/algorithms/lchs_derivations.md), and
+    Corollary 9 for the coefficient-mass bound, which is not an operator
+    error. The
+    `kernel_approximation` allowance epsilon_c fixes mu, R and Delta
+    (_apel_radius). The strip half-width eta is then chosen among
+    eta_limit*j/16 for j = 1..15, all strictly inside the four strip
+    conditions, as the one whose grid has the fewest nodes (smallest j
+    on a tie). Any such eta gives a valid bound. The choice minimizes the node
+    count, not the complete coherent cost, which h and N also change through
+    the nodes and coefficients. T_e*B_Ls enters M_eta.
+
+    The returned mapping holds mu, R, Delta, the continuous coefficient
+    mass beta_R = mu*exp((1-mu)*Delta), eta, eta_limit, the step h, the
+    half-range N, the three allowances, the discretization and truncation
+    bounds, the bound 2*C_beta/(exp(2*pi*eta/h) - 1) + truncation on the
+    difference between the finite coefficient mass and beta_R (the
+    discretization bound with M_eta replaced by
+    C_beta = 4*R*exp((1-mu)*Delta)/(pi*cos(eta)*D_eta)), the radius rule and
+    the scalar selection work: 32 units per bisection step and per strip
+    width tried.
+    """
+    scaled_time = finite_real(problem.final_time * problem.l_norm, "T_e*B_Ls")
+    if problem.final_time < 0 or problem.l_norm < 0:
+        raise ValueError("Apel-Berntson selection requires nonnegative T_e and B_Ls")
+    epsilon_c = allowances["kernel_approximation"]
+    epsilon_disc = allowances["k_discretization"]
+    epsilon_trunc = allowances["k_truncation"]
+    supplied_radius = resolved_kernel.parameters["radius"]
+    mu, radius, delta, steps = _apel_radius(epsilon_c, supplied_radius)
+    limit = _apel_strip_limit(mu, radius, delta)
+    best = None
+    for fraction in range(1, _APEL_STRIP_FRACTIONS):
+        eta = limit * fraction / _APEL_STRIP_FRACTIONS
+        grid = _apel_tanh_sinh_grid(eta, mu, radius, delta, scaled_time, epsilon_disc, epsilon_trunc)
+        if best is None or grid[1] < best[1][1]:
+            best = eta, grid
+    eta, (step, half_count, disc, trunc) = best
+    sine = sin(eta)
+    d_eta = 1.0 - (pi / 2 * hypot(1.0, radius) * sine) ** 2
+    beta_error = _positive_bound(log(2.0) + log(4.0 * radius / pi) + (1.0 - mu) * delta - log(cos(eta))
+                                 - log(d_eta) - _log_expm1(2.0 * pi * eta / step)) + trunc
+    beta_continuous = _exp_with_nonfinite_overflow(log(mu) + (1.0 - mu) * delta)
+    if not isfinite(beta_continuous):
+        raise ValueError("Apel-Berntson coefficient mass exceeds the finite binary64 range")
+    return _immutable_map(
+        {
+            "mu": mu,
+            "R": radius,
+            "Delta": delta,
+            "beta_R": beta_continuous,
+            "eta": eta,
+            "eta_limit": limit,
+            "h": step,
+            "N": half_count,
+            "kernel_allowance": epsilon_c,
+            "discretization_allowance": epsilon_disc,
+            "truncation_allowance": epsilon_trunc,
+            "discretization_bound": disc,
+            "truncation_bound": trunc,
+            "beta_discretization_bound": beta_error,
+            "radius_rule": "kk1_root" if supplied_radius is None else "supplied",
+            "selection_work": _APEL_SCALAR_STEP_WORK * (steps + _APEL_STRIP_FRACTIONS - 1),
+        }
+    )
+
+
+def kk6_radius(epsilon_c: float, *, form: str, a: float | None = None, b: float | None = None,
+               alpha_a: float | None = None, max_quadrature_work: int | None) -> dict[str, Any]:
+    """Propose one Apel-Berntson radius R from the p = 2 stationary relation of KK6, or say why none is generated.
+
+    The proposal is a heuristic finite candidate for provider enumeration
+    (`selection.provider_frontier`): the fixed-R kernel at the returned R is
+    built and priced by its actual finite grid and coherent row like every
+    other candidate. Nothing here claims an optimum of the complete cost, a
+    unique root, a p = 4 result or an enclosure of the root.
+
+    With mu = (2/pi) atan R, L(mu) = log((1-mu)/epsilon_c), Delta = L/mu and
+    beta_R = mu exp((1-mu) Delta) (KK5, `_apel_radius`), the continuous mass
+    satisfies d log(beta_R)/dmu = -L/mu**2, because L' = -1/(1-mu) cancels the
+    1/mu terms, so d log(beta_R)/dR = -2L/[pi (1+R**2) mu**2]. Two leading-cost
+    surrogates of the coherent route's query normalization use it:
+
+    - Separate parts (K1): J_sep(R) = (a R + b) beta_R**2 with a = alpha_L > 0
+      and b = alpha_H >= 0 the query normalizations of the actual compiled
+      children (`joint.access_summary(child).alpha`, not a target norm). The
+      joint owner normalizes by lambda_q (lambda_k alpha_L + alpha_H); omitting
+      the R-independent lambda_q is legitimate for a fixed support, and the
+      surrogate equals the table normalization only when lambda_k = R (for
+      the Apel nonuniform table lambda_k = max|k_j| <= R). The stationary
+      condition d log J_sep/dR = 0 is the zero of
+      g_sep(mu) = L - pi mu**2 (1+R**2) a / [4 (a R + b)].
+    - Single A (K2): HermitianPart[(k - i) A_0] = k L_0 + H_0, and the
+      single-A generator (`plan_single_a_generator`) has alpha_S =
+      lambda_q r alpha_A with r = hypot(max|k_j|, 1), so the surrogate is
+      J_A(R) = alpha_A sqrt(1+R**2) beta_R**2. Its stationary condition is
+      the zero of g_A(mu) = L - (pi/4) mu**2 R; the positive alpha_A cancels
+      but must be the known query normalization of the supplied encoding.
+
+    Existence (K3): for 0 < epsilon_c < 1 and U = 1 - epsilon_c, L > 0 on
+    0 < mu < U. As mu -> 0+, L -> log(1/epsilon_c) > 0 while the subtracted
+    term is O(mu**2) for b > 0, mu/2 + o(mu) for b = 0 and O(mu**3) for
+    single A. As mu -> U-, L -> 0 while the subtracted term stays strictly
+    positive. Each residual is continuous, so it has an interior root. The
+    separate form with a = 0 < b is strictly decreasing in R (no interior
+    stationary point), and a = b = 0, zero time or the unitary reduction use
+    their exact shortcuts; neither generates a proposal. An unknown or
+    nonpositive normalization is not treated as zero: no proposal.
+
+    Procedure (K3, binary64 numerical evidence only): bisect on (0, U),
+    never evaluating the limiting endpoints. Each midpoint visit, including
+    a domain shrink where the rounded L is not positive and a failing
+    evaluation, is charged the 32 scalar units of an Apel radius step
+    before it is evaluated, against the per-construction
+    ``max_quadrature_work``. The loop stops at a computed zero or when the
+    midpoint no longer moves. Without a zero, both residual signs must have
+    been observed inside the domain, and the observed endpoint of smaller
+    |g| (then smaller mu) is returned; otherwise no proposal. One further
+    32-unit block covers R = tan(pi mu/2) and the mandatory fixed-R check
+    `_apel_radius(epsilon_c, R)`, a numerical admission, not an enclosure.
+    A numerical failure leaves the proposal ungenerated with its spent work;
+    no neighbor or second bracket is tried. A block beyond
+    ``max_quadrature_work`` raises `nwqlib._limits.ResourceLimitError`
+    instead, so the limit refuses the planning rather than removing this
+    entry from an enumeration.
+
+    Args:
+        epsilon_c: The Apel-Berntson continuous allowance of this Problem
+            (the `kernel_approximation` allowance of the AB pair).
+        form: ``"separate_parts"`` or ``"single_a"``.
+        a: alpha_L of the separate form.
+        b: alpha_H of the separate form, 0 for an absent H child.
+        alpha_a: alpha_A of the single-A form.
+        max_quadrature_work: The per-construction limit
+            ``LCHS.max_quadrature_work``.
+
+    Returns:
+        A mapping with ``radius`` (None when not generated), ``reason``,
+        ``form``, ``epsilon_c``, ``visits``, ``work_units`` (charged scalar
+        units), ``residual`` ((mu, g) of the returned point or None),
+        ``positive`` and ``negative`` (the last observed (mu, g) of each sign
+        or None) and ``numerical_zero``.
+
+    Raises:
+        ResourceLimitError: If the next 32-unit block would exceed
+            ``max_quadrature_work``.
+    """
+    record = dict(radius=None, form=form, epsilon_c=epsilon_c, visits=0, work_units=0, residual=None,
+                  positive=None, negative=None, numerical_zero=False)
+
+    def refused(reason):
+        return {**record, "reason": reason}
+
+    if form == "separate_parts":
+        if a is None or b is None or not (isfinite(a) and isfinite(b) and a >= 0 and b >= 0):
+            return refused(f"separate-parts query normalizations a={a!r}, b={b!r} are not known nonnegative values")
+        if a == 0:
+            return refused("a = alpha_L = 0: b*beta_R**2 decreases strictly in R, so there is no interior "
+                           "stationary proposal")
+    elif form == "single_a":
+        if alpha_a is None or not (isfinite(alpha_a) and alpha_a > 0):
+            return refused(f"single-A query normalization alpha_A={alpha_a!r} is not a known positive value")
+    else:
+        raise ValueError(f"KK6 form must be 'separate_parts' or 'single_a', not {form!r}")
+    if not 0.0 < epsilon_c < 1.0:
+        return refused(f"continuous allowance epsilon_c={epsilon_c!r} is not in (0, 1)")
+    lower, upper = 0.0, 1.0 - epsilon_c
+    if not 0.0 < upper <= 1.0:
+        return refused("no represented domain 0 < mu < 1 - epsilon_c")
+    log_epsilon = log(epsilon_c)
+    hit = None
+
+    def charge(step):
+        need = record["work_units"] + _APEL_SCALAR_STEP_WORK
+        if exceeds(need, max_quadrature_work):
+            raise ResourceLimitError(f"the KK6 radius search needs at least {need} work units for {step}, exceeding "
+                                     f"LCHS.max_quadrature_work={max_quadrature_work}")
+        record["work_units"] = need
+
+    while True:
+        middle = lower + (upper - lower) / 2
+        if middle == lower or middle == upper:
+            break
+        charge("its next residual visit")
+        record["visits"] += 1
+        if not 0.0 < middle < 1.0:
+            return refused(f"invalid interior point mu={middle!r}")
+        log_ratio = log1p(-middle) - log_epsilon
+        if not isfinite(log_ratio):
+            return refused(f"nonfinite L(mu) at mu={middle!r}")
+        if log_ratio <= 0.0:
+            # A rounded upper boundary: shrink the domain without calling it an observed negative residual.
+            upper = middle
+            continue
+        radius = tan(pi * middle / 2)
+        if not (isfinite(radius) and radius > 0.0):
+            return refused(f"nonfinite or nonpositive R at mu={middle!r}")
+        if form == "separate_parts":
+            residual = log_ratio - pi * middle * middle * (1.0 + radius * radius) * a / (4.0 * (a * radius + b))
+        else:
+            residual = log_ratio - pi / 4 * middle * middle * radius
+        if not isfinite(residual):
+            return refused(f"nonfinite residual at mu={middle!r}")
+        if residual == 0.0:
+            hit = (middle, residual)
+            record["numerical_zero"] = True
+            break
+        if residual > 0.0:
+            lower, record["positive"] = middle, (middle, residual)
+        else:
+            upper, record["negative"] = middle, (middle, residual)
+    if hit is None:
+        if record["positive"] is None or record["negative"] is None:
+            return refused("no representable interior sign bracket was observed")
+        hit = min((record["positive"], record["negative"]), key=lambda item: (abs(item[1]), item[0]))
+    record["residual"] = hit
+    charge("the final conversion and fixed-R check")
+    radius = tan(pi * hit[0] / 2)
+    if not (isfinite(radius) and radius > 0.0):
+        return refused(f"nonfinite or nonpositive R at the returned mu={hit[0]!r}")
+    try:
+        _apel_radius(epsilon_c, radius)
+    except ValueError as error:
+        return refused(f"the fixed-R check refuses R={radius!r}: {error}")
+    return {**record, "radius": radius, "reason": "p = 2 stationary radius of the leading-cost surrogate"}
+
+
+APEL_BERNTSON_PROFILE_ID = "apel_berntson_kk1_kk4_v1"
+
+# Pairs whose parameters are derived together from the problem scalars and
+# allowances, each with the profile identifier recorded in
+# kernel_parameter_selection.
 LCHS_PAIR_PROFILE_RESOLVERS: Mapping[
     tuple[str, str],
-    Callable[[LCHSProblemContext, ResolvedProviderConfig], Mapping[str, ProviderParameter]],
+    tuple[str, Callable[[LCHSProblemContext, ResolvedProviderConfig, Mapping[str, float]],
+                        Mapping[str, ProviderParameter]]],
 ] = MappingProxyType(
     {
-        ("low_somma_f2", "symmetric_uniform_trapezoid"): (
-            _resolve_low_somma_pair_profile
-        )
+        ("low_somma_f2", "symmetric_uniform_trapezoid"): (LOW_SOMMA_PROFILE_ID, _resolve_low_somma_pair_profile),
+        ("apel_berntson", "tanh_sinh"): (APEL_BERNTSON_PROFILE_ID, _resolve_apel_pair_profile),
     }
 )
 
@@ -1249,6 +2143,8 @@ def resolve_provider_config(
 def resolve_lchs_provider_requests(
     lchs_kernel: ProviderConfig,
     k_quadrature: ProviderConfig,
+    *,
+    coefficient_artifact: LCHSDiscreteWeightArtifact | None = None,
 ) -> tuple[
     LCHSKernelProvider,
     ResolvedProviderConfig,
@@ -1261,6 +2157,9 @@ def resolve_lchs_provider_requests(
     The LCHS Method calls this at construction. Each rule resolves its
     supported parameters and checks their domains before any problem data
     is read. An unknown rule name or a rejected pair raises ValueError.
+    The `"discrete_weights"` + `"artifact_nodes"` pair needs the
+    LCHSDiscreteWeightArtifact whose content_id equals its `artifact_id`,
+    and the artifact is accepted by no other pair.
 
     Returns:
         (kernel provider, resolved kernel config, quadrature provider,
@@ -1288,6 +2187,16 @@ def resolve_lchs_provider_requests(
             f"LCHS kernel-quadrature pair {key[0]!r} + {key[1]!r} is rejected: "
             f"{compatibility.reason}"
         )
+    if key == ("discrete_weights", "artifact_nodes"):
+        if not isinstance(coefficient_artifact, LCHSDiscreteWeightArtifact):
+            raise ValueError("the discrete_weights kernel needs its prepared LCHSDiscreteWeightArtifact "
+                             "(prepare_lchs_discrete_weights), and this caller supplies none. "
+                             "The LCHS Method has no input for this pair")
+        if coefficient_artifact.content_id != resolved_kernel.parameters["artifact_id"]:
+            raise ValueError(f"the supplied artifact {coefficient_artifact.content_id} is not the "
+                             f"discrete_weights artifact_id {resolved_kernel.parameters['artifact_id']}")
+    elif coefficient_artifact is not None:
+        raise ValueError("a coefficient artifact is used only by the discrete_weights + artifact_nodes pair")
     return (
         kernel,
         resolved_kernel,
@@ -1315,12 +2224,16 @@ def _admit_coefficient_rounding(coefficient_l1_norm: float, epsilon: float, pair
     arXiv:2508.19238v2, Theorem 2, and Theorem 3, Eq. (12), for the discrete
     sum), about 1.2e16 at c = 50.
 
-    The kernel and quadrature bounds describe exact arithmetic, and the LCHS
-    error model reports no floating-point value, so it cannot report this
-    rounding next to them. Planning therefore refuses the table when
-    u*alpha exceeds LCHS_ROUNDING_EPSILON_FRACTION*epsilon. Both sides are
-    operator-level quantities for a unit input, and the input norm, Duhamel
-    weight and PSD recovery scale them alike. Equality is accepted.
+    The kernel and quadrature bounds describe the ideal rule in exact
+    arithmetic, and the LCHS error model reports no floating-point value, so
+    it cannot report this rounding next to them. Planning therefore refuses
+    the table when u*alpha exceeds LCHS_ROUNDING_EPSILON_FRACTION*epsilon.
+    Both sides are operator-level quantities for a unit input, and the input
+    norm, Duhamel weight and PSD recovery scale them alike. Equality is
+    accepted. This is a scale check of the sum's evaluation. It does not
+    bound the binary64 construction of the nodes, weights and coefficients,
+    which ``native_floating_point`` covers with the other floating-point
+    errors.
     """
     rounding = _UNIT_ROUNDOFF*coefficient_l1_norm
     allowance = LCHS_ROUNDING_EPSILON_FRACTION*epsilon
@@ -1334,19 +2247,102 @@ def _admit_coefficient_rounding(coefficient_l1_norm: float, epsilon: float, pair
         )
 
 
+def coefficient_lift(coefficients) -> int:
+    """Return k, the power of two 2**k that lifts every nonzero Cartesian part of a coefficient table into the normal range.
+
+    With q the smallest ``frexp`` exponent among the nonzero real and
+    imaginary parts, k = max(0, -1021 - q). A positive binary64 number is at
+    least 2**-1074, whose exponent is -1073, so 0 <= k <= 52, and every
+    nonzero part of 2**k*c_j is at least 2**-1022. Scaling by 2**k is exact.
+    The admission ``_admit_coefficient_rounding`` requires u*beta <=
+    .1*epsilon with u = 2**-53 and epsilon < 1, so every admitted provider
+    table has raw one-norm beta < .1/u, about 9.01e14 or 2**49.7. Its
+    lifted parts therefore stay below 2**102, a further factor g < 2 (the
+    homogeneous compensation) keeps them below 2**103, and a finite
+    application count or table length adds far less than the remaining
+    range, so no lifted sum overflows. The argument covers the whole table,
+    not each term alone, and it holds only for admitted provider tables or
+    tables derived from them by such bounded factors. A table without a
+    nonzero part has k = 0.
+
+    The lift serves magnitudes and rotations. abs((1+1j)*2**-1074) rounds
+    to 2**-1074 instead of sqrt(2)*2**-1074, and multiplying a subnormal
+    part by a non-power-of-two factor or a unit phase rounds it by up to
+    order one relative to its value. After the lift, hypot and such
+    products round with relative error of order u. A normal table has
+    k = 0 and is unchanged. Normalizing by the largest part instead can
+    push a small retained part below the normal range: for
+    (1e14 + 2**-1074 i, (1+i)*2**-1074), dividing by 2**47 loses the
+    second coefficient, while the lift by 2**52 keeps its amplitude
+    2**.25*2**-537/1e7.
+    """
+    parts = np.abs(np.asarray(coefficients, dtype=np.complex128).view(np.float64))
+    smallest = float(np.min(parts, where=parts > 0, initial=inf))
+    return 0 if smallest == inf else max(0, -1021 - frexp(smallest)[1])
+
+
+def lifted_magnitudes(coefficients):
+    """Return the magnitudes 2**k*|c_j| of a coefficient table and its lift k (``coefficient_lift``).
+
+    The raw magnitude of c_j is magnitudes[j]*2**-k, which a caller keeps as
+    a PhysicalScale factor, never as a binary64 product that could
+    underflow. Normalized quantities such as sqrt(K_j/sum_i K_i) do not
+    depend on k. The table is not modified. For k = 0 the magnitudes are
+    NumPy's complex magnitudes of the c_j themselves, which can differ from
+    Python's ``abs`` in the last binary place. Bytes per coefficient: the
+    16-byte complex copy with the 18-byte lift scan at the peak, then the
+    copy with the 8-byte result, 8 retained.
+    """
+    values = np.array(coefficients, dtype=np.complex128)
+    lift = coefficient_lift(values)
+    if lift:
+        values *= 2.0**lift
+    return np.abs(values), lift
+
+
 def _resolve_coefficient_context(
     *,
     lchs_kernel: ProviderConfig,
     k_quadrature: ProviderConfig,
     problem_context: LCHSProblemContext,
-    max_bytes=DEFAULT_INPUT_BYTES,
-    max_quadrature_work=100_000_000,
+    max_bytes=None,
+    max_quadrature_work=None,
+    coefficient_artifact: LCHSDiscreteWeightArtifact | None = None,
+    free_half_width: int | None = None,
+    strip_margin: float | None = None,
+    work_ledger: dict | None = None,
+    dense_select_slot_limit: int | None = None,
 ) -> LCHSCoefficientPlan:
     """Build one immutable coefficient plan, in the same form for every kernel-quadrature pair.
 
-    Coefficients are c_j = w_j*g(k_j) in node order. A non-finite node, weight,
+    Coefficients are c_j = w_j*g(k_j) in node order, with g(k_j) taken from
+    the rule's kernel_values when it supplies them. A non-finite node, weight,
     coefficient or running L1 norm raises at the first offending index, so an
     overflowed kernel never reaches PREP normalization or SELECT phases.
+
+    `coefficient_artifact` is the LCHSDiscreteWeightArtifact of the
+    `"discrete_weights"` pair and `None` for every other pair. Its weights
+    are used after the support and allowance checks of the artifact rule.
+    Nothing here solves an optimization or reevaluates its residual.
+
+    `free_half_width` is the free uniform grid of PLAN M3 for the Low–Somma
+    pair, which provider enumeration (`selection.provider_frontier`) uses:
+    J' at least the profile's J and h = R/J'. Then h <= R/J <= h_max, so the
+    Theorem 3 condition and the recorded component caps still hold, with the
+    same R and gamma. The derived J and h are replaced by J' and R/J'.
+
+    `strip_margin` is the strip margin d of the composite-Gauss panel bound
+    (`_ellipse_rule`) for the default Eq. (7) pair, which provider
+    enumeration sets to 0.5. It is recorded as the derived parameter
+    `strip_margin`; None keeps LCHS_ELLIPSE_STRIP_MARGIN and records nothing,
+    so the default plan is unchanged.
+
+    A supplied `work_ledger` mapping receives the admitted quadrature work
+    of the rule under `"quadrature_work"` (`_check_quadrature_work`).
+
+    `dense_select_slot_limit` is `LCHS.max_dense_select_slots` on a quantum
+    dense_exact route (`selection._route`) and None elsewhere. The composite
+    Gauss rule reads it (`_build_composite_gauss`).
     """
 
     (
@@ -1355,24 +2351,41 @@ def _resolve_coefficient_context(
         quadrature,
         resolved_quadrature,
         compatibility,
-    ) = resolve_lchs_provider_requests(lchs_kernel, k_quadrature)
+    ) = resolve_lchs_provider_requests(lchs_kernel, k_quadrature, coefficient_artifact=coefficient_artifact)
     pair_key = (resolved_kernel.implementation, resolved_quadrature.implementation)
-    profile_resolver = LCHS_PAIR_PROFILE_RESOLVERS.get(pair_key)
+    profile_id, profile_resolver = LCHS_PAIR_PROFILE_RESOLVERS.get(pair_key, (None, None))
     pair_label = (
         f"{resolved_kernel.implementation!r} + "
         f"{resolved_quadrature.implementation!r}"
     )
+    allowances = _component_allowances(problem_context, pair_key, pair_label)
     try:
         derived_parameters = (
-            MappingProxyType({})
+            {}
             if profile_resolver is None
-            else profile_resolver(problem_context, resolved_kernel)
+            else dict(profile_resolver(problem_context, resolved_kernel, allowances))
         )
+        derived_parameters.update({f"allowance_{name}": value for name, value in allowances.items()})
+        if free_half_width is not None:
+            if pair_key != ("low_somma_f2", "symmetric_uniform_trapezoid") or free_half_width < derived_parameters["J"]:
+                raise ValueError("a free uniform grid needs the Low–Somma pair and a half width of at least its "
+                                 f"profile's J={derived_parameters.get('J')}")
+            derived_parameters.update(J=free_half_width, h=derived_parameters["R"] / free_half_width)
+        if strip_margin is not None:
+            if pair_key != ("near_optimal_eq7", "composite_gauss") or not 0 < strip_margin < 1:
+                raise ValueError("a Gauss panel strip margin needs the near_optimal_eq7 + composite_gauss pair and "
+                                 f"0 < d < 1, not d={strip_margin!r}")
+            derived_parameters["strip_margin"] = float(strip_margin)
+        derived_parameters = _immutable_map(derived_parameters)
         pair_context = MappingProxyType(
             {
                 "kernel_parameters": resolved_kernel.parameters,
                 "quadrature_parameters": resolved_quadrature.parameters,
                 "derived_parameters": derived_parameters,
+                "component_allowances": allowances,
+                "coefficient_artifact": coefficient_artifact,
+                "work_ledger": work_ledger,
+                "dense_select_slot_limit": dense_select_slot_limit,
             }
         )
         quadrature_plan = quadrature.build_nodes_and_weights(
@@ -1388,43 +2401,67 @@ def _resolve_coefficient_context(
         ) from exc
     # Combine base quadrature weights with the selected kernel. The coefficient
     # L1 norm supplies LCU normalization, while complex phases belong to SELECT.
-    coefficients: list[complex] = []
-    coefficient_l1_norm = 0.0
-    for index, (node, weight) in enumerate(zip(
-        quadrature_plan.nodes,
-        quadrature_plan.base_weights,
-        strict=True,
-    )):
+    # The arrays are evaluated together, and the error at the first offending
+    # index is reported in the order of the checks at that index: node,
+    # weight, kernel evaluation, coefficient, running L1 norm. The kernel is
+    # evaluated only before the first non-finite node or weight, and a scalar
+    # kernel only up to its first failure or non-finite value.
+    nodes, weights = quadrature_plan.nodes, quadrature_plan.base_weights
+    finite = np.isfinite(nodes) & np.isfinite(weights)
+    stop, failure = (len(nodes) if finite.all() else int(np.argmin(finite))), None
+    if quadrature_plan.kernel_values is not None:
+        values = quadrature_plan.kernel_values[:stop]
+    elif kernel.coefficients is not None:
+        try:
+            with np.errstate(all="ignore"):
+                values = np.asarray(kernel.coefficients(nodes[:stop], pair_context), dtype=np.complex128)
+        except ArithmeticError as exc:
+            raise ValueError(f"invalid inputs for LCHS provider pair {pair_label}: {exc}") from exc
+    else:
+        values = np.empty(stop, dtype=np.complex128)
+        for index in range(stop):
+            try:
+                values[index] = kernel.coefficient(float(nodes[index]), pair_context)
+            except ArithmeticError as exc:
+                values, failure = values[:index], exc
+                break
+            if not np.isfinite(values[index]):
+                values = values[:index + 1]
+                break
+    evaluated = len(values)
+    with np.errstate(all="ignore"):
+        coefficients = weights[:evaluated] * values
+        running = np.cumsum(np.abs(coefficients))
+    if not np.isfinite(running).all():
+        # A non-finite coefficient makes the running norm non-finite at its index.
+        index = int(np.argmin(np.isfinite(running)))
+        node = float(nodes[index])
+        if not np.isfinite(coefficients[index]):
+            raise ValueError(
+                f"LCHS provider pair {pair_label} produced non-finite coefficient "
+                f"at node {node!r} (index {index}): {complex(coefficients[index])!r}"
+            )
+        raise ValueError(
+            f"LCHS provider pair {pair_label} produced non-finite coefficient "
+            f"L1 norm at node {node!r} (index {index}): {float(running[index])!r}"
+        )
+    if failure is not None:
+        raise ValueError(
+            f"invalid inputs for LCHS provider pair {pair_label} at node "
+            f"{float(nodes[evaluated])!r} (index {evaluated}): {failure}"
+        ) from failure
+    if stop < len(nodes):
+        node, weight = float(nodes[stop]), float(weights[stop])
         if not np.isfinite(node):
             raise ValueError(
                 f"LCHS provider pair {pair_label} produced non-finite node "
-                f"at index {index}: {node!r}"
+                f"at index {stop}: {node!r}"
             )
-        if not np.isfinite(weight):
-            raise ValueError(
-                f"LCHS provider pair {pair_label} produced non-finite weight "
-                f"at node {node!r} (index {index}): {weight!r}"
-            )
-        try:
-            coefficient = weight * kernel.coefficient(node, pair_context)
-        except ArithmeticError as exc:
-            raise ValueError(
-                f"invalid inputs for LCHS provider pair {pair_label} at node "
-                f"{node!r} (index {index}): {exc}"
-            ) from exc
-        if not np.isfinite(coefficient):
-            raise ValueError(
-                f"LCHS provider pair {pair_label} produced non-finite coefficient "
-                f"at node {node!r} (index {index}): {coefficient!r}"
-            )
-        coefficient_l1_norm += float(abs(coefficient))
-        if not np.isfinite(coefficient_l1_norm):
-            raise ValueError(
-                f"LCHS provider pair {pair_label} produced non-finite coefficient "
-                f"L1 norm at node {node!r} (index {index}): "
-                f"{coefficient_l1_norm!r}"
-            )
-        coefficients.append(complex(coefficient))
+        raise ValueError(
+            f"LCHS provider pair {pair_label} produced non-finite weight "
+            f"at node {node!r} (index {stop}): {weight!r}"
+        )
+    coefficient_l1_norm = float(running[-1]) if len(running) else 0.0
     _admit_coefficient_rounding(coefficient_l1_norm, float(problem_context.epsilon), pair_label)
     # Keep user/default parameter provenance alongside the immutable grid so
     # reporting and later realization use the same coefficient selection.
@@ -1432,8 +2469,8 @@ def _resolve_coefficient_context(
         name: ("user" if name in lchs_kernel.parameters else "provider_default")
         for name in resolved_kernel.parameters
     }
-    if profile_resolver is not None:
-        selection["profile"] = LOW_SOMMA_PROFILE_ID
+    if profile_id is not None:
+        selection["profile"] = profile_id
     return LCHSCoefficientPlan(
         requested_lchs_kernel=lchs_kernel,
         resolved_lchs_kernel=resolved_kernel,
@@ -1446,11 +2483,183 @@ def _resolve_coefficient_context(
         derived_parameters=derived_parameters,
         nodes=quadrature_plan.nodes,
         base_weights=quadrature_plan.base_weights,
-        coefficients=tuple(coefficients),
+        coefficients=coefficients,
         coefficient_l1_norm=coefficient_l1_norm,
         quadrature=quadrature_plan,
         compatibility=compatibility,
     )
+
+
+@dataclass(frozen=True, kw_only=True)
+class LCHSContinuousKernelPlan:
+    """A compact LCHS kernel on (-R, R) with the guarded truncated Cauchy proposal for sampled nodes.
+
+    [`resolve_lchs_continuous_kernel`][nwqlib.algorithms.lchs.providers.resolve_lchs_continuous_kernel]
+    returns it. The truncated Cauchy density q_R(k) = 1/(2*atan(R)*(1+k**2))
+    on |k| < R has the inverse distribution function
+    k = tan((2v-1)*atan(R)) for uniform v. The endpoint guard keeps v in
+    [guard, 1-guard]: for U uniform on [0, 1], `node(U)` has the guarded
+    density q_g(k) = q_R(k)/Z on |k| <= R_g, with Z = 1 - 2*guard and
+    R_g = tan(Z*atan(R)). `weight` returns g(k)/q_g(k) = Z*g(k)/q_R(k), so
+    the mean of weight(k)*f(k) over these draws is the integral of g*f
+    over [-R_g, R_g], with no further normalization. That integral differs
+    from the one over (-R, R) by at most `guard_omission_bound` for
+    |f| <= 1. A sampled LCHS estimate uses these draws in place of a k
+    quadrature. The fields are read-only. Finite random bits and the
+    rounding of k, of the weight and of its phase are not bounded here.
+
+    Attributes:
+        requested_lchs_kernel: Kernel choice as given.
+        resolved_lchs_kernel: Kernel used, with its defaults filled in.
+        lchs_kernel_formula_id: Versioned identifier of the kernel formula.
+        derived_parameters: For Apel-Berntson `mu`, `R`, `Delta` and
+            `beta_R`; for Low-Somma `gamma`, `R` and `epsilon_lchs`.
+        radius: Support radius R of the kernel and the proposal.
+        proposal_normalization: 2*atan(R), the normalization of q_R.
+        importance_weight_bound: Z*W, the upper bound on |weight(k)| for
+            the guarded proposal, with W = `unguarded_weight_bound`.
+        unguarded_weight_bound: Upper bound W on |g(k)/q_R(k)| over
+            |k| < R. Apel-Berntson has |g/q_R| = beta_R =
+            (2*atan(R)/pi)*exp((1-mu)*Delta) at every k, because |g_R| is
+            proportional to 1/(1+k**2). Low-Somma has
+            |g/q_R| = (2*atan(R)/pi)*exp(c - (1+k**2)/(4*gamma**2)), largest at k = 0.
+        importance_weight_constant: Whether |weight(k)| equals
+            `importance_weight_bound` at every k.
+        kernel_error_bound: Operator-norm error of the continuous integral
+            over (-R, R) for a unit input: the Apel-Berntson continuous
+            allowance epsilon_c, or epsilon_lchs of Low-Somma Theorem 2.
+        guard: Endpoint guard in (0, 1/2). The two omitted v-intervals
+            carry proposal mass 2*guard.
+        guard_omission_bound: 2*guard*W, the operator-norm bound on the
+            kernel mass that the guard omits, at most the guard allowance.
+    """
+
+    requested_lchs_kernel: ProviderConfig
+    resolved_lchs_kernel: ResolvedProviderConfig
+    lchs_kernel_formula_id: str
+    derived_parameters: Mapping[str, ProviderParameter]
+    radius: float
+    proposal_normalization: float
+    importance_weight_bound: float
+    unguarded_weight_bound: float
+    importance_weight_constant: bool
+    kernel_error_bound: float
+    guard: float
+    guard_omission_bound: float
+
+    def node(self, uniform: float) -> float:
+        """Return the node k = tan((2v-1)*atan(R)) for v = guard + (1-2*guard)*uniform.
+
+        Every `uniform` in the closed interval [0, 1] maps to a binary64
+        node with |k| < R, where the weight is finite. The resolver
+        establishes this from the two ends of the interval, assuming a
+        faithful tan.
+        """
+        guarded = self.guard + (1.0 - 2.0 * self.guard) * uniform
+        return tan((2.0 * guarded - 1.0) * atan(self.radius))
+
+    def weight(self, k_value: float) -> complex:
+        """Return the importance weight (1-2*guard)*g(k)/q_R(k) of the guarded proposal at a node with |k| < R."""
+        derived = self.derived_parameters
+        retained = 1.0 - 2.0 * self.guard
+        if self.resolved_lchs_kernel.implementation == "apel_berntson":
+            return apel_berntson_kernel(k_value, radius=self.radius, mu=float(derived["mu"]),
+                                        delta=float(derived["Delta"])) * (retained * self.proposal_normalization
+                                                                          * (1.0 + k_value * k_value))
+        c_value = float(self.resolved_lchs_kernel.parameters["c"])
+        gamma = float(derived["gamma"])
+        magnitude = (retained * self.proposal_normalization / pi) * exp(
+            c_value - (1.0 + k_value * k_value) / (4.0 * gamma**2))
+        return complex(magnitude * cos(k_value * c_value), -magnitude * sin(k_value * c_value))
+
+
+def resolve_lchs_continuous_kernel(*, lchs_kernel: ProviderConfig, kernel_allowance: float,
+                                   guard_allowance: float) -> LCHSContinuousKernelPlan:
+    """Return a compact kernel and its guarded truncated Cauchy proposal for sampled LCHS nodes.
+
+    The Apel-Berntson kernel uses the radius rule of `apel_berntson` with
+    `kernel_allowance` as its continuous allowance epsilon_c (Apel and
+    Berntson, arXiv:2610.03669v1, Theorems 4 and 6 and Proposition 10). The
+    Low-Somma kernel uses
+    epsilon_lchs = `kernel_allowance` in Theorem 2 of arXiv:2508.19238v2,
+    gamma = sqrt(c + log((1+1/(2*pi))/epsilon_lchs))/c and R = 2*c*gamma**2.
+    With W the bound on |g/q_R|, the guard is guard_allowance/(2*W), so the
+    omitted kernel mass 2*guard*W meets the guard allowance. Neither choice
+    depends on the problem, because the continuous error bound holds for
+    every PSD L_s and Hermitian H. The Eq. (7) and Cauchy kernels have no
+    admitted finite-interval weight bound on this proposal and are refused.
+
+    The guard must also keep every binary64 node strictly inside (-R, R).
+    The map from the uniform variable to the argument of tan uses only
+    correctly rounded, hence monotone, operations. If tan is faithful
+    (error below one unit in the last place), then every node lies within
+    one unit in the last place of the range spanned by node(0) and
+    node(1). The resolver therefore requires both extreme nodes to lie at
+    least one unit in the last place inside (-R, R), which keeps the
+    weight finite for every uniform in [0, 1]. A tiny guard fails this
+    check and is refused, not widened, since a wider guard would omit more
+    kernel mass than its allowance.
+
+    Args:
+        lchs_kernel (ProviderConfig): `"apel_berntson"` or `"low_somma_f2"`
+            with their parameters.
+        kernel_allowance (float): Operator-norm allowance of the continuous
+            kernel integral, in (0, 1) for Apel-Berntson and in (0, 4/15]
+            for Low-Somma.
+        guard_allowance (float): Positive operator-norm allowance of the
+            endpoint guard, small enough that the guard is below 1/2 and
+            large enough that its extreme nodes stay inside (-R, R).
+
+    Returns:
+        kernel (LCHSContinuousKernelPlan): The kernel, proposal, weight
+            bounds and both error bounds.
+
+    Raises:
+        ValueError: For another kernel, an allowance outside its range, or
+            a guard whose extreme binary64 nodes do not stay inside
+            (-R, R), the numerical range limit of the guard.
+    """
+    kernel, resolved = resolve_provider_config(lchs_kernel, LCHS_KERNEL_IMPLEMENTATIONS, slot="lchs_kernel")
+    kernel_allowance = finite_real(kernel_allowance, "kernel_allowance")
+    guard_allowance = finite_real(guard_allowance, "guard_allowance")
+    if resolved.implementation == "apel_berntson":
+        mu, radius, delta, _ = _apel_radius(kernel_allowance, resolved.parameters["radius"])
+        # beta_R as (2*atan(R)/pi)*exp((1-mu)*Delta), the product that `weight`
+        # evaluates, so that |weight| and this bound agree to rounding.
+        bound = _exp_with_nonfinite_overflow(log(2.0 * atan(radius) / pi) + (1.0 - mu) * delta)
+        derived = {"mu": mu, "R": radius, "Delta": delta, "beta_R": bound}
+    elif resolved.implementation == "low_somma_f2":
+        if not 0.0 < kernel_allowance <= 4.0 / 15.0:
+            raise ValueError("the continuous Low-Somma kernel requires kernel_allowance in (0, 4/15]")
+        c_value = float(resolved.parameters["c"])
+        gamma = sqrt(c_value + log((1.0 + 1.0 / (2.0 * pi)) / kernel_allowance)) / c_value
+        radius = 2.0 * c_value * gamma**2
+        bound = _exp_with_nonfinite_overflow(log(2.0 * atan(radius) / pi) + c_value - 1.0 / (4.0 * gamma**2))
+        derived = {"gamma": gamma, "R": radius, "epsilon_lchs": kernel_allowance}
+    else:
+        raise ValueError(f"lchs_kernel {resolved.implementation!r} has no admitted weight bound on the "
+                         "truncated Cauchy proposal; use 'apel_berntson' or 'low_somma_f2'")
+    guard = guard_allowance / (2.0 * bound) if isfinite(bound) else 0.0
+    if not 0.0 < guard < 0.5:
+        raise ValueError(f"guard_allowance {guard_allowance!r} gives endpoint guard {guard!r} for weight bound "
+                         f"{bound!r}; the guard must lie in (0, 1/2)")
+    omission = 2.0 * guard * bound
+    if omission > guard_allowance:
+        guard = nextafter(guard, 0.0)
+        omission = 2.0 * guard * bound
+    plan = LCHSContinuousKernelPlan(
+        requested_lchs_kernel=lchs_kernel, resolved_lchs_kernel=resolved, lchs_kernel_formula_id=kernel.formula_id,
+        derived_parameters=_immutable_map(derived), radius=radius, proposal_normalization=2.0 * atan(radius),
+        importance_weight_bound=(1.0 - 2.0 * guard) * bound, unguarded_weight_bound=bound,
+        importance_weight_constant=resolved.implementation == "apel_berntson",
+        kernel_error_bound=kernel_allowance, guard=guard, guard_omission_bound=omission)
+    lowest, highest = plan.node(0.0), plan.node(1.0)
+    if not (nextafter(lowest, -float("inf")) > -radius and nextafter(highest, float("inf")) < radius):
+        raise ValueError(
+            f"guard_allowance {guard_allowance!r} gives endpoint guard {guard!r}, whose extreme nodes {lowest!r} "
+            f"and {highest!r} do not stay one unit in the last place inside (-R, R) with R = {radius!r}. "
+            "This is the numerical range limit of the binary64 guard; use a larger guard_allowance")
+    return plan
 
 
 def _unitary_coefficient_plan(options):
@@ -1499,41 +2708,94 @@ def _unitary_coefficient_plan(options):
     )
 
 
-def _homogeneous_coefficient_plan(quadrature, elapsed):
+def _homogeneous_coefficient_plan(quadrature, elapsed, scalar_phase=(0.0, 0.0), *, max_bytes):
     """Return the coefficient plan of the physical propagator exp(-A*elapsed).
 
-    Each coefficient is multiplied by exp(shift*elapsed), the recovery of the
-    PSD shift, and coefficient_l1_norm becomes the sum of the
-    compensated magnitudes. When binary64 cannot represent that factor, the
-    coefficients carry exp(shift*elapsed)*2**-e instead, with e from
-    solution_error_budget.psd_recovery_exponent, and every routine that uses
-    them composes 2**e into its binary recovery. derived_parameters records the shift, the
-    elapsed time and the factor applied to the coefficients. The nodes and
-    base weights are unchanged.
+    Coefficient j becomes d_j = g*2**k*c_j*exp(i*phi_j), with the stored
+    raw coefficient c_j, and every routine that uses the coefficients
+    composes 2**E, the plan's recovery_exponent, into its binary recovery,
+    so that 2**E*d_j = exp(s*elapsed)*c_j*exp(i*phi_j) for the signed
+    shift s of solution_error_budget.signed_shift, the recovery of the PSD
+    shift or known decay. coefficient_l1_norm becomes sum_j |d_j|. The
+    factor g*2**k is common to all coefficients, so it changes the physical
+    recovery and leaves the normalized coefficient state unchanged.
+
+    Scale. exp(s*elapsed) is the PhysicalScale mu*2**e' of
+    solution_error_budget.admitted_exp, g = 2*mu lies in [1, 2), and k is
+    the exact lift of ``coefficient_lift``, at most 52, which brings every
+    nonzero Cartesian part of the raw table into the normal range. Then
+    E = e' - 1 - k, an exact integer however large s*elapsed is, and
+    derived_parameters["homogeneous_coefficient_compensation"] records the
+    applied factor g*2**k in [1, 2**53). The exact product of each nonzero
+    raw part with g*2**k lies in the normal range, so its binary64 value
+    has relative error at most u = 2**-53, and no coefficient shrinks or
+    underflows however strong the known decay. A table without subnormal
+    parts has k = 0, and then E = 0 exactly when exp(s*elapsed) lies in
+    [1, 2). Under provider admission the one-norm sum_j |d_j| stays below
+    2*2**52*.1/u, about 8.1e30, so no complete sum has to leave binary64
+    (``coefficient_lift``). A nonfinite s*elapsed raises
+    ApplicabilityError.
+
+    ``scalar_phase = (a, b)`` is the scalar a recipe takes out of its
+    evolved children: with children L_c = L - c_L I and
+    H_c = H - c_H I, a = c_L + s and b = c_H, and
+    exp(-i t (k L_s + H)) = exp(-i t (k a + b)) exp(-i t (k L_c + H_c)).
+    phi_j = -elapsed*(k_j*a + b) enters as the unit phase of
+    solution_error_budget.extracted_phase, which refuses a nonfinite
+    argument. The magnitude it multiplies is at least 2**-1022, so the
+    rotation rounds by order u relative to |d_j| and keeps the phase of
+    c_j, although a rotated Cartesian part can still cancel to a tiny or
+    zero value with an absolute effect of order u*|d_j|. The default
+    (0, 0) leaves the coefficients unrotated.
+
+    derived_parameters records the shift, the elapsed time, the factor
+    applied to the coefficients and any scalar phase. The nodes, base
+    weights and raw quadrature coefficients are unchanged.
+
+    Bytes, checked against max_bytes before the lift scan and the new table,
+    as a coarse estimate of the dominant arrays. For M nodes this stage
+    holds the raw node, weight and coefficient arrays of the plan and of the
+    quadrature data (56 bytes per node), and forms the new complex128
+    coefficients, their scalar phases and their read-only copy (64 bytes per
+    node at most), so 128*M, plus 16*K for a rule that keeps its kernel
+    values, K = M, else K = 0. The lift scan (18 bytes per node,
+    ``coefficient_lift``) ends before the new array is formed.
     """
     from dataclasses import replace
-    from .solution_error_budget import psd_recovery_exponent, psd_recovery_part
-    shift = float(quadrature.conversion["psd_shift"])
+    from .solution_error_budget import admitted_exp, extracted_phase, signed_shift
+    m = len(quadrature.coefficients)
+    kernel_count = 0 if quadrature.coefficient_plan.quadrature.kernel_values is None else m
+    _check_bytes(128*m + 16*kernel_count, max_bytes, "LCHS homogeneous coefficient table")
+    shift = signed_shift(quadrature.conversion)
     # ACL arXiv:2312.03916v2, Eq. (4)/(60), specialized to constant A:
     # replacing A by A+sI shifts L by s*I, and
     # exp(-A*T) = exp(s*T)*exp(-(A+s*I)*T). The LCHS integral is applied to
     # the shifted A, whose L is PSD, and exp(s*T) is applied once to the
     # homogeneous coefficients. Duhamel source branches use their own elapsed
     # time T-t_j instead.
-    compensation = psd_recovery_part(shift, elapsed, psd_recovery_exponent(shift, elapsed))
-    coefficients = tuple(complex(c * compensation) for c in quadrature.coefficients)
-    alpha = fsum(abs(c) for c in coefficients)
+    scale = admitted_exp(shift*elapsed)
+    lift = coefficient_lift(quadrature.coefficients)
+    compensation, exponent = ldexp(2*scale.mantissa, lift), scale.exponent - 1 - lift
+    dissipative, hamiltonian = scalar_phase
+    coefficients = np.asarray(quadrature.coefficients, dtype=np.complex128) * compensation
+    if dissipative or hamiltonian:
+        coefficients *= np.fromiter((extracted_phase(elapsed, k, scalar_phase) for k in quadrature.k_nodes),
+                                    dtype=np.complex128, count=m)
+    alpha = fsum(np.abs(coefficients))
     if not isfinite(alpha) or alpha <= 0:
         raise ValueError("PSD-compensated LCHS coefficients require a finite positive 1-norm")
     raw = quadrature.coefficient_plan
-    return replace(raw, coefficients=coefficients, coefficient_l1_norm=alpha,
+    extracted = {} if not (dissipative or hamiltonian) else {
+        "scalar_phase_dissipative": float(dissipative), "scalar_phase_hamiltonian": float(hamiltonian)}
+    return replace(raw, coefficients=coefficients, coefficient_l1_norm=alpha, recovery_exponent=exponent,
         derived_parameters=_immutable_map({**raw.derived_parameters,
-            "psd_shift": shift, "elapsed_time": elapsed,
-            "homogeneous_coefficient_compensation": compensation}))
+            "psd_shift": float(quadrature.conversion["psd_shift"]),
+            "scalar_decay": float(quadrature.conversion["scalar_decay"]), "elapsed_time": elapsed,
+            "homogeneous_coefficient_compensation": compensation, **extracted}))
 
 
 def resolve_lchs_coefficient_plan(problem_or_plan, *, lchs_kernel=None, k_quadrature=None,
-                                  approximation_tolerance=None, max_bytes=DEFAULT_INPUT_BYTES):
+                                  approximation_tolerance=None, max_bytes=None):
     """Return the LCHS coefficient table of a problem without a source, or of an LCHS Plan.
 
     For a `LinearDynamics` without a source, it computes the k nodes, the
@@ -1560,17 +2822,19 @@ def resolve_lchs_coefficient_plan(problem_or_plan, *, lchs_kernel=None, k_quadra
         approximation_tolerance (float | None): Construction tolerance,
             strictly between 0 and 1. `None` selects `0.01`, as in `LCHS`.
             Must be `None` for a Plan.
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
+        max_bytes (int | None): Default `None`, the physical memory of this computer.
             Upper limit on the arrays of the Cartesian parts and the PSD
-            check, tested before they are formed. A `PeriodicStencil` A
+            check, and on the node grid and coefficient table data, each
+            tested before it is formed. A `PeriodicStencil` A
             forms no matrix and uses the bound `||L|| <= mass + 4*diffusion`.
 
     Returns:
         coefficients (LCHSCoefficientPlan): The nodes, weights, coefficients
             and component bounds. For a dense A the coefficients include the
-            PSD growth factor `exp(shift*T)`, divided by `2**e` when the
-            factor exceeds binary64, as recorded in
-            `derived_parameters["homogeneous_coefficient_compensation"]`.
+            PSD growth factor `exp(shift*T)` divided by
+            `2**recovery_exponent`, and
+            `derived_parameters["homogeneous_coefficient_compensation"]`
+            records the factor applied to the raw coefficients.
 
     Raises:
         ValueError: If the problem has a source or zero elapsed time, if
@@ -1629,9 +2893,9 @@ def resolve_lchs_coefficient_plan(problem_or_plan, *, lchs_kernel=None, k_quadra
     _check_bytes(48*d*d + 16*d, max_bytes, "LCHS Cartesian/PSD coefficient selection")
     from .method import LCHS
     method = LCHS(lchs_kernel=kernel, k_quadrature=quadrature, approximation_tolerance=tolerance)
-    # Same eigensolve limit as the default LCHS.max_spectral_work.
     prepared = _prepare_decomposition(matrix=matrix, method=method, padded_dimension=dimension,
-                                      max_spectral_work=100_000_000, parts=False)
-    selected = _quadrature_data_from_plan(prepared=prepared, final_time=problem.elapsed_time, method=method,
-                                          max_bytes=max_bytes)
-    return _homogeneous_coefficient_plan(selected, problem.elapsed_time)
+                                      max_spectral_work=method.max_spectral_work, parts=False)
+    selected = _quadrature_data_from_plan(l_norm=prepared.l_norm, conversion=prepared.conversion,
+        psd_premise_satisfied=prepared.numerical_psd_premise_satisfied, final_time=problem.elapsed_time,
+        method=method, max_bytes=max_bytes)
+    return _homogeneous_coefficient_plan(selected, problem.elapsed_time, max_bytes=max_bytes)

@@ -79,7 +79,6 @@ from math import asin, atan, atan2, cos, hypot, isfinite, pi, sin, sqrt
 from typing import TYPE_CHECKING
 
 import scipy.linalg as la
-from sys import int_info
 from nwqlib._linalg_laws import MAX_EXPONENTIAL_NORM
 from nwqlib.subroutines.fermionic_pool import (
     FermionicGenerator,
@@ -88,12 +87,10 @@ from nwqlib.subroutines.fermionic_pool import (
     _double_triplet_base_terms,
     _ladder_expansion_terms,
     _normalized_anti_hermitian_terms,
-    _check_generator_work,
     _snapshot_generator,
 )
 from nwqlib.operators._pauli import _pauli_masks
-from nwqlib.operators._fermion import mapping_requirements
-from nwqlib.operators.access import DEFAULT_INPUT_BYTES
+from nwqlib.operators.access import _check_products
 
 if TYPE_CHECKING:
     from qiskit import QuantumCircuit
@@ -124,7 +121,7 @@ class _UnsupportedDefaultGenerator(ValueError):
     """The stored generator does not implement the normalized default family."""
 
 
-def _plan_generator_circuit(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000):
+def _plan_generator_circuit(generator, *, max_bytes=None, max_products=None):
     """Classify one checked generator into the exact circuit route it will use.
 
     ``commuting`` applies when all Pauli terms pairwise commute. Two Pauli
@@ -144,26 +141,25 @@ def _plan_generator_circuit(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_pro
     (see ``docs/ENGINEERING_CONSTANTS.md``, "Generator occupation planning
     limits"). The default GSD shared-index doubles fit these caps.
     """
-    generator = _snapshot_generator(generator, max_bytes=max_bytes, max_products=max_products)
+    generator = _snapshot_generator(generator)
     rows = generator.pauli_terms
     if any(complex(value).real != 0.0 for _, value in rows):
         raise ValueError("generator Pauli coefficients must be anti-Hermitian")
     m, q = len(rows), generator.num_qubits
-    digits = max(1, (q + int_info.bits_per_digit - 1) // int_info.bits_per_digit)
-    pairs = m * (m - 1) // 2
-    _check_generator_work(max_bytes, max_products, payload_bytes=m * (32 + 8 * digits), work=m * (q * digits + 1) + pairs * (digits + 1))
+    # One mask pair per row from its q letters, and one commutation test per
+    # pair of rows, which grows with m**2 and allocates nothing more.
+    _check_products(m * (q + 1) + m * (m - 1) // 2, max_products)
     masks = tuple(_pauli_masks(label)[:2] for label, _ in rows)
     if all(((x & masks[j][1]).bit_count() + (z & masks[j][0]).bit_count()) % 2 == 0
            for i, (x, z) in enumerate(masks) for j in range(i)):
         return _GeneratorCircuitPlan("commuting", generator)
-    _require_default_double(generator, max_bytes=max_bytes, max_products=max_products)
+    _require_default_double(generator, max_bytes=max_bytes)
     p, q, r, s = generator.spatial_indices
     if len({p, q, r, s}) == 4:
         return _GeneratorCircuitPlan("four_distinct", generator)
     if not set((p, q)).intersection((r, s)):
         return _GeneratorCircuitPlan("pair_split", generator)
-    active, blocks = _active_occupation_blocks(generator, max_bytes=max_bytes, max_products=max_products,
-        max_active_modes=6, max_block_dimension=5)
+    active, blocks = _active_occupation_blocks(generator, max_active_modes=6, max_block_dimension=5)
     return _GeneratorCircuitPlan("shared_index", generator, active, blocks)
 
 
@@ -174,7 +170,7 @@ def build_generator_circuit(
     controlled: bool = False,
     inverse: bool = False,
     _plan: _GeneratorCircuitPlan | None = None,
-    max_bytes: int = DEFAULT_INPUT_BYTES,
+    max_bytes: int | None = None,
 ) -> QuantumCircuit:
     """Build an exact circuit of `exp(theta*A)` for one pool generator `A`, optionally controlled or inverted.
 
@@ -212,8 +208,9 @@ def build_generator_circuit(
         _plan: Default `None`. Construction plan that ADAPT's planning
             computes once for this generator and supplies for every angle.
             A caller leaves it at its default.
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
-            Byte limit for choosing the construction.
+        max_bytes (int | None): Default `None`, the physical memory of this
+            computer. Byte limit for choosing the construction, which maps
+            the Pauli terms of a default double.
 
     Returns:
         circuit (QuantumCircuit): Circuit on
@@ -278,7 +275,7 @@ def build_generator_circuit(
     return circuit
 
 
-def _require_default_double(generator: FermionicGenerator, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000) -> None:
+def _require_default_double(generator: FermionicGenerator, *, max_bytes=None) -> None:
     """Require the generator to be exactly the normalized default GSD double for its indices.
 
     The closed-form tables hold only for that operator. A custom generator
@@ -299,13 +296,8 @@ def _require_default_double(generator: FermionicGenerator, *, max_bytes=DEFAULT_
         if generator.family == "double_singlet"
         else _double_triplet_base_terms
     )
-    # Normalizing the default four-operator terms is bounded locally. The Jordan-Wigner
-    # mapping below is checked separately for the full register and its labels
-    # (mapping_requirements).
-    # The fixed 8192 bytes and 4096 work are an untuned charge for normalizing
-    # at most six base terms of four ladder operators, checked against the
-    # caller's limits (docs/ENGINEERING_CONSTANTS.md).
-    _check_generator_work(max_bytes, max_products, payload_bytes=8192, work=4096)
+    # Normalizing at most six default terms of four ladder operators needs no
+    # limit. The Jordan-Wigner mapping below checks its own bytes.
     expected = _normalized_anti_hermitian_terms(base(*indices))
     if (
         len(generator.fermion_terms) != len(expected)
@@ -314,13 +306,32 @@ def _require_default_double(generator: FermionicGenerator, *, max_bytes=DEFAULT_
         raise _UnsupportedDefaultGenerator(
             "noncommuting custom generator does not match the normalized default GSD family"
         )
-    law = mapping_requirements((len(ops) for ops in expected), num_modes=generator.num_qubits,
-                               max_bytes=max_bytes, labels=True)
-    _check_generator_work(max_bytes, max_products, payload_bytes=law[1], work=law[2])
     expected_pauli = _ladder_expansion_terms(tuple((c, ops) for ops, c in expected.items()),
         generator.num_qubits, mapping="jw", max_bytes=max_bytes)
     if dict(expected_pauli) != dict(generator.pauli_terms):
         raise _UnsupportedDefaultGenerator("generator fermion terms and Pauli representation must agree")
+
+
+def _excitation_layout(ops, sign_mode=None):
+    """Return ``(active, initial, sign, parity)`` of ``_append_excitation`` for the ladder product ``ops``.
+
+    ``active`` lists the sorted active modes, ``initial`` the occupation
+    they start from as a bit mask, ``sign`` the fermionic sign of ``E`` on
+    it and ``parity`` the bit mask of the inactive modes whose occupation
+    flips the rotation, ``sign_mode`` included.
+    """
+    active = sorted(mode for mode, _ in ops)
+    initial = sum(1 << mode for mode, creation in ops if not creation)
+    state, sign, parity = initial, 1, 0
+    for mode, _ in reversed(ops):
+        sign *= -1 if (state & ((1 << mode) - 1)).bit_count() % 2 else 1
+        state ^= 1 << mode
+        parity ^= (1 << mode) - 1
+    for mode in active:
+        parity &= ~(1 << mode)
+    if sign_mode is not None:
+        parity ^= 1 << sign_mode
+    return active, initial, sign, parity
 
 
 def _append_excitation(
@@ -369,17 +380,7 @@ def _append_excitation(
     from qiskit import QuantumCircuit
     from qiskit.circuit.library import RYGate
     from nwqlib.subroutines.qiskit_compat import controlled as controlled_gate
-    active = sorted(mode for mode, _ in ops)
-    initial = sum(1 << mode for mode, creation in ops if not creation)
-    state, sign, parity = initial, 1, 0
-    for mode, _ in reversed(ops):
-        sign *= -1 if (state & ((1 << mode) - 1)).bit_count() % 2 else 1
-        state ^= 1 << mode
-        parity ^= (1 << mode) - 1
-    for mode in active:
-        parity &= ~(1 << mode)
-    if sign_mode is not None:
-        parity ^= 1 << sign_mode
+    active, initial, sign, parity = _excitation_layout(ops, sign_mode)
     pivot = active[0]
     before = QuantumCircuit(circuit.num_qubits)
     for mode in active[1:]:
@@ -468,12 +469,19 @@ def _append_pair_split(circuit, generator, theta, off):
     negative of that operator (module docstring, item 1), so the angle
     changes sign. The library angle is divided by ``sqrt(2)`` (item 2).
     """
+    factors, orientation = _pair_split_factors(generator)
+    parameters = _pair_parameters(orientation * theta / sqrt(2))
+    for (ops, equality, sign_mode), angle in reversed(tuple(zip(factors, parameters, strict=True))):
+        _append_excitation(circuit, ops, angle, off, equality=equality, sign_mode=sign_mode)
+
+
+def _pair_split_factors(generator):
+    """Return the ``(ops, equality, sign_mode)`` rows of ``_append_pair_split`` and the sign of its angle."""
     p, q, r, s = generator.spatial_indices
     if p == q:
-        pair, left, right = p, r, s
+        pair, left, right, orientation = p, r, s, 1
     else:
-        pair, left, right = r, p, q
-        theta = -theta
+        pair, left, right, orientation = r, p, q, -1
     pu, pd, qu, qd, ru, rd = (
         2 * pair,
         2 * pair + 1,
@@ -489,9 +497,7 @@ def _append_pair_split(circuit, generator, theta, off):
         (((qd, 1), (ru, 1), (pd, 0), (pu, 0)), (qu, rd), None),
         (((qd, 1), (ru, 1), (rd, 0), (qu, 0)), (pu, pd), pu),
     )
-    parameters = _pair_parameters(theta / sqrt(2))
-    for (ops, equality, sign_mode), angle in reversed(tuple(zip(factors, parameters, strict=True))):
-        _append_excitation(circuit, ops, angle, off, equality=equality, sign_mode=sign_mode)
+    return factors, orientation
 
 
 def _singlet_parameters(theta):
@@ -843,19 +849,39 @@ def _append_shared_index(circuit, generator, theta, off, plan):
     planning caps (six active modes, blocks of dimension five) bound its
     size.
     """
-    active = plan.active_modes
-    width = len(active)
+    width = len(plan.active_modes)
+    swaps = _shared_index_swaps(generator.num_qubits, plan.active_modes)
+    for left, right in swaps:
+        circuit.swap(left + off, right + off)
+        circuit.cz(left + off, right + off)
+    for a, b, angle in _shared_index_rotations(plan, theta):
+        _append_two_level(circuit, width, a, b, angle, off)
+    for left, right in reversed(swaps):
+        circuit.swap(left + off, right + off)
+        circuit.cz(left + off, right + off)
+
+
+def _shared_index_swaps(num_qubits, active):
+    """Return the adjacent swaps of ``_append_shared_index`` that move the modes ``active`` to positions 0 to m - 1."""
     # Route fermionic modes, including their parity on occupied spectators.
-    order, swaps = list(range(generator.num_qubits)), []
+    order, swaps = list(range(num_qubits)), []
     for destination, mode in enumerate(active):
         position = order.index(mode)
         while position > destination:
             swaps.append((position - 1, position))
             order[position - 1], order[position] = order[position], order[position - 1]
             position -= 1
-    for left, right in swaps:
-        circuit.swap(left + off, right + off)
-        circuit.cz(left + off, right + off)
+    return swaps
+
+
+def _shared_index_rotations(plan, theta):
+    """Return the two-level rotations ``(a, b, angle)`` of ``_append_shared_index`` in the order they are appended.
+
+    For each occupation block of more than one state, the Givens rotations
+    that reduce ``expm(theta B)`` to the identity are listed in reverse, so
+    the rotations reproduce the block exponential.
+    """
+    appended = []
     for component, block in plan.occupation_blocks:
         if len(component) == 1:
             continue
@@ -882,8 +908,91 @@ def _append_shared_index(circuit, generator, theta, off, plan):
                 current[col] = c * first + s * second
                 current[row] = -s * first + c * second
                 rotations.append((component[col], component[row], 2 * atan2(s, c)))
-        for a, b, angle in reversed(rotations):
-            _append_two_level(circuit, width, a, b, angle, off)
-    for left, right in reversed(swaps):
-        circuit.swap(left + off, right + off)
-        circuit.cz(left + off, right + off)
+        appended.extend(reversed(rotations))
+    return appended
+
+
+def generator_cx_count(plan, theta):
+    """Return ``(w, None)`` with the canonical CX count bound of one generator circuit, or ``(None, reason)``.
+
+    The circuit is the uncontrolled forward ``exp(theta A)`` that
+    ``build_generator_circuit(plan.generator, theta, _plan=plan)`` builds,
+    and ``w`` is read from the compiler plan ``plan`` without building it.
+    Each of its top-level instructions is counted under a lowering to
+    one-qubit U and CX gates, with no wrapper definition opened, no
+    synthesis or transpilation and no cancellation or parallel execution
+    assumed, so ``w`` bounds the CX depth of the generator:
+
+    - a standard one-qubit gate and the circuit's global phase: 0;
+    - CX: 1, CZ: 1 (H-CX-H on the target), SWAP: 3 (three alternating CX),
+      RXX, RYY, RZZ: 2 (one-qubit basis changes around CX-RZ-CX);
+    - an RY with k >= 1 controls: ``2 M_k`` with ``M_k`` the CX count of a
+      k-controlled X (``_mcx_counts.MCX_CX_BY_CONTROLS[k - 1]``), from
+      ``C^k RY(phi) = RY(phi/2) X_k RY(-phi/2) X_k`` (rightmost factor
+      first). With the controls inactive both ``X_k`` act as the identity
+      and the rotations cancel, and with them active ``X RY(t) X = RY(-t)``
+      gives ``RY(phi)``. Open controls add one-qubit X gates only;
+    - the Gray-code RY multiplexor of ``_multiplexors._rotation_multiplexor``
+      on k controls: ``2**k``, one CX per Gray-code position, 0 for k = 0.
+
+    Per route this gives:
+
+    - ``commuting``: ``2(w_P - 1)`` for each Pauli term of weight
+      ``w_P >= 1`` with a nonzero coefficient, its CX parity ladder and
+      undoing it, or its RXX, RYY or RZZ at weight 2;
+    - each excitation factor of ``pair_split`` and ``four_distinct``
+      (``_append_excitation``): twice its CX ladder, CZ parity gates and
+      equality CX, around an RY with k controls, the other active modes
+      and the equality control, or around a multiplexor over those
+      controls and the four spectators;
+    - ``shared_index``: 8 for each adjacent swap, a SWAP and a CZ applied
+      twice, and for each two-level rotation (``_shared_index_rotations``)
+      twice its CX ladder, ``popcount(a ^ b) - 1``, around an RY with
+      ``m - 1`` controls on the m active modes.
+
+    The shared-index rotations depend on ``theta``, because a Givens step
+    that is already the identity is omitted, so that route replays the
+    block exponentials, as building the circuit does. The other routes do
+    not depend on ``theta``. A controlled RY with more controls than the
+    table holds makes the count unknown. The identities are those of ideal
+    real angles. They claim nothing about the numerical error of the
+    actual generator circuit. The count is a pre-routing bound, not the
+    native two-qubit depth of an executable circuit, which
+    ``ADAPT.max_native_two_qubit_depth`` checks separately.
+    """
+    from nwqlib.subroutines._mcx_counts import MCX_CX_BY_CONTROLS
+
+    def rotation(controls):
+        if controls > len(MCX_CX_BY_CONTROLS):
+            raise LookupError(f"RY with {controls} controls has no tabulated CX count")
+        return 2 * MCX_CX_BY_CONTROLS[controls - 1] if controls else 0
+
+    def excitation(ops, equality=None, sign_mode=None, spectators=0):
+        active, _, _, parity = _excitation_layout(ops, sign_mode)
+        ladder = len(active) - 1 + parity.bit_count() + (equality is not None)
+        controls = len(active) - 1 + (equality is not None)
+        turn = (1 << (controls + spectators)) if spectators else rotation(controls)
+        return 2 * ladder + turn
+
+    generator = plan.generator
+    try:
+        if plan.kind == "commuting":
+            total = sum(2 * (len(label) - label.count("I") - 1) for label, value in generator.pauli_terms
+                        if complex(value).imag != 0.0 and set(label) != {"I"})
+        elif plan.kind == "pair_split":
+            factors, _ = _pair_split_factors(generator)
+            total = sum(excitation(ops, equality, sign_mode) for ops, equality, sign_mode in factors)
+        elif plan.kind == "four_distinct":
+            modes = tuple(2 * orbital + spin for orbital in generator.spatial_indices for spin in (0, 1))
+            total = sum(
+                excitation(((modes[target[0]], 1), (modes[target[1]], 1), (modes[source[1]], 0),
+                            (modes[source[0]], 0)), spectators=4)
+                for source, target, _, _ in _four_distinct_factors(generator.family, theta / sqrt(2)))
+        else:
+            width = len(plan.active_modes)
+            total = 8 * len(_shared_index_swaps(generator.num_qubits, plan.active_modes)) + sum(
+                2 * ((a ^ b).bit_count() - 1) + rotation(width - 1)
+                for a, b, _ in _shared_index_rotations(plan, theta))
+    except LookupError as error:
+        return None, str(error)
+    return total, None

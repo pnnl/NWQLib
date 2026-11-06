@@ -500,7 +500,7 @@ def test_classical_quadratic_matvec_recovers_extreme_observable_scale(tmp_path, 
             if name == "dense":
                 path = result.save(tmp_path / str(index))
                 with monkeypatch.context() as guard:
-                    guard.setattr(owner, "_scaled_observable", lambda *a: pytest.fail("load replayed action"))
+                    guard.setattr(owner, "_scaled_observable_action", lambda *a: pytest.fail("load replayed action"))
                     loaded = nwqlib.load_result(path)
                     assert loaded.analyze().value == result.value
                 bad = result.plan.revise(reconstruction=result.plan.reconstruction.revise(
@@ -510,3 +510,115 @@ def test_classical_quadratic_matvec_recovers_extreme_observable_scale(tmp_path, 
             if a == 1e308:
                 normalized = nwqlib.solve(p, method=ExpectationMethod(), execution="classical")
                 assert normalized.value is None and normalized.unavailable
+
+
+def test_classical_scaled_copy_is_checked_at_planning_when_every_state_needs_it():
+    """An observable that does not scale exactly is charged its scaled copy at planning.
+
+    For O = 1e-200 IZ in Pauli form, the binary exponent -664 lies beyond
+    the exact vector scaling, so every state's evaluation acts with the copy
+    O * 2**664 instead of O. The Plan is refused one product below the
+    copy's requirement and declares that requirement as its routine's work.
+    At it, the Plan runs to 1e-200 * <IZ> for the
+    normalized state proportional to |00> + |01> + 0.5|10>.
+    """
+    import numpy as np
+    from nwqlib.algorithms import expectation as owner
+
+    p = Expectation(state=np.array([1.0, 1.0, 0.5, 0.0]), observable=ingest_pauli([("IZ", 1e-200)], num_qubits=2))
+    _, copy = owner._classical_action_requirements(p.observable, p.state, max_bytes=None, scaled=True)
+    with pytest.raises(ValueError, match=f"scaled copy .* every state needs.* requires {copy} classical products"):
+        nwqlib.plan(p, method=ExpectationMethod(max_classical_products=copy - 1), execution="classical")
+    plan = nwqlib.plan(p, method=ExpectationMethod(max_classical_products=copy), execution="classical")
+    assert plan.construction.kernels[0].invocation_work == copy
+    result = nwqlib.solve(plan)
+    vector = np.array([1.0, 1.0, 0.5, 0.0]) / np.linalg.norm([1.0, 1.0, 0.5, 0.0])
+    expected = 1e-200 * float(vector @ np.diag([1, -1, 1, -1]) @ vector)
+    assert result.value == pytest.approx(expected, rel=1e-15, abs=0)
+
+
+def test_classical_copy_that_only_a_direction_needs_is_checked_before_it_is_formed(monkeypatch):
+    """A copy that only one state's direction needs is checked at its own requirement, after the direction.
+
+    O = 2 IZ has exponent 2 and scales exactly. The direction of |00>
+    scales exactly too, so that state runs at its ordinary requirement. A
+    direction with the smallest positive
+    subnormal on |10> does not scale back from 2**-2, so its evaluation
+    forms the copy. The copy's requirement plus the 2N of the abandoned
+    scaling is checked after the direction and before the copy: one
+    product less refuses with the copy's stage and requirement, and the
+    requirement itself gives 2.
+    """
+    import numpy as np
+    from nwqlib.algorithms import expectation as owner
+    from nwqlib.operators import inputs as inputs_module
+
+    observable = ingest_pauli([("IZ", 2.0)], num_qubits=2)
+    ordinary = Expectation(state=np.array([1.0, 0.0, 0.0, 0.0]), observable=observable)
+    tail = Expectation(state=np.array([1.0, 0.0, np.nextafter(0.0, 1.0), 0.0]), observable=observable)
+    _, work = owner._classical_action_requirements(observable, ordinary.state, max_bytes=None)
+    _, copy = owner._classical_action_requirements(observable, tail.state, max_bytes=None, scaled=True)
+    fallback = copy + 2 * observable.basis.dimension
+    assert work < fallback
+    copies = []
+    scaled_copy = inputs_module._scaled_observable
+    monkeypatch.setattr(inputs_module, "_scaled_observable",
+                        lambda *a: copies.append(a) or scaled_copy(*a))
+
+    def solve(problem, cap):
+        plan = nwqlib.plan(problem, method=ExpectationMethod(max_classical_products=cap), execution="classical")
+        assert plan.construction.kernels[0].invocation_work == work
+        return nwqlib.solve(plan)
+
+    assert solve(ordinary, work).value == pytest.approx(2.0, rel=1e-15, abs=0)
+    assert copies == []
+    with pytest.raises((ValueError, RuntimeError), match=f"direction .* requires {fallback} classical products"):
+        solve(tail, fallback - 1)
+    assert copies == []
+    assert solve(tail, fallback).value == pytest.approx(2.0, rel=1e-15, abs=0)
+    assert len(copies) == 1
+
+
+def test_classical_plan_scans_the_observable_for_exact_scaling_once(tmp_path, monkeypatch):
+    """The exactness scan of O*2**(-e) runs once for each bound Plan.
+
+    O = 2 IZ has exponent 2, so deciding whether its scaling is exact reads
+    every stored coefficient. Planning reads them once, and solving the
+    same Plan twice reads them no more. A loaded Plan reads them at its
+    first evaluation only.
+    """
+    import numpy as np
+    from nwqlib.operators import inputs as inputs_module
+
+    calls = []
+    scan = inputs_module._scales_exactly
+    monkeypatch.setattr(inputs_module, "_scales_exactly", lambda *a: calls.append(1) or scan(*a))
+    problem = Expectation(state=np.array([1.0, 0.0, 0.5, 0.0]), observable=ingest_pauli([("IZ", 2.0)], num_qubits=2))
+    plan = nwqlib.plan(problem, method=ExpectationMethod(), execution="classical")
+    assert len(calls) == 1
+    result = nwqlib.solve(plan)
+    assert nwqlib.solve(plan).value == result.value == pytest.approx(2.0, rel=1e-15, abs=0)
+    assert len(calls) == 1
+    loaded = nwqlib.load_result(result.save(tmp_path / "result")).plan
+    for _ in range(2):
+        assert nwqlib.solve(loaded).value == result.value
+    assert len(calls) == 2
+
+
+def test_classical_expectation_bytes_default_to_the_physical_memory(monkeypatch):
+    """`ExpectationMethod` stores `max_bytes=None` and checks its classical workspace against the physical memory.
+
+    A refusal under the default names the physical memory, read when the Plan
+    is made. With enough memory the same default Method plans and solves.
+    """
+    from nwqlib import _limits
+
+    problem = Expectation(state=[1, 1], observable=[[1.0, 0.0], [0.0, -1.0]])
+    method = ExpectationMethod()
+    assert method.max_bytes is None and method.model_dump(mode="json")["max_bytes"] is None
+    monkeypatch.setattr(_limits, "physical_memory_bytes", lambda: 1)
+    with pytest.raises(ValueError, match="physical memory"):
+        nwqlib.plan(problem, method=method, execution="classical")
+    monkeypatch.undo()
+    result = nwqlib.solve(problem, method=method, execution="classical")
+    assert result.plan.method.max_bytes is None and result.value == pytest.approx(0, abs=1e-15)

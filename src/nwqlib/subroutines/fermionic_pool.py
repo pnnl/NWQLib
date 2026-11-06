@@ -98,7 +98,7 @@ from nwqlib._validation import integer
 from nwqlib._numerics import stable_complex_sum, _occupation_bits
 from nwqlib.operators._pauli import apply_terms, combine_terms
 from nwqlib.operators import FactorizedOperatorProduct, fermion_table
-from nwqlib.operators.access import DEFAULT_INPUT_BYTES, _check_bytes, _check_products
+from nwqlib.operators.access import _check_bytes, _check_products
 from nwqlib.operators._fermion import mapping_requirements, _check
 from nwqlib.core.records import InputRef, Source
 
@@ -193,34 +193,19 @@ RAW_GENERATOR_SOURCE = Source(
 )
 
 
-def _check_generator_work(max_bytes, max_products, *, payload_bytes=0, work=0):
-    """Check the known arrays and scalar products of one named generator routine against the limits."""
-    _check_bytes(payload_bytes, max_bytes, "fermionic generator")
-    _check_products(work, max_products)
-
-
-def _snapshot_generator(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000):
-    """Check the named raw fields before traversing or copying them, and return an immutable copy.
+def _snapshot_generator(generator):
+    """Check the named raw fields and return an immutable copy, or the generator itself when it is immutable.
 
     Only builtin finite tuples and lists are accepted, and iterators are never
     consumed. Arbitrary instance attributes are not scientific input fields
     and are neither read nor included in the content hash.
     """
-    stored_bytes = products = 0
-
-    def charge(*, payload_bytes=0, work=0):
-        nonlocal stored_bytes, products
-        stored_bytes += payload_bytes
-        products += work
-        _check_generator_work(max_bytes, max_products, payload_bytes=stored_bytes, work=products)
-
     if type(generator) is not FermionicGenerator:
         raise TypeError("generator admission requires FermionicGenerator")
     q = integer(generator.num_qubits, "num_qubits", minimum=0)
     index = integer(generator.pool_index, "pool_index", minimum=0)
     if type(generator.family) is not str:
         raise TypeError("generator family must be a string")
-    charge(payload_bytes=len(generator.family) + 64, work=len(generator.family) + q + index.bit_length() + 8)
     if generator.family not in get_args(PoolFamily):
         raise ValueError("unknown fermionic generator family")
     immutable = type(generator.num_qubits) is int and type(generator.pool_index) is int
@@ -229,7 +214,6 @@ def _snapshot_generator(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_product
         nonlocal immutable
         if type(value) not in (tuple, list):
             raise TypeError("generator metadata requires finite builtin tuples or lists")
-        charge(payload_bytes=16 * len(value), work=len(value))
         immutable &= type(value) is tuple
         return value
 
@@ -237,8 +221,6 @@ def _snapshot_generator(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_product
         nonlocal immutable
         if isinstance(value, bool) or not isinstance(value, Complex):
             raise TypeError("generator coefficients must be finite numeric scalars")
-        if isinstance(value, int):
-            charge(payload_bytes=max(1, (value.bit_length() + 7) // 8), work=value.bit_length())
         try:
             result = complex(value)
         except (OverflowError, ValueError) as error:
@@ -279,7 +261,6 @@ def _snapshot_generator(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_product
         label, value = row
         if type(label) is not str:
             raise TypeError("generator Pauli labels must be strings")
-        charge(payload_bytes=len(label) + 16, work=len(label) + 1)
         if len(label) != q or any(axis not in "IXYZ" for axis in label):
             raise ValueError("generator and Pauli qubit counts must agree")
         rows.append((label, coefficient(value)))
@@ -290,7 +271,7 @@ def _snapshot_generator(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_product
         fermion_terms=tuple(fermions), pauli_terms=tuple(rows))
 
 
-def _generator_reference(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000):
+def _generator_reference(generator):
     """Hash a checked copy in the generator/1 encoding, with signed zeros written as +0.
 
     Sorted-key compact UTF-8 JSON keeps row/operator order, exact indices,
@@ -298,12 +279,6 @@ def _generator_reference(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_produc
     the raw content and does not prove the later projection or mapping
     scientifically.
     """
-    slots = (len(generator.pauli_terms) * (generator.num_qubits + 64)
-             + sum(64 + len(ops) * (32 + generator.num_qubits.bit_length())
-                   for _, ops in generator.fermion_terms)
-             + 32 * (len(generator.spatial_indices) + len(generator.spin_orbital_indices or ()))
-             + len(generator.family) + 256)
-    _check_generator_work(max_bytes, max_products, payload_bytes=8 * slots, work=8 * slots)
     def parts(value):
         return (value.real or 0.0, value.imag or 0.0)
     raw = dict(encoding="nwqlib.fermionic_generator/1", family=generator.family,
@@ -777,7 +752,7 @@ def _same_spin_qubit_excitations(
     )
 
 
-def _native_ladder_sum(terms, num_qubits, *, mapping, max_bytes=DEFAULT_INPUT_BYTES, labels=False):
+def _native_ladder_sum(terms, num_qubits, *, mapping, max_bytes=None, labels=False):
     """Map ordered ladder terms to a Pauli ``OperatorInput`` with equal labels summed.
 
     ``mapping`` is ``jw`` (Jordan-Wigner, Eq. (E8)) or ``z_free`` (qubit
@@ -792,7 +767,7 @@ def _native_ladder_sum(terms, num_qubits, *, mapping, max_bytes=DEFAULT_INPUT_BY
 
 
 def _ladder_expansion_terms(terms, num_qubits, *, mapping, coefficient_cutoff=GENERATOR_COEFFICIENT_CUTOFF,
-                            max_bytes=DEFAULT_INPUT_BYTES):
+                            max_bytes=None):
     """Return the ``(label, coefficient)`` Pauli terms of ordered ladder terms.
 
     All contributions to a label are summed before the absolute
@@ -811,7 +786,7 @@ def _sum_paulis(paulis):
                  if abs(c) > GENERATOR_COEFFICIENT_CUTOFF)
 
 
-def _active_occupation_blocks(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_products=1_000_000_000, max_active_modes=8, max_block_dimension=8):
+def _active_occupation_blocks(generator, *, max_active_modes=8, max_block_dimension=8):
     """Return bounded active-mode connected blocks of the stored fermion action.
 
     The generator is written as a matrix on the ``2**m`` occupation states of
@@ -834,20 +809,9 @@ def _active_occupation_blocks(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_p
         component (bit ``i`` is ``active_modes[i]``) and ``matrix[i, j]`` is
         ``<occupations[i]| A |occupations[j]>``.
     """
-    terms = len(generator.fermion_terms)
-    operators = sum(len(ops) for _, ops in generator.fermion_terms)
-    _check_generator_work(max_bytes, max_products, payload_bytes=32 * operators, work=(operators + 1) * (operators.bit_length() + generator.num_qubits.bit_length() + 1))
     active = tuple(sorted({mode for _, ops in generator.fermion_terms for mode, _ in ops}))
     if len(active) > max_active_modes:
         raise ValueError(f"local occupation planning supports at most {max_active_modes} active modes")
-    occupations = 1 << len(active)
-    # Bytes: an allowance of 64 per column entry, charged for
-    # min(terms, 2**m) + 1 entries in each of the 2**m columns. A column
-    # holds at most min(terms, 2**m) nonzero entries.
-    # Work: for each of the 2**m occupations, 4 units per term and per stored
-    # ladder operator (the sign loop below) plus 2**m for the
-    # connected-component search.
-    _check_generator_work(max_bytes, max_products, payload_bytes=64 * occupations * (min(terms, occupations) + 1), work=occupations * (4 * (terms + operators + 1) + occupations))
     mapping = {mode: index for index, mode in enumerate(active)}
     columns = {}
     for initial in range(1 << len(active)):
@@ -878,7 +842,6 @@ def _active_occupation_blocks(generator, *, max_bytes=DEFAULT_INPUT_BYTES, max_p
         component.sort()
         if len(component) > max_block_dimension:
             raise ValueError(f"local occupation block exceeds dimension {max_block_dimension}")
-        _check_generator_work(max_bytes, max_products, payload_bytes=32 * len(component) ** 2, work=len(component) ** 2)
         block = np.array([[columns[col].get(row, 0.0) for col in component] for row in component], dtype=complex)
         block.flags.writeable = False
         blocks.append((tuple(component), block))
@@ -991,7 +954,40 @@ def _scaled_taylor_step(
     return result
 
 
-def apply_spin_squared(state: np.ndarray, *, num_qubits: int) -> np.ndarray:
+def _spin_ladder_product(num_qubits):
+    """Return the matrix-free product ``S_- S_+`` on ``num_qubits`` interleaved spin orbitals, from metadata only."""
+    minus_terms, plus_terms = [], []
+    for p in range(num_qubits // 2):
+        down_p = spin_orbital(p, "down")
+        up_p = spin_orbital(p, "up")
+        minus_terms.append((1.0, ((down_p, 1), (up_p, 0))))
+        plus_terms.append((1.0, ((up_p, 1), (down_p, 0))))
+    minus = _native_ladder_sum(minus_terms, num_qubits, mapping="jw")
+    plus = _native_ladder_sum(plus_terms, num_qubits, mapping="jw")
+    # Only the two already admitted references and dimension metadata are owned.
+    metadata_bytes = 16 + ((2**num_qubits).bit_length() + 7) // 8
+    return FactorizedOperatorProduct((minus, plus), max_bytes=metadata_bytes)
+
+
+def _spin_squared_requirements(num_qubits, factors=None):
+    """Return ``(bytes, products)`` of `apply_spin_squared` on ``d = 2**num_qubits`` amplitudes, from metadata only.
+
+    The bytes are a coarse count of the arrays the action holds together
+    beside its input: its index array and the ``S_z`` diagonal, 16d, and at
+    the largest of its three stages either the up and down bit arrays and
+    their float differences while the diagonal is built (40d), the ladder
+    product's own action (``FactorizedOperatorProduct.action_requirements``),
+    or its 16d result with the diagonal factors and the two 16d vectors of
+    the final sum (64d). The products are those of the ladder product.
+    ``num_qubits`` is positive and even.
+    """
+    factors = _spin_ladder_product(num_qubits) if factors is None else factors
+    d, action, products = factors.action_requirements()
+    return 16 * d + max(40 * d, action, 64 * d), products
+
+
+def apply_spin_squared(state: np.ndarray, *, num_qubits: int, max_bytes: int | None = None,
+                       max_products: int | None = None) -> np.ndarray:
     """Return `S^2 @ state` for the total spin, without forming a matrix, in the same Jordan-Wigner convention.
 
     Uses ``S^2 = S_- S_+ + S_z (S_z + 1)`` with
@@ -1005,6 +1001,12 @@ def apply_spin_squared(state: np.ndarray, *, num_qubits: int) -> np.ndarray:
             `p` with spin up and qubit `2p + 1` with spin down. It is
             converted to complex.
         num_qubits (int): Number of spin orbitals, even.
+        max_bytes (int | None): Default None, the physical memory. Limit on
+            the arrays the action holds together beside `state`, its index
+            array, the `S_z` diagonal and the ladder product's vectors,
+            checked before it runs.
+        max_products (int | None): Default None, no limit. Limit on the
+            scalar products of the ladder action.
 
     Returns:
         vector (numpy.ndarray): `S^2 @ state`, complex, of length
@@ -1012,12 +1014,17 @@ def apply_spin_squared(state: np.ndarray, *, num_qubits: int) -> np.ndarray:
 
     Raises:
         ValueError: If `num_qubits` is odd, if the state length is not
-            `2**num_qubits`, or if the action needs more than 10 GB
-            (decimal, `10_000_000_000` bytes) of known arrays or more than
-            1,000,000,000 scalar products. These two limits are fixed and
-            checked before the action.
+            `2**num_qubits`, or if the action exceeds a limit.
     """
+    return _apply_spin_squared(state, num_qubits=num_qubits, max_bytes=max_bytes, max_products=max_products)
 
+
+def _apply_spin_squared(state, *, num_qubits, max_bytes, max_products, factors=None):
+    """Return `S^2 @ state` as `apply_spin_squared` does, with the ladder product ``factors`` when given.
+
+    A caller that has already built ``_spin_ladder_product(num_qubits)`` to
+    count the action passes it, so one call maps the two ladder sums once.
+    """
     if num_qubits % 2:
         raise ValueError("apply_spin_squared requires an even number of spin orbitals")
     vector = np.asarray(state, dtype=complex).reshape(-1)
@@ -1025,31 +1032,19 @@ def apply_spin_squared(state: np.ndarray, *, num_qubits: int) -> np.ndarray:
         raise ValueError("state length must match num_qubits")
     if num_qubits == 0:
         return np.zeros_like(vector)
-    minus_terms, plus_terms = [], []
-    for p in range(num_qubits // 2):
-        down_p = spin_orbital(p, "down")
-        up_p = spin_orbital(p, "up")
-        minus_terms.append((1.0, ((down_p, 1), (up_p, 0))))
-        plus_terms.append((1.0, ((up_p, 1), (down_p, 0))))
-    minus = _native_ladder_sum(minus_terms, num_qubits, mapping="jw")
-    plus = _native_ladder_sum(plus_terms, num_qubits, mapping="jw")
-    # Only the two already admitted references and dimension metadata are owned.
-    metadata_bytes = 16 + ((2**num_qubits).bit_length() + 7) // 8
-    factors = FactorizedOperatorProduct((minus, plus), max_bytes=metadata_bytes)
-    law = factors.action_requirements()
-    # This function takes no caller limit, so the default input byte and
-    # product ceilings apply (docs/ENGINEERING_CONSTANTS.md).
-    _check_bytes(law[1], DEFAULT_INPUT_BYTES, "spin-squared action")
-    if law[2] > 1_000_000_000:
-        raise ValueError(f"spin-squared action needs {law[2]} scalar products, above the fixed "
-                         "bound of 1,000,000,000 products for apply_spin_squared")
+    factors = _spin_ladder_product(num_qubits) if factors is None else factors
+    size, products = _spin_squared_requirements(num_qubits, factors)
+    _check_bytes(size, max_bytes, "spin-squared action")
+    _check_products(products, max_products)
     indices = np.arange(vector.size, dtype=np.uint64)
     spin_z_values = np.zeros(vector.size, dtype=float)
     for spatial in range(num_qubits // 2):
         up = (indices >> np.uint64(2 * spatial)) & np.uint64(1)
         down = (indices >> np.uint64(2 * spatial + 1)) & np.uint64(1)
         spin_z_values += 0.5 * (up.astype(float) - down.astype(float))
-    return factors.matvec(vector, max_bytes=DEFAULT_INPUT_BYTES) + (
+    # The law counts no bit array beside the ladder action.
+    del up, down
+    return factors.matvec(vector, max_bytes=max_bytes, max_products=max_products) + (
         spin_z_values * (spin_z_values + 1.0) * vector
     )
 

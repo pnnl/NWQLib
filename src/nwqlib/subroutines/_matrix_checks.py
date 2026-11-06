@@ -6,8 +6,11 @@ from typing import Any
 
 import numpy as np
 
+# Entrywise window of is_unitary, registered in docs/ENGINEERING_CONSTANTS.md.
+UNITARY_ATOL = 1.0e-8
 
-def is_unitary(matrix: Any, *, atol: float = 1.0e-8) -> bool:
+
+def is_unitary(matrix: Any, *, atol: float = UNITARY_ATOL) -> bool:
     """Return whether ``matrix`` is unitary within absolute ``atol``.
 
     The test is ``max |(U^dagger U - I)_ij| <= atol`` entrywise. Unitarity

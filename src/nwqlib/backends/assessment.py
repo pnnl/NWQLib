@@ -24,7 +24,7 @@ docs/profiles.md defines these axes and the time-model scopes.
 
 from datetime import datetime, timezone
 from fractions import Fraction
-from math import fsum, isfinite
+from math import fsum, inf, isfinite
 from typing import Literal, NamedTuple
 
 from pydantic import PrivateAttr, model_validator
@@ -51,6 +51,7 @@ from nwqlib.core.records import (
     Text,
     Unit,
     _declared_fields_equal,
+    storable_power,
 )
 from nwqlib.evidence.records import Evidence, Fact
 from nwqlib.evidence.error_model import (
@@ -82,6 +83,9 @@ _ASSESSMENT_SOURCE = Source(
     domain="bounded metadata comparisons at one selected Plan/Realization",
     reference="nwqlib.backends.assessment",
 )
+# Reason for an exact count or byte value that a saved record cannot hold
+# (core.records.STORABLE_INTEGER_BOUND).
+_UNSTORABLE = "exact value has more than the 4300 decimal digits a saved record holds"
 
 
 class AssessmentDetail(Record):
@@ -502,14 +506,9 @@ def _select_workload(plan, realization, context, memo=None):
     features.append(operations.fact.revise(quantity="logical_operations"))
     if readout == "amplitudes":
         declaration = details.amplitudes
-        # The largest value below is 16 * 2**width bytes, which has width + 5 bits.
-        if declaration.width + 5 > construction.program.limits.max_integer_bits:
-            raise ValueError(
-                "native amplitude return cardinality exceeds the admitted integer size"
-            )
         for name, value in (
-            ("native_return_items", 1 << declaration.width),
-            ("native_return_logical_bytes", 16 * (1 << declaration.width)),
+            ("native_return_items", storable_power(1, declaration.width)),
+            ("native_return_logical_bytes", storable_power(16, declaration.width)),
             ("stored_vector_items", declaration.output.basis.dimension),
             ("stored_vector_logical_bytes", declaration.output.data_bytes),
         ):
@@ -519,36 +518,16 @@ def _select_workload(plan, realization, context, memo=None):
                     value,
                     "selected amplitude return/publication; simulator RSS unknown",
                     realization.content_id,
+                    reason=_UNSTORABLE,
                 )
             )
     features = tuple(features)
-    # This is a scalar cardinality, not allocation of that many statistic slots.
-    # Bound its integer growth without substituting metadata max_items for the
-    # separate eventual acquisition's population cap.
-    bits = (
-        1 + len(details.qubits)
-        if readout == "probabilities"
-        else classical_width + 1
-        if readout == "counts"
-        and classical_width is not None
-        and repetitions is not None
-        and classical_width < repetitions.bit_length()
-        else None
-    )
-    if bits is not None:
-        if bits > construction.program.limits.max_integer_bits:
-            raise ValueError("readout cardinality exceeds the admitted integer-output size")
-
     readout_items = readout_shape(
         kind=readout,
         details=details,
         width=width,
         classical_width=classical_width,
         repetitions=repetitions,
-        # A trajectory counts all of its points (``point_items``) against the
-        # same integer-size limit, by bit length before forming a marginal.
-        max_items=(1 << construction.program.limits.max_integer_bits) - 1 if readout == "trajectory" else None,
-        max_items_source="the Program's admitted integer-output size" if readout == "trajectory" else None,
     )
     shape_known = width is not None and (readout != "counts" or classical_width is not None)
     if not shape_known:
@@ -829,15 +808,15 @@ def _assess_capability(workload, profile, at):
 
 
 def _capacity_detail(quantity: ResourceQuantity, limit, allocation, context, at, *, complete):
-    """Compare a scoped peak or subtotal with a granted capacity, never an upper bound as a lower one.
+    """Compare a scoped peak or subtotal of declared bytes with a granted capacity, which is at most conditional.
 
-    An exact byte requirement above the granted capacity proves infeasibility
-    even when other workspace is unknown. Feasibility needs a complete peak
-    (``complete``) that is exact or an upper bound, fits the granted capacity
-    and, for workspace reused across measurements, has the serial schedule it
-    requires. An upper bound above the granted capacity only makes the
-    comparison conditional, because an upper bound is not a lower
-    requirement.
+    The bytes come from ``Workspace`` declarations, which have no interpretation
+    of their own. The fold labels them estimates, an estimate stays one through
+    every combination, and a resource law cannot state a byte metric. An estimate
+    is neither a lower requirement nor an upper bound, so the comparison proves
+    neither a failure nor a fit, and the reason says which way the numbers go
+    because the status cannot. ``complete`` says the quantity is the whole peak
+    rather than a known subtotal.
     """
     value = _integer(quantity)
     status, reason = (
@@ -859,42 +838,22 @@ def _capacity_detail(quantity: ResourceQuantity, limit, allocation, context, at,
             "resource lifecycle/basis/population does not match this planned capacity comparison"
         )
     elif limit is not None and value is not None:
-        if quantity.interpretation == "exact" and value > limit.value:
-            # A known subtotal is a lower requirement even if other workspace is
-            # missing. Unlike an upper envelope, it can disprove a fit.
-            status, reason = (
-                "infeasible",
-                "known byte requirement exceeds this location's granted stock",
-            )
-        elif (
-            scheduled
-            and complete
-            and quantity.interpretation in {"exact", "upper_bound"}
-            and value <= limit.value
-        ):
-            status, reason = (
-                "feasible",
-                "complete declared peak fits this location's stock in its stated scope",
-            )
-        elif not scheduled:
-            status, reason = (
-                "conditional",
-                "per-acquisition reuse requires the unestablished serial schedule",
+        status = "conditional"
+        direction = "exceeds" if value > limit.value else "fits"
+        if not scheduled:
+            reason = (
+                f"declared peak {direction} this location's stock, "
+                "but its per-acquisition reuse requires the unestablished serial schedule"
             )
         elif not complete:
-            status, reason = (
-                "conditional",
-                "known subtotal fits or is only an envelope; missing workspace still matters",
-            )
-        elif quantity.interpretation == "upper_bound" and value > limit.value:
-            status, reason = (
-                "conditional",
-                "upper envelope exceeds stock; it is not a proved lower requirement",
+            reason = (
+                f"known subtotal of declared bytes {direction} this location's stock; "
+                "missing workspace still matters"
             )
         else:
-            status, reason = (
-                "conditional",
-                "estimate/condition does not establish an unconditional capacity comparison",
+            reason = (
+                f"declared peak {direction} this location's stock; "
+                "a declared size is an estimate, which proves neither a fit nor a failure"
             )
     if not _fresh(allocation, at):
         status, reason = (
@@ -996,14 +955,12 @@ def _state_body_detail(workload, profile, allocation, stocks, at):
             "workspace, buffers, copies and readout storage are additional unresolved requirements",
         ),
     )
-    body = None
-    if exponent + item_bytes.bit_length() <= workload.construction.program.limits.max_integer_bits:
-        body = item_bytes << exponent
+    body = storable_power(item_bytes, exponent)
     if body is None:
         fact = Fact(
             **args,
             availability="unknown",
-            reason="exact body value exceeds the admitted integer-output size; comparison uses bit lengths",
+            reason=_UNSTORABLE + ", and the comparison with the memory stock stays exact",
         )
     else:
         fact = Fact(
@@ -1014,9 +971,8 @@ def _state_body_detail(workload, profile, allocation, stocks, at):
         )
     status, reason = "unknown", "matching memory grant is unavailable"
     if limit is not None:
-        # b * 2**e > L exactly when 2**e > L // b, and for m >= 0 the smallest
-        # k with 2**k > m is m.bit_length(). The comparison never forms 2**e.
-        exceeds = limit.value < item_bytes or exponent >= (limit.value // item_bytes).bit_length()
+        # A stock is a stored record value, so an unstorable body exceeds it.
+        exceeds = body is None or body > limit.value
         status = "infeasible" if exceeds else "conditional"
         reason = (
             "representation-specific body lower requirement exceeds this location's stock"
@@ -1058,14 +1014,15 @@ def _assess_capacity(workload, profile, allocation, at):
       leaves every granted capacity unknown.
     - Each granted execution capacity is compared with the matching estimated
       peak. When the total memory peak is unknown, the known subtotal is
-      compared too, because it can still prove a failure.
+      compared too, so its size against the grant stays visible. Declared sizes
+      are estimates, so these comparisons are conditional and their reasons say
+      which way they go (``_capacity_detail``).
     - A memory quantity without a matching granted capacity is reported as
       unknown.
-    - Exact resident input, analysis, I/O, materialization and stored bytes
-      are simultaneous for the whole workload, so each alone can show that a
-      granted capacity is too small, regardless of the batch schedule. Declared
-      resident bytes are subtracted from the remaining granted capacity
-      without forming a possibly oversized sum.
+    - Declared resident bytes last for the whole workload, whatever the batch
+      schedule. They are subtracted from the remaining granted capacity without
+      forming a possibly oversized sum, and when they alone exceed it, a
+      conditional detail says so.
     - A grant larger than the profile's matching hard limit is infeasible.
     - A width above the target's maximum qubit count is infeasible when exact.
     - For any representation other than "classical", the state-body lower
@@ -1133,8 +1090,8 @@ def _assess_capacity(workload, profile, allocation, at):
         for item in allocation.limits
         if item.stage == "execution" and item.kind == "capacity_stock"
     }
-    # Each supplied execution stock drives its own scoped comparison. A kept
-    # subtotal can refute its stock independently of unknown total workspace.
+    # Each supplied execution stock drives its own scoped comparison. A known
+    # subtotal stays visible beside an unknown total workspace.
     for owner in (allocation, profile):
         for limit in owner.limits:
             if limit.stage != "execution" or limit.kind != "capacity_stock":
@@ -1163,52 +1120,32 @@ def _assess_capacity(workload, profile, allocation, at):
             details.append(
                 _capacity_detail(quantity, None, allocation, resources.context, at, complete=True)
             )
-    # Invariant resident lower requirements can reject independently of an
-    # unknown/conditional batch peak. The fold preserves these purpose quantities.
-    for quantity in resources.quantities:
-        if (
-            quantity.metric
-            in {
-                "input_bytes",
-                "analysis_bytes",
-                "io_bytes",
-                "materialization_bytes",
-                "stored_bytes",
-            }
-            and quantity.interpretation == "exact"
-            and quantity.required_schedule is None
-        ):
-            limit = stocks.get((quantity.location, "memory"))
-            value = _integer(quantity)
-            if limit is not None and value is not None and value > limit.value:
-                details.append(
-                    _capacity_detail(
-                        quantity, limit, allocation, resources.context, at, complete=False
-                    )
-                )
     # A resident declaration is simultaneous for the entire workload, independent
     # of any batch schedule. Compare by remaining stock, without constructing a
     # potentially oversized sum or attempting to infer a variable-workspace peak.
+    # This tells a caller that a serial schedule would not help, which the
+    # detail of a batch peak alone can suggest.
     remaining = {
         location: limit.value for (location, metric), limit in stocks.items() if metric == "memory"
     }
-    resident_failures = set()
+    resident_excess = set()
     for resident in resources.context.resident:
         location = resident.location
-        if resident.bytes is None or location not in remaining or location in resident_failures:
+        if resident.bytes is None or location not in remaining or location in resident_excess:
             continue
         if resident.bytes > remaining[location]:
-            resident_failures.add(location)
+            resident_excess.add(location)
         else:
             remaining[location] -= resident.bytes
     if _fresh(allocation, at):
-        for location in sorted(resident_failures):
+        for location in sorted(resident_excess):
             details.append(
                 AssessmentDetail(
-                    quantity="resident memory lower requirement",
+                    quantity="declared resident memory",
                     scope=location,
-                    status="infeasible",
-                    reason="simultaneous declared resident bytes alone exceed this location's stock, regardless of schedule",
+                    status="conditional",
+                    reason="simultaneous declared resident bytes alone exceed this location's stock under any schedule; "
+                           "a declared size is an estimate, which proves no failure",
                     limit=stocks[location, "memory"],
                     evidence_ids=(resources.context.content_id, allocation.evidence.content_id),
                 )
@@ -1422,26 +1359,18 @@ def _predict_time(model: TimeModel, workload, profile, allocation, at, runtime, 
     seconds = lower = upper = None
     if not reasons:
         try:
-            terms = [
-                coefficient.seconds_per_unit * float(values[coefficient.feature])
-                for coefficient in model.coefficients
-                if coefficient.seconds_per_unit
-            ]
-            central = fsum(terms)
-            if not isfinite(central):
-                raise OverflowError("nonfinite model sum")
+            central = fsum(coefficient.seconds_per_unit * float(values[coefficient.feature])
+                           for coefficient in model.coefficients if coefficient.seconds_per_unit)
+        except OverflowError:
+            central = inf
+        high = central + (0.0 if model.uncertainty is None else model.uncertainty.upper_residual_seconds)
+        if not isfinite(high):
+            reasons.append("time model arithmetic exceeds binary64; no clipped prediction is supplied")
+        else:
             seconds = Float64(value=central)
             if model.uncertainty is not None:
-                lo = max(0.0, central + model.uncertainty.lower_residual_seconds)
-                hi = central + model.uncertainty.upper_residual_seconds
-                if not isfinite(hi):
-                    raise OverflowError("nonfinite model interval")
-                lower, upper = Float64(value=lo), Float64(value=hi)
-        except OverflowError:
-            reasons.append(
-                "finite model arithmetic exceeds binary64 range; no clipped prediction is supplied"
-            )
-            seconds = lower = upper = None
+                lower = Float64(value=max(0.0, central + model.uncertainty.lower_residual_seconds))
+                upper = Float64(value=high)
     return TimePrediction(
         model_id=model.content_id,
         point_id=point_id,
@@ -1845,7 +1774,6 @@ def assess(
     accuracy: Accuracy | None = None,
     facts: tuple[FramedFact, ...] = (),
     reference: TargetReference | None = None,
-    max_assessments=4096,
 ) -> ProfileAssessment:
     """Forecast one resolved point of a Plan on a device profile and allocation, without running anything.
 
@@ -1884,9 +1812,6 @@ def assess(
             the Plan's error model. A fact for one point cannot cover another.
         reference (TargetReference | None): Supplied reference value, passed
             unchanged to the Plan's error model.
-        max_assessments (int): Positive limit on assessment and
-            prediction rows, here one plus the number of time models, checked
-            before any model is evaluated.
 
     Returns:
         assessment (ProfileAssessment): The forecast.
@@ -1896,26 +1821,24 @@ def assess(
     Raises:
         TypeError: If `profile` is not a `DeviceProfile` or `accuracy` is not an
             `Accuracy`.
-        ValueError: If the rows exceed `max_assessments`, or the stored records
-            do not match the Plan, profile and allocation.
+        ValueError: If `realization` is not a point of `plan`, a supplied fact
+            names no error source of the Plan's error model or repeats one,
+            contradicts the point's parameter values or has another frame, or
+            the Plan's error model describes another output.
     """
     return _assess(plan, realization, profile=profile, allocation=allocation, context=context,
                    runtime=runtime, assessed_at=assessed_at, accuracy=accuracy, facts=facts,
-                   reference=reference, max_assessments=max_assessments
-                   ).validate_context(plan, profile, allocation, runtime)
+                   reference=reference)
 
 
 def _assess(plan, realization, *, profile, allocation, context, runtime, assessed_at, accuracy,
-            facts, reference, max_assessments, memo=None):
-    """Build one point's assessment (``assess``) without its final ``validate_context``.
+            facts, reference, memo=None):
+    """Build one point's assessment for ``assess`` and ``estimate_plan``.
 
-    ``assess`` validates the result, and ``estimate_plan`` validates each
-    assessment once through ``PlanEstimate.validate_plan``. ``memo`` is the
-    caller's cache of resource estimates (``resources.estimate``).
+    ``memo`` is the caller's cache of resource estimates (``resources.estimate``).
     """
     if not isinstance(profile, DeviceProfile):
         raise TypeError("assessment requires a supplied DeviceProfile")
-    _forecast_rows(1, profile, max_assessments)
     at = _assessment_time(assessed_at)
     context = ResourceContext() if context is None else context
     point, workload = _assessment_inputs(
@@ -1940,8 +1863,10 @@ def _assess(plan, realization, *, profile, allocation, context, runtime, assesse
             context=scientific,
             facts=facts,
             reference=reference,
-            max_integer_bits=plan.construction.program.limits.max_integer_bits,
         )
+        # A Plan does not tie its error model to its output, so the claim is
+        # checked against the Plan's output and frame here.
+        error.validate_plan(plan)
     time, predictions = _assess_time(
         workload, profile, allocation, at, runtime=runtime, point_id=point.content_id
     )
@@ -2038,12 +1963,19 @@ class PlanEstimate(Record):
         return self
 
     def validate_plan(self, plan):
-        """Check that every assessment of this estimate belongs to this Plan and carries no invented runtime seed."""
+        """Check that every assessment of this estimate belongs to this Plan and carries no invented runtime seed.
+
+        The assessments are checked once per estimate. The result of
+        ``estimate_plan`` was built from its Plan, so for it, as after a first
+        check, only the Plan's identity is compared.
+        """
         if (
             self.plan_id != plan.content_id
             or self.resources.construction_id != plan.construction.content_id
         ):
             raise ValueError("estimate belongs to another selected Plan")
+        if self._plan_validated:
+            return self
         frame = ErrorFrame.from_output(plan.problem, plan.output) if self.assessments else None
         for assessment in self.assessments:
             if assessment.point.runtime_options_id is not None:
@@ -2078,8 +2010,7 @@ class PlanEstimate(Record):
         assessment = self._point_map.get(receipt.realization_id)
         if assessment is None:
             return None
-        if not self._plan_validated:
-            self.validate_plan(plan)
+        self.validate_plan(plan)
         observation = self._observations.get(receipt.realization_id)
         if observation is None:
             observation = assessment.realization.resolved_observation(plan)[1]
@@ -2087,43 +2018,38 @@ class PlanEstimate(Record):
         return assessment.validate_prepared(plan, receipt.realization, receipt, observation=observation)
 
 
-def _forecast_rows(points, profile, max_assessments):
-    """Count the assessment and prediction records against the limit before any model is evaluated."""
-    if type(max_assessments) is not int or max_assessments < 1:
-        raise ValueError("max_assessments must be a positive integer")
-    required = points * (1 + len(profile.models))
-    if required > max_assessments:
-        raise ValueError(
-            f"profile forecast requires {required} assessment/prediction rows; max_assessments={max_assessments}"
-        )
-    return required
-
-
 def _profile_points(plan):
-    """Resolve the Plan's Experiments whose next parameter point is already fixed.
+    """Resolve the points of the Plan's Experiments that are already fixed.
 
-    A future point of an adaptive method or an unexpanded range axis is
-    listed as unpredicted instead of being guessed. A point with remaining
-    symbolic parameters is assessed but also listed, because its forecast does
-    not cover a later measurement with bound parameters.
+    Each range-axis point of a static Plan's experiment is one planned
+    execution (`Plan._static_points`) and is resolved. A future point of an
+    adaptive method, and the range axes of a Method whose experiments are
+    query templates (`Method.query_catalog_reason`), are listed as
+    unpredicted instead of being guessed. A point with remaining symbolic
+    parameters is assessed but also listed, because its forecast does not
+    cover a later measurement with bound parameters. The points are
+    generated one at a time.
     """
     points = []
     unpredicted = []
     names = {p.name for p in plan.construction.program.parameters}
     nodes = {d.id: d.node for d in plan.construction.program.definitions}
+    catalog = plan.method.query_catalog_reason() is not None
     for experiment in plan.experiments:
         known = set(plan._binding_map)
         if experiment.batch is not None:
             batch = nodes[experiment.batch]
             known.update(b.parameter for b in batch.settings[experiment.setting_index].bindings)
-            if any(axis.parameter not in known for axis in batch.axes):
+            if batch.axes and catalog:
                 unpredicted.append(
-                    f"{experiment.name}: future range-axis points are not expanded for forecasting"
+                    f"{experiment.name}: range-axis points of a query template are not expanded for forecasting"
                 )
                 continue
+            known.update(axis.parameter for axis in batch.axes)
         missing = names - known
+        later = plan._static_points((experiment,))
         try:
-            point = plan.resolve(experiment.name)
+            first = plan.resolve(experiment.name, bindings=next(later).bindings)
         except KeyError as error:
             if error.args and error.args[0] in missing:
                 unpredicted.append(
@@ -2135,7 +2061,8 @@ def _profile_points(plan):
             unpredicted.append(
                 f"{experiment.name}: unresolved parameters remain symbolic; no forecast covers a later bound acquisition"
             )
-        points.append(point)
+        points.append(first)
+        points.extend(plan.resolve(experiment.name, bindings=point.bindings) for point in later)
     return tuple(points), tuple(unpredicted)
 
 
@@ -2149,17 +2076,9 @@ def estimate_plan(
     accuracy=None,
     facts=(),
     reference=None,
-    max_assessments=4096,
     profile_points=None,
 ):
     """Assess the chosen constructions of the whole Plan with the supplied device models, never execute.
-
-    max_assessments counts the point-assessment and model-prediction rows.
-    The entire requested expansion is checked before the first model evaluation.
-    The logical resource estimate without a profile is independent of this cap.
-    Its default of 4096 rows is an output-size control registered in
-    docs/ENGINEERING_CONSTANTS.md ("Resource forecast and explicit inspection
-    bounds").
 
     One cache of resource estimates (``resources.estimate``) lives for this
     call. The Plan's own construction is estimated first, with the Method's
@@ -2189,7 +2108,6 @@ def estimate_plan(
                 "device predictions require a supplied DeviceProfile and explicit Allocation"
             )
         points, unpredicted = _profile_points(plan) if profile_points is None else profile_points
-        _forecast_rows(len(points), profile, max_assessments)
     elif allocation is not None:
         if not isinstance(allocation, Allocation):
             raise TypeError("allocation must be a supplied Allocation")
@@ -2199,7 +2117,6 @@ def estimate_plan(
     memo = {}
     resources = estimate(plan.construction, context=context, memo=memo,
                          catalog=plan.method.query_catalog_reason())
-    # validate_plan below validates each assessment once.
     assessments = tuple(
         _assess(
             plan,
@@ -2212,12 +2129,11 @@ def estimate_plan(
             accuracy=accuracy,
             facts=facts,
             reference=reference,
-            max_assessments=max_assessments,
             memo=memo,
         )
         for point in points
     )
-    return PlanEstimate(
+    result = PlanEstimate(
         plan_id=plan.content_id,
         resources=resources,
         assessments=assessments,
@@ -2225,4 +2141,6 @@ def estimate_plan(
         allocation=allocation,
         assessed_at=at,
         unpredicted=unpredicted,
-    ).validate_plan(plan)
+    )
+    result._plan_validated = True
+    return result

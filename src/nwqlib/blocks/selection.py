@@ -15,11 +15,61 @@ import numpy as np
 
 from nwqlib.core.records import Basis, Source
 from nwqlib.ir import Binding, BlockSignature, QuantumPort
+from nwqlib._limits import ResourceLimitError, byte_allowance, exceeds, memory_limit
+from nwqlib._validation import integer
 from nwqlib._preparation_laws import direct_preparation_controlled_cx_bound
-from nwqlib.operators.access import DEFAULT_INPUT_BYTES
 from nwqlib.operators.inputs import OperatorInput
 from nwqlib.problems.inputs import StateInput, ingest_vector
 from .records import BlockSemantics, Primitive, SelectedDefinition
+
+
+# Bytes that one elementary gate leaves at one top-level position of a flattened
+# Aer circuit. The Run's memory check (_prepared_execution._admit_circuit_memory)
+# charges this for a Measure or Reset bit and for each gate of a stored gate list.
+# The stable footprint growth of a Trotterized QPE circuit, whose positions are
+# cx, crz and one-qubit gates, was 159 to 217 bytes per position on Qiskit 2.6.0
+# and Aer 0.18.0 (q=10, max_time=2). It is a coarse estimate, not a byte bound, and
+# other gate classes cost more: a route with its own measurement passes its own
+# law to SelectedBlock.bind instead. Other backends have no calibration of their
+# own and use the same count.
+NATIVE_POSITION_BYTES = 200
+
+# Top-level positions of one gate with 0, 1, 2 and 3 controls after Aer 0.18.0's
+# translation of Qiskit 2.6.0's control of it (_lower_aer_circuit, statevector
+# target), measured gate by gate. A global phase takes no position until a control
+# turns it into a phase gate. The table belongs to Aer's native gate set, and another
+# backend's positions were not measured.
+_CONTROLLED_POSITIONS = {
+    "x": (1, 1, 1, 1), "z": (1, 1, 1, 3), "h": (1, 7, 7, 7), "ry": (1, 1, 5, 13), "rz": (1, 1, 8, 36),
+    "rx": (1, 1, 5, 13), "rzz": (1, 3, 10, 38), "global_phase": (0, 1, 1),
+}
+
+
+def _stated_circuit_bytes(record):
+    """Return the memory estimate of a built-in block whose record states its circuit, for ``SelectedBlock.bind``, or None.
+
+    A stored gate list takes one position per gate, a global phase taking none.
+    A product state takes one RY and one RZ per qubit on Aer, measured at 1, 2, 4
+    and 8 qubits through the public preparation.
+    """
+    if record.decomposition is not None:
+        return NATIVE_POSITION_BYTES * sum(item.gate != "phase" for item in record.decomposition)
+    spec = record.semantics.preparation
+    if spec is not None and spec.implementation == "qiskit.product":
+        return NATIVE_POSITION_BYTES * 2 * (spec.basis.dimension - 1).bit_length()
+    return None
+
+
+def controlled_gate_positions(gate, controls=0):
+    """Return the Aer native positions of ``gate`` under ``controls`` closed controls, or None when not measured.
+
+    A method's memory law multiplies these by its bytes per position. Control
+    does not scale every gate alike, as the table above shows, so a count of
+    the uncontrolled gate or of its CX gates does not give this number. Each
+    open control adds two X positions around the gate, which the caller counts.
+    """
+    positions = _CONTROLLED_POSITIONS.get(gate, ())
+    return positions[controls] if controls < len(positions) else None
 
 
 def _source(name):
@@ -133,43 +183,41 @@ def _no_arguments(arguments):
         raise ValueError("static native implementation does not accept scalar arguments")
 
 
-def direct_preparation_amplitudes(block) -> int:
-    """Return the amplitude count of the direct state preparation that a block declares, or 0.
+def direct_preparation(block):
+    """Return ``(qubits, transformed)`` of the direct state preparation that a block declares, or None.
 
     A block declares the input state it prepares in ``semantics.preparation``,
     or in ``semantics.base_semantics`` for a control or adjoint of such a
-    block. A ``qiskit.direct`` specification means that the constructor
-    synthesizes that state with the direct magnitude/phase tree of
-    ``subroutines/state_preparation/direct.py``, whose classical work grows
-    as q*2**q in the 2**q amplitudes. That holds for the library's PREP leaf
-    (through ``prepare_qiskit``), the ADAPT query reference and the LCHS
-    vector PREP. Circuit construction and the Run compare this count with
-    their ``max_direct_amplitudes`` before any gate constructor runs. A tree
-    built inside another constructor without a declaration is bounded by
-    that constructor's own size check. The LCU coefficient PREP is bounded
-    by ``_admit_lcu``, the band-address PREP of the banded block encoding by
-    ``block_encoding.core._banded_plan`` and the LCHS source-branch
-    preparations by the size check of the dense LCHS input.
+    block, which is then ``transformed``. A ``qiskit.direct`` specification
+    on ``q`` qubits means that the circuit holds one
+    ``DirectPreparationGate``, whose tree a backend builds when it reads its
+    definition (``direct.direct_tree_bytes``). That holds for the library's
+    PREP leaf (through ``prepare_qiskit``), the ADAPT query reference and the
+    LCHS vector PREP. A tree built inside another constructor without a
+    declaration is bounded by that constructor's own size check. The LCU
+    coefficient PREP is bounded by ``_admit_lcu``, the band-address PREP of
+    the banded block encoding by ``block_encoding.core._banded_plan`` and
+    the LCHS source-branch preparations by the size check of the dense LCHS
+    input.
     """
     semantics = block.record.semantics
-    for declared in (semantics, semantics.base_semantics):
+    for transformed, declared in ((False, semantics), (True, semantics.base_semantics)):
         spec = None if declared is None else declared.preparation
         if spec is not None and spec.implementation == "qiskit.direct":
-            return spec.basis.dimension
-    return 0
+            return spec.basis.dimension.bit_length() - 1, transformed
+    return None
 
 
 # Native constructors bound by SelectedBlock.bind. Lowering calls each one as
 # constructor(block, arguments, context) after its admission checks, where
-# context(factory) returns the method context and context.max_direct_amplitudes
-# is the direct-preparation limit that lowering admitted the block against. The
-# returned circuit acts on the block's ports in signature order.
+# context(factory) returns the method context. The returned circuit acts on
+# the block's ports in signature order.
 
 
 def _preparation_circuit(block, arguments, method_context):
     _no_arguments(arguments)
     from nwqlib.problems.inputs import prepare_qiskit
-    return prepare_qiskit(block._payload, max_direct_amplitudes=method_context.max_direct_amplitudes).circuit
+    return prepare_qiskit(block._payload).circuit
 
 
 def _primitive_circuit(block, arguments, method_context):
@@ -193,8 +241,9 @@ def _select_circuit(block, arguments, method_context):
     _no_arguments(arguments)
     from nwqlib.subroutines._semantic import signed_pauli_select
     operator, coefficients, _ = block._payload
-    return signed_pauli_select(tuple(label for label, _ in operator.pauli_terms().labels()), coefficients,
-                              block.record.semantics.index_qubits, operator.manifest.basis.dimension.bit_length() - 1)
+    terms = operator.pauli_terms()
+    return signed_pauli_select(terms.x, terms.z, coefficients, block.record.semantics.index_qubits,
+                               operator.manifest.basis.dimension.bit_length() - 1)
 
 
 def _reflection_circuit(block, arguments, method_context):
@@ -207,8 +256,9 @@ def _readout_circuit(block, arguments, method_context):
     _no_arguments(arguments)
     from nwqlib.subroutines._semantic import pauli_readout_basis
     operator, _, _ = block._payload
-    return pauli_readout_basis(tuple(label for label, _ in operator.pauli_terms().labels()),
-                              block.record.semantics.index_qubits, operator.manifest.basis.dimension.bit_length() - 1)
+    terms = operator.pauli_terms()
+    return pauli_readout_basis(terms.x, terms.z, block.record.semantics.index_qubits,
+                               operator.manifest.basis.dimension.bit_length() - 1)
 
 
 @dataclass(frozen=True, eq=False, init=False, slots=True)
@@ -233,24 +283,39 @@ class SelectedBlock:
     _payload: object = field(repr=False)
     _base: object = field(repr=False)
     _constructor: object = field(repr=False)
+    _native_bytes: int | None = field(repr=False)
+    _definition_bytes: int | None = field(repr=False)
 
     def __init__(self, *args, **kwargs):
         raise TypeError("use selected block factories or SelectedBlock.bind")
 
     @classmethod
-    def bind(cls, record, *, payload=None, base=None, constructor=None):
+    def bind(cls, record, *, payload=None, base=None, constructor=None, native_bytes=None, definition_bytes=None):
         """Bind trusted code to a selected definition and its inputs, for a new kind of block.
 
         A leaf block gets a constructor that receives `(block, arguments,
         method_context)` and returns a Qiskit circuit, after the common checks of
         `lower_qiskit`. `method_context(factory)` returns the context object of
         the Run, or of a standalone `lower_qiskit` call, which `factory()`
-        creates on first use, and `method_context.max_direct_amplitudes` is the
-        limit that `lower_qiskit` checked direct state preparations against.
-        The constructor must implement the record's promised action and work
+        creates on first use. The constructor must implement the record's promised action and work
         rule, and must not keep `method_context` or the Run. A controlled or
         adjoint block gets its base instead of a constructor. Loading a
-        `SelectedDefinition` from a file never recreates this binding.
+        `SelectedDefinition` from a file never recreates this binding, so code
+        that restores a block passes the same estimates again.
+
+        A Run compares `native_bytes` and `definition_bytes` with the Method's
+        `max_bytes`, or the physical memory when that is `None`, before it
+        builds a circuit. They are rough estimates of how much memory the circuit
+        keeps, not limits on it, and they stay outside the saved record, so they
+        change neither the content hash nor a resource estimate. Calls and
+        definitions without an estimate count nothing, and a refusal names how
+        many were left out. One value stands for every argument value of the block,
+        a mean over its calls when they differ. Without an explicit value, an
+        adjoint takes the values of its base, a controlled block has none because
+        control changes the gate count by gate type, and a block with a stored
+        gate list counts `NATIVE_POSITION_BYTES` for each gate that takes a
+        position, a global phase taking none, as a product state preparation does
+        for its two gates per qubit.
 
         Args:
             record (SelectedDefinition): The selected definition.
@@ -260,6 +325,17 @@ class SelectedBlock:
                 or adjoint, whose content hash equals `record.base_selection_id`.
             constructor (Callable | None): The leaf constructor,
                 required unless `record` names a blocker or a base.
+            native_bytes (int | None): Nonnegative. Rough bytes that one call
+                of the block leaves in the backend's flattened circuit: its
+                top-level gates after the backend's translation, each at the
+                bytes of its gate class, plus any table a gate carries. A
+                `Repeat` around the call multiplies it. Default `None`, not
+                estimated, apart from the rules above.
+            definition_bytes (int | None): Nonnegative. Rough bytes of the gate
+                definition that the block's constructor builds, which a Run
+                keeps once per block, or once per argument values for a block
+                with parameters, however often the circuit calls it. Default
+                `None`, not estimated, apart from the rules above.
 
         Returns:
             block (SelectedBlock): The bound block.
@@ -267,7 +343,8 @@ class SelectedBlock:
         Raises:
             TypeError: If `record` is not a `SelectedDefinition` or `constructor` is
                 not callable.
-            ValueError: If the base and constructor do not match the record.
+            ValueError: If the base and constructor do not match the record, or
+                an estimate is negative or not an integer.
         """
         if type(record) is not SelectedDefinition:
             raise TypeError("native binding requires a SelectedDefinition")
@@ -281,11 +358,25 @@ class SelectedBlock:
             raise ValueError("transformed selection requires its exact live base")
         elif constructor is None and record.blocker is None:
             raise ValueError("selected leaf requires a bound native constructor")
+        native_bytes = None if native_bytes is None else integer(native_bytes, "native_bytes", 0)
+        definition_bytes = None if definition_bytes is None else integer(definition_bytes, "definition_bytes", 0)
+        if base is not None:
+            # inverse_realized_gate reverses the definition or swaps a UCG for its
+            # adjoint table, which keeps the position count of the base.
+            if record.adjoint and not record.controlled:
+                native_bytes = base._native_bytes if native_bytes is None else native_bytes
+                definition_bytes = base._definition_bytes if definition_bytes is None else definition_bytes
+        else:
+            stated = _stated_circuit_bytes(record)
+            native_bytes = stated if native_bytes is None else native_bytes
+            definition_bytes = stated if definition_bytes is None else definition_bytes
         instance = object.__new__(cls)
         object.__setattr__(instance, "record", record)
         object.__setattr__(instance, "_payload", payload)
         object.__setattr__(instance, "_base", base)
         object.__setattr__(instance, "_constructor", constructor)
+        object.__setattr__(instance, "_native_bytes", native_bytes)
+        object.__setattr__(instance, "_definition_bytes", definition_bytes)
         return instance
 
 
@@ -393,7 +484,7 @@ def select_preparation(name: str, state: StateInput, *,
             ("snapshot_logical_payload", spec.payload_bytes), ("snapshot_work", spec.work))) if supplied else
                          (Binding(parameter="num_qubits", value=1 if classification == "product" else q),
                          Binding(parameter="multiplicity", value=q if classification == "product" else 1))),
-        cost_context=("stored-data snapshot census only; native synthesis/control cost and allocator overhead unknown" if supplied else
+        cost_context=("coarse stored-data snapshot byte estimate only; native synthesis/control cost unknown" if supplied else
                       "exact ordered logical primitives; control acts on every operation including phase" if primitives is not None else
                       f"{classification}; {spec.work_law}; native CX slot bound is not an exact inventory; workspace/synthesis context required"),
         construction_work=work,
@@ -408,26 +499,30 @@ def _signed_pauli_requirements(m, q):
     Returns ``(a, padded, requirements)`` with ``a = ceil(log2 m)`` index
     qubits and ``padded = 2**a`` labels. The requirement terms are:
 
-    - ``payload_bytes = m*(q + 16) + 32*padded``. The first term is the
-      per-term label formula of ``PauliTerms.labels``, a q-character label
-      and a 16-byte complex coefficient. The constructor ``_select_circuit``
-      materializes these labels while the circuit is built, and counting
-      them here checks them against the caller's ``max_bytes``. The 32 bytes per label
-      bound the peak of the selection itself, which holds m binary64
-      coefficients and the float64 amplitude array together with either at
-      most two float64 temporaries of length m while forming
-      ``sqrt(|c_j| / alpha)`` or the bytes copy made by ``tobytes``, since
-      m <= padded.
+    - ``payload_bytes = 8*m*W + 40*padded`` with ``W = ceil(q/64)``. The
+      constructors ``_select_circuit`` and ``_readout_circuit`` read the
+      operator's packed X and Z masks in place and form no label strings.
+      The readout holds one more mask, of the Y letters (``x & z``), 8*m*W
+      bytes. The 40 bytes per address bound the larger of two peaks. The
+      selection itself holds m binary64 coefficients and the float64
+      amplitude array together with either at most two float64 temporaries
+      of length m while forming ``sqrt(|c_j| / alpha)`` or the bytes copy
+      made by ``tobytes``, 32 bytes per address since m <= padded. One
+      system qubit's step of a constructor holds the coefficients and
+      amplitudes, 16 bytes per address, beside the two 8-byte mask columns
+      and the one-byte padded letter codes of ``local_pauli_codes`` and
+      the projected codes, at most 19 more bytes per address. The projected
+      matrices are gate parameters of the built circuit.
     - ``work = m*(q + 1) + (q + 1)*(a + 1)*padded``, the size formula
       reported as ``construction_work`` of the constructor, which circuit
       construction sums but does not check against a limit. Its unit is one read or
-      write of a table entry. The first term reads m labels of q characters
-      and their coefficients. The second term covers the q per-qubit UCG
+      write of a table entry. The first term reads the q mask bits of the m
+      terms and their coefficients. The second term covers the q per-qubit UCG
       tables and the sign diagonal. Each is visited in one pass that builds
       the table padded to ``padded`` entries and in one pass per address
       bit. For a UCG table that pass is the dependency test of
-      ``project_unitary_table_dependencies``, which compares at most
-      padded/2 entry pairs differing in that bit. For the diagonal it is one
+      ``code_dependencies``, which compares the padded letter codes of the
+      address pairs differing in that bit. For the diagonal it is one
       level of ``append_control_diagonal_phases``, which halves the table
       and lowers the differences as an RZ multiplexor whose Walsh butterfly
       makes one pass per remaining control. The projected copy, the
@@ -442,7 +537,7 @@ def _signed_pauli_requirements(m, q):
     """
     a = (max(1, m) - 1).bit_length()
     padded = 1 << a
-    return a, padded, dict(items=max(m, padded), payload_bytes=m * (q + 16) + padded * 32,
+    return a, padded, dict(items=max(m, padded), payload_bytes=8 * m * ((q + 63) // 64) + padded * 40,
                            work=m * (q + 1) + (q + 1) * (a + 1) * padded)
 
 
@@ -460,7 +555,7 @@ def signed_pauli_coefficients(operator):
     return coefficients
 
 
-def select_signed_pauli(name: str, operator: OperatorInput, *, max_bytes=DEFAULT_INPUT_BYTES) -> SelectedBlock:
+def select_signed_pauli(name: str, operator: OperatorInput, *, max_bytes=None) -> SelectedBlock:
     """Build the signed Pauli SELECT block of a Hermitian Pauli operator, the core of its LCU block encoding.
 
     For `A = sum_j c_j P_j` with real `c_j`, `alpha = sum_j |c_j|` and
@@ -500,8 +595,8 @@ def select_signed_pauli(name: str, operator: OperatorInput, *, max_bytes=DEFAULT
         name (str): Signature name of the SELECT block in the Program.
         operator (OperatorInput): Hermitian Pauli operator A with M terms on q
             qubits, from [`ingest_pauli`](inputs.md).
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes).
-            Nonnegative limit on the bytes above.
+        max_bytes (int | None): Default `None`, the physical memory of this
+            computer. Nonnegative limit on the bytes above.
 
     Returns:
         block (SelectedBlock): The SELECT, with ports `index` (`a = ceil(log2 M)` qubits,
@@ -518,15 +613,16 @@ def select_signed_pauli(name: str, operator: OperatorInput, *, max_bytes=DEFAULT
     q = operator.manifest.basis.dimension.bit_length() - 1
     a, padded, requirements = _signed_pauli_requirements(m, q)
     work = requirements["work"]
-    if type(max_bytes) is not int or max_bytes < 0:
-        raise ValueError("Pauli selection max_bytes must be a nonnegative integer")
+    if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
+        raise ValueError("Pauli selection max_bytes must be a nonnegative integer or None")
     # The selection arrays stay within `32P` because the coefficients are frozen
     # before the amplitudes are built: coefficients use `8m`, amplitudes `8P`, and
     # at most two float64 temporaries `16m`, giving `24m + 8P <= 32P`. Coefficient
     # freezing peaks at `16m` before amplitudes exist, amplitude freezing at
     # `8m + 16P <= 24P`, and these phases are sequential.
-    if requirements["payload_bytes"] > max_bytes:
-        raise ValueError("signed Pauli coefficient selection exceeds max_bytes")
+    if exceeds(requirements["payload_bytes"], memory_limit(max_bytes)):
+        raise ResourceLimitError(f"signed Pauli coefficient selection exceeds {byte_allowance(max_bytes)}: it needs "
+                                 f"{requirements['payload_bytes']} bytes")
     # Frozen before the amplitudes exist. Alpha and the amplitudes read it in term order.
     coefficients = signed_pauli_coefficients(operator)
     try:
@@ -561,7 +657,7 @@ def select_signed_pauli(name: str, operator: OperatorInput, *, max_bytes=DEFAULT
     return SelectedBlock.bind(record, payload=(operator, coefficients, amplitudes), constructor=_select_circuit)
 
 
-def select_pauli_preparation(name: str, select: SelectedBlock, *, max_bytes=DEFAULT_INPUT_BYTES) -> SelectedBlock:
+def select_pauli_preparation(name: str, select: SelectedBlock, *, max_bytes=None) -> SelectedBlock:
     """Build the coefficient preparation PREP of a signed Pauli SELECT, `PREP|0> = sum_j sqrt(|c_j| / alpha) |j>`.
 
     The amplitudes come from the SELECT block, so the PREP is tied to that
@@ -576,7 +672,7 @@ def select_pauli_preparation(name: str, select: SelectedBlock, *, max_bytes=DEFA
     Args:
         name (str): Signature name of the PREP block.
         select (SelectedBlock): The untransformed signed Pauli SELECT.
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes). Limit
+        max_bytes (int | None): Default `None`, the physical memory of this computer. Limit
             on the bytes of the amplitude vector input.
 
     Returns:
@@ -713,9 +809,12 @@ def transform_block(name: str, block: SelectedBlock, *, control=False, adjoint=F
     The Pauli SELECT and readout counts read the `controlled` flag instead. A
     dense-dilation encoding adds the work of the exact synthesis of its unitary
     and of Qiskit's control of the synthesized gates, and a supplied preparation
-    or encoding adds the same for each dense unitary in its circuit. `lower_qiskit`
-    counts these syntheses before they start, against its `max_synthesis_work`,
-    or in a Run against `ExecutionLimits.max_synthesis_work`.
+    or encoding adds the same for each dense unitary in its circuit. When that
+    circuit holds a gate whose Qiskit definition is not yet built, such as a
+    `StatePreparation`, this count is not possible without building it, so the
+    construction work is `None` and `cost_context` names the gate. In a Run,
+    `ExecutionTrace.synthesis_work` also counts these syntheses once they
+    are made.
 
     Args:
         name (str): Signature name of the new block.
@@ -747,6 +846,7 @@ def transform_block(name: str, block: SelectedBlock, *, control=False, adjoint=F
     signature = BlockSignature(name=name, target=record.signature.target, quantum=ports, coupling="joint")
     work = record.construction_work
     law = record.cost_law
+    unresolved = ""
     if control and work is not None:
         if record.implementation.name == "reflection.positive_zero":
             dimension = record.semantics.basis.dimension
@@ -775,16 +875,21 @@ def transform_block(name: str, block: SelectedBlock, *, control=False, adjoint=F
             work += bound(a, q, controlled=True) + 1
         elif record.implementation.name in ("preparation.supplied", "encoding.native"):
             from nwqlib.subroutines._dense_synthesis import dense_synthesis_size, gatewise_control_size
-            from nwqlib.subroutines.qiskit_compat import dense_control_counts, dense_synthesis_widths
+            from nwqlib.subroutines.qiskit_compat import dense_gatewise_charges, unbuilt_definition
             # Lowering controls the supplied circuit once per Run through
             # qiskit_compat.controlled, which synthesizes each distinct dense
             # unitary in it exactly before Qiskit controls every occurrence of
-            # the synthesized gates.
+            # the synthesized gates. Planning reads only built definitions, and
+            # one that is not built leaves the work unknown, not its known part.
             circuit = (block._payload._native if record.implementation.name == "preparation.supplied"
                        else block._payload.circuit)
-            work += sum(dense_synthesis_size(width)[0] for width in dense_synthesis_widths(circuit))
-            counts = dense_control_counts(circuit, 1)
-            work += gatewise_control_size(*counts)[0] if counts[0] else 0
+            widths, counts, unbuilt = dense_gatewise_charges(circuit, 1, built=True)
+            if unbuilt is None:
+                work += sum(dense_synthesis_size(width)[0] for width in widths)
+                work += gatewise_control_size(*counts)[0] if counts[0] else 0
+            else:
+                work = None
+                unresolved = f"; construction work unresolved: controlled synthesis of {unbuilt_definition(unbuilt)}"
         elif (record.implementation.name == "encoding.planned"
               and record.implementation.domain == "dense_dilation"):
             from nwqlib.subroutines._dense_synthesis import (dense_synthesis_size, gatewise_control_counts,
@@ -818,7 +923,7 @@ def transform_block(name: str, block: SelectedBlock, *, control=False, adjoint=F
         signature=signature, controlled=control, adjoint=adjoint,
         semantics=semantics,
         base_selection_id=record.content_id,
-        cost_context=record.cost_context + "; transformation: " + ("selected inverse" if adjoint else "selected forward extension") + (" with one coherent control (all phase operations included); controlled cost requires law context" if control else ""),
+        cost_context=record.cost_context + "; transformation: " + ("selected inverse" if adjoint else "selected forward extension") + (" with one coherent control (all phase operations included); controlled cost requires law context" if control else "") + unresolved,
         construction_work=work, cost_law=law,
     ), base=block)
 

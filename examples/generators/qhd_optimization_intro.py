@@ -223,17 +223,20 @@ show_card(result, baseline, probability, values, predicted, seconds, peak_bytes)
 # - **Input.** A SymPy expression that is real everywhere in a box, the tuple of its variables, and one `(lower, upper)` interval per variable.
 # - **Output.** Probabilities of grid points. The main solve uses exact readout, in which the simulator computes these probabilities without shot sampling, subject to numerical rounding. `result.most_probable_coordinates` is where the probability concentrates, and `result.candidate` the observed grid point with the least evaluated objective.
 # - **Size.** Each variable takes `num_grid_points` interior grid points. The one-hot encoding uses one qubit per grid point and variable, so $d$ variables with $K$ points each need $dK$ qubits for $K^d$ grid points.
-# - **Qubit limit.** The local simulator accepts 20 qubits by default, so two variables fit at most 10 grid points each on the circuit route.
+# - **Simulator memory.** The statevector of $w$ qubits takes $16 \cdot 2^w$ bytes. This notebook sets `simulator_memory_mb=16` for the refusal demonstration, and the library default is the physical memory of the computer.
 # - **Work and memory.** `plan` counts the work and the bytes of the objective tables and the evolution, checks them against `max_work` and `max_bytes` and refuses before forming them (Section 4). Work is a nominal measure of classical computation that NWQLib derives from the problem sizes by formula ([work units](../docs/glossary.md#work-units)). It combines estimates such as one unit for each node of the symbolic expression evaluated at each table entry, and it is neither a uniform count of scalar operations nor a time.
 #
-# The cell asks for 11 grid points per variable, 22 qubits. `solve` refuses before building the circuit, and the error names the limit and the amount. The remedy here is `execution="classical"`, which evolves the 121 grid amplitudes classically, one solve in under a second.
+# The cell asks for 11 grid points per variable, 22 qubits whose state alone takes 64 MiB, with `simulator_memory_mb=16`. `solve` refuses before building the circuit, and the error names the limit and the bytes. The remedy here is `execution="classical"`, which evolves the 121 grid amplitudes classically, one solve in under a second.
 
 # %%
+from nwqlib.execution import ExecutionLimits
+
+DEMONSTRATION_LIMITS = ExecutionLimits(simulator_memory_mb=16)
 wide = QHD(num_grid_points=11, num_steps=STEPS, total_time=TOTAL_TIME, schedule=SCHEDULE)
 wide_plan = plan(problem, method=wide, seed=7)  # tabulates the objective, builds no circuit
 started = perf_counter()
 try:
-    solve(wide_plan, progress=False)
+    solve(wide_plan, limits=DEMONSTRATION_LIMITS, progress=False)
 except ValueError as refusal:
     print(f"Refused after {perf_counter() - started:.2f} s, before any circuit existed:\n{refusal}")
 
@@ -244,7 +247,8 @@ wide_values = baseline["f"](*np.meshgrid(*wide_grid, indexing="ij"))
 show_table([
     ("Grid points", host_plan.reconstruction.restricted_dimension, "11 per variable"),
     ("Qubits on the circuit route", wide_plan.reconstruction.width,
-     f"Above max_simulation_qubits = {result.data.trace.limits.max_simulation_qubits}"),
+     f"Their {format_bytes(16 << wide_plan.reconstruction.width)} complex128 state exceeds the demonstration's "
+     f"simulator_memory_mb = {DEMONSTRATION_LIMITS.simulator_memory_mb} MiB"),
     ("Classical workspace", format_bytes(host_plan.reconstruction.workspace_bytes), "Stated by plan before the run"),
     ("Classical work", host_plan.reconstruction.size_units, "Units, a planning quantity, not seconds"),
     ("Most probable grid point", host_result.most_probable_coordinates,
@@ -254,7 +258,7 @@ show_table([
 ], headers=('After switching to execution="classical"', "Value", "Meaning"))
 
 # %% [markdown]
-# Raising `max_simulation_qubits` to 22, the remedy that the error message names, would simulate the 22-qubit circuit, beyond this notebook's budget.
+# Raising `simulator_memory_mb`, the remedy that the error message names, would simulate the 22-qubit circuit, beyond this notebook's time budget.
 #
 # ## 2. What it costs
 #
@@ -286,7 +290,7 @@ print(f"Compiled CX / predicted CX = {compiled['operations'].get('cx', 0) / pred
 trace = result.data.trace
 show_table([
     ("Peak memory", f"{format_bytes(predicted.quantity('known_memory', location='host').fact.value.numerator)} "
-     "of selected arrays", format_bytes(peak_bytes)),
+     "as a coarse circuit-memory estimate on Aer", format_bytes(peak_bytes)),
     ("Objective-table evaluations", selected.reconstruction.support_evaluations, "Done by plan"),
     ("Work [units, a planning quantity, not seconds]",
      f"{format_value(predicted.quantity('construction_work').fact.value.numerator)}, an upper bound",
@@ -299,7 +303,7 @@ show_table([
 ], headers=("Classical cost", "Before the run", "Measured or recorded by the run"))
 
 # %% [markdown]
-# - **Peak memory** is the largest total of Python allocations, traced with `tracemalloc` while the card cell repeats plan and solve. Memory that Aer allocates in C++ is not traced. `estimate` counts only the arrays that the construction itself holds.
+# - **Peak memory** is the largest total of Python allocations, traced with `tracemalloc` while the card cell repeats plan and solve. Memory that Aer allocates in C++ is not traced. `estimate` uses a coarse circuit-memory law calibrated on Aer, together with derivation storage. A Run compares this estimate with `max_bytes` before building. It is not a process-memory bound or a prediction of the traced peak.
 # - **Work.** `estimate` bounds the work counted once for each distinct circuit definition. The run records that contribution plus the work counted for each use of a definition in circuit construction. Here the two contributions are equal, so the recorded total is twice the estimate. These are nominal work counts, not measured CPU time, and the estimate does not bound the total recorded preparation work.
 # - **Baseline budget.** The baseline runs 500 descents from random starts, 9 from a 3 × 3 set of starts to locate the minima, and 36 from the grid points to mark the valley of each.
 # - **Not estimated:** physical qubits, error correction, run time on hardware and price.
@@ -365,11 +369,14 @@ show_table([(run.plan.method.total_time, run.plan.method.num_steps,
 limits = trace.limits
 host_main = plan(problem, method=method, seed=7, execution="classical")  # nothing runs yet
 show_table([
-    ("Qubits the local simulator accepts", limits.max_simulation_qubits,
-     f"Default. This grid uses {selected.reconstruction.width}"),
-    ("Simulator memory cap", f"{limits.simulator_memory_mb:,} MiB", "Default simulator_memory_mb"),
-    ("QHD work cap", method.max_work, "Default max_work, for objective tables, products and classical evolution"),
-    ("QHD memory cap", format_bytes(method.max_bytes), "Default max_bytes, for tables, state and workspace"),
+    ("Simulator memory cap", "Physical memory (default)" if limits.simulator_memory_mb is None else f"{limits.simulator_memory_mb:,} MiB",
+     f"Default simulator_memory_mb. The {selected.reconstruction.width} qubits of this grid hold a complex128 "
+     f"state of {format_bytes(16 << selected.reconstruction.width)}"),
+    ("QHD work cap", "No limit (default)" if method.max_work is None else f"{method.max_work:,} work units",
+     "max_work, on the counted work of objective tables, products and classical evolution"),
+    ("QHD memory cap", "Physical memory (default)" if method.max_bytes is None else format_bytes(method.max_bytes),
+     "max_bytes, on the tables, state and workspace that planning counts. The default is the physical memory "
+     "that this computer reports, and planning makes no memory check where none is reported"),
     ("Classical evaluation of this grid: workspace", format_bytes(host_main.reconstruction.workspace_bytes),
      "Stated by plan before it runs"),
     ("Classical evaluation of this grid: work", host_main.reconstruction.size_units, "Units, a planning quantity, not seconds"),
@@ -390,7 +397,7 @@ show_table([
 #
 # - **Input.** A SymPy expression, the tuple of its variables in the order you want them reported, and one `(lower, upper)` interval per variable. The expression must be real everywhere in the box.
 # - **Grid.** Each variable takes `num_grid_points` interior points of its interval, spaced `(upper - lower) / (num_grid_points + 1)` apart, so the grid never touches the bounds.
-# - **Size limits.** The cell uses $d=3$ variables and $K=4$ points: 12 qubits and 64 grid points. Keep $dK$ within 20 qubits for the local simulator, or use `execution="classical"` (Section 1).
+# - **Size limits.** The cell uses $d=3$ variables and $K=4$ points: 12 qubits and 64 grid points. Keep $dK$ small enough for the local simulator's memory and the intended runtime, or use `execution="classical"` (Section 1).
 # - **Output.** `my_result.most_probable_coordinates` is the most probable grid point, in the order of `my_variables`, with `my_result.most_probable_probability`. `my_result.candidate` is the observed grid point with the least evaluated objective, and `my_result.objective` its value. `my_result.marginals.array` holds one row of grid-value probabilities per variable.
 
 # %%
@@ -505,8 +512,8 @@ show_table([
      "Defaults of AugmentedLagrangian"),
     ("Classical work", f"{disk.resources.table_evaluations} objective-table evaluations, "
      f"{disk.resources.evolution_work:,} units of classical-evolution work (a planning quantity, not seconds)",
-     f"QHD planning checks each counted part of a round's work against max_work = {disk_method.max_work:,} "
-     "before running it"),
+     "QHD planning checks each counted part of a round's work against max_work before running it, here "
+     + ("no limit (the default)" if disk_method.max_work is None else f"{disk_method.max_work:,}")),
     ("Circuit cost of a quantum run", f"{len(round_cx)} circuits of {disk.resources.width} qubits, at most "
      f"{sum(round_cx):,} CX gates", f"Per round {' / '.join(format_value(cx) for cx in round_cx)}, upper bounds from a "
      f"Plan built for quantum execution of each round's effective objective with {disk_method.num_steps} steps"),
@@ -541,7 +548,7 @@ show_table([(item.iteration + 1, item.penalty, item.inequality_multipliers[0], i
 #
 # The multiplier that the run reports is the method's iterate after its last round on the 16-point grid. Nothing requires it to equal the continuous multiplier $\sqrt2-1$.
 #
-# `constrained_grid_minimum(result)` checks its work against its limit before evaluating. Its signed difference subtracts the freshly evaluated minimum from the best objective recorded in the result.
+# `constrained_grid_minimum(result)` checks the memory that its evaluation needs before evaluating, and its work when you pass `max_work`. Its signed difference subtracts the freshly evaluated minimum from the best objective recorded in the result.
 #
 # That difference can be negative, including when the result's best point belongs to the evaluated feasible grid, because the two values can have different rounding errors. An off-grid or infeasible best point gives no conclusion about optimality on the grid.
 #
@@ -798,7 +805,7 @@ show_table([(item.iteration + 1, ", ".join(slack_forms[item.iteration]["forms"].
 RESOURCE_LABELS = {
     "logical_width": "Qubits", "system": "System qubits", "clean_ancilla": "Ancilla qubits",
     "cx": "CX gates", "calls": "Block invocations", "preparation_components": "Single-qubit factors of product-state loading",
-    "known_memory": "Classical memory of selected arrays [bytes]",
+    "known_memory": "Coarse circuit-memory estimate on Aer [bytes]",
     "construction_work": "Classical construction work [size units]",
 }
 UNMODELED_LABELS = {
@@ -822,6 +829,20 @@ def show_estimate(workload):
 
 # %%
 show_estimate(predicted)
+
+# %% [markdown]
+# The CX and rotation counts add up the blocks of every step. `step_blocks` lists the blocks of one step in the order the circuit applies them, each with its qubits, angle, construction and CX count.
+
+# %%
+from collections import Counter
+
+from nwqlib.algorithms.qhd import step_blocks
+
+first_step = step_blocks(selected, 0)
+show_table([(block.kind, block.support, block.angle, block.provider, block.cx) for block in first_step[:6]],
+           headers=("Block", "Qubits", "Angle [rad]", "Construction", "CX"), digits=6)
+print(", ".join(f"{count} {kind}" for kind, count in Counter(block.kind for block in first_step).items())
+      + f" blocks in step 0 of {selected.method.num_steps}.")
 
 # %% [markdown]
 # ### B. A saved result, reloaded and recomputed

@@ -12,6 +12,7 @@ The [QHD guide](../../algorithms/qhd.md) explains the model, the readout and the
 | Choose the initial state | [`KineticGroundState`][nwqlib.algorithms.qhd.initial_state.KineticGroundState], [`UniformState`][nwqlib.algorithms.qhd.initial_state.UniformState], [`GaussianState`][nwqlib.algorithms.qhd.initial_state.GaussianState] |
 | Read the best observed and most probable points | [`QHDAnalysis`][nwqlib.algorithms.qhd.records.QHDAnalysis] |
 | Compare the result with a grid minimum or a reference evolution | [`QHDVerification`][nwqlib.algorithms.qhd.records.QHDVerification] with `result.verify(checks=...)` |
+| List the blocks of one step of a one-hot circuit | [`step_blocks`][nwqlib.algorithms.qhd.onehot_schedule.step_blocks], [`QHDBlock`][nwqlib.algorithms.qhd.records.QHDBlock] |
 | Count rotations and T gates and bound the product-formula error | [`circuit_resources`][nwqlib.algorithms.qhd.resources.circuit_resources], [`evolution_bound`][nwqlib.algorithms.qhd.evolution_bounds.evolution_bound], [`run_resources`][nwqlib.algorithms.qhd.resources.run_resources] |
 
 ## Configure QHD
@@ -114,6 +115,18 @@ Each initial state is a product of nonnegative per-variable amplitude vectors, a
       heading_level: 3
 
 ::: nwqlib.algorithms.qhd.resources.QHDRunEntry
+    options:
+      heading_level: 3
+
+## Inspect one step of a one-hot circuit {#step-blocks}
+
+`step_blocks(plan, k)` lists the blocks of step k in the order the circuit applies them. Each block's construction and CX count are those that the `Plan`'s CX and rotation counts add up over all steps.
+
+::: nwqlib.algorithms.qhd.onehot_schedule.step_blocks
+    options:
+      heading_level: 3
+
+::: nwqlib.algorithms.qhd.records.QHDBlock
     options:
       heading_level: 3
 

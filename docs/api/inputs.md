@@ -47,6 +47,9 @@ The Pauli operator stays a sum of two terms on 2 qubits, the dense matrix maps `
 | Pauli labels and coefficients | `ingest_pauli(terms, num_qubits=q)` | `OperatorInput`, Pauli terms |
 | Packed Pauli masks | `ingest_pauli_masks(x, z, coefficients, num_qubits=q)` | `OperatorInput`, Pauli terms |
 | A periodic grid operator with mass, diffusion and potential | `PeriodicStencil(q, mass, diffusion, potential)` | Parameters, accepted as a Problem's matrix |
+| A periodic band operator `sum_b beta_b S^b` of cyclic shifts | `ingest_band(offsets, coefficients, num_qubits=q)` | `OperatorInput`, band coefficients |
+| The Hermitian parts L and H of `A = L + iH`, given separately, with an optional lower bound of L that you know | `ingest_cartesian(L, H, dissipative_lower_bound=None)` | `OperatorInput`, the two parts |
+| A block-encoding circuit of an operator, with its normalization and error bound | `ingest_block_encoding(encoding, reference=..., hermitian=...)` | `OperatorInput`, the circuit with its stated properties |
 | Fermionic ladder-operator strings | `ingest_fermion(terms, num_modes=q)`, then `.fermion_terms().to_pauli(mapping="jw")` | `OperatorInput`, fermionic, then Pauli |
 | A double-factorized electronic Hamiltonian | `ingest_df(T, factors, ...)`, then `.to_pauli()` | `FactorizedHamiltonian`, then `DFConversion` |
 | An XACC Hamiltonian file | [`read_xacc` or `parse_xacc`](subroutines/fermionic_pool.md) | Qiskit `SparsePauliOp` |
@@ -57,7 +60,7 @@ The Pauli operator stays a sum of two terms on 2 qubits, the dense matrix maps `
 | A computational basis state | `ingest_occupation(bits, num_qubits=q)` | `StateInput`, at most q X gates |
 | Norm and spectral bounds of an operator | `refine_operator_facts(A, unit=..., scope=..., refinements=(...))` | `OperatorFactReport` |
 
-Every function checks the bytes it will keep against `max_bytes`, default 10 GB (decimal, `10_000_000_000`), before it copies data. To check whether a large input fits under `max_bytes` before you build it, use the size formula for its representation in [Input cost controls](../development/input_contracts.md). Coordinates follow Qiskit, with qubit 0 the rightmost tensor factor and the rightmost character of a Pauli label.
+Every function checks the bytes it will keep against `max_bytes` before it copies data. The default `None` uses the physical memory of the computer. To check whether a large input fits under `max_bytes` before you build it, use the size formula for its representation in [Input cost controls](../development/input_contracts.md). Coordinates follow Qiskit, with qubit 0 the rightmost tensor factor and the rightmost character of a Pauli label.
 
 ## Operators
 
@@ -95,6 +98,26 @@ Every function checks the bytes it will keep against `max_bytes`, default 10 GB 
       heading_level: 3
 
 ::: nwqlib.operators.inputs.ingest_periodic_stencil
+    options:
+      heading_level: 3
+
+::: nwqlib.operators.inputs.ingest_band
+    options:
+      heading_level: 3
+
+::: nwqlib.operators.inputs.ingest_cartesian
+    options:
+      heading_level: 3
+
+::: nwqlib.operators.inputs.CartesianParts
+    options:
+      heading_level: 3
+
+::: nwqlib.operators.inputs.ingest_block_encoding
+    options:
+      heading_level: 3
+
+::: nwqlib.operators.inputs.SuppliedBlockEncoding
     options:
       heading_level: 3
 

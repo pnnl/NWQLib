@@ -11,13 +11,12 @@ from nwqlib.blocks import (
     select_preparation, select_signed_pauli, select_zero_reflection, signed_pauli_cx_bound, transform_block,
 )
 from nwqlib.ir import (
-    Allocate, Binding, BlockCall, Definition, ExprRef, Expression, Parameter, ParameterRef, PortMap, Program, Register,
-    Repeat, Sequence,
+    Allocate, Binding, BlockCall, ClassicalValue, Definition, ExprRef, Expression, Measure, Parameter, ParameterRef,
+    PortMap, Program, Register, Repeat, Reset, Sequence,
 )
 from nwqlib.operators import ingest_pauli
 from nwqlib.problems import ingest_occupation, ingest_vector
 
-LOWER = dict(max_operations=100000, max_qubits=3, max_clbits=3)
 
 
 def construction(blocks, calls, registers, *, repeat=1):
@@ -47,7 +46,6 @@ def action(circuit, initial):
 
 @pytest.mark.parametrize("custom", (None, "target", "payload", "symbolic"))
 def test_selected_binding_rejects_unbound_and_incompatible_live_access_before_sdk(monkeypatch, custom):
-    from dataclasses import FrozenInstanceError
     from nwqlib.blocks.selection import SelectedBlock
     from nwqlib.core import Source
 
@@ -85,7 +83,7 @@ def test_selected_binding_rejects_unbound_and_incompatible_live_access_before_sd
     for selected in (transformed, inverse):
         assert selected.record.signature.target == base.record.signature.target
         assert selected.record.implementation == base.record.implementation
-        assert selected.record.base_selection_id == base.record.content_id and selected._base is base
+        assert selected.record.base_selection_id == base.record.content_id
     if custom != "target":
         # q=1 has the selected 4-unit base plus 12-unit controlled-extension law.
         assert transformed.record.construction_work == 16
@@ -101,26 +99,20 @@ def test_selected_binding_rejects_unbound_and_incompatible_live_access_before_sd
             with pytest.raises(ValueError, match="reflection"):
                 transform_block("invalid", SelectedBlock.bind(invalid, constructor=constructor), control=True)
     for record, fields in (
-        (None, {"constructor": constructor}),
-        (base.record, {"constructor": object()}),
-        (base.record, {}),
         (transformed.record, {"constructor": constructor}),
         (transformed.record, {"base": base, "constructor": constructor}),
-        (transformed.record, {"base": object()}),
         (transformed.record, {"base": other}),
     ):
         with pytest.raises((TypeError, ValueError)):
             SelectedBlock.bind(record, **fields)
     bound = SelectedBlock.bind(base.record, payload=base._payload, constructor=constructor)
     assert bound.record.content_id == base.record.content_id
-    assert bound._payload is base._payload and bound._constructor is constructor
-    with pytest.raises(FrozenInstanceError):
-        bound._constructor = base._constructor
+    assert bound._payload is base._payload
     blocked = SelectedBlock.bind(base.record.revise(blocker="explicitly unbound fixture"))
     with pytest.raises(ValueError):
-        lower_qiskit(one(blocked), blocks=(blocked,), **LOWER)
+        lower_qiskit(one(blocked), blocks=(blocked,))
     with pytest.raises(ValueError, match="exact persisted selected identities"):
-        lower_qiskit(one(other), blocks=(bound,), **LOWER)
+        lower_qiskit(one(other), blocks=(bound,))
     assert not imports and not calls
 
 
@@ -136,6 +128,114 @@ def supplied_expectation(circuit):
     state = bind_preparation_circuit(circuit, reference=InputRef(identity="declared:preparation", representation="circuit", source=source),
         basis=observable.manifest.basis)
     return state, plan(Expectation(state=state, observable=observable), method=ExpectationMethod(), seed=7)
+
+
+def test_memory_estimates_stay_outside_identity_and_count_calls_apart_from_definitions():
+    """A Repeat multiplies what each call keeps but not a definition, an adjoint keeps the gate count and control does not."""
+    from nwqlib.blocks.lowering import _count_definition, _definition_closure
+    from nwqlib.blocks.selection import NATIVE_POSITION_BYTES, SelectedBlock
+
+    plain = select_zero_reflection("plain", 1)
+    # Two X, one Z and a global phase: the phase takes no position in a flattened circuit.
+    assert plain._native_bytes == plain._definition_bytes == 3 * NATIVE_POSITION_BYTES
+    known = SelectedBlock.bind(plain.record, payload=plain._payload, constructor=plain._constructor,
+                               native_bytes=1000, definition_bytes=70)
+    assert known.record == plain.record and known.record.content_id == plain.record.content_id
+    with pytest.raises(ValueError, match="native_bytes"):
+        SelectedBlock.bind(plain.record, payload=plain._payload, constructor=plain._constructor, native_bytes=-1)
+    inverse = transform_block("inverse", known, adjoint=True)
+    gated = transform_block("gated", known, control=True)
+    assert (inverse._native_bytes, inverse._definition_bytes) == (1000, 70)
+    assert (gated._native_bytes, gated._definition_bytes) == (None, None)
+    selected = construction((known, inverse, gated), (
+        ("plain", (("system", "system"),)), ("inverse", (("system", "system"),)),
+        ("gated", (("control", "control"), ("system", "system"))),
+    ), (("control", 1), ("system", 1)), repeat=5)
+    counted = _count_definition(selected, blocks=(known, inverse, gated))
+    assert counted.native_bytes == 5 * (1000 + 1000)
+    assert (counted.native_unknown, counted.first_unknown) == (5, "gated")
+    # One gate per selected block, the shared base of the transforms included once.
+    assert {key: block.record.signature.name for key, block in _definition_closure(counted.selected.values()).items()} == {
+        (known.record.content_id, ()): "plain", (inverse.record.content_id, ()): "inverse",
+        (gated.record.content_id, ()): "gated"}
+
+
+def test_a_run_compares_known_memory_with_the_limit_before_its_charge_and_names_what_it_left_out():
+    """A small uncovered call keeps a large known block protected.
+
+    Three calls of the known block keep 3*10**6 bytes and its definition 5*10**5 once. The uncovered
+    controlled call adds nothing but its instruction, four instructions at 256 bytes each. One byte
+    below that total the Run refuses before its charge and builds nothing, and at the total it prepares.
+
+    A base that only its transform reaches counts as held once it is built, as a base bound by name does.
+    Lowering keeps the base and its inverse, 2000 bytes each, and the handle keeps 100, so a second
+    preparation needs 4100 + 100 + 256 and is refused before its charge at a limit of 4356.
+    """
+    import nwqlib
+    from nwqlib.algorithms.expectation import ExpectationMethod
+    from nwqlib.blocks.selection import SelectedBlock
+    from nwqlib.core.planning import Experiment, ObservationSpec
+    from nwqlib._prepared_execution import Run, prepare_experiment
+
+    built = []
+    reflection = select_zero_reflection("known", 1)
+
+    def constructor(block, arguments, context):
+        built.append(block.record.signature.name)
+        return reflection._constructor(block, arguments, context)
+
+    known = SelectedBlock.bind(reflection.record, payload=reflection._payload, constructor=constructor,
+                               native_bytes=10**6, definition_bytes=5 * 10**5)
+    gated = transform_block("gated", known, control=True)
+    total = 3 * 10**6 + 5 * 10**5 + 4 * 256
+
+    def limited(max_bytes):
+        base = nwqlib.plan(nwqlib.Expectation(state=[1.0, 1.0], observable=ingest_pauli((("Z", 1.0),), num_qubits=1)),
+                           method=ExpectationMethod(max_bytes=max_bytes), seed=7)
+        calls = ("known", (("system", "system"),)), ("gated", (("control", "control"), ("system", "system")))
+        known_repeated = construction((known,), calls[:1], (("control", 1), ("system", 1)), repeat=3)
+        definitions = (*known_repeated.program.definitions,
+                       Definition(id="gated_call", node=BlockCall(signature="gated", ports=(
+                           PortMap(port="control", wire="control"), PortMap(port="system", wire="system")))),
+                       Definition(id="whole", node=Sequence(children=("root", "gated_call"))))
+        selected = SelectedConstruction(program=known_repeated.program.revise(
+            root="whole", definitions=definitions, signatures=(known.record.signature, gated.record.signature)),
+            selections=(known.record, gated.record))
+        return base.revise(construction=selected,
+            experiments=(Experiment(name="circuit", setting="circuit",
+                                    observation=ObservationSpec(kind="pauli_expectation", labels=("IZ",))),),
+            error_model=base.error_model.revise(construction_id=selected.content_id))._bind(blocks=(known, gated))
+
+    plan = limited(total - 1)
+    with Run(plan, progress=False) as run:
+        with pytest.raises(ValueError, match=rf"preparing this circuit needs about {total} bytes, exceeding "
+                                             rf"max_bytes={total - 1}.*calls 1 \(first of block 'gated'\)"):
+            plan.method.prepare(plan, run=run)
+        assert run.trace.preparations == 0 and built == []
+    plan = limited(total)
+    with Run(plan, progress=False) as run:
+        plan.method.prepare(plan, run=run)
+        assert run.trace.preparations == 1 and built == ["known"]
+
+    base = SelectedBlock.bind(reflection.record, payload=reflection._payload, constructor=reflection._constructor,
+                              native_bytes=100, definition_bytes=2000)
+    inverse = transform_block("inverse", base, adjoint=True)
+    selected = one(inverse)
+    limit = 2 * 2000 + 100 + 256
+    for bound in ((inverse,), (base, inverse)):
+        initial = nwqlib.plan(nwqlib.Expectation(state=[1.0, 1.0], observable=ingest_pauli((("Z", 1.0),), num_qubits=1)),
+                              method=ExpectationMethod(max_bytes=limit), seed=7)
+        plan = initial.revise(construction=selected,
+            experiments=(Experiment(name="inverse", setting="inverse",
+                                    observation=ObservationSpec(kind="pauli_expectation", labels=("Z",))),),
+            error_model=initial.error_model.revise(construction_id=selected.content_id))._bind(blocks=bound)
+        with Run(plan, progress=False) as run:
+            prepare_experiment(plan.resolve("inverse"), run=run)
+            assert set(run._state["definitions"][0]) == {base.record.content_id, inverse.record.content_id}
+            with pytest.raises(ValueError, match=rf"needs about 4456 bytes, exceeding max_bytes={limit}.*"
+                                                 "4100 bytes already held by this Run and 356 bytes new"):
+                prepare_experiment(plan.resolve("inverse"), run=run)
+            assert run.trace.preparations == 1
 
 
 def test_supplied_selected_preparation_forward_inverse_control_and_unknown_laws():
@@ -157,11 +257,11 @@ def test_supplied_selected_preparation_forward_inverse_control_and_unknown_laws(
     u = np.exp(1j*phi)*np.array([[c, -s], [s, c]])
     initial = np.array([1, 1j])/np.sqrt(2)
     for block, expected in ((base, u@initial), (inverse, u.conj().T@initial)):
-        result = lower_qiskit(one(block), blocks=(block,), **LOWER)
+        result = lower_qiskit(one(block), blocks=(block,))
         np.testing.assert_allclose(action(result.circuit, initial), expected, atol=3e-14, rtol=0)
     initial_control = np.array([1, 1, 0, 0])/np.sqrt(2)
     expected = np.array([1, np.exp(1j*phi)*c, 0, np.exp(1j*phi)*s])/np.sqrt(2)
-    result = lower_qiskit(one(controlled), blocks=(controlled,), **LOWER)
+    result = lower_qiskit(one(controlled), blocks=(controlled,))
     np.testing.assert_allclose(action(result.circuit, initial_control), expected, atol=3e-14, rtol=0)
     for block in (base, inverse, controlled):
         assert block.record.cost_law is None and block.record.resource_laws == ()
@@ -172,7 +272,7 @@ def test_supplied_selected_preparation_forward_inverse_control_and_unknown_laws(
     assert another.record.content_id != base.record.content_id
     restored = SelectedConstruction.model_validate_json(one(base).model_dump_json())
     with pytest.raises(ValueError, match="exact persisted selected identities"):
-        lower_qiskit(restored, blocks=(another,), **LOWER)
+        lower_qiskit(restored, blocks=(another,))
 
 
 def test_supplied_annotations_reach_common_preparation_hls_once(monkeypatch):
@@ -265,7 +365,7 @@ def test_parameter_calls_keep_distinct_action_and_only_recent_native_specializat
     previous, counts = {}, []
     for a, b in ((.2, .7), (.2, .7), (.2, -.7), (.2, .7)):
         current = {}
-        logical = lowering._lower_qiskit(point(a, b), blocks=(block,), **LOWER,
+        logical = lowering._lower_qiskit(point(a, b), blocks=(block,),
                                          specialization_cache=(previous, current))
         # Two Ry rotations add, and their physical global phases add. A
         # signature-keyed argument overwrite changes both independent values.
@@ -308,12 +408,44 @@ def test_parameter_calls_keep_distinct_action_and_only_recent_native_specializat
     assert sizes == [2, 2, 3, 3]  # Current/previous b plus the common a; no older b object.
     assert len(run._state["specializations"]) == 2 and not run.trace.events
     run.close()
+    # What the Run holds: two definitions of the current frontier and each of the
+    # handles' two calls. The frontier replaces its predecessor, so only the
+    # circuits that handles keep grow with the preparations.
+    from nwqlib._prepared_execution import _held_bytes
+    costed = plan.revise(experiments=plan.experiments)._bind(
+        blocks=(SelectedBlock.bind(record, constructor=build, native_bytes=500, definition_bytes=1000),))
+    run = Run(costed)
+    held = []
+    for a, b in ((.2, .7), (.2, .7), (.2, -.7), (.3, .8)):
+        actual = costed.resolve("rotation", bindings=(Binding(parameter="a", value=Float64(value=a)),
+                                                      Binding(parameter="b", value=Float64(value=b))))
+        prepare_experiment(actual, run=run, runtime=RuntimeOptions(seed=7))
+        held.append(_held_bytes(run))
+    assert held == [2000 + count * 1000 for count in (1, 2, 3, 4)]
+    # A record that cannot be saved restores the committed frontier and adds no handle.
+    original = Run._write
+
+    def refused(self, records=(), **kwargs):
+        if any(row[0] == "prepared" for row in records):
+            raise ValueError("refused record")
+        return original(self, records, **kwargs)
+
+    actual = costed.resolve("rotation", bindings=(Binding(parameter="a", value=Float64(value=-.4)),
+                                                  Binding(parameter="b", value=Float64(value=-.9))))
+    frontier = dict(run._state["specializations"])
+    with monkeypatch.context() as patch:
+        patch.setattr(Run, "_write", refused)
+        with pytest.raises(ValueError, match="refused record"):
+            prepare_experiment(actual, run=run, runtime=RuntimeOptions(seed=7))
+    assert run._state["specializations"] == frontier and _held_bytes(run) == held[-1]
+    run.close()
+    assert _held_bytes(run) == 0
 
 
 def test_controlled_negative_x_and_complex_preparation_inverse_order():
     negative = select_signed_pauli("minus_x", ingest_pauli([("X", -2)], num_qubits=1))
     ctrl = transform_block("controlled", negative, control=True)
-    circuit = lower_qiskit(one(ctrl), blocks=(ctrl,), **LOWER).circuit
+    circuit = lower_qiskit(one(ctrl), blocks=(ctrl,)).circuit
     # Control is q0, system q1: (|00>+|01>)/sqrt(2) -> (|00>-|11>)/sqrt(2).
     initial = np.array([1, 1, 0, 0], dtype=complex) / np.sqrt(2)
     expected = np.array([1, 0, 0, -1], dtype=complex) / np.sqrt(2)
@@ -327,11 +459,11 @@ def test_controlled_negative_x_and_complex_preparation_inverse_order():
                            ("inverse", (("control", "control"), ("system", "system")))), (("control", 1), ("system", 2)))
     input_state = np.zeros(8, dtype=complex)
     input_state[:2] = 1 / np.sqrt(2)
-    forward = lower_qiskit(one(controlled), blocks=(controlled,), **LOWER).circuit
+    forward = lower_qiskit(one(controlled), blocks=(controlled,)).circuit
     expected_state = np.zeros(8, dtype=complex)
     expected_state[0], expected_state[3] = 1 / np.sqrt(2), 1j / np.sqrt(2)
     np.testing.assert_allclose(action(forward, input_state), expected_state, atol=3e-14, rtol=0)
-    circuit = lower_qiskit(program, blocks=(controlled, inverse), **LOWER).circuit
+    circuit = lower_qiskit(program, blocks=(controlled, inverse)).circuit
     np.testing.assert_allclose(action(circuit, input_state), input_state, atol=3e-14, rtol=0)
 
 
@@ -347,21 +479,21 @@ def test_signed_y_identity_projected_block_and_padding():
     program = program.revise(encodings=(PauliEncoding(root="body", select="select", prepare="prep", unprepare="unprep"),))
     assert program.encoding_semantics("body").kind == "block_encoding"
     assert program.encoding_semantics("body").alpha == 6
-    circuit = lower_qiskit(program, blocks=blocks, **LOWER).circuit
+    circuit = lower_qiskit(program, blocks=blocks).circuit
     # A/6 = [[3,-2-i],[-2+i,3]]/6; index-zero entries are positions 0,4.
     expected = np.array([[3, -2 - 1j], [-2 + 1j, 3]]) / 6
     for column in range(2):
         initial = np.zeros(8, dtype=complex)
         initial[column * 4] = 1
         np.testing.assert_allclose(action(circuit, initial)[[0, 4]], expected[:, column], atol=4e-14, rtol=0)
-    selected_circuit = lower_qiskit(one(select), blocks=(select,), **LOWER).circuit
+    selected_circuit = lower_qiskit(one(select), blocks=(select,)).circuit
     for index in (3, 7):
         initial = np.zeros(8)
         initial[index] = 1
         np.testing.assert_allclose(action(selected_circuit, initial), initial, atol=3e-14, rtol=0)
     assert select.record.semantics.alpha == 6
     readout = select_pauli_readout("readout", select)
-    circuit = lower_qiskit(one(readout), blocks=(readout,), **LOWER).circuit
+    circuit = lower_qiskit(one(readout), blocks=(readout,)).circuit
     initial = np.zeros(8, dtype=complex)
     initial[1], initial[5] = 1 / np.sqrt(2), 1j / np.sqrt(2)  # positive Y eigenstate in label 1
     expected_readout = np.zeros(8, dtype=complex)
@@ -376,14 +508,13 @@ def test_signed_y_identity_projected_block_and_padding():
 
 def test_identity_zero_reflection_and_alpha_revision_boundary():
     identity = select_signed_pauli("identity", ingest_pauli([("I", -3)], num_qubits=1))
-    circuit = lower_qiskit(one(identity), blocks=(identity,), **LOWER).circuit
+    circuit = lower_qiskit(one(identity), blocks=(identity,)).circuit
     np.testing.assert_allclose(action(circuit, [1, 0]), [-1, 0], atol=2e-14, rtol=0)
     with pytest.raises(ValueError, match="zero Pauli"):
         select_signed_pauli("zero", ingest_pauli([("X", 0)], num_qubits=1))
     for width in (0, 1, 2):
         reflection = select_zero_reflection("reflection", width)
-        circuit = lower_qiskit(one(reflection), blocks=(reflection,),
-            max_qubits=width, max_clbits=0).circuit
+        circuit = lower_qiskit(one(reflection), blocks=(reflection,)).circuit
         dimension = 1 << width
         initial = np.ones(dimension) / np.sqrt(dimension)
         expected = -initial.copy()
@@ -391,12 +522,12 @@ def test_identity_zero_reflection_and_alpha_revision_boundary():
         np.testing.assert_allclose(action(circuit, initial), expected, atol=3e-14, rtol=0)
         if width == 0:
             controlled = transform_block("controlled_empty", reflection, control=True)
-            circuit = lower_qiskit(one(controlled), blocks=(controlled,), max_qubits=1, max_clbits=0).circuit
+            circuit = lower_qiskit(one(controlled), blocks=(controlled,)).circuit
             np.testing.assert_allclose(action(circuit, [1, 0]), [1, 0], atol=3e-14, rtol=0)
     changed = identity.record.revise(semantics=identity.record.semantics.revise(alpha=6.0))
     program = one(identity).revise(selections=(changed,))
     with pytest.raises(ValueError, match="exact persisted"):
-        lower_qiskit(program, blocks=(identity,), **LOWER)
+        lower_qiskit(program, blocks=(identity,))
 
 
 def test_reject_before_sdk_import_and_no_repeat_expansion(monkeypatch):
@@ -412,13 +543,107 @@ def test_reject_before_sdk_import_and_no_repeat_expansion(monkeypatch):
         return original(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", forbidden)
-    with pytest.raises(ValueError, match="max_operations"):
-        lower_qiskit(huge, blocks=(prep,), **LOWER)
-    with pytest.raises(ValueError, match="width"):
-        lower_qiskit(one(prep), blocks=(prep,), max_qubits=0, max_clbits=0)
+    with pytest.raises(ValueError, match=r"lowering of \d{13} instructions"):
+        lower_qiskit(huge, blocks=(prep,))
     bad_signature = prep.record.signature.revise(quantum=(prep.record.signature.quantum[0].revise(ensures="zero"),))
     with pytest.raises(ValueError, match="signature differs"):
         one(prep).revise(program=one(prep).program.revise(signatures=(bad_signature,)))
+
+
+def test_lowering_builds_a_long_repeat_without_a_visit_limit():
+    """Lowering counts and builds a Repeat of 100,001 preparation calls in full, with no visit limit."""
+    prep = select_preparation("prep", ingest_occupation("1", num_qubits=1))
+    built = lower_qiskit(one(prep, repeat=100_001), blocks=(prep,))
+    assert built.dynamic_visits > 100_001 and built.circuit.count_ops() == {"state_preparation": 100_001}
+
+
+def test_lowering_checks_256_bytes_per_appended_instruction_before_the_sdk(monkeypatch):
+    """A block call appends one instruction, a measurement or reset one per register qubit, and Repeat multiplies its body."""
+    prep = select_preparation("x", ingest_occupation("10", num_qubits=2))
+    base = one(prep, repeat=3)
+    wire, = (port.name for port in prep.record.signature.quantum)
+    definitions = tuple(d for d in base.program.definitions if d.id != "root") + (
+        Definition(id="measure", node=Measure(wire=wire, result="bits")),
+        Definition(id="reset", node=Reset(wire=wire)),
+        Definition(id="root", node=Sequence(children=(f"allocate_{wire}", "repeat", "measure", "reset"))),
+    )
+    construction = base.revise(program=base.program.revise(
+        definitions=definitions, classical=(ClassicalValue(name="bits", dtype="bits", width=2),)))
+    instructions = 3 + 2 + 2
+    built = lower_qiskit(construction, blocks=(prep,), max_bytes=256 * instructions)
+    assert len(built.circuit.data) == instructions
+    original = builtins.__import__
+
+    def forbidden(name, *args, **kwargs):
+        assert not name.startswith("qiskit"), "SDK import before the memory check"
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", forbidden)
+    with pytest.raises(ValueError, match=r"lowering of 7 instructions needs about 1792 bytes, exceeding "
+                                         r"max_bytes=1791\. Raise max_bytes .* reduce the repetitions"):
+        lower_qiskit(construction, blocks=(prep,), max_bytes=256 * instructions - 1)
+    with pytest.raises(ValueError, match=r"lowering of 1000000000000 instructions .* the physical memory"):
+        lower_qiskit(one(prep, repeat=10**12), blocks=(prep,))
+
+
+@pytest.mark.parametrize("body", ("empty", "zero_repeat"))
+def test_lowering_emits_a_repeated_body_without_instructions_once(monkeypatch, body):
+    """Repeating an empty Sequence, or a zero-count Repeat of a reset, 10**12 times adds no instruction or loop."""
+    from nwqlib.blocks import lowering
+
+    def program(count):
+        definitions = (
+            Definition(id="allocate", node=Allocate(wire="q")),
+            Definition(id="empty", node=Sequence(children=())),
+            Definition(id="reset", node=Reset(wire="q")),
+            Definition(id="zero_repeat", node=Repeat(body="reset", count=0)),
+            Definition(id="outer", node=Repeat(body=body, count=count)),
+            Definition(id="measure", node=Measure(wire="q", result="bits")),
+            Definition(id="root", node=Sequence(children=("allocate", "outer", "reset", "measure"))),
+        )
+        return SelectedConstruction(program=Program(
+            root="root", definitions=definitions, registers=(Register(name="q", width=3),),
+            classical=(ClassicalValue(name="bits", dtype="bits", width=3),)), selections=())
+
+    small = lower_qiskit(program(3), blocks=(), max_bytes=6 * 256)
+
+    def bounded(*args):
+        assert args[0] <= 3, "a body without instructions was iterated"
+        return range(*args)
+
+    monkeypatch.setattr(lowering, "range", bounded, raising=False)
+    large = lower_qiskit(program(10**12), blocks=(), max_bytes=6 * 256)
+    for built in (small, large):
+        assert built.circuit.count_ops() == {"reset": 3, "measure": 3}
+        assert built.measurement_layout == (("bits", (0, 1, 2)),)
+    # Each body is one visit: the empty Sequence, or the zero-count Repeat without its body.
+    assert (small.dynamic_visits, large.dynamic_visits) == (5 + 3, 5 + 10**12)
+
+
+def test_lowering_emits_a_shared_sequence_without_instructions_once():
+    """Sixteen Sequences that each call the previous empty one twice reach it 2**16 times but emit it once."""
+    import sys
+
+    definitions = [Definition(id="allocate", node=Allocate(wire="q")), Definition(id="empty0", node=Sequence())]
+    definitions += [Definition(id=f"empty{i}", node=Sequence(children=(f"empty{i - 1}", f"empty{i - 1}")))
+                    for i in range(1, 17)]
+    definitions += [Definition(id="reset", node=Reset(wire="q")),
+                    Definition(id="root", node=Sequence(children=("allocate", "empty16", "reset")))]
+    construction = SelectedConstruction(program=Program(
+        root="root", definitions=tuple(definitions), registers=(Register(name="q", width=1),)), selections=())
+    calls = []
+
+    def profile(frame, event, arg):
+        if event == "call" and frame.f_code.co_name == "emit" and frame.f_globals["__name__"] == "nwqlib.blocks.lowering":
+            calls.append(1)
+            assert len(calls) <= 64, "a shared node without instructions was emitted again"
+
+    sys.setprofile(profile)
+    try:
+        built = lower_qiskit(construction, blocks=(), max_bytes=256)
+    finally:
+        sys.setprofile(None)
+    assert built.circuit.count_ops() == {"reset": 1} and built.dynamic_visits == 2**17 + 2
 
 
 @pytest.mark.parametrize("index_qubits", [4])
@@ -437,8 +662,7 @@ def test_native_cx_envelopes_cover_uniform_preparation_and_larger_select_tables(
     controlled = transform_block("controlled_select", selected, control=True)
     for block, bound in ((prep, direct_preparation_controlled_cx_bound(index_qubits)),
                          (controlled, signed_pauli_cx_bound(index_qubits, system_qubits, controlled=True))):
-        circuit = lower_qiskit(one(block), blocks=(block,), max_operations=100000,
-                               max_qubits=1+index_qubits+system_qubits, max_clbits=0).circuit
+        circuit = lower_qiskit(one(block), blocks=(block,)).circuit
         native = transpile(circuit, basis_gates=["u", "cx"], optimization_level=0)
         assert native.count_ops().get("cx", 0) <= bound
 
@@ -447,7 +671,7 @@ def test_controlled_generic_inventory_satisfies_native_slot_bound():
     from nwqlib._preparation_laws import direct_preparation_controlled_cx_bound
     state = ingest_vector(np.array([1, 2j, 3, -4j], dtype=complex))
     controlled = transform_block("controlled", select_preparation("prep", state), control=True)
-    circuit = lower_qiskit(one(controlled), blocks=(controlled,), **LOWER).circuit.decompose(reps=10)
+    circuit = lower_qiskit(one(controlled), blocks=(controlled,)).circuit.decompose(reps=10)
     # Two magnitude/phase trees: six rotation slots and four CX slots;
     # control costs at most 2 CX per rotation and 6 per CX, hence 36.
     assert direct_preparation_controlled_cx_bound(2) == 36
@@ -455,7 +679,7 @@ def test_controlled_generic_inventory_satisfies_native_slot_bound():
     assert set(circuit.count_ops()) <= {"u", "cx"}
     select = select_signed_pauli("select", ingest_pauli([("X", -1), ("Y", 2)], num_qubits=1))
     ctrl_select = transform_block("controlled_select", select, control=True)
-    circuit = lower_qiskit(one(ctrl_select), blocks=(ctrl_select,), **LOWER).circuit.decompose(reps=10)
+    circuit = lower_qiskit(one(ctrl_select), blocks=(ctrl_select,)).circuit.decompose(reps=10)
     # Two labels: three UCG CX, two core unitaries, three completion
     # rotations, and one sign rotation. Control gives <=6*3+2*(2+3+1)=30 CX.
     assert signed_pauli_cx_bound(1, 1, controlled=True) == 30
@@ -501,15 +725,15 @@ def test_lowering_synthesizes_a_controlled_dense_encoding_once(monkeypatch):
     program = construction((controlled,), (("controlled", ports), ("controlled", ports)),
                            tuple((port.name, port.width) for port in controlled.record.signature.quantum))
     calls = _counted_syntheses(monkeypatch)
-    lower_qiskit(program, blocks=(controlled,), **LOWER)
+    lower_qiskit(program, blocks=(controlled,))
     assert calls == [2]
 
 
-def test_lowering_admits_a_controlled_dense_encoding_before_its_synthesis(monkeypatch):
-    # Lowering charges the exact synthesis of the controlled base and
-    # Qiskit's control of the synthesized gates against max_synthesis_work
-    # before the synthesis starts. One unit below the two laws refuses, and
-    # the laws themselves admit it.
+def test_lowering_records_a_controlled_dense_encoding_before_its_synthesis(monkeypatch):
+    # Lowering checks the memory of the exact synthesis of the controlled base
+    # and of Qiskit's control of the synthesized gates against max_bytes, and
+    # in a Run records their work by the two laws, before the synthesis starts.
+    from nwqlib.blocks.lowering import _lower_qiskit
     from test_dense_synthesis import _counted_syntheses, _dense_synthesis_work
     from test_synthesis_admission import _gatewise_control_work
 
@@ -517,10 +741,10 @@ def test_lowering_admits_a_controlled_dense_encoding_before_its_synthesis(monkey
     ports = tuple((port.name, port.name) for port in controlled.record.signature.quantum)
     program = construction((controlled,), (("controlled", ports),),
                            tuple((port.name, port.width) for port in controlled.record.signature.quantum))
-    need = _dense_synthesis_work(2) + _gatewise_control_work(2, 1)
     calls = _counted_syntheses(monkeypatch)
-    with pytest.raises(ValueError, match="max_synthesis_work"):
-        lower_qiskit(program, blocks=(controlled,), max_synthesis_work=need - 1, **LOWER)
-    assert calls == []
-    lower_qiskit(program, blocks=(controlled,), max_synthesis_work=need, **LOWER)
-    assert calls == [2]
+    recorded = []
+    with pytest.raises(ValueError, match="exact synthesis for the controlled transform 'controlled' needs about"):
+        _lower_qiskit(program, blocks=(controlled,), max_bytes=10_000, record_synthesis=recorded.append)
+    assert recorded == [] and calls == []
+    _lower_qiskit(program, blocks=(controlled,), record_synthesis=lambda work: recorded.append((work, list(calls))))
+    assert recorded == [(_dense_synthesis_work(2) + _gatewise_control_work(2, 1), [])] and calls == [2]

@@ -4,18 +4,18 @@ The larger historical reference cases remain explicit test selectors. This
 file is not a finite native acceptance command or permission to run a campaign.
 """
 
+from fractions import Fraction
 import math
+import re
 import numpy as np
 import pytest
 from qiskit.quantum_info import Operator
-from _qsp_references import cks_inverse_coefficients
+from _qsp_references import cks_inverse_coefficients, restricted_inverse_residual_bound
 from nwqlib.algorithms.qls import numerical as qls_numerical
 from nwqlib.algorithms.qls.constants import QLS_TARGET_MARGIN
-import nwqlib.subroutines.qsp.inverse as qsp_inverse
 from nwqlib.subroutines.block_encoding import block_encoding_top_left, build_block_encoding
-from nwqlib.subroutines.qsp import (
-    build_real_chebyshev_encoding, chebyshev_polynomial_sup_bound, solve_symmetric_qsp_phases,
-)
+from nwqlib.subroutines.qsp import build_real_chebyshev_encoding, chebyshev_polynomial_sup_bound, solve_wx_qsp_phases
+from nwqlib.subroutines.qsp.inverse import _inverse_chebyshev, _table
 from nwqlib.subroutines.qsp.shortcut import _realize_kernel_reflection, plan_kernel_reflection
 
 def _normed_qsp_target(coefficients: tuple[float, ...]) -> tuple[np.ndarray, float]:
@@ -23,39 +23,123 @@ def _normed_qsp_target(coefficients: tuple[float, ...]) -> tuple[np.ndarray, flo
     return np.asarray(coefficients) / scale, scale
 
 
-
-def test_inverse_fit_meets_independent_relative_residual() -> None:
-    """The selected coefficients approximate 1/(kappa*x) on their stated domain."""
-    fit = qsp_inverse._fit_inverse_chebyshev(4.0, 1.0e-2)
-    assert fit.kappa == 4.0
-    assert fit.certificate <= 1.0e-2
-    with pytest.raises(ValueError, match="positive width"):
-        qsp_inverse._fit_inverse_chebyshev(1.0, 1.0e-2)
-    grid = np.linspace(0.25, 1.0, 25 * fit.degree)
-    values = np.polynomial.chebyshev.chebval(grid, fit.coefficients)
-    assert np.max(np.abs(4.0 * grid * values - 1.0)) <= 1.0e-2
+def _chebyshev_t(m: int, t: Fraction) -> Fraction:
+    previous, current = Fraction(1), t
+    for _ in range(m - 1):
+        previous, current = current, 2 * t * current - previous
+    return current if m else Fraction(1)
 
 
+def test_minimax_inverse_matches_exact_rational_reference_and_its_relative_residual() -> None:
+    """The stored kappa=4 table equals the exact minimax polynomial off its DCT nodes.
 
-def test_cks_cross_check_agrees_within_summed_certificates() -> None:
-    """[CKS] (arXiv:1511.02306v2) closed form and the fit agree on D within their certificates."""
+    With a = 1/4 and m = 6, P(x) = (1 - T_6(t(x^2))/T_6(17/15))/(4x),
+    t(y) = (1 + a^2 - 2y)/(1 - a^2), is evaluated in rational arithmetic at
+    x = 3/10, which is not one of the 12 Chebyshev zeros of the construction.
+    """
+    inverse = _inverse_chebyshev(4.0, 0.1)
+    assert (inverse.degree, inverse.ideal_degree) == (11, 11)
+    assert all(c == 0 for c in inverse.coefficients[::2])
+    a, x = Fraction(1, 4), Fraction(3, 10)
+    exact = (1 - _chebyshev_t(6, (1 + a * a - 2 * x * x) / (1 - a * a))
+             / _chebyshev_t(6, (1 + a * a) / (1 - a * a))) / (4 * x)
+    assert abs(np.polynomial.chebyshev.chebval(0.3, inverse.coefficients) - float(exact)) <= 1e-15
+    assert inverse.minimax_error == pytest.approx(float(1 / _chebyshev_t(6, Fraction(17, 15))), rel=1e-14)
+    grid = np.linspace(0.25, 1.0, 4001)
+    residual = np.max(np.abs(4.0 * grid * np.polynomial.chebyshev.chebval(grid, inverse.coefficients) - 1.0))
+    assert inverse.minimax_error <= residual + 1e-15 and residual <= inverse.residual_check_value <= 0.1
+    with pytest.raises(ValueError, match="kappa must exceed 1"):
+        _inverse_chebyshev(1.0, 0.1)
+
+
+def test_minimax_inverse_degree_boundary_and_numerical_refinement() -> None:
+    """The degree changes exactly where sech(m beta) crosses epsilon_inv; a marginal table is refined.
+
+    For kappa = 4, sech(6 beta) = 2/((5/3)^6 + (3/5)^6). At kappa = 43/32
+    the degree-1 minimax residual is 825/2873, and with epsilon_inv 2e-15
+    above it the check value of the degree-1 table, which includes
+    4 eps log2(12) = 3.6e-15, exceeds the tolerance. The review witness is
+    a binary64 epsilon at which a degree-1 coefficient from another
+    evaluation exceeds the tolerance by exactly 2**-58 at x = 1, while the
+    coefficient computed here meets it. The returned tables of either degree
+    are checked against an exact rational upper bound on their residual. At
+    kappa = 3 the epsilon just above sech(3 beta) = 16/65 leaves the
+    degree-5 table no room. At kappa = 100 and epsilon_inv = 1e-12 the
+    formation term of the refined table exceeds that of the first, and the
+    refinement reserve covers it. At 1e-14 the formation term alone exceeds
+    the tolerance.
+    """
+    delta = float(Fraction(2) / (Fraction(5, 3) ** 6 + Fraction(3, 5) ** 6))
+    above, below = _inverse_chebyshev(4.0, delta * (1 + 1e-9)), _inverse_chebyshev(4.0, delta * (1 - 1e-9))
+    assert (above.degree, above.ideal_degree, below.degree, below.ideal_degree) == (11, 11, 13, 13)
+    kappa, witness = Fraction(43, 32), float.fromhex("0x1.260c4beaf89b0p-2")
+    archived, computed = Fraction(8627849756020611, 2**53), Fraction(_table(43 / 32, 1, None)[0][1])
+    assert restricted_inverse_residual_bound([archived], kappa) - Fraction(witness) == Fraction(1, 2**58)
+    assert restricted_inverse_residual_bound([computed], kappa) <= Fraction(witness)
+    for epsilon in (825 / 2873 + 2e-15, witness):
+        marginal = _inverse_chebyshev(43 / 32, epsilon)
+        assert marginal.ideal_degree == 1 <= marginal.degree and marginal.degree % 2 == 1
+        odd = [Fraction(c) for c in marginal.coefficients[1::2]]
+        assert restricted_inverse_residual_bound(odd, kappa) <= Fraction(marginal.residual_check_value)
+        assert marginal.residual_check_value <= epsilon
+    boundary = _inverse_chebyshev(3.0, 0.24615384615384617)
+    assert boundary.degree == 7 and boundary.residual_check_value <= 0.24615384615384617
+    refined = _inverse_chebyshev(100.0, 1e-12)
+    assert refined.degree > refined.ideal_degree and refined.residual_check_value <= 1e-12
+    with pytest.raises(ValueError, match="unresolved"):
+        _inverse_chebyshev(100.0, 1e-14)
+
+
+def test_unresolved_inverse_check_reports_its_compared_value_for_a_table_that_meets_the_tolerance() -> None:
+    """At kappa = 1.01 and epsilon_inv = 3e-15 the degree-13 table meets the tolerance, which its check cannot decide.
+
+    The refusal reports sech(7 beta), the formation term and the resolution
+    4 eps log2(60) of M = 60 evaluation points, and the check value formed
+    from them. An exact rational bound puts the residual of the same table
+    below 3e-15. At epsilon_inv = 1e-14 the check accepts this table, which
+    records the value that the check compared.
+    """
+    with pytest.raises(ValueError, match="unresolved") as refused:
+        _inverse_chebyshev(1.01, 3e-15)
+    reported = re.search(r"degree 13 .* = \((\S+) \+ (\S+)\) \+ \((\S+) \+ (\S+)\) = (\S+) exceeds",
+                         str(refused.value))
+    delta, formation, repeated, resolution, value = map(float, reported.groups())
+    coefficients, *terms = _table(1.01, 7, None)
+    assert delta == pytest.approx(1 / math.cosh(14 * math.atanh(1 / 1.01)), rel=1e-12)
+    assert formation == repeated and [formation, resolution] == terms
+    assert resolution == 4 * np.finfo(float).eps * (60).bit_length()
+    assert value == (delta + formation) + (formation + resolution) > 3e-15
+    odd = [Fraction(c) for c in coefficients[1::2]]
+    assert restricted_inverse_residual_bound(odd, Fraction(1.01)) <= Fraction(3e-15)
+    accepted = _inverse_chebyshev(1.01, 1e-14)
+    assert accepted.coefficients == tuple(coefficients) and accepted.residual_check_value == value
+
+
+def test_cks_cross_check_agrees_within_summed_residual_bounds() -> None:
+    """[CKS] (arXiv:1511.02306v2) closed form and the minimax table agree on D within their residuals."""
 
     kappa_be, epsilon_inv = 4.0, 1.0e-2
-    fit = qsp_inverse._fit_inverse_chebyshev(kappa_be, epsilon_inv)
+    inverse = _inverse_chebyshev(kappa_be, epsilon_inv)
     cks = cks_inverse_coefficients(kappa_be, epsilon_inv)
     domain = np.linspace(1.0 / kappa_be, 1.0, 25 * (len(cks) - 1))
-    fit_values = kappa_be * np.polynomial.chebyshev.chebval(domain, fit.coefficients)
+    table_values = kappa_be * np.polynomial.chebyshev.chebval(domain, inverse.coefficients)
     cks_values = np.polynomial.chebyshev.chebval(domain, cks)
-    cks_certificate = float(np.max(np.abs(domain * cks_values - 1.0)))
-    assert cks_certificate <= epsilon_inv  # the paper form holds its own bound
-    disagreement = float(np.max(np.abs(domain * (fit_values - cks_values))))
-    assert disagreement <= fit.certificate + cks_certificate + 1.0e-12
+    cks_residual = float(np.max(np.abs(domain * cks_values - 1.0)))
+    assert cks_residual <= epsilon_inv  # the paper form holds its own bound
+    disagreement = float(np.max(np.abs(domain * (table_values - cks_values))))
+    assert disagreement <= inverse.residual_check_value + cks_residual + 1.0e-12
 
 
-
-def test_kernel_reflection_polynomial_eq6_and_bounds() -> None:
+def test_kernel_reflection_polynomial_eq6_eq62_and_bounds() -> None:
+    """The DCT table equals Dalzell Eq. (62) in rational arithmetic at x = 3/10 and keeps K(0) = 1."""
     kr = _realize_kernel_reflection(plan_kernel_reflection(4.0, 1.0e-2))
-    assert kr.kr_ell == int(np.ceil(4.0 * np.log(2.0 / 1.0e-2) / 2.0))
+    ell = int(np.ceil(4.0 * np.log(2.0 / 1.0e-2) / 2.0))
+    assert kr.kr_ell == ell and all(c == 0 for c in kr.coefficients[1::2])
+    delta, x = Fraction(1, 4), Fraction(3, 10)
+    filter_delta = 1 / _chebyshev_t(ell, (1 + delta * delta) / (1 - delta * delta))
+    filter_x = _chebyshev_t(ell, (1 + delta * delta - 2 * x * x) / (1 - delta * delta)) * filter_delta
+    exact = (2 * filter_x - 1 + filter_delta) / (1 + filter_delta)
+    assert abs(np.polynomial.chebyshev.chebval(0.3, kr.coefficients) - float(exact)) <= 1e-14
     grid = np.linspace(0.0, 1.0, 2001)
     values = np.polynomial.chebyshev.chebval(grid, kr.coefficients)
     assert np.polynomial.chebyshev.chebval(0.0, kr.coefficients) == pytest.approx(1.0, abs=1e-12)
@@ -63,9 +147,7 @@ def test_kernel_reflection_polynomial_eq6_and_bounds() -> None:
     assert np.max(off_kernel) <= -1.0 + 4.0e-2 / 1.01 + 1.0e-12
     assert np.min(off_kernel) >= -1.0 - 1.0e-12
     normed, _ = _normed_qsp_target(kr.coefficients)
-    phases = solve_symmetric_qsp_phases(normed)
-    assert phases.max_residual <= 1.0e-12
-
+    assert solve_wx_qsp_phases(normed).residual_sup_bound <= 1.0e-12
 
 
 def test_real_pass_right_singular_semantics_on_non_normal_blocks() -> None:
@@ -84,7 +166,7 @@ def test_real_pass_right_singular_semantics_on_non_normal_blocks() -> None:
 
     even = _realize_kernel_reflection(plan_kernel_reflection(2.0, 0.1))
     even_target, _ = _normed_qsp_target(even.coefficients)
-    even_phases = solve_symmetric_qsp_phases(even_target)
+    even_phases = solve_wx_qsp_phases(even_target)
     even_block = block_encoding_top_left(
         Operator(build_real_chebyshev_encoding(encoding, even_phases.phases)).data,
         num_ancillas=encoding.num_ancillas + 2,
@@ -99,7 +181,7 @@ def test_real_pass_right_singular_semantics_on_non_normal_blocks() -> None:
     odd_coefficients = np.zeros(4)
     odd_coefficients[1] = 0.2
     odd_coefficients[3] = 0.1
-    odd_phases = solve_symmetric_qsp_phases(odd_coefficients)
+    odd_phases = solve_wx_qsp_phases(odd_coefficients)
     odd_block = block_encoding_top_left(
         Operator(build_real_chebyshev_encoding(encoding, odd_phases.phases)).data,
         num_ancillas=encoding.num_ancillas + 2,

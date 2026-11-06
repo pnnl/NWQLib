@@ -16,12 +16,12 @@ from nwqlib._choice_archive import unsupported_archive_format
 from nwqlib.core.records import FrozenArray
 
 from nwqlib.operators.inputs import OperatorInput
-from nwqlib.problems.inputs import StateInput
+from nwqlib.problems.inputs import PhysicalScale, StateInput
 from .method import LCHS
 from .primary_records import LCHSReconstruction
 
 # Layout of the saved LCHS manifest: Method, Plan, Problem, output, native data and selected blocks.
-FORMAT = "lchs/10"
+FORMAT = "lchs/12"
 
 
 _RECORD_MODULES = {name: "nwqlib." + module for module, names in (
@@ -29,18 +29,31 @@ _RECORD_MODULES = {name: "nwqlib." + module for module, names in (
     ("algorithms.lchs.providers", ("LCHSCoefficientPlan", "LCHSQuadraturePlan", "LCHSPairCompatibility")),
     ("algorithms.lchs.time_independent_terms", ("LCHSQuadratureData", "LCHSProductFormulaSelectData", "_LCHSTrotterNodeRecord",
                                                "LCHSProductFormulaNodes")),
-    ("algorithms.lchs.selection", ("LCHSData",)),
+    ("algorithms.lchs.selection", ("LCHSData", "LCHSGenerator", "DenseLCHSInputs")),
+    ("operators.cartesian", ("PartFacts",)),
     ("algorithms.lchs.periodic", ("_PeriodicPayload",)),
     ("algorithms.lchs.select_synthesis", ("LCHSProductFormulaSelectPlan",)),
-    ("algorithms.lchs.source_selection", ("SourceBranchLayout",)),
+    ("algorithms.lchs.source_selection", ("SourceBranchLayout", "LCHSApplication", "LCHSApplicationFacts")),
+    ("algorithms.lchs.coherent_selection", ("PreparedCoherentRoute", "CoherentSelection", "CoherentCandidate",
+                                            "CoherentObjective", "CoherentControls", "CoherentRequest",
+                                            "SamplingTarget")),
     ("subroutines.block_encoding.core", ("BlockEncodingPlan",)),
+    ("subroutines.block_encoding.analytic_prep", ("AnalyticKernelPlan", "AnalyticKernelPreparation")),
     ("subroutines.block_encoding.banded", ("BandSpecification",)),
+    ("subroutines.block_encoding.joint", ("JointEncodingPlan", "DiagonalTable", "ComplexDiagonalTable")),
+    ("subroutines.block_encoding.nodes", ("UniformNodeRecipe",)),
+    ("subroutines.block_encoding.source_prep", ("FactorizedSourcePreparation",)),
     ("subroutines.pauli_decomposition", ("PauliDecomposition", "PauliTerm")),
-    ("subroutines.qsp.evolution", ("JacobiAngerExpansion", "QSPPreparedEvolution")),
-    ("subroutines.qsp.phases", ("SymmetricQSPPhases",)),
+    ("subroutines.qsp.evolution", ("JacobiAngerExpansion", "QSPPreparedEvolution", "SharedQSVTEvolutionPlan",
+                                   "QubitizedEvolutionPlan", "QubitizedTarget", "QubitizedTargetPlan")),
+    ("subroutines.qsp.phases", ("WxQSPPhases", "LaurentQSPPhases", "PhaseSynthesisEvidence")),
+    ("subroutines.qsp.imaginary_time", ("ImaginaryTimeExpansion", "ImaginaryTimeDegreeSelection")),
     ("subroutines.state_preparation.mps", ("MPSDecomposition",)),
     ("subroutines.trotterization.error_budget", ("TrotterStepSelection",)),
     ("subroutines._multiplexors", ("AffineAngleTable",)),
+    ("algorithms.lchs.sampled_plan", ("LCHSSampledPayload",)),
+    ("algorithms.lchs.sampled_qsp_bank", ("SampledQSPMemberPlan", "SampledQSPBucketPlan", "SampledQSPBankPlan",
+                                          "PreparedQSPBucket", "PreparedSampledQSPBank")),
 ) for name in names}
 
 
@@ -76,9 +89,11 @@ class _SelectedData:
         the Plan's own Method, ``array``, ``state`` or ``operator`` for a
         file written next to the archive (with ``leaves`` set, ``array``
         holds the ndarray itself), ``frozen_array`` for a ``FrozenArray``
-        stored as its array and read back as one, ``complex`` with real and imag
-        parts, ``mapping`` and ``tuple`` for containers (lists are saved as
-        tuples), or the record class name with its dataclass fields.
+        stored as its array and read back as one, ``physical_scale`` with the
+        mantissa, integer exponent and evidence of a ``PhysicalScale``,
+        ``complex`` with real and imag parts, ``mapping`` and ``tuple`` for
+        containers (lists are saved as tuples), or the record class name with
+        its dataclass fields.
         Anything else raises TypeError.
         """
         if isinstance(value, LCHS):
@@ -101,6 +116,10 @@ class _SelectedData:
             if isinstance(value, StateInput):
                 return dict(kind="state", value=self.files.write_state(name, value))
             return dict(kind="operator", value=self.files.write_operator(name, value))
+        if isinstance(value, PhysicalScale):
+            # The integer exponent and the binary64 mantissa are exact JSON values.
+            return dict(kind="physical_scale", mantissa=value.mantissa, exponent=value.exponent,
+                        evidence=value.evidence)
         if type(value) is complex:
             return dict(kind="complex", real=value.real, imag=value.imag)
         if isinstance(value, Mapping):
@@ -134,6 +153,8 @@ class _SelectedData:
             return self.files.read_state(value["value"])
         if kind == "operator":
             return self.files.read_operator(value["value"])
+        if kind == "physical_scale":
+            return PhysicalScale(mantissa=value["mantissa"], exponent=value["exponent"], evidence=value["evidence"])
         if kind == "complex":
             return complex(value["real"], value["imag"])
         if kind == "tuple":
@@ -154,8 +175,10 @@ _CONSTRUCTORS = {
     'parity': ('nwqlib.blocks.selection','_primitive_circuit'),
     'tensor_prep': ('nwqlib.algorithms.lchs.native','construct_preparation'),
     'select': ('nwqlib.algorithms.lchs.native','construct_select'),
+    'coherent_lcu': ('nwqlib.algorithms.lchs.native','construct_coherent_lcu'),
     'periodic_step': ('nwqlib.algorithms.lchs.periodic','construct_periodic_step'),
     'periodic_phase': ('nwqlib.algorithms.lchs.periodic','construct_periodic_phase'),
+    'pair': ('nwqlib.algorithms.lchs.sampled_plan','construct_pair'),
 }
 
 
@@ -165,11 +188,15 @@ def save(method,plan,files):
     Each block of the construction is saved as its known constructor name,
     or as the index of its base for an inverse or controlled copy. Only a PREP
     tensor block saves its payload. Planning gives the other blocks their data
-    from the Plan's own data, and loading gives it the same way. SELECT and
-    the periodic Strang blocks share the Plan's one numerical payload, SELECT
+    from the Plan's own data, and loading gives it the same way. SELECT, the
+    coherent LCU body and the periodic Strang blocks share the Plan's one
+    numerical payload, SELECT
     also takes the Problem's elapsed time, the input preparation is the
-    Problem's initial state (quantum.py, periodic.py and host.py) and a
-    parity block has no payload. No circuit is saved. Qiskit circuits are built only when a point
+    Problem's initial state (quantum.py, periodic.py and host.py), a
+    sampled-pair block takes the numerical payload, the Plan's
+    reconstruction, which holds its rows, and the Problem, whose states it
+    prepares with a source (sampled_plan.py), and a parity
+    block has no payload. No circuit is saved. Qiskit circuits are built only when a point
     is prepared.
 
     The numerical payload grows with the grid and the schedule (node tables,
@@ -190,10 +217,14 @@ def save(method,plan,files):
                     if block._constructor.__module__==module and block._constructor.__name__==function),None)
                 if key is None:
                     raise ValueError('LCHS archive requires its actual known selected constructor')
-                if key in {'select','periodic_step','periodic_phase'}:
+                if key in {'select','coherent_lcu','periodic_step','periodic_phase'}:
                     payload = block._payload[0] if key=='select' else block._payload
                     if payload is not plan._native['native_data']:
                         raise ValueError('LCHS native leaf differs from its shared selected data')
+                if key=='pair' and (block._payload[0] is not plan._native['native_data']
+                                    or block._payload[1] != plan.reconstruction
+                                    or block._payload[2].content_id != plan.problem.content_id):
+                    raise ValueError('LCHS pair block differs from its Plan payload, row table and Problem')
                 if key=='tensor_prep':
                     selected.append(dict(constructor=key,payload=data.write(block._payload)))
                 else:
@@ -220,7 +251,7 @@ def load(saved,files):
 
     Loading checks the format and restores each inverse or controlled copy
     from its saved base index. The periodic Strang payload is used as saved.
-    Loading never chooses a new grid, fits phases or solves an eigensystem.
+    Loading never chooses a new grid, synthesizes phases or solves an eigensystem.
     """
     if saved.get('format')!=FORMAT:
         raise unsupported_archive_format("LCHS archive", saved.get('format'), FORMAT)
@@ -229,13 +260,17 @@ def load(saved,files):
         output=files.read_output(saved['output']),reconstruction=LCHSReconstruction.model_validate(saved['plan']['reconstruction']))
     data = _SelectedData(files,method)
     selected = data.read(files.read_numpy_json(saved['native']))
-    native = {} if selected is None else dict(native_data=selected,
+    sampled = plan.reconstruction.pair_rows is not None
+    native = {} if selected is None else dict(native_data=selected) if sampled else dict(native_data=selected,
         coefficient_plan=selected.coefficient_plan if plan.problem.source is None else None)
     blocks = []
     if plan.construction.selections:
         from nwqlib.blocks.selection import SelectedBlock
-        payloads = dict(select=(selected,plan.problem.elapsed_time),periodic_step=selected,periodic_phase=selected,
-            input=plan.problem.initial_state,parity=None)
+        # A sampled-pair block reads its saved rows and step buckets from the
+        # Plan's reconstruction, so loading draws and selects nothing again.
+        payloads = dict(select=(selected,plan.problem.elapsed_time),coherent_lcu=selected,periodic_step=selected,
+            periodic_phase=selected,
+            input=plan.problem.initial_state,parity=None,pair=(selected,plan.reconstruction,plan.problem))
         for record,item in zip(plan.construction.selections,saved['selected'],strict=True):
             if 'base' in item:
                 block = SelectedBlock.bind(record,base=blocks[item['base']])
@@ -246,7 +281,15 @@ def load(saved,files):
                     payload = data.read(item['payload'])
                 else:
                     payload = payloads[key]
-                block = SelectedBlock.bind(record,payload=payload,constructor=getattr(import_module(module),function))
+                memory = {}
+                if key in ('periodic_step','periodic_phase'):
+                    from .periodic import _leaf_memory
+                    memory = _leaf_memory(payload,phase_only=key=='periodic_phase')
+                elif key=='pair' and plan.reconstruction.pair_qsp is None:
+                    from .sampled_plan import _pair_memory,_pair_word_sizes
+                    memory = _pair_memory(selected,plan.reconstruction,plan.problem,
+                                          _pair_word_sizes(selected,plan.reconstruction)[1])
+                block =SelectedBlock.bind(record,payload=payload,constructor=getattr(import_module(module),function),**memory)
             blocks.append(block)
     elif plan.construction.kernels:
         from .host import bind_host

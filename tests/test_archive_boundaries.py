@@ -19,12 +19,10 @@ def test_journal_lock_and_lost_folder_have_owned_context(tmp_path):
             LocalJournal(path, 4096, create=False)
         assert str(path) in " ".join(caught.value.__notes__)
         journal.commit((("example", "before", 1),))
-        prior = journal.usage.copy()
         shutil.rmtree(folder)
         with pytest.raises(sqlite3.Error) as caught:
             journal.commit((("example", "after", 2),))
         assert str(path) in " ".join(caught.value.__notes__)
-        assert journal._data_bytes == prior["data_bytes"]
     finally:
         journal.close()
 

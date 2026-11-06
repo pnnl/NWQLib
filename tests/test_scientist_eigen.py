@@ -1,5 +1,7 @@
 """Independent two-qubit eigenvalue witnesses on the selected public Method path."""
 
+import math
+
 import numpy as np
 import pytest
 from nwqlib.core.planning import Plan, RandomStreams
@@ -110,60 +112,72 @@ def test_saved_sampled_lanczos_result_reanalyzes_with_its_shot_counts(tmp_path):
     assert strict.cutoff == pytest.approx(2*2*np.sqrt(2*np.log(2*2/delta)/4096), rel=2e-15)
 
 
-# Projected analysis envelope of numerical.reconstruct at krylov_dimension m=2:
-# 512*m*m+128*m bytes and 32*m*m+16*m**3 work.
+# Projected analysis bytes of numerical.reconstruct at krylov_dimension m=2.
 ANALYSIS_BYTES = 512 * 2 * 2 + 128 * 2
-ANALYSIS_WORK = 32 * 2 * 2 + 16 * 2**3
-# The Pauli census and the Gershgorin frame each admit a fixed 65,536-byte
-# allowance before allocating (ENGINEERING_CONSTANTS "Chebyshev Lanczos
-# defaults" and "Eigen input conversion and classical preparation"), more than
-# the analysis envelope. A byte limit equal to the envelope therefore passes
-# the analysis admission and stops at that later phase, and the byte case
-# completes under the default limit.
-FIXED_PHASE = "Lanczos Pauli census|Gershgorin frame workspace"
 
 
-def at_envelope(limit, envelope, plan_method, method):
-    """Return the Method that completes: the envelope itself, or the default byte limit."""
-    if limit != "max_bytes":
-        return method(envelope)
-    with pytest.raises(ValueError, match=FIXED_PHASE):
-        plan_method(method(envelope))
-    return method(None)
+def test_lanczos_plan_admits_projected_analysis_before_acquisition():
+    """The projected analysis runs after every moment is acquired, but its bytes depend only on m.
 
-
-@pytest.mark.parametrize("mode,shots", [("quantum", None)])
-@pytest.mark.parametrize(
-    "limit,envelope,message",
-    [
-        ("max_bytes", ANALYSIS_BYTES, f"Lanczos projected analysis needs {ANALYSIS_BYTES} data bytes"),
-        ("max_analysis_work", ANALYSIS_WORK, "Lanczos projected analysis exceeds max_analysis_work"),
-    ],
-)
-def test_lanczos_plan_admits_projected_analysis_before_acquisition(mode, shots, limit, envelope, message):
-    """The projected analysis runs after every moment is acquired, but its envelope depends
-    only on m and the Method's limits. One unit below the envelope must stop plan(), so no
-    Run and no acquisition exist. At the envelope itself the analysis admission passes: a
-    max_analysis_work limit plans and completes, and a max_bytes limit stops at the fixed
-    census or Gershgorin allowance (FIXED_PHASE), so that case completes under the default
-    byte limit.
+    One byte below them stops plan(), so no Run and no acquisition exist. At
+    the bound the analysis admission passes and planning stops at the fixed
+    65,536-byte allowance of the Pauli census or the Gershgorin frame
+    (ENGINEERING_CONSTANTS "Chebyshev Lanczos defaults" and "Eigen input
+    conversion and classical preparation"), so the run completes under the
+    default byte limit.
     """
     problem = Eigenproblem(A=[[1, 1], [1, 1]])
 
-    def plan_method(method):
+    def plan_method(max_bytes):
+        method = Lanczos(initial_state=[1, 0], krylov_dimension=2, max_bytes=max_bytes)
         return method.plan(
-            problem, output=problem.default_output(), execution=mode, shots=shots, rng=RandomStreams(4)
+            problem, output=problem.default_output(), execution="quantum", shots=None, rng=RandomStreams(4)
         )
 
-    def lanczos(value):
-        return Lanczos(initial_state=[1, 0], krylov_dimension=2, **({} if value is None else {limit: value}))
-
-    with pytest.raises(ValueError, match=message):
-        plan_method(lanczos(envelope - 1))
-    method = at_envelope(limit, envelope, plan_method, lanczos)
-    result, run = execute(problem, method, mode, shots)
+    with pytest.raises(ValueError, match=f"Lanczos projected analysis needs about {ANALYSIS_BYTES} bytes"):
+        plan_method(ANALYSIS_BYTES - 1)
+    with pytest.raises(ValueError, match="Lanczos Pauli census|Gershgorin frame workspace"):
+        plan_method(ANALYSIS_BYTES)
+    result, run = execute(problem, Lanczos(initial_state=[1, 0], krylov_dimension=2), "quantum", None)
     assert result.eigenvalue is not None
     assert len(run.trace.events) == len(result.plan.experiments)
+
+
+def test_classical_recurrence_is_checked_once_at_planning():
+    """A classical Lanczos Plan is refused at planning when its recurrence exceeds a limit, and runs at the limit.
+
+    For H = Z_0 + 0.5 X_1 + 0.25 Z_0 Z_1 on 12 qubits from |0...0> with
+    three Krylov directions, the bytes and products of the reference and the
+    Chebyshev recurrence on 4,096 amplitudes are known before any Run and
+    exceed the other planning checks. Half the bytes or half the products
+    refuses the Plan, and Plans at exactly those limits run. From |0...0>
+    the trial space holds |0...0> and qubit 1 flipped, where H is
+    [[1.25, 0.5], [0.5, 0.75]], so the projected value is 1 - sqrt(0.3125).
+    """
+    from nwqlib.operators import ingest_pauli
+    from nwqlib.problems import ingest_occupation
+
+    n = 12
+    terms = (("I" * (n - 1) + "Z", 1.0), ("I" * (n - 2) + "XI", 0.5), ("I" * (n - 2) + "ZZ", 0.25))
+    problem = Eigenproblem(A=ingest_pauli(terms, num_qubits=n))
+
+    def plan(**limits):
+        method = Lanczos(initial_state=ingest_occupation("0" * n, num_qubits=n), krylov_dimension=3, **limits)
+        return method.plan(problem, output=problem.default_output(), execution="classical", shots=None,
+                           rng=RandomStreams(4))
+
+    free = plan()
+    need_bytes, need_work = free.method._classical_requirements(free._native["operator"], free._native["reference"],
+                                                                free.reconstruction)
+    with pytest.raises(ValueError, match=f"classical Chebyshev preparation and recurrence needs about {need_bytes}"):
+        plan(max_bytes=need_bytes // 2)
+    with pytest.raises(ValueError, match=rf"require {need_work} classical products, above "
+                                         rf"max_classical_products={need_work // 2}\. Raise max_classical_products "
+                                         rf"to at least {need_work} or set it to None\."):
+        plan(max_classical_products=need_work // 2)
+    for limits in ({"max_bytes": need_bytes}, {"max_classical_products": need_work}):
+        result = Run(plan(**limits)).wait(timeout=30, poll_interval=0)
+        assert result.eigenvalue == pytest.approx(1 - np.sqrt(0.3125), abs=1e-12, rel=0)
 
 
 def test_adapt_commutator_actual_decision_and_reanalysis():
@@ -297,7 +311,7 @@ def test_original_matvec_affine_frame_and_saved_ritz(storage, monkeypatch, tmp_p
         "pauli": ingest_pauli((("X", 1), ("Y", 1), ("Z", 0.3)), num_qubits=1),
     }
     monkeypatch.setattr(
-        _eigen_inputs, "pauli_coefficients", lambda *a: pytest.fail("implicit conversion")
+        _eigen_inputs, "pauli_coefficient_masks", lambda *a: pytest.fail("implicit conversion")
     )
     problem = Eigenproblem(A=inputs[storage])
     result, run = execute(
@@ -346,8 +360,118 @@ def test_sparse_three_dimensional_adapt_preserves_embedding(monkeypatch):
         assert result.plan._native["reference"].basis.dimension == 4
         run.close()
     # Exact zero pruning cannot become a coefficient cutoff.
-    terms = dict(_eigen_inputs.pauli_coefficients(np.array([[0.0, 1e-30], [1e-30, 0.0]])))
-    assert terms == {"X": 1e-30}
+    x, z, coefficients = _eigen_inputs.pauli_coefficient_masks(np.array([[0.0, 1e-30], [1e-30, 0.0]]),
+                                                               max_bytes=None)
+    assert (x.tolist(), z.tolist(), coefficients.tolist()) == ([[1]], [[0]], [1e-30])
+
+
+def test_dense_custom_adapt_generator_keeps_the_record_of_its_projected_labels(monkeypatch):
+    """A dense custom ADAPT generator is projected on its packed words and keeps the label route's records.
+
+    The expected member projects the labels of ``pauli_coefficients`` with
+    ``_project_terms`` and ingests them: the stored terms, the processed
+    operator and the symmetry evidence agree, for a generator with Y terms
+    and a small Hermitian part removed by the projection. A term with a
+    negative imaginary coefficient has a negative-zero real part, which the
+    member record keeps and the processed operator's content hash does not.
+    Planning sums no identical words, since the generator's words are
+    distinct.
+    """
+    import nwqlib
+    from nwqlib.algorithms.gcim import ADAPT
+    from nwqlib.algorithms._eigen_inputs import dense_pauli_matrix
+    from nwqlib.algorithms.gcim.adapt_inputs import _project_terms
+    from nwqlib.algorithms.gcim.adapt_records import AdaptSymmetry
+    from nwqlib.core.records import Complex128
+    from nwqlib.operators import ingest_dense, ingest_pauli, inputs
+    from nwqlib.operators._pauli import pauli_coefficients
+
+    rng = np.random.default_rng(11)
+    a = rng.normal(size=(4, 4)) + 1j * rng.normal(size=(4, 4))
+    hermitian = rng.normal(size=(4, 4))
+    generator = ingest_dense((a - a.conj().T) + 1e-13 * (hermitian + hermitian.T))
+    method = ADAPT(initial_state=[1, 0, 0, 0], pool=(generator,), input_conversion="dense_pauli",
+                   max_iterations=1, input_symmetry_tolerance=1e-10)
+    monkeypatch.setattr(inputs, "_coalesced_input", lambda table: pytest.fail("distinct words summed again"))
+    plan = nwqlib.plan(Eigenproblem(A=ingest_dense(np.diag([1.0, -1.0, 0.5, 2.0]))), method=method,
+                       execution="classical", seed=3)
+    member = plan._native["inputs"].members[0]
+    monkeypatch.undo()
+    matrix = dense_pauli_matrix(generator, input_conversion="dense_pauli", max_bytes=None)
+    rows, evidence = _project_terms(pauli_coefficients(matrix), antihermitian=True, tolerance=1e-10, qubits=2)
+    assert any("Y" in label for label, _ in rows) and evidence["correction_applied"]
+    assert any(c.imag < 0 and math.copysign(1.0, c.real) < 0 for _, c in rows)
+    assert member.terms == tuple((label, Complex128(real=c.real, imag=c.imag)) for label, c in rows)
+    assert member.processed_input == ingest_pauli(rows, num_qubits=2).reference
+    assert member.symmetry == AdaptSymmetry(**evidence)
+
+
+@pytest.mark.parametrize("d", [5, 8])
+def test_dense_pauli_conversion_ingests_masks_with_the_operator_of_its_labels(d):
+    """Converting a dense Hermitian matrix through packed masks gives the operator of its labels.
+
+    A random complex Hermitian d-by-d matrix, padded to 8 with its mean
+    diagonal for d = 5, is converted with ``dense_pauli``. The operator has
+    the content hash and the terms of ingesting the labelled block
+    transform, Y terms and their signs included. The transform's words are
+    distinct, so the conversion sums no identical words.
+    """
+    from nwqlib.algorithms._eigen_inputs import dense_pauli_matrix, eigen_operator
+    from nwqlib.operators import ingest_dense, ingest_pauli, inputs
+    from nwqlib.operators._pauli import pauli_coefficients
+
+    rng = np.random.default_rng(d)
+    a = rng.normal(size=(d, d)) + 1j * rng.normal(size=(d, d))
+    problem = Eigenproblem(A=ingest_dense(a + a.conj().T))
+    with pytest.MonkeyPatch.context() as guard:
+        guard.setattr(inputs, "_coalesced_input", lambda table: pytest.fail("distinct words summed again"))
+        operator = eigen_operator(problem, problem.default_output(), input_conversion="dense_pauli")
+    matrix = dense_pauli_matrix(problem.A, input_conversion="dense_pauli", max_bytes=None, padding="mean")
+    labels = pauli_coefficients(matrix)
+    expected = ingest_pauli(((label, c.real) for label, c in labels), num_qubits=3)
+    assert any("Y" in label for label, _ in labels)
+    assert operator.reference == expected.reference
+    assert operator.pauli_terms().labels() == expected.pauli_terms().labels()
+
+
+def test_dense_pauli_conversion_checks_the_transform_then_the_packed_words():
+    """The conversion bytes are the transform's 64*D**2, then 32*D**2 + 64*R once R words are known.
+
+    A single-Z dense Hamiltonian on 6 qubits has R = 1, so the transform
+    binds: the public quantum Lanczos Plan is built at 64*D**2 bytes and
+    refused one byte below. A random dense Hermitian matrix on 3 qubits has
+    R = D**2 words, so packing them binds above the transform. R comes from
+    the labelled block transform.
+    """
+    import nwqlib
+    from nwqlib.operators import ingest_dense
+    from nwqlib.operators._pauli import pauli_coefficient_masks, pauli_coefficients
+    from nwqlib.problems import ingest_occupation
+
+    q = 6
+    d = 1 << q
+    problem = Eigenproblem(A=ingest_dense(np.diag(np.tile([1.0, -1.0], d // 2))))
+    state = ingest_occupation("0" * q, num_qubits=q)
+
+    def build(cap):
+        return nwqlib.plan(problem, method=Lanczos(initial_state=state, krylov_dimension=2,
+                                                   input_conversion="dense_pauli", max_bytes=cap),
+                           execution="quantum", seed=6)
+
+    build(64 * d * d)
+    with pytest.raises(ValueError, match="eigenvalue Pauli conversion"):
+        build(64 * d * d - 1)
+
+    rng = np.random.default_rng(3)
+    a = rng.normal(size=(8, 8)) + 1j * rng.normal(size=(8, 8))
+    matrix = a + a.conj().T
+    words = len(pauli_coefficients(matrix))
+    need = 32 * 8 * 8 + 64 * words
+    assert words == 64 and need > 64 * 8 * 8
+    x, z, coefficients = pauli_coefficient_masks(matrix, max_bytes=need)
+    assert len(coefficients) == words
+    with pytest.raises(ValueError, match="Pauli mask packing"):
+        pauli_coefficient_masks(matrix, max_bytes=need - 1)
 
 
 def test_supplied_preparation_products_and_declared_alias_preservation(monkeypatch):
@@ -423,11 +547,13 @@ def test_matrix_energy_shift_preserves_original_input_relation(monkeypatch, tmp_
             pytest.fail("explicit input relation triggered new science")
 
         with monkeypatch.context() as guard:
-            guard.setattr(_eigen_inputs, "pauli_coefficients", forbidden)
+            guard.setattr(_eigen_inputs, "pauli_coefficient_masks", forbidden)
             guard.setattr(np.linalg, "eigh", forbidden)
             guard.setattr(np.linalg, "eigvalsh", forbidden)
             options = EnergyShiftOptions.for_result(first, name="shift", shift=2.0, tolerance=2e-12)
-            assert options.relation == "matrix_entries" and options.baseline.terms is None
+            assert options.relation == "matrix_entries"
+            # A dense input with no zero entry keeps all entries without coordinates.
+            assert options.baseline.table == ("dense_matrix" if storage is np.array else "matrix_entries")
             options = EnergyShiftOptions.model_validate_json(options.model_dump_json())
             receipt, facts = second.verify(checks=options)
         assert receipt.result_id == second.content_id
@@ -464,14 +590,13 @@ def test_matrix_energy_shift_preserves_original_input_relation(monkeypatch, tmp_
 
 
 def test_energy_shift_relations_decide_the_exact_binary64_relation():
-    """The stored-table relation equals exact Fraction arithmetic on the recorded values.
+    """The stored-table relation decides each hand-derived exact case on the recorded values.
 
-    Owners: energy_shift._triple_zero, _pauli_relation and _matrix_relation.
+    Owners: energy_shift._triple_zero and _relation.
     The cases separate the exact relation from rounded comparisons:
     t == b + c accepts t = b = 1, c = eta.
     """
-    from collections import defaultdict
-    from fractions import Fraction
+    from nwqlib.core.records import FrozenArray
     from nwqlib.evidence import energy_shift
 
     eta, big = 5e-324, float(np.finfo(float).max)
@@ -479,25 +604,6 @@ def test_energy_shift_relations_decide_the_exact_binary64_relation():
     result, run = execute(Eigenproblem(A=np.diag([1.0, 2.0])), method, "classical")
     endpoint = energy_shift._endpoint(result)
     run.close()
-
-    def exact_pauli(base, target, shift):
-        table = defaultdict(Fraction)
-        for label, value in target:
-            table[label] += Fraction(value)
-        for label, value in base:
-            table[label] -= Fraction(value)
-        table["I"] -= Fraction(shift)
-        return all(value == 0 for value in table.values())
-
-    def exact_matrix(base, target, shift):
-        table = defaultdict(Fraction)
-        for index in range(2):
-            table[index, index, "real"] -= Fraction(shift)
-        for sign, entries in ((1, target), (-1, base)):
-            for row, column, real, imag in entries:
-                table[row, column, "real"] += sign * Fraction(real)
-                table[row, column, "imag"] += sign * Fraction(imag)
-        return all(value == 0 for value in table.values())
 
     def decided(relation, base, target, shift):
         try:
@@ -507,11 +613,30 @@ def test_energy_shift_relations_decide_the_exact_binary64_relation():
             return False
         return True
 
-    pauli = lambda base, target, shift: energy_shift._pauli_relation(  # noqa: E731
-        endpoint.revise(matrix_entries=None, terms=base), endpoint.revise(matrix_entries=None, terms=target),
-        shift, max_bytes=10**6)
-    matrix = lambda base, target, shift: energy_shift._matrix_relation(  # noqa: E731
-        endpoint.revise(matrix_entries=base), endpoint.revise(matrix_entries=target), shift, max_bytes=10**6)
+    def tables(rows, table):
+        """Two-column keys and (real, imag) values. A one-qubit Pauli key is its X and Z mask.
+
+        A dense table holds the four entries of the 2-by-2 matrix in row-major order.
+        """
+        if table == "dense_matrix":
+            values = np.zeros((4, 2))
+            for row, column, real, imag in rows:
+                values[2 * row + column] = real, imag
+            return endpoint.revise(table=table, table_keys=None, table_values=FrozenArray(values))
+        masks = {"I": (0, 0), "X": (1, 0), "Z": (0, 1), "Y": (1, 1)}
+        keys = [masks[row[0]] for row in rows] if table == "pauli_terms" else [row[:2] for row in rows]
+        values = [(row[1], 0.0) for row in rows] if table == "pauli_terms" else [row[2:] for row in rows]
+        return endpoint.revise(table=table, table_keys=FrozenArray(np.array(keys, dtype=np.int64).reshape(-1, 2)),
+                               table_values=FrozenArray(np.array(values, dtype=np.float64).reshape(-1, 2)))
+
+    def relation(table, base_table=None, target_table=None):
+        return lambda base, target, shift: energy_shift._relation(
+            tables(base, base_table or table), tables(target, target_table or table), shift, table, max_bytes=10**6)
+
+    pauli, matrix = relation("pauli_terms"), relation("matrix_entries")
+    # Dense tables, alone or against stored entries, decide every matrix case alike.
+    dense = [relation("matrix_entries", *kinds) for kinds in (
+        ("dense_matrix", None), (None, "dense_matrix"), ("dense_matrix", "dense_matrix"))]
     pauli_cases = [
         ((("I", 1.0),), (("I", 1.0),), eta, False),  # t = b = 1, c = eta: residual -eta.
         ((("I", 1.0),), (("I", 3.0),), 2.0, True),
@@ -535,19 +660,44 @@ def test_energy_shift_relations_decide_the_exact_binary64_relation():
         (((0, 0, 1.0, 0.0), (1, 1, 1.0, 0.0)), ((0, 0, 2.0, 0.0), (1, 1, 1.0, 0.0)), 0.0, False),
     ]
     for base, target, shift, expected in pauli_cases:
-        assert exact_pauli(base, target, shift) is expected
         assert decided(pauli, base, target, shift) is expected
     for base, target, shift, expected in matrix_cases:
-        assert exact_matrix(base, target, shift) is expected
         assert decided(matrix, base, target, shift) is expected
-    # Coordinates beyond int64 are merged as the endpoint's own Python integers.
-    wide = endpoint.basis.revise(dimension=2**70)
-    big = ((2**69, 2**69 + 1, 0.5, 0.0), (2**69, 2**69, 1.0, 0.0))
-    wide_relation = lambda base, target, shift: energy_shift._matrix_relation(  # noqa: E731
-        endpoint.revise(basis=wide, matrix_entries=base), endpoint.revise(basis=wide, matrix_entries=target),
-        shift, max_bytes=10**6)
-    # 2**69 + 1 and 2**69 round to one binary64 value, so float64 coordinates
-    # would merge the last pair's distinct keys and accept it.
-    for base, target, shift, expected in ((big, big, 0.0, True), (big, big, 1.0, False),
-                                          (big[:1], ((2**69, 2**69, 0.5, 0.0),), 0.0, False)):
-        assert decided(wide_relation, base, target, shift) is expected
+        assert all(decided(variant, base, target, shift) is expected for variant in dense)
+
+
+def test_packed_hamiltonian_conversion_charges_its_arrays_not_records_of_dropped_words():
+    """The packed conversion charges its coexisting arrays, and the records charge only the terms they keep.
+
+    A 5-qubit diagonal Hamiltonian with a 2**-28 Hermitian perturbation has
+    nearly all 1024 Pauli words nonzero, and ADAPT's coefficient cutoff
+    keeps one nonidentity word, beside the identity coefficient that stays
+    whole. The public quantum Plan is built at 300000 bytes with those terms.
+    One byte below the packing of the nonzero words, counted from the
+    labelled block transform, refuses at the packing stage.
+    """
+    import nwqlib
+    from nwqlib.algorithms.gcim import ADAPT
+    from nwqlib.operators import ingest_dense, ingest_pauli
+    from nwqlib.operators._pauli import pauli_coefficients
+    from nwqlib.problems import ingest_occupation
+
+    q, d = 5, 32
+    rng = np.random.default_rng(19)
+    v = rng.normal(size=(d, d)) + 1j * rng.normal(size=(d, d))
+    matrix = np.diag(np.tile([1.0, -1.0], d // 2)) + 2.0**-28 * (v + v.conj().T)
+    problem = Eigenproblem(A=ingest_dense(matrix))
+    generator = ingest_pauli((("I" * (q - 1) + "X", 1j),), num_qubits=q)
+
+    def build(cap):
+        return nwqlib.plan(problem, method=ADAPT(
+            initial_state=ingest_occupation("0" * q, num_qubits=q), pool=(generator,), input_conversion="dense_pauli",
+            max_iterations=1, max_bytes=cap, pauli_coefficient_cutoff=1e-5), execution="quantum", seed=2)
+
+    inputs = build(300_000)._native["inputs"]
+    assert len(inputs.nonidentity) == 1 and inputs.dropped_l1 > 0
+    words = len(pauli_coefficients(matrix.astype(complex)))
+    packing = 32 * d * d + 64 * words
+    assert words > 1000 and packing < 300_000
+    with pytest.raises(ValueError, match="Pauli mask packing"):
+        build(packing - 1)

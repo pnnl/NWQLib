@@ -20,6 +20,7 @@ Program built here.
 from dataclasses import dataclass
 from math import sqrt
 import numpy as np
+from nwqlib.algorithms.protocol import ApplicabilityError
 from nwqlib.blocks.encoding import construct_block_encoding
 from nwqlib.blocks.records import (
     BlockSemantics,
@@ -27,7 +28,7 @@ from nwqlib.blocks.records import (
     SelectedConstruction,
     SelectedDefinition,
 )
-from nwqlib.blocks.selection import SelectedBlock, select_preparation, select_pauli_parity
+from nwqlib.blocks.selection import SelectedBlock, controlled_gate_positions, select_preparation, select_pauli_parity
 from nwqlib.core.analysis import capture_analysis_origin
 from nwqlib.core.planning import Plan, Experiment, ObservationPoint, ObservationSpec, ReadoutDetails
 from nwqlib.core.records import Float64, InputRef, Source
@@ -48,14 +49,15 @@ from nwqlib.ir import (
     MetadataRef,
     Parameter,
     PortMap,
+    Program,
     QuantumPort,
     Register,
     Release,
     Sequence,
     Setting,
 )
-from nwqlib.ir.validation import admitted_program
 from nwqlib.operators.access import _check_bytes
+from nwqlib.operators.inputs import _same_storage
 from nwqlib.problems.inputs import PhysicalScale, compose_recovery
 from nwqlib.problems.records import (
     Solution,
@@ -84,6 +86,7 @@ from nwqlib._quantum_readout import (
     validate_readout_layout,
     weighted_group_moments,
 )
+from .constants import QLS_PHASE_RELATIVE_TARGET_SHARE
 from .primary_records import (
     METHOD,
     QLSAnalysis,
@@ -92,6 +95,101 @@ from .primary_records import (
     QLSSamples,
     validate_selection,
 )
+
+# Kept bytes per Aer native position of a QLS circuit. The growth walk measured
+# 1295-1394 B of RSS growth per position on the periodic stencil at q=8. A coarse
+# estimate, not a bound on process memory. Registered in ENGINEERING_CONSTANTS.
+_NATIVE_POSITION_BYTES = 1500
+
+
+def _leaf_memory(positions, table_bytes=0):
+    """Return the ``SelectedBlock.bind`` estimates of a leaf with these positions and tables.
+
+    One built definition is taken as the size of one occurrence.
+    """
+    kept = positions*_NATIVE_POSITION_BYTES + table_bytes
+    return dict(native_bytes=kept, definition_bytes=kept)
+
+
+def _open_x_positions(controls):
+    """Return the positions of an X with these controls when all are open, an upper count, or None if not measured."""
+    positions = controlled_gate_positions("x", controls)
+    return None if positions is None else positions + 2*controls
+
+
+def _band_query_positions(counts, n):
+    """Return the Aer positions of one uncontrolled shift-LCU query on n system qubits, or None if not measured.
+
+    ``counts`` is ``banded._band_gate_counts``, which holds a = the address
+    width. Each class keeps its own position count: the QFT pair has n(n-1)
+    cp, 2n h and 2 floor(n/2) swap, because Aer keeps a cp or swap as one
+    position. Each of the n UCRZ tables has its 2**a rz and 2**a cx, an upper
+    count because a multiplexor omits a zero Walsh angle. The address diagonal
+    has its table and cx, and the PREP pair 2 (2**a - 1) ry and its cx. J and
+    the half shift are one X each, and a sign is an X with a - 1 controls
+    between two H, each counted with open controls.
+    """
+    a = counts["prep_register_qubits"]
+    signs = len(counts["negative_self_inverse_labels"]) if a else 0
+    xs = [_open_x_positions(controls) for controls in counts["pair_swap_controls"]]
+    if counts["half_shift_label"] is not None:
+        xs.append(_open_x_positions(a))
+    if signs:
+        xs.extend([_open_x_positions(a-1)]*signs)
+    if None in xs:
+        return None
+    return (counts["qft_pairs"]*(n*(n-1) + 2*n + 2*(n//2))
+            + counts["ucrz_multiplexor_gates"]*(counts["ucrz_table_entries_per_gate"] + counts["ucrz_basis_cx_per_gate"])
+            + counts["control_diagonal_gates"]*counts["control_diagonal_table_entries"] + counts["control_diagonal_basis_cx"]
+            + 2*((1 << a) - 1) + counts["prep_pair_cx"] + sum(xs) + 2*signs)
+
+
+def _query_memory(base, controls, route):
+    """Return the estimates of one query of A/alpha from its encoding's operation classes, or {} when there is no law.
+
+    A CX count is not the unit: a cp or swap is one position on Aer, and a
+    Pauli query can hold no CX and still keep its positions. ``plan.detail``
+    survives a reload, so selection and loading form the same value.
+
+    - Band: ``_band_query_positions``, uncontrolled.
+    - Pauli, uncontrolled: the PREP pair of 2 (2**a - 1) ry and its cx, then one
+      native multiplexer per system qubit with a gate, with a table of 2**r
+      2x2 matrices on its r support bits, and the coefficient diagonal.
+    - Dense: one unitary on m = n + 1 qubits, whose 16*4**m byte matrix each
+      occurrence keeps, because lowering copies each operation. With k
+      controls the gate is synthesized, and the positions are the bounds of
+      the selected route (``_dense_synthesis.gatewise_control_counts``,
+      ``controlled_synthesis_gate_census``), with two X per open control.
+
+    A controlled band or Pauli query, a supplied encoding and a controlled RHS
+    preparation have no measured law. Their calls are reported as not counted.
+    """
+    if not isinstance(base, BaseEncoding) or base.selected.record.implementation.name != "encoding.planned":
+        return {}
+    plan = base.selected._payload
+    n, detail = plan.system_qubits, plan.detail
+    if plan.implementation == "dense_dilation":
+        if not controls:
+            return _leaf_memory(1, 16*4**(n+1))
+        from nwqlib.subroutines._dense_synthesis import (controlled_synthesis_gate_census, gatewise_control_counts,
+                                                         select_dense_control_route)
+        positions = (sum(controlled_synthesis_gate_census(n+1+controls).values())
+                     if select_dense_control_route(route, controls) == "whole_matrix"
+                     else gatewise_control_counts(n+1, controls)[1])
+        return _leaf_memory(positions + 2*controls)
+    if controls:
+        return {}
+    if plan.implementation == "banded":
+        positions = _band_query_positions(detail["periodic_gate_counts"], n)
+        return {} if positions is None else _leaf_memory(positions)
+    if plan.implementation in ("pauli_lcu", "multiplexed_pauli"):
+        padded = detail["padded_table_size"]
+        supports = [r for r, active in zip(detail["effective_control_counts"], detail["nontrivial_tables"], strict=True)
+                    if active]
+        diagonal = padded - 1 if detail["coefficient_phase_diagonal"] else 0
+        return _leaf_memory(2*(padded - 1) + detail["prep_pair_cx"] + len(supports) + diagonal
+                            + detail["coefficient_diagonal_cx"], sum(64 << r for r in supports))
+    return {}
 
 
 @dataclass(frozen=True)
@@ -107,8 +205,8 @@ class BaseEncoding:
     original: object
     encoded: object
     svd: object
-    max_bytes: int
-    max_work: int
+    max_bytes: int | None
+    max_work: int | None
 
     def validate(self):
         if self.selected.record.semantics.input != self.encoded.reference:
@@ -116,7 +214,7 @@ class BaseEncoding:
         if (
             self.selected.record.implementation.name == "encoding.planned"
             and self.selected._payload.implementation == "dense_dilation"
-            and self.selected._payload.source is not self.encoded._data
+            and not _same_storage(self.selected._payload.source, self.encoded._data)
         ):
             raise ValueError("QLS dense completion differs from its exact selected input data")
         if self.svd is not None:
@@ -145,7 +243,7 @@ def _native_encoding(base):
     # The padded frames built below are two complex p x p identity-extended
     # frames (32 p^2 bytes) and the padded singular values (8 p bytes). The
     # source passed the power-of-two admission, so its dimension is p, and
-    # the completion law admitted above (384 p^2 + 32 p bytes) already
+    # the completion law admitted above (256 p^2 + 32 p bytes) already
     # covers these arrays.
     cache = base.svd
     if d == padded:
@@ -179,11 +277,15 @@ class Query:
             (``qiskit_compat.controlled``), the QLS Method's
             ``dense_control_route`` for a planned dense-dilation encoding and
             ``gatewise`` otherwise.
+        max_bytes: The QLS Method's ``max_bytes``, against which the
+            construction checks the controlled synthesis of a supplied
+            circuit before it starts.
     """
 
     base: BaseEncoding | SelectedBlock
     control_count: int
     route: str
+    max_bytes: int | None
 
 
 def _query_circuit(block, arguments, method_context):
@@ -237,6 +339,15 @@ def _query_circuit(block, arguments, method_context):
             gates[key] = inverse_realized_gate(gate, native_ucg=native_ucg)
         gate = gates[key]
     if payload.control_count:
+        if selected.record.implementation.name in ("encoding.native", "preparation.supplied"):
+            from nwqlib.subroutines._dense_synthesis import admit_dense_syntheses
+            from nwqlib.subroutines.qiskit_compat import dense_gatewise_charges
+            # Planning counted only the definitions that the supplied circuit had
+            # built (host_planning._admit_query_synthesis), so this gate's
+            # syntheses are checked here before any of them starts.
+            widths, counts, _ = dense_gatewise_charges(gate, payload.control_count)
+            admit_dense_syntheses(widths, controls=(counts,), max_work=None, max_bytes=payload.max_bytes,
+                                  operation="QLS controlled supplied query synthesis")
         gate = controlled(gate, payload.control_count, ctrl_state=state, route=payload.route)
     circuit = QuantumCircuit(gate.num_qubits)
     circuit.append(gate, range(gate.num_qubits))
@@ -317,8 +428,12 @@ def _leaf(
     choice=None,
     base_semantics=None,
     construction_work=None,
+    memory=(),
 ):
-    """Bind one QLS operation with its qubit order, phase convention and cost data with their scope."""
+    """Bind one QLS operation with its qubit order, phase convention and cost data with their scope.
+
+    ``memory`` holds its ``SelectedBlock.bind`` estimates (``_leaf_memory``).
+    """
     source = Source(
         name="qls." + kind,
         version="2",
@@ -360,10 +475,10 @@ def _leaf(
         cost_context="selected native operation; hardware routing and SDK workspace unknown",
         construction_work=max(1, width) * 16 if construction_work is None else construction_work,
     )
-    return SelectedBlock.bind(record, payload=payload, constructor=constructor)
+    return SelectedBlock.bind(record, payload=payload, constructor=constructor, **dict(memory))
 
 
-def _query_leaf(base, *, kind, controls, basis, route="gatewise"):
+def _query_leaf(base, *, kind, controls, basis, max_bytes, route="gatewise"):
     """Create a parameterized base query and reuse only the per-query resource evidence that applies to it.
 
     Only an uncontrolled query of the encoding of ``A/alpha`` carries a CX
@@ -428,13 +543,14 @@ def _query_leaf(base, *, kind, controls, basis, route="gatewise"):
         reference=selected.record.semantics.input,
         width=width,
         kind=kind + "_query",
-        payload=Query(base, controls, route),
+        payload=Query(base, controls, route, max_bytes),
         constructor=_query_circuit,
         parameters=parameters,
         laws=laws,
         choice=selected.record.content_id,
         base_semantics=selected.record.semantics,
         construction_work=selected.record.construction_work,
+        memory=_query_memory(base, controls, route),
     )
 
 
@@ -825,6 +941,9 @@ def _program(method, problem, output, shots, rec, base, preparation, terms=None)
                 decomposition=decomposition,
                 cost_parameters=costs,
                 laws=laws,
+                # The measured positions of its controls, with two X around each open one.
+                memory=(() if (positions := controlled_gate_positions(kind, len(controls))) is None
+                        else _leaf_memory(positions + 2*(len(controls) - values.bit_count()))),
             )
         return call(
             name,
@@ -856,6 +975,7 @@ def _program(method, problem, output, shots, rec, base, preparation, terms=None)
                 kind=kind,
                 controls=len(controls),
                 basis=basis,
+                max_bytes=method.max_bytes,
                 route=route if kind == "original_A" else "gatewise",
             )
         values = sum(value << i for i, (_, value) in enumerate(controls))
@@ -1099,8 +1219,7 @@ def _program(method, problem, output, shots, rec, base, preparation, terms=None)
         )
         for i in range(rec.width)
     )
-    program = admitted_program(
-        "QLS.max_admission_steps", method.max_admission_steps,
+    program = Program(
         root=root,
         definitions=tuple(Definition(id=name, node=node) for name, node in definitions.items()),
         expressions=tuple(Expression(id=name, value=value) for name, value in expressions.items()),
@@ -1158,18 +1277,56 @@ def _program(method, problem, output, shots, rec, base, preparation, terms=None)
     return construction, tuple(experiments), tuple(blocks.values())
 
 
+def _phase_tolerance(method, polynomial_kappa, rescale):
+    """Return the phase residual target of ``method`` for its chosen polynomial.
+
+    An explicit ``phase_residual_tolerance`` is used as given. A shortcut
+    solver otherwise keeps the solver preset, because its ``epsilon_inv`` sets
+    the kernel-reflection ``eta`` and the relation below does not apply to it.
+    ``qsvt_inverse`` otherwise takes ``max(preset, c epsilon_inv/(k s))`` with
+    ``c = QLS_PHASE_RELATIVE_TARGET_SHARE``, k = ``polynomial_kappa`` and s =
+    ``rescale``.
+
+    On ``[1/k, 1]``, ``1 <= ||y|| <= k`` for ``y = (A/alpha)^-1 b_hat``. The
+    executed polynomial is ``P/s + r`` with ``|r| <= delta``, and recovery
+    multiplies by ``k s``, so the relative inverse error is at most
+    ``e + k s delta/||y||``, with e the polynomial's own relative residual.
+    Where the second argument decides and the residual meets it, the phase
+    term is at most ``c epsilon_inv``.
+
+    ``epsilon_inv`` is the polynomial's target, not a total allowance, so no
+    share of it is withdrawn from the polynomial and the degree stays. The
+    maximum keeps a strict request from gaining a phase obligation stricter
+    than the preset, which the Method does not promise and which can exceed
+    the solver's numerical floor. Where the preset decides, the plan keeps
+    the polynomial, target and control flow of that preset, and the bound
+    above has no ``c epsilon_inv`` form. Substituting the numerical checks
+    for e and delta gives nominal evidence, because neither has an arithmetic
+    enclosure.
+    """
+    from nwqlib.subroutines.qsp.phases import QSP_SOLVER_RESIDUAL_TOLERANCE
+
+    if method.phase_residual_tolerance is not None:
+        return method.phase_residual_tolerance
+    if method.solver != "qsvt_inverse":
+        return QSP_SOLVER_RESIDUAL_TOLERANCE
+    return max(QSP_SOLVER_RESIDUAL_TOLERANCE,
+               QLS_PHASE_RELATIVE_TARGET_SHARE * method.epsilon_inv / (polynomial_kappa * rescale))
+
+
 def plan_quantum(
     method, problem, *, output, shots, rng, reconstruction, encoding, encoded_operator, rhs, svd
 ):
     """Solve the QSP phases of the chosen polynomial and build the matching RHS preparation, query circuit and readout.
 
-    The phases implement ``Re P = polynomial / rescale``. Their residual norming
-    bound becomes ``phase_error``, which explicit verification adds to the
-    polynomial allowance. Phase solving is the only numerical optimization
-    here and runs once, within ``max_qsp_evaluations`` and ``max_bytes``.
+    The canonical Wx synthesis implements ``Re U_00 = polynomial / rescale``
+    within the target of `_phase_tolerance`. Its coefficient residual becomes
+    ``phase_error``, which explicit verification adds to the polynomial
+    allowance. The synthesis runs once, within ``max_bytes``.
     """
+    from .host_planning import conditioning_note
     from .method import _error_model
-    from nwqlib.subroutines.qsp.phases import solve_symmetric_qsp_phases
+    from nwqlib.subroutines.qsp.phases import _QSPPhaseConvergenceError, solve_wx_qsp_phases
 
     rec = reconstruction
     rec = rec.revise(**_layout(rec, method.solver))
@@ -1187,19 +1344,23 @@ def plan_quantum(
         **_observable_fields(output, terms),
     )
     if shots is not None and _counts_width(rec) > 64:
-        raise ValueError(
+        raise ApplicabilityError(
             f"sampled QLS readout needs {_counts_width(rec)} classical bits, "
             "more than its 64-bit count decoder supports")
-    phase = solve_symmetric_qsp_phases(
-        tuple(c / rec.polynomial.rescale for c in rec.polynomial.coefficients),
-        max_degree=method.max_degree,
-        max_evaluations=method.max_qsp_evaluations,
-        max_bytes=method.max_bytes,
-        limit_name="QLS.max_qsp_evaluations",
-    )
+    tolerance = _phase_tolerance(method, rec.polynomial_kappa, rec.polynomial.rescale)
+    try:
+        phase = solve_wx_qsp_phases(
+            tuple(c / rec.polynomial.rescale for c in rec.polynomial.coefficients),
+            residual_tolerance=tolerance, max_bytes=method.max_bytes)
+    except _QSPPhaseConvergenceError as error:
+        note = conditioning_note(rec.polynomial_kappa, rec.sigma_min, rec.sigma_max, problem.dimension)
+        raise type(error)(
+            f"QLS phase synthesis of degree {rec.degree} did not meet its target: {error}. "
+            "QLS(phase_residual_tolerance=...) chooses another target, and its documentation gives the effect on the "
+            f"error. {note}", evidence=error.evidence) from error
     preparation = select_preparation("rhs", rhs, per_bit=True)
     rec = rec.revise(phase_solution=phase.phases, phase_error=phase.residual_sup_bound,
-                     phase_evaluations=phase.evaluations)
+                     phase_tolerance=tolerance, phase_fft_lengths=phase.evidence.fft_lengths)
     # 1 KiB per unit of polynomial degree, circuit wire and observable term,
     # plus 32 KiB, as an allowance for the Program records that _program
     # builds below, plus the stored group bases and member labels.
@@ -1491,10 +1652,11 @@ def _counts_statistics(plan, chunks, rows):
         indices, sample_counts, _, _ = reduce_sample_arrays(
             mass_chunk, observed=_counts_bits(rec, mass_setting), coordinates=rec.coordinates,
             success=rec.success, conditions=rec.conditions, dimension=rec.original_dimension)
-        # The reducer returns fresh, C-contiguous int64 arrays that nothing else
-        # references, so the record adopts them without copying.
-        fields["samples"] = QLSSamples(indices=FrozenArray._from_owned_canonical_array(indices),
-                                       counts=FrozenArray._from_owned_canonical_array(sample_counts))
+        # Each array is copied into immutable storage and released before the
+        # next, so the handoff holds at most 24 bytes per sampled index.
+        indices = FrozenArray(indices)
+        sample_counts = FrozenArray(sample_counts)
+        fields["samples"] = QLSSamples(indices=indices, counts=sample_counts)
         del indices, sample_counts
         return fields
     if not isinstance(output, (QuadraticForm, NormalizedExpectation)):

@@ -1,4 +1,4 @@
-"""Executable UCGate persistence and the tiny upstream-change canary."""
+"""Executable UCGate and direct-preparation persistence, and the tiny upstream-change canary."""
 
 import io
 
@@ -75,6 +75,39 @@ def test_codec_preserves_instruction_action(tmp_path):
     np.testing.assert_allclose(Operator(restored).data, np.diag([1, 1j]), rtol=0, atol=2e-15)
 
 
+def test_a_direct_preparation_is_stored_by_its_state_and_read_back_unbuilt(tmp_path, monkeypatch):
+    """A saved gate holds the state of its direct preparation, never the tree, which reads back unbuilt.
+
+    The tree takes about 1 KiB per amplitude and the state 16 bytes, so saving a Run's definition
+    cache does not build a tree that its execution never needed.
+    """
+    from nwqlib.subroutines.state_preparation import direct
+
+    state = np.arange(1., 9.) * np.exp(.3j * np.arange(8))
+    state /= np.linalg.norm(state)
+    wrapper = direct.direct_preparation_circuit(state, register_name="system").to_gate(label="prepare")
+
+    def refused(gate):
+        raise AssertionError("saving built the direct tree")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(direct.DirectPreparationGate, "_define", refused)
+        files = ArchiveFiles(tmp_path, 1_000_000)
+        name = files.write_instruction("wrapper.qpy", wrapper)
+        restored = ArchiveFiles(tmp_path, 1_000_000).read_instruction(name)
+        inner = restored.definition.data[0].operation
+        assert type(inner) is direct.DirectPreparationGate and inner._definition is None
+        np.testing.assert_array_equal(inner.state, state)
+    # A tree that was already built is not stored either.
+    built = direct.DirectPreparationGate(state)
+    built.definition
+    name = files.write_instruction("built.qpy", built)
+    again = ArchiveFiles(tmp_path, 1_000_000).read_instruction(name)
+    assert type(again) is direct.DirectPreparationGate and again._definition is None
+    np.testing.assert_array_equal(again.state, state)
+    np.testing.assert_allclose(Operator(again).data[:, 0], state, rtol=0, atol=2e-15)
+
+
 def test_native_clifford_leaf_keeps_raw_qpy_and_ucgate_neighbor(tmp_path):
     from qiskit.quantum_info import Clifford
     from nwqlib._qpy_archive import PREFIX
@@ -109,6 +142,41 @@ def test_controlled_and_inverse_multiplexors_keep_phase_and_open_control(tmp_pat
     np.testing.assert_allclose(Operator(restored).data, expected, rtol=0, atol=2e-14)
 
 
+def test_shared_realized_inverse_reuses_adjoint_and_executes_after_roundtrip(tmp_path, monkeypatch):
+    from qiskit.circuit import Gate
+    from qiskit.circuit.library import UnitaryGate
+    from nwqlib.subroutines.qiskit_compat import inverse_realized_gate
+
+    phases = np.array([.17, -.23, .31, -.47])
+    child = QuantumCircuit(2, global_phase=.13)
+    child.append(UnitaryGate(np.diag(np.exp(1j * phases))), [0, 1], copy=False)
+    shared = child.to_gate()
+    forward = QuantumCircuit(2, global_phase=.19)
+    repetitions = 16
+    for _ in range(repetitions):
+        forward.append(shared, [0, 1], copy=False)
+    gate = Gate("shared_forward", 2, [])
+    gate.definition = forward
+    matrix_calls = []
+    matrix = UnitaryGate.to_matrix
+
+    def observed(operation):
+        matrix_calls.append(operation)
+        return matrix(operation)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(UnitaryGate, "to_matrix", observed)
+        inverse = inverse_realized_gate(gate)
+    assert len(matrix_calls) == 1
+    # Independent diagonal action includes both levels of global phase.
+    expected = np.diag(np.exp(-1j * (.19 + repetitions * (.13 + phases))))
+    np.testing.assert_allclose(Operator(inverse).data, expected, rtol=0, atol=2e-13)
+    files = ArchiveFiles(tmp_path, 1_000_000)
+    name = files.write_instruction("shared-inverse.qpy", inverse)
+    restored = files.read_instruction(name)
+    np.testing.assert_allclose(Operator(restored).data, expected, rtol=0, atol=2e-13)
+
+
 def test_public_lanczos_archive_reopens_in_fresh_process(tmp_path, monkeypatch):
     import json
     import subprocess
@@ -131,17 +199,17 @@ def test_public_lanczos_archive_reopens_in_fresh_process(tmp_path, monkeypatch):
             assert completed.wait().eigenvalue == expected
             assert completed.trace.jobs == jobs
     path = tmp_path / "lanczos"
-    collect = Run.collect
+    from nwqlib import _prepared_execution as execution
+    submit = execution.submit_experiment
 
-    def interrupt(run, chunk):
-        fresh = collect(run, chunk)
-        if fresh:
-            raise RuntimeError("stop after committed observation")
-        return fresh
+    def interrupt(*args, **kwargs):
+        # The static workflow's first outcome has committed with its collection ordinal.
+        submit(*args, **kwargs)
+        raise RuntimeError("stop after committed observation")
 
     with Run(plan, directory=path) as run:
         with monkeypatch.context() as patch:
-            patch.setattr(Run, "collect", interrupt)
+            patch.setattr(execution, "submit_experiment", interrupt)
             with pytest.raises(RuntimeError, match="committed observation"):
                 run.resume()
         prefix = [chunk.content_id for chunk in run.observations.chunks]

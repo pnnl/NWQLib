@@ -9,7 +9,7 @@ docs/fault-tolerant-resources.md defines the targets, stages and limitations.
 
 from __future__ import annotations
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from nwqlib._limits import exceeds, optional_limit
 
 from pathlib import Path
 import hashlib
@@ -81,19 +81,18 @@ class LogicalCompilation(Record):
     quantities: tuple[ResourceQuantity, ...]
     output_qasm: str | None
     elapsed_seconds: Nonnegative
-    max_operations: Annotated[NonnegativeInt, Field(gt=0)]
-    max_bytes: Annotated[NonnegativeInt, Field(gt=0)]
-    timeout_seconds: Positive
+    max_operations: Annotated[NonnegativeInt, Field(gt=0)] | None
+    max_bytes: Annotated[NonnegativeInt, Field(gt=0)] | None
+    timeout_seconds: Positive | None
     limitations: tuple[Text, ...]
 
     @model_validator(mode="after")
     def _stage(self):
-        """Keep the stage, target and output consistent with ``count_only`` and the recorded limits.
+        """Keep the stage, target and output consistent with ``count_only``.
 
         A count-only run stops at Clifford+T synthesis before fusion and has no
         output circuit. A full run keeps its final QASM. Raw gate names are
-        distinct, their total respects ``max_operations``, and measured qubits
-        lie inside the compiled width.
+        distinct, and measured qubits lie inside the compiled width.
         """
         if self.count_only != (self.stage == "synthesis_before_fusion"):
             raise ValueError("compiler stage must match count_only")
@@ -103,22 +102,23 @@ class LogicalCompilation(Record):
             raise ValueError("full compilation requires its output artifact")
         if len(dict(self.raw_counts)) != len(self.raw_counts):
             raise ValueError("raw gate names must be distinct")
-        if sum(value for _, value in self.raw_counts) > self.max_operations:
-            raise ValueError("compiled output exceeds max_operations")
         if any(q >= self.width for q, _ in self.terminal_measurements):
             raise ValueError("terminal measurement lies outside the compiled width")
         return self
 
-    def save(self, path, *, max_bytes=DEFAULT_MAX_BYTES):
-        """Save this record with the library's byte-limited JSON writer."""
+    def save(self, path, *, max_bytes=None):
+        """Save this record as JSON, with at most ``max_bytes`` written bytes, or no limit when it is None."""
         from nwqlib._choice_archive import ArchiveFiles
 
         path = Path(path)
         ArchiveFiles(path.parent, max_bytes).write_json(path.name, self.model_dump(mode="json"))
 
     @classmethod
-    def load(cls, path, *, max_bytes=DEFAULT_MAX_BYTES):
-        """Read saved compilation data in the current format without importing NWQEC."""
+    def load(cls, path, *, max_bytes=None):
+        """Read saved compilation data in the current format without importing NWQEC.
+
+        ``max_bytes`` bounds the bytes read, and None sets no limit.
+        """
         from nwqlib._choice_archive import ArchiveFiles
 
         path = Path(path)
@@ -202,7 +202,7 @@ def _static_body(circuit, *, max_operations, max_bytes):
     if not isinstance(circuit, QuantumCircuit):
         raise ValueError("selected artifact has no Qiskit circuit")
     size = len(circuit.data)
-    if size > max_operations:
+    if exceeds(size, max_operations):
         raise ValueError("compiler input exceeds max_operations")
     # The inspection inventory envelope: 64 bytes per operation plus 16 per
     # quantum or classical wire for the Python collections built below
@@ -272,14 +272,14 @@ def _static_body(circuit, *, max_operations, max_bytes):
 
     body, _ = snapshot_circuit(body, max_bytes=max_bytes)
     try:
-        qasm = export_qasm(body, format="qasm2")
+        qasm = export_qasm(body, format="qasm2", max_text_bytes=max_bytes)
     except Exception as error:
         raise ValueError(f"selected static body cannot be exported as QASM2: {error}") from error
     # Encoded once. The caller reuses these bytes for its size checks, its
-    # digest and the compiler's body.qasm.
+    # digest and the compiler's body.qasm. export_qasm has already checked
+    # their size against max_bytes.
     data = qasm.encode("utf-8")
     del qasm
-    _check_bytes(len(data), max_bytes, "compiler QASM2 input")
     return data, tuple(measurements), tuple(saves), phase
 
 
@@ -291,14 +291,15 @@ def compile_logical(
     rz_err="per-gate",
     epsilon=None,
     count_only=False,
-    max_operations=100_000,
-    max_bytes=DEFAULT_MAX_BYTES,
-    timeout_seconds=60,
+    max_operations=None,
+    max_bytes=None,
+    timeout_seconds=None,
 ):
     """Compile one existing fixed circuit body in a local child process with limits.
 
-    The limits cover the counted input and output operations and the bytes
-    passed between processes, not the compiler's own process memory (RSS).
+    The limits cover the input operations, the bytes passed between processes
+    and the copies of the output text, not the compiler's own process memory
+    (RSS) or synthesis work.
     Requested synthesis precision is recorded, never certified. Terminal
     measurements of the source are metadata and are not compiled into the body.
 
@@ -312,23 +313,31 @@ def compile_logical(
             to 1e-10 for "per-gate" and 1e-2 otherwise.
         count_only: Record Clifford+T counts before final fusion, without an
             output circuit. Valid only for "clifford_t".
-        max_operations: Cap on source instructions and compiled output gates.
-        max_bytes: Cap on the bytes passed to and from the child, the captured
-            diagnostics and the returned result.
-        timeout_seconds: Wall-clock deadline for the compiler child. The
-            defaults of the three limits are registered in
+        max_operations: Default None, no limit. Positive limit on the source
+            instructions, checked before export.
+        max_bytes: Default None, the physical memory of this computer. Limit
+            on the buffers that this process holds at once: the request and
+            the QASM input, the captured diagnostics with their decoded
+            text, and the returned result. The output QASM text of a full
+            compilation is counted four times, which covers the copies held
+            at once after the child returns. It does not bound the
+            compiler's own memory. Where the platform does not report its
+            memory, None sets no byte limit, and only `timeout_seconds`
+            stops a compiler that keeps printing.
+        timeout_seconds: Default None, no deadline. Positive wall-clock
+            deadline for the compiler child. The limits are registered in
             docs/ENGINEERING_CONSTANTS.md ("Explicit logical compilation and
             physical projection").
 
     Returns:
         A LogicalCompilation for this source and stage.
     """
-    from ._auxiliary_process import run_auxiliary
+    from ._auxiliary_process import optional_timeout, run_auxiliary
 
     index = integer(index, "index", 0)
-    max_operations = integer(max_operations, "max_operations", 1)
-    max_bytes = integer(max_bytes, "max_bytes", 1)
-    timeout_seconds = finite_real(timeout_seconds, "timeout_seconds")
+    max_operations = optional_limit(max_operations, "max_operations")
+    max_bytes = optional_limit(max_bytes, "max_bytes")
+    timeout_seconds = optional_timeout(timeout_seconds)
     count_only = boolean(count_only, "count_only")
     if target not in {"clifford_t", "pbc", "pbc_tfuse", "clifford_reduction"}:
         raise ValueError("unsupported NWQEC target")
@@ -345,8 +354,8 @@ def compile_logical(
     # compiler policy. The requested epsilon is not a certified bound on the
     # compiled circuit's error.
     effective = (1e-10 if rz_err == "per-gate" else 1e-2) if requested is None else requested
-    if effective <= 0 or timeout_seconds <= 0:
-        raise ValueError("epsilon and timeout_seconds must be positive")
+    if effective <= 0:
+        raise ValueError("epsilon must be positive")
     circuit, binding = _source(source, index)
     qasm, measurements, saves, phase = _static_body(
         circuit, max_operations=max_operations, max_bytes=max_bytes
@@ -367,7 +376,6 @@ def compile_logical(
             rz_err=rz_err,
             epsilon=effective,
             count_only=count_only,
-            max_operations=max_operations,
         ),
         max_bytes=max_bytes,
         timeout_seconds=timeout_seconds,
@@ -408,6 +416,15 @@ def compile_logical(
     pbc = target in {"pbc", "pbc_tfuse"}
     if not pbc:
         values.update(t=counts.get("t", 0) + counts.get("tdg", 0), cx=counts.get("cx", 0))
+    # The output of this target holds non-Clifford gates as rotations such as rx(pi/4)
+    # beside its t and tdg, so counting t and tdg would leave those out. Reading them
+    # as T needs a check that the output holds only such angles, which was not made.
+    if target == "clifford_reduction":
+        values["t"] = None
+    unavailable = dict(
+        logical_depth="depth is unavailable for this compiler stage/representation",
+        t="the clifford_reduction output also writes non-Clifford gates as rotations such as rx(pi/4), which are "
+          "not counted as T in this basis; its T cost is not established here, use target='clifford_t' for a T count")
     quantities = tuple(
         ResourceQuantity(
             metric=metric,
@@ -417,9 +434,7 @@ def compile_logical(
                 scope=scope,
                 availability="unknown" if value is None else "concrete",
                 value=None if value is None else Rational(numerator=value, denominator=1),
-                reason="depth is unavailable for this compiler stage/representation"
-                if value is None
-                else None,
+                reason=unavailable[metric] if value is None else None,
                 evidence=None if value is None else evidence,
             ),
             population=f"one static compiler body; {stage}",

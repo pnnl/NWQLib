@@ -3,57 +3,55 @@
 The byte and product checks run without Qiskit or SciPy.
 """
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from nwqlib._limits import ResourceLimitError, check_memory, exceeds, memory_limit
+from nwqlib._validation import integer
 
 from typing import Annotated, Literal
 
-from pydantic import Field, StrictInt
+from pydantic import Field
 
-from nwqlib.core.records import Basis, InputRef, Record, Text
+from nwqlib.core.records import Basis, InputRef, Record, StrictInteger, Text
 
-Count = Annotated[StrictInt, Field(ge=0)]
-"""Nonnegative integer field: a Python `int` that is 0 or larger.
+Count = Annotated[StrictInteger, Field(ge=0)]
+"""Nonnegative integer field: a Python `int` or NumPy integer that is 0 or larger, stored as `int`.
 
-A `bool`, a NumPy integer or a float such as `2.0` is rejected, not
-converted. Convert a NumPy integer or a whole-number float with `int(...)`.
+A `bool` or a float such as `2.0` is rejected, not converted. Convert a
+whole-number float with `int(...)`.
 """
-DEFAULT_INPUT_BYTES = DEFAULT_MAX_BYTES
 
 
-def _check_bytes(size: int, max_bytes: int, operation: str = "input") -> None:
-    """Reject an operation whose peak live arrays would exceed max_bytes, before it allocates.
+def _check_bytes(size: int, max_bytes: int | None, operation: str = "input") -> None:
+    """Reject an operation whose dominant arrays would exceed the memory limit, before it allocates.
 
-    ``size`` is the caller's byte formula, an upper bound on the arrays alive
-    at the same time at the peak of one operation, as far as they are known
-    before allocation. It excludes workspace inside SciPy, Qiskit and LAPACK,
-    Python object overhead and the resident memory of the process. Each
-    caller states which arrays its terms count. A dimension integer such as
-    ``2**q`` is counted by its own byte length.
-    docs/CODE_TOUR.md, "Byte and work budgets", explains why budgets are
-    checked before work.
+    ``size`` is the caller's coarse byte estimate of the arrays alive at the
+    same time at the peak of one operation. It excludes workspace inside
+    SciPy, Qiskit and LAPACK, Python object overhead and the resident memory
+    of the process. ``max_bytes=None`` uses the physical memory of this
+    computer (`nwqlib._limits.check_memory`).
     """
-    if type(max_bytes) is not int or max_bytes < 1:
-        raise ValueError("max_bytes must be a positive integer")
-    if size > max_bytes:
-        raise ValueError(f"{operation} needs {size} data bytes, exceeding max_bytes={max_bytes}")
+    check_memory(size, max_bytes, operation)
 
 
-def _check_products(count: int, max_products: int, limit_name: str = "max_products") -> None:
-    """Bound scalar multiplications in one explicitly requested action.
+def _check_products(count: int, max_products: int | None, limit_name: str = "max_products") -> None:
+    """Bound scalar multiplications in one explicitly requested action, where ``max_products=None`` sets no limit.
 
     ``count`` is a derived count of the scalar products the action will
     perform, fixed by its representation before any product runs. It is a
     work limit, not measured CPU time. ``limit_name`` is the caller's option
     that supplies ``max_products``, and the error message names it.
     """
-    if type(max_products) is not int or max_products < 1:
-        raise ValueError(f"{limit_name} must be a positive integer")
+    if max_products is None:
+        return
+    try:
+        max_products = integer(max_products, limit_name, 1)
+    except ValueError:
+        raise ValueError(f"{limit_name} must be a positive integer or None") from None
     if count > max_products:
-        raise ValueError(f"action needs {count} scalar products, exceeding {limit_name}={max_products}")
+        raise ResourceLimitError(f"action needs {count} scalar products, exceeding {limit_name}={max_products}")
 
 
 def refuse_known_need(family, field, cap, known_need, later):
-    """Raise when the largest planning requirement already known exceeds ``cap``.
+    """Raise when the largest byte requirement already known exceeds ``cap``, where None means the physical memory.
 
     At each planning boundary a Method passes the maximum of the complete
     requirements of every phase whose occurrence and dimensions are already
@@ -66,12 +64,20 @@ def refuse_known_need(family, field, cap, known_need, later):
     more. No eigensolve, symbolic expansion, grouping or pair scan is run to
     discover a remedy.
     """
-    if known_need > cap:
-        raise ValueError(
-            f"{family}.{field}={cap} is below the largest known "
-            f"planning requirement {known_need}. Raise {family}.{field} "
-            f"to at least {known_need}. Later phases can need more: {later}."
+    limit = memory_limit(cap)
+    if not exceeds(known_need, limit):
+        return
+    if cap is None:
+        raise ResourceLimitError(
+            f"the largest known planning requirement of {family}, {known_need} bytes, exceeds the "
+            f"physical memory ({limit} bytes) that {family}.{field}=None allows. A computer with at "
+            f"least {known_need} bytes of physical memory admits it. Later phases can need more: {later}."
         )
+    raise ResourceLimitError(
+        f"{family}.{field}={cap} is below the largest known "
+        f"planning requirement {known_need}. Raise {family}.{field} "
+        f"to at least {known_need}. Later phases can need more: {later}."
+    )
 
 
 class InputManifest(Record):

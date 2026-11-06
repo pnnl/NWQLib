@@ -20,7 +20,22 @@ these relations, which the shared execution code relies on:
 
 - ``target_for`` and ``admit_batch`` reject an unsupported readout, shot count
   or batch before preparation, upload or submission, so a request that cannot
-  run spends no provider work.
+  run spends no provider work. For a counts, Pauli expectation or probability
+  readout, ``target_for`` decides from the readout kind and shots and the
+  adapter's own configuration, and treats a probability readout and its
+  amplitude form alike, because ``prepare_static`` checks one point for a
+  batch that fixes these for all its points.
+- An adapter with limits that depend on the Run defines the optional
+  ``admit_preparation(observation, classical_widths=..., run=...)`` and
+  ``admit_submission(natives, run=...)``. The shared execution code calls the
+  first before the preparation charge and its random draw, and the second after
+  ``admit_batch``, before the submission intent. Each makes every
+  ``run.check_data`` that it can decide from the readout, the saved request bytes
+  and its own configuration. Nothing is then counted, reserved or left uncertain,
+  and ``Run.extend_limits`` leads past the refusal. A provider that was never
+  contacted cannot have received the request, so a refusal known at that point
+  must not wait for ``launch``, whose errors make the submission uncertain.
+  A size known only from native translation stays in ``prepare``, after its charge.
 - The shared execution code saves the submission intent and the circuits and
   shots set aside for it (its exposure) before calling ``launch``. ``launch``
   sends one create request, labels it with a name, tag or spool path derived
@@ -45,7 +60,14 @@ these relations, which the shared execution code relies on:
   raising.
 - ``cancel`` sends one request for the original job. Only a later provider
   status confirms cancellation, and the circuits and shots set aside stay
-  counted.
+  counted. An exception from it does not stop ``refresh`` of the same job,
+  because a provider may refuse to cancel a job that already ended. The shared
+  execution code raises it after saving what the refresh found.
+- An adapter with staged remote preparation (Nexus) defines
+  ``cancel_preparation(locator, run=...)``, which sends one request for the
+  original compile job under the same relations: only a later
+  ``refresh_compile`` status confirms it, and an exception from it does not stop
+  that read of the job.
 - Each adapter translates measurement maps and bit order in one decoder
   (``_decode`` for IBM, IonQ and Nexus, ``_submit_aer_execution`` for Aer and
   ``NWQSimBackend._result`` with the runner for NWQ-Sim and Slurm). IonQ's
@@ -60,22 +82,68 @@ these relations, which the shared execution code relies on:
   bit 0, as its least significant bit. Pauli labels use Qiskit order, with
   qubit 0 rightmost.
 - Provider responses, result files and saved payloads that NWQLib reads or
-  parses are checked by ``run.check_data`` before the read or parse.
-  Transfers inside a provider SDK are outside that check.
+  parses are checked by ``run.check_data`` before the read or parse. Decode
+  arrays whose size follows from the requested shots are checked when the
+  experiment is prepared, before it is submitted. Provider metadata that
+  only a paid job's result gives is saved at its actual size and counted
+  when the outcome is saved. Transfers inside a provider SDK are outside
+  these checks.
+- An adapter that returns ``estimated_observable`` defines
+  ``estimate_bytes(record, max_bytes=...)``, the JSON bound of the saved
+  estimate without its provider metadata, which the Run reserves before
+  submission.
 - ``qualification_notice`` states the scope of the evidence once per Run. Offline SDK
   and transport checks do not qualify a live account, queue, device or site.
+
+An adapter that binds parameterized circuits sets ``supports_template_pubs``,
+and ``template_readouts`` when it binds only some readout kinds (Aer binds
+counts). The Run then asks the Method for experiments
+that share one circuit up to rotation angles (``Method.row_templates``),
+among those whose readout the adapter binds. An adapter whose translation
+can need concrete angles defines ``translates_template(circuit)``, and the
+Run prepares the experiments of a template it refuses, or of a template
+without parameters, one by one. The Run
+passes ``prepare`` that circuit with its angles as parameters once per
+template, and reports the compiled parameter order in
+``NativePreparation.parameters``. Before binding, the Run passes every
+experiment's values to ``fold_template(native, rows)``. It returns None
+when the compiled template runs as compiled, and otherwise each
+experiment's correction class and values by name. The Run then binds the
+experiments of each class to one circuit that ``template_class`` builds
+from the compiled template without compiling again, and a later preparation
+gets the compiled template back from its saved bytes with
+``restore_template``. ``bind_template(native, values, runtime=...)`` returns
+the native object of one experiment from the native object of the template
+circuit it runs, the compiled template or its class circuit, with ``values``
+in that circuit's parameter order, and the preparation-record fields that
+the experiment does not share with the template. IBM shares them all, since
+its runtime seed only compiles. Aer runs each experiment with the seed of
+its own ``runtime``, so its record keeps that runtime and its counts
+sampling. A detached adapter sends the bound experiments of a Run as one job,
+and a synchronous one (Aer) runs each as its own attempt. ``restore_native``
+rebuilds a bound experiment from a preparation record whose ``template``
+holds the values. ``result_keys(natives)``
+gives each item's result key, saved with the submission before ``launch``,
+so the position of each experiment in the provider's batch is recorded
+before the job exists. Each experiment keeps its own preparation record,
+attempt and shots.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import cache
 from importlib.metadata import version
 import platform
-from typing import Literal
+from typing import ClassVar, Literal
 from uuid import uuid4
 
 from pydantic import PrivateAttr
 
 from nwqlib.core.records import Record, Source, Text
 from nwqlib.execution import CountsSampling, NativeDepth, RegisterMap, SubmissionItem
+
+
+# Preparations in one process use the same installed SDK versions.
+version = cache(version)
 
 
 @dataclass(frozen=True)
@@ -116,10 +184,20 @@ class NativePreparation:
             represented factor ``(1.0, ±0.0)`` under the arithmetic model of
             the classical computation. ``None`` means the classical correction
             was not assessed.
+        initial_state_error: The bound ``initial_state_defect`` of the state
+            vector that the simulator sets directly as its initial state in
+            place of a direct preparation circuit, or None when it sets none
+            (``PreparedArtifact.initial_state_error``).
         native_depth: The native two-qubit depth of ``native`` on the
             backend's target (``NativeDepth``), or None when the backend does
             not compute it. It is qualified only when the backend also
             establishes that the provider executes ``native`` unchanged.
+        parameters: Names of the parameters that ``native`` keeps, in the
+            order of the provider's binding columns, for a template, and empty
+            for a bound circuit. When the adapter folds the template for each
+            experiment (``fold_template``), the folded circuits that run have
+            their own parameters, recorded in each experiment's
+            ``TemplateBinding``.
     """
 
     native: object
@@ -139,7 +217,9 @@ class NativePreparation:
     provider_options_json: str | None = None
     probability_window_exclusions: tuple[str, ...] | None = None
     statevector_roundoff: tuple[float, float] | None = None
+    initial_state_error: float | None = None
     native_depth: NativeDepth | None = None
+    parameters: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -160,6 +240,11 @@ class BackendRefresh:
         native_simulations: Number of simulations that the backend reports, or None when unavailable.
         associations: Newly learned references to child jobs or results, tied to original submission items.
         error: Original retrieval or decoding exception, raised after the available state is saved. None on a successful refresh.
+        terminal_without_result: With status "uncertain", the provider or the local system has confirmed
+            that the job ended and no result is available now. ``Run.wait`` then stops with ``RunFailed``
+            instead of polling. A later refresh can still collect a result that arrives. It stays False
+            where a result can legitimately appear later, such as a Slurm job that reports COMPLETED
+            before its file is visible on a shared file system.
     """
 
     status: str
@@ -169,6 +254,7 @@ class BackendRefresh:
     native_simulations: int | None = None
     associations: tuple[SubmissionItem, ...] = ()
     error: Exception | None = None
+    terminal_without_result: bool = False
 
 
 def environment(packages):
@@ -200,6 +286,19 @@ def _run_state_threads(run):
     """
     from nwqlib.backends import qiskit_aer as aer
     return run._state.setdefault("aer_state_threads", aer._aer_state_threads())
+
+
+def executed_stop(length, *, position=None, last=None):
+    """Return how many of a circuit's ``length`` top-level instructions a local simulator translates and runs.
+
+    Aer's statevector target and the local NWQ-Sim runner run only the
+    instructions before the resolved ``position`` of an exact Pauli readout,
+    or before the ``last`` resolved boundary of a trajectory, and every
+    instruction for any other readout. A later instruction, and the tree of a
+    direct preparation in it, is never built. Both adapters truncate there,
+    and the Run's check of direct preparation trees counts the same prefix.
+    """
+    return position if position is not None else last if last is not None else length
 
 
 def coherent_body_issue(circuit, stop=None):
@@ -284,6 +383,13 @@ class AerBackend(Record):
     kind: Literal["qiskit_aer"] = "qiskit_aer"
     noise_model_id: Text | None = None
     _noise_model: object = PrivateAttr(default=None)
+    # Experiments that share one circuit up to its angles (Method.row_templates)
+    # are lowered and translated once per template and run one by one, each
+    # with its own seed (bind_template). Only counts are bound: their
+    # preparation record depends on no angle, while the probability-window
+    # exclusions and phase factors of an exact readout read concrete angles.
+    supports_template_pubs: ClassVar[bool] = True
+    template_readouts: ClassVar[frozenset] = frozenset({"counts"})
 
     @classmethod
     def from_noise_model(cls, model):
@@ -397,8 +503,8 @@ class AerBackend(Record):
                 keys for point, (_, kind, keys) in zip(observation.positions, trajectory[1], strict=True)
                 if kind == "amplitudes" or (kind == "reduction"
                                             and not registered_reducer(point.reducer).phase_invariant))
-        if circuit.num_qubits > run.limits.max_simulation_qubits:
-            raise ValueError("Aer circuit exceeds max_simulation_qubits")
+        # Aer reads max_memory_mb=0 as the system memory.
+        memory_mb = run.limits.simulator_memory() or 0
         context = run._state["backend_context"]
         preparations = context.setdefault("aer_preparations", {})
         if target.name not in preparations:
@@ -415,20 +521,37 @@ class AerBackend(Record):
         if self.noise_model_id is not None:
             noise = context.setdefault("noise_model", self._bound_noise_model())
         options = {} if noise is None else {"noise_model": noise}
+        # A direct preparation that opens the circuit is set as the whole
+        # initial state when the readout allows it and its memory fits, the
+        # decision that the Run's check before the charge also takes
+        # (qiskit_aer._direct_initial_state_bytes). The executed prefix
+        # contains it when the last trajectory boundary or the readout
+        # position is at least one. Otherwise its circuit is built as before.
+        initial = None
+        if aer._direct_initial_state_bytes(
+                observation, noiseless=noise is None,
+                observes=(max(position) if trajectory is not None else position) >= 1,
+                width=circuit.num_qubits, memory_mb=memory_mb, state_threads=_run_state_threads(run)) is not None:
+            initial = aer._initial_state(circuit)
         native = aer._prepare_aer_execution(target, circuit, shots=observation.shots or None, seed=runtime.seed,
             pauli_expectation_readout=((position, observation.labels) if observation.kind == "pauli_expectation" else None),
             probability_qubits=observation.qubits if observation.kind == "probabilities" else None,
             trajectory=trajectory, phase_keys=phase_keys, views=views, preparation=preparations[target.name],
-            simulator_memory_mb=run.limits.simulator_memory_mb, state_threads=_run_state_threads(run),
-            exact_synthesis=run._exact_dense_unitaries, **options)
+            simulator_memory_mb=memory_mb, state_threads=_run_state_threads(run),
+            exact_synthesis=run._exact_dense_unitaries, initial_state=initial, **options)
         if trajectory is not None and native.simulator.options.method != "statevector":
             # Pure-state execution is established by the effective method,
             # not by the absence of a noise-model option.
             raise ValueError(f"an Aer trajectory requires deterministic noiseless pure-state execution; "
                              f"the selected simulator method is {native.simulator.options.method!r}")
-        native.metadata["simulator_memory_mb"] = run.limits.simulator_memory_mb
+        native.metadata["simulator_memory_mb"] = memory_mb
         native.metadata["simulator_method"] = native.simulator.options.method
         native.metadata["simulator_zero_threshold"] = native.simulator.options.zero_threshold
+        # A template (Method.row_templates) keeps its angles as parameters,
+        # which each experiment binds at submission (bind_template).
+        parameters = tuple(parameter.name for parameter in native.circuit.parameters)
+        if parameters:
+            native = replace(native, parameters=parameters)
         population = ("unconditional" if observation.kind == "counts" else native.metadata["readout_population"])
         if observation.kind == "amplitudes":
             if native.metadata.get("statevector_semantics") != "pre_final_measurement":
@@ -466,21 +589,67 @@ class AerBackend(Record):
             # The envelope of the stored phase factors, (0, 0) when no saved
             # state is multiplied, including every non-trajectory readout.
             statevector_roundoff=aer._statevector_roundoff(native),
+            initial_state_error=native.metadata.get("initial_state_error"),
+            parameters=parameters,
             transformation="fresh logical container with run-owned definitions; shared Aer lowering/readout; "
-                "owned in-process snapshot; selected simulator memory limit, no process RSS claim")
+                "owned in-process snapshot; selected simulator memory limit, no process RSS claim"
+                + ("; initial direct preparation set as the state vector"
+                   if native.metadata.get("initial_state_error") is not None else "")
+                + (f"; parameterized template bound per experiment ({len(parameters)} parameters)"
+                   if parameters else ""))
 
-    def admit_trajectory_buffers(self, observation, *, width, memory_mb, run):
-        """Check the memory of a trajectory's simulated state, saved results and marginal workspace against ``memory_mb``.
+    def translates_template(self, circuit):
+        """Whether Aer translates the template ``circuit`` (``Method.row_templates``) with its angles left as parameters.
 
-        This is the Aer trajectory check before the Aer circuit is built
-        (``qiskit_aer._admit_aer_saved_buffers``). The trajectory memory check
+        A parameter of a Qiskit standard gate stays a parameter through
+        translation (``qiskit_aer._standard_gate_parameters``). Any other
+        operation that carries a parameter, such as a ``HamiltonianGate``
+        whose time is a parameter, can need its value to be translated, so
+        the Run prepares the experiments of that template one by one.
+        """
+        from nwqlib.backends.qiskit_aer import _standard_gate_parameters
+        return _standard_gate_parameters(circuit)
+
+    def fold_template(self, native, rows):
+        """Return None: an Aer template runs as translated, with each experiment's values bound to it."""
+        return None
+
+    def bind_template(self, native, values, *, runtime):
+        """Return one experiment's native object for the translated template ``native`` and its own record fields.
+
+        The experiment shares the template's circuit object and binds
+        ``values``, in the order of ``native.parameters``, at submission
+        (``qiskit_aer._submit_aer_execution``). It runs with the seed of its
+        own ``runtime``, so its preparation record keeps that runtime and the
+        counts sampling of that seed. Its other record fields are the
+        template's, because a counts preparation depends on no angle.
+        """
+        if not native.parameters or len(values) != len(native.parameters):
+            raise ValueError("an Aer template binding needs one value for each template parameter")
+        bound = replace(native, metadata={**native.metadata, "seed_simulator": runtime.seed}, values=tuple(values))
+        return bound, dict(runtime=runtime, counts_sampling=CountsSampling(kind="fixed_seed", seed=runtime.seed))
+
+    def admit_simulation_memory(self, observation, *, width, memory_mb, run):
+        """Check the memory of a statevector simulation of ``width`` qubits and its saved results against ``memory_mb``.
+
+        This is the Aer check before the Aer circuit is built
+        (``qiskit_aer._admit_aer_saved_buffers``): the live state, the saved
+        state of an amplitude readout or the vector of a probability
+        readout, and for a trajectory its saved results and marginal
+        workspace. A counts readout runs on the counts target, whose
+        simulation method Aer chooses, so it is not checked here and Aer's
+        own ``max_memory_mb`` bounds it. The trajectory memory check
         uses the same positive thread cap passed to Aer's
         ``max_parallel_threads`` (``_run_state_threads``). The cap is part of the
         effective preparation configuration and is reapplied on restoration.
         Saved marginal workspace is counted for at most that many
         state-update threads under the CPU double-statevector execution
-        configuration. Returns the counted bytes.
+        configuration. Returns the bytes of the kept saves (saved states,
+        probabilities and expectations), which stay held while the host
+        reduces the saved states after the simulation, or 0 for counts.
         """
+        if observation.kind == "counts":
+            return 0
         from nwqlib.backends import qiskit_aer as aer
         return aer._admit_aer_saved_buffers(observation, width=width, memory_mb=memory_mb,
                                             state_threads=_run_state_threads(run))
@@ -518,8 +687,15 @@ class AerBackend(Record):
         from nwqlib.backends.qiskit_aer import _submit_aer_execution
         return _submit_aer_execution(native)
 
-    def restore_native_data(self, record, circuit, metadata, *, run):
-        """Restore the already built Aer circuit and the effective simulator options."""
+    def restore_native_data(self, record, circuit, metadata, *, run, initial_state=None):
+        """Restore the already built Aer circuit and the effective simulator options.
+
+        ``initial_state`` reads the saved source vector of a preparation set
+        directly as the initial state when called
+        (``_PreparedAerExecution.initial_state``), or is None. A record bound
+        to a template (``record.template``) gets the saved template circuit,
+        which the template's experiments share, with its own values.
+        """
         from qiskit_aer import AerSimulator
         from nwqlib.backends.qiskit_aer import _PreparedAerExecution, _restore_aer_readout, _trajectory_saves
         from nwqlib.backends.targets import AER_STATEVECTOR_TARGET
@@ -539,4 +715,6 @@ class AerBackend(Record):
             observation.shots or None,
             (observation.position, observation.labels) if observation.kind == "pauli_expectation" else None,
             observation.qubits if observation.kind == "probabilities" else None, metadata,
-            _trajectory_saves(observation, record.boundaries) if trajectory else None)
+            _trajectory_saves(observation, record.boundaries) if trajectory else None, initial_state,
+            **({} if record.template is None else dict(parameters=record.template.parameters,
+                                                       values=record.template.values)))

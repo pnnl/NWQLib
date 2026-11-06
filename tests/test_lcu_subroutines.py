@@ -100,7 +100,7 @@ def test_dense_select_admission_counts_branch_synthesis_before_it_starts(monkeyp
         with pytest.raises(ValueError, match="max_work"):
             build_lcu_circuit([1.0] * 4, [np.eye(64)] * 4, max_work=10**8)
         with pytest.raises(ValueError, match="max_bytes"):
-            build_lcu_circuit([1.0] * 16, [np.eye(256)] * 16, max_work=10**16)
+            build_lcu_circuit([1.0] * 16, [np.eye(256)] * 16, max_work=10**16, max_bytes=10**10)
         prepare_lcu_data([1.0, 1.0], [np.eye(64)] * 2, max_work=10**8)
 
     x = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=complex)
@@ -109,6 +109,25 @@ def test_dense_select_admission_counts_branch_synthesis_before_it_starts(monkeyp
     # Machine-precision class: ideal gates evaluated in binary64.
     np.testing.assert_allclose(actual, 0.25 * np.eye(2) + 0.75 * x, rtol=0.0, atol=1e-13)
 
+
+
+def test_lcu_coefficient_intake_admits_its_arrays_once_before_conversion(monkeypatch):
+    """Three coefficients pad to P = 4 addresses. The PREP-stage formula, 128
+    bytes per address, covers the complex128 coefficients and the bookkeeping
+    arrays, so 512 bytes admit them and 511 refuse them before conversion."""
+    from nwqlib.subroutines.lcu import data as lcu_data
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("coefficients converted before admission")
+
+    coefficients = [0.5, -0.25j, 0.25]
+    with monkeypatch.context() as guard:
+        guard.setattr(lcu_data, "_array_input", forbidden)
+        with pytest.raises(ValueError, match="LCU coefficient intake arrays"):
+            lcu_core.prepare_lcu_gate_data(coefficients, system_dimension=2, max_bytes=511)
+    data = lcu_core.prepare_lcu_gate_data(coefficients, system_dimension=2, max_bytes=512)
+    assert data.coefficient_l1_norm == 1.0
+    assert data.prep_amplitudes == (np.sqrt(0.5), 0.5, 0.5, 0.0)
 
 def test_dense_select_is_exact_for_small_angle_branches():
     """Near-identity branches keep their small rotations exactly.

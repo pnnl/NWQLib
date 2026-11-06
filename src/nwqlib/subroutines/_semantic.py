@@ -34,17 +34,25 @@ import numpy as np
 from qiskit import QuantumCircuit
 from qiskit.circuit.library import ZGate
 
-from ._multiplexors import append_control_diagonal_phases, append_dependency_projected_unitaries
+from ._multiplexors import (
+    append_control_diagonal_phases,
+    append_projected_unitary_table,
+    code_dependencies,
+    local_pauli_codes,
+    project_letter_codes,
+)
 from .pauli_decomposition import _LOCAL_PAULI_FACTORS
 from .qiskit_compat import controlled
 
 
-def signed_pauli_select(labels, coefficients, num_index_qubits, num_system_qubits):
+def signed_pauli_select(x, z, coefficients, num_index_qubits, num_system_qubits):
     """Return the signed SELECT circuit on ``a + n`` qubits without forming a dense matrix.
 
-    ``labels`` are Qiskit Pauli labels of length n (qubit 0 last) and
-    ``coefficients`` their real coefficients. Addresses beyond
-    ``len(labels)`` act as the identity. When the index register holds
+    ``x`` and ``z`` are the uint64 masks of the Pauli words, one row per
+    term, with system qubit j at bit ``j % 64`` of word ``j // 64``
+    (``PauliTerms.x`` and ``PauliTerms.z``, qubit zero rightmost in a label),
+    and ``coefficients`` their real coefficients. Addresses beyond the last
+    row act as the identity. When the index register holds
     ``j``, the circuit applies ``+P_j`` for ``c_j > 0`` and ``-P_j`` for
     ``c_j < 0``. A zero coefficient gets ``-P_j`` when some coefficient is
     negative and ``+P_j`` otherwise, which does not matter because PREP gives
@@ -61,40 +69,39 @@ def signed_pauli_select(labels, coefficients, num_index_qubits, num_system_qubit
     index = circuit.qubits[:a]
     if any(c < 0 for c in coefficients):
         append_control_diagonal_phases(circuit, index, [0.0 if c > 0 else np.pi for c in coefficients])
+    factors = tuple(_LOCAL_PAULI_FACTORS[letter] for letter in "IXZY")
     for q in range(n):
-        append_dependency_projected_unitaries(
-            circuit, circuit.qubits[a + q], index,
-            [_LOCAL_PAULI_FACTORS[label[-1 - q]] for label in labels],
-        )
+        codes = local_pauli_codes(x, z, q, address_bits=a)
+        append_projected_unitary_table(circuit, circuit.qubits[a + q], index,
+                                       project_letter_codes(codes, code_dependencies(codes), factors))
     return circuit
 
 
-def pauli_readout_basis(labels, num_index_qubits, num_system_qubits):
+def pauli_readout_basis(x, z, num_index_qubits, num_system_qubits):
     """Return the index-controlled basis change that turns each ``P_j`` into a Z word.
 
-    On ``a + n`` qubits, index register first, each system qubit receives
-    H where the label of the held index has X, ``H S†`` where it has Y, and
+    ``x`` and ``z`` are the masks of ``signed_pauli_select``. On ``a + n``
+    qubits, index register first, each system qubit receives
+    H where the word of the held index has X, ``H S†`` where it has Y, and
     the identity for Z, I and padded addresses. Conjugation maps each
     factor to Z (``H X H = Z`` and ``(H S†) Y (H S†)† = Z``). After this
     index-controlled rotation, the parity of the Z-basis outcomes on the
-    non-identity positions of the held index's label gives the eigenvalue
+    non-identity positions of the held index's word gives the eigenvalue
     of that Pauli string.
     """
     a, n = num_index_qubits, num_system_qubits
     circuit = QuantumCircuit(a + n, name="SELECT_basis")
     identity = np.eye(2, dtype=complex)
     hadamard = np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2)
-    rotations = {
-        "I": identity,
-        "X": hadamard,
-        "Y": hadamard @ np.diag([1, -1j]),
-        "Z": identity,
-    }
+    # I and Z both take the identity, so with the mask of the Y letters (X and
+    # Z set) in place of Z the codes x + 2y separate exactly the three
+    # distinct rotations. The new array leaves the caller's masks unchanged.
+    y = x & z
+    factors = (identity, hadamard, identity, hadamard @ np.diag([1, -1j]))
     for q in range(n):
-        append_dependency_projected_unitaries(
-            circuit, circuit.qubits[a + q], circuit.qubits[:a],
-            [rotations[label[-1 - q]] for label in labels],
-        )
+        codes = local_pauli_codes(x, y, q, address_bits=a)
+        append_projected_unitary_table(circuit, circuit.qubits[a + q], circuit.qubits[:a],
+                                       project_letter_codes(codes, code_dependencies(codes), factors))
     return circuit
 
 

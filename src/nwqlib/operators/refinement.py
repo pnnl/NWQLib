@@ -9,7 +9,7 @@ from pydantic import model_validator
 from nwqlib.core.records import Float64, Rational, Record, Scope, Source, Text, Unit
 from nwqlib.evidence.error_model import ErrorFrame, FramedFact
 from nwqlib.evidence.records import Evidence, Fact, WorkProvenance
-from .access import Count, DEFAULT_INPUT_BYTES, InputManifest, _check_bytes
+from .access import Count, InputManifest, _check_bytes
 
 Refinement = Literal["certify_pauli_l1", "certify_sparse_rows"]
 SOURCE = Source(name="structural_operator_facts", version="1",
@@ -201,26 +201,33 @@ def _scalar_frontier(count):
     The allowance is 32 integers of ``3174 + bit_length(count)`` bits.
     Both the bit width and the number of integers are derived below.
     """
-    # Finite binary64 values share denominator 2**1074 and magnitude <2**1024.
-    # A sum of count values therefore needs at most 2098+bit_length(count)
-    # numerator bits. Cross comparison with a denominator needs another 1074.
-    # The constant 3174 is 2098 + 2 + 1074. The two extra bits cover the
-    # Gershgorin radius, which sums a real and an imaginary magnitude per
-    # entry (2*count terms), and the diagonal plus or minus that radius.
+    # Finite binary64 values share denominator 2**1074 and magnitude <2**1024,
+    # so the scans keep integer numerators over 2**1074 (_scaled). A sum of
+    # count values needs at most 2098+bit_length(count) bits, and two more
+    # cover the Gershgorin radius (2*count terms) and the diagonal plus or
+    # minus it. The constant 3174 is 2098 + 2 + 1074, which also covers the
+    # 1075-bit denominator and the gcd quotients of the final Fractions.
     #
-    # Slot count. Each Fraction holds two integers. The most integers are
-    # alive in _sparse_values while |Re a| + |Im a| is formed for the radius
-    # of a row after the first. Eleven Fractions are alive then: lower, upper
-    # and norm, the previous row's lo, hi and row_norm, this row's diagonal,
-    # radius and real, and the two magnitudes being added, 22 integers in
-    # all. CPython's Fraction._add, like _sub, holds at most seven more
-    # integers at once, its g, s, t, g2, t // g2, db // g2 and s * (db // g2),
-    # so the peak is 29 and 32 slots cover it. _pauli_values peaks at 19,
-    # the five Fractions full, center, centered, value and magnitude, one
-    # finished difference and seven temporaries. Integers held inside
-    # C-level int arithmetic and math.gcd, Python object overhead and CPU
-    # time are not counted.
+    # Slot count. The _sparse_values scan holds at most 14 integers at once:
+    # lower, upper and norm, the previous row's lo, hi and row_norm, this
+    # row's diagonal, radius and real part, and five while one radius term
+    # is added. _pauli_values holds at most 7. Building the final Fractions
+    # adds at most two integers per Fraction built, the denominator, a gcd
+    # and two quotients, so the peak is 21 and 32 slots cover it. Integers
+    # held inside C-level int arithmetic and math.gcd, Python object
+    # overhead and CPU time are not counted.
     return 32 * ((3174 + max(1, count).bit_length() + 7) // 8)
+
+
+def _scaled(value):
+    """Return the exact integer ``value * 2**1074`` of a finite binary64 ``value``."""
+    numerator, denominator = value.as_integer_ratio()
+    return numerator << (1075 - denominator.bit_length())
+
+
+def _exact(values):
+    """Return the integer numerators over 2**1074 as Fractions."""
+    return {name: Fraction(value, 1 << 1074) for name, value in values.items()}
 
 
 def _pauli_values(raw, num_qubits):
@@ -229,25 +236,26 @@ def _pauli_values(raw, num_qubits):
     Every Pauli word has spectral norm one, so the triangle inequality gives
     ``||H|| <= sum_P |c_P|`` and places the spectrum in
     ``[c_I - sum_{P != I} |c_P|, c_I + sum_{P != I} |c_P|]``. The stored
-    binary64 coefficients are summed as exact fractions, so the bounds hold
-    for the operator as stored, without rounding. Returns the values and the
-    derived scalar-operation count.
+    binary64 coefficients are summed exactly as integer multiples of
+    2**-1074 (_scaled), so the bounds hold for the operator as stored,
+    without rounding. Returns the values and the derived scalar-operation
+    count.
     """
-    full = center = centered = Fraction(0)
+    full = center = centered = 0
     identity = "I" * num_qubits
     for label, coefficient in raw:
         if coefficient.imag != 0:
             raise ValueError("Hermitian Pauli refinement requires real coefficients")
-        value = Fraction(float(coefficient.real))
+        value = _scaled(float(coefficient.real))
         magnitude = abs(value)
         full += magnitude
         if label == identity:
             center += value
         else:
             centered += magnitude
-    return dict(operator_norm_upper_bound=full, identity_coefficient=center,
+    return _exact(dict(operator_norm_upper_bound=full, identity_coefficient=center,
         centered_norm_upper_bound=centered, eigenvalue_lower_bound=center-centered,
-        eigenvalue_upper_bound=center+centered), 4*len(raw)+2
+        eigenvalue_upper_bound=center+centered)), 4*len(raw)+2
 
 
 def _sparse_values(operator, max_bytes):
@@ -258,26 +266,26 @@ def _sparse_values(operator, max_bytes):
     Hermitian matrix the spectral norm equals the spectral radius, which is
     at most the largest absolute row sum. The diagonal of an exactly
     Hermitian matrix is real, and ``|Re a| + |Im a| >= |a|`` keeps the
-    radius rational. Returns the values and the derived scalar-operation
-    count.
+    radius rational. The sums are exact integer multiples of 2**-1074
+    (_scaled). Returns the values and the derived scalar-operation count.
     """
     data, indices, indptr = operator.sparse_entries(max_bytes=max_bytes)
     dimension = operator.basis.dimension
     lower = upper = None
-    norm = Fraction(0)
+    norm = 0
     operations = 0
     # For Hermitian A, CSC columns give the same absolute sums and diagonal as
     # rows. |Re a|+|Im a| >= |a| provides a rational Gershgorin enclosure.
     for row in range(dimension):
-        diagonal = radius = Fraction(0)
+        diagonal = radius = 0
         for offset in range(int(indptr[row]), int(indptr[row + 1])):
             value = data[offset]
-            real = Fraction(float(value.real))
+            real = _scaled(float(value.real))
             operations += 1
             if int(indices[offset]) == row:
                 diagonal = real
             else:
-                radius += abs(real) + abs(Fraction(float(value.imag)))
+                radius += abs(real) + abs(_scaled(float(value.imag)))
                 operations += 5
         lo, hi = diagonal-radius, diagonal+radius
         row_norm = abs(diagonal)+radius
@@ -289,8 +297,8 @@ def _sparse_values(operator, max_bytes):
         # above charges one conversion per entry and five more operations per
         # off-diagonal radius term.
         operations += 4 + int(row > 0)*2 + 1
-    return dict(operator_norm_upper_bound=norm, eigenvalue_lower_bound=lower,
-                eigenvalue_upper_bound=upper), operations
+    return _exact(dict(operator_norm_upper_bound=norm, eigenvalue_lower_bound=lower,
+                       eigenvalue_upper_bound=upper)), operations
 
 
 def _publish(operator, unit, scope, selected, values, *, entries, input_bytes, operations):
@@ -328,7 +336,7 @@ def _report(operator, unit, scope, facts, receipts, *, parent_id=None):
         reason=None if options else "no_known_refinement: supported Hermitian Pauli or CSR/CSC data is unavailable")
 
 
-def refine_operator_facts(operator, *, unit: Unit, scope: Scope, max_bytes=DEFAULT_INPUT_BYTES,
+def refine_operator_facts(operator, *, unit: Unit, scope: Scope, max_bytes=None,
                           refinements: tuple[Refinement, ...] = (),
                           previous: OperatorFactReport | None = None) -> OperatorFactReport:
     """Compute exact bounds on an operator's norm and spectrum, and return them in a report.
@@ -360,9 +368,9 @@ def refine_operator_facts(operator, *, unit: Unit, scope: Scope, max_bytes=DEFAU
         operator (OperatorInput): The operator.
         unit (Unit): Unit of the operator's values.
         scope (Scope): Scope of the bounds.
-        max_bytes (int): Limit on the bytes read and the exact integers kept
-            alive, checked before each computation. Default 10 GB (decimal,
-            `10_000_000_000`).
+        max_bytes (int | None): Limit on the bytes read and the exact integers kept
+            alive, checked before each computation. Default `None`, the physical
+            memory of this computer.
         refinements (tuple[str, ...]): Distinct computations to run, each
             available for this operator. Default `()`.
         previous (OperatorFactReport | None): A report from an earlier call

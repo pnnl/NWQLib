@@ -2,7 +2,7 @@
 
 import pytest
 
-from nwqlib._quantum_readout import reduce_sample_arrays, reduce_setting, validate_readout_layout
+from nwqlib._quantum_readout import physical_shot_count, reduce_sample_arrays, validate_readout_layout
 from nwqlib.core import Source
 from nwqlib.core.planning import ObservationSpec
 from nwqlib.execution import ObservationChunk, RegisterMap
@@ -22,9 +22,9 @@ def _chunk(outcomes, observation, *, classical_layout=(), returned_shots=None):
 
 
 @pytest.mark.parametrize("counts", [False, True])
-def test_valued_noncontiguous_flags_keep_algorithm_and_physical_mass(counts):
+def test_valued_noncontiguous_flags_keep_layout_and_physical_shots(counts):
     success, conditions = ((4,1),(0,0)), ((3,1),)
-    # Valued flags in success-then-condition order, then the parity pivot, physical bit 2.
+    # Valued flags in success-then-condition order, then physical bit 2.
     observed = (4,0,3,2)
     weights = (("0101",3),("1101",1),("1001",2),("1100",4))
     classical = (ClassicalValue(name="flags",dtype="bits",width=2),
@@ -35,15 +35,17 @@ def test_valued_noncontiguous_flags_keep_algorithm_and_physical_mass(counts):
         ObservationSpec(kind="probabilities",qubits=observed,population="unconditional"),
         classical_layout=layout if counts else (), returned_shots=10 if counts else None)
     validate_readout_layout(chunk, observed=observed, classical=classical)
-    # Six shots satisfy algorithm flags; only four reach the physical slice,
-    # with three positive and one negative parity: (6,4,3-1)/10.
-    assert reduce_setting(chunk, observed=observed, success=success, conditions=conditions,
-        pivot=2) == pytest.approx((.6,.4,.2), rel=0., abs=2e-16)
     if counts:
+        # Six of the ten returned shots satisfy the two valued flags, and four of them also the third.
+        assert physical_shot_count(chunk, observed=observed, success=success) == 6
+        assert physical_shot_count(chunk, observed=observed, success=success+conditions) == 4
         # Classical positions cannot be relabeled as the measured physical bits.
         chunk = chunk.revise(classical_layout=(RegisterMap(name="flags",bits=(4,0)), RegisterMap(name="result",bits=(3,2))))
         with pytest.raises(ValueError, match="classical declarations"):
             validate_readout_layout(chunk, observed=observed, classical=classical)
+    else:
+        with pytest.raises(ValueError, match="selected physical bit order"):
+            validate_readout_layout(chunk, observed=observed[::-1], classical=classical)
 
 
 def test_samples_use_original_coordinates_not_a_high_prefix():
@@ -58,15 +60,18 @@ def test_samples_use_original_coordinates_not_a_high_prefix():
     assert (indices.tolist(), counts.tolist()) == ([1,2], [3,1])
 
 
-def test_padded_coordinate_mass_and_samples_share_original_space():
+def test_padded_coordinate_shots_and_samples_share_original_space():
     chunk=_chunk(dict.fromkeys(("00","01","10","11"), 1), ObservationSpec(kind="counts",shots=4),
         classical_layout=(RegisterMap(name="c",bits=(0,1)),), returned_shots=4)
-    mass=reduce_setting(chunk,observed=(0,1),success=(),coordinates=(0,1),dimension=3)
-    assert mass==(1.,.75,.75)
+    # All four shots without the projection. Dimension 3 excludes coordinate 3.
+    assert physical_shot_count(chunk,observed=(0,1),success=())==4
+    assert physical_shot_count(chunk,observed=(0,1),success=(),coordinates=(0,1),dimension=3)==3
     indices,counts,algorithm,physical=reduce_sample_arrays(chunk,observed=(0,1),coordinates=(0,1),success=(),dimension=3)
     assert (algorithm,physical)==(4,3) and indices.tolist()==[0,1,2] and counts.tolist()==[1,1,1]
-    with pytest.raises(ValueError,match="basis rotation"):
-        reduce_setting(chunk,observed=(0,1),success=(),pivot=1,coordinates=(0,1),dimension=3)
+    # Coordinate 3 ("011") is inside dimension 5, and its bit reversal, coordinate 6 ("110"), is not.
+    chunk=_chunk({"011":1,"110":2}, ObservationSpec(kind="counts",shots=3),
+        classical_layout=(RegisterMap(name="c",bits=(0,1,2)),), returned_shots=3)
+    assert physical_shot_count(chunk,observed=(7,5,2),success=(),coordinates=(7,5,2),dimension=5)==1
 
 
 def test_histogram_layout_for_wide_and_single_word_readouts_and_the_count_limit():
@@ -84,6 +89,8 @@ def test_histogram_layout_for_wide_and_single_word_readouts_and_the_count_limit(
     packed = histogram.packed_indices()
     assert packed.dtype == np.uint64 and packed.tolist() == [[5, 1], [3, 0]]
     assert histogram.index_list() == [2**64 + 5, 3]
+    # Only the first entry, with its two shots, has bit 64 set.
+    assert physical_shot_count(chunk, observed=tuple(range(70)), success=((64, 1),)) == 2
     with pytest.raises(ValueError, match="width 70"):
         histogram.indices()
     with pytest.raises(ValueError):
@@ -153,109 +160,78 @@ def test_probability_arrays_check_values_at_publication_and_layout_and_provenanc
         _chunk((indices, weights), marginal)
 
 
-@pytest.mark.parametrize("success_count, same_mass, contiguous, expected", [
-    # Mass passes at 16 visits per complex entry, 8F plus 16A for a success
-    # selection, 16d for a separate physical scan, (4n+4)d for a gather and
-    # 4w+L declaration checks, written phase by phase for F = 32 and n = 3.
-    (8, False, True, 24*32 + 16*8 + 16*6 + 4*5),
-    (8, True, False, 24*32 + 16*8 + 16*8 + 4*5),
-])
-def test_reducer_work_follows_the_executed_mass_and_gather_branches(success_count, same_mass, contiguous, expected):
-    """``readout_requirements`` charges the branches ``reduce_scaled`` executes; omitted facts reserve more."""
-    from nwqlib._quantum_readout import readout_requirements
+@pytest.mark.parametrize("n, rows, contiguous, step", [(12, 1000, True, 1), (12, 1000, False, 1), (14, 4, False, 1),
+                                                       (12, 1000, False, 2654435761)])
+def test_projected_reduction_arrays_fit_its_registered_workspace(monkeypatch, n, rows, contiguous, step):
+    """The arrays of a projected reduction stay within ``49*2**n + 320*M + 2**17`` bytes.
 
-    d = 6 if not same_mass and success_count == 8 else 8
-    layout = readout_requirements(32, 3, d, 0, 0, has_moment=False, success_count=success_count,
-                                  same_mass=same_mass, contiguous=contiguous)
-    assert layout[1] == expected
-    count_only = readout_requirements(32, 3, d, 0, 0, has_moment=False)
-    assert count_only[0] >= layout[0] and count_only[1] >= layout[1]
-    moment = readout_requirements(32, 3, d, 4, 128, success_count=success_count, same_mass=same_mass,
-                                  contiguous=contiguous)
-    full = readout_requirements(32, 3, d, 4, 128)
-    assert full[0] >= moment[0] and full[1] >= moment[1]
-
-
-def test_registry_reduction_of_a_thousand_terms_fits_its_charged_bytes(monkeypatch):
-    """The parsed, packed and numerical phases of a 1000-term reduction fit ``projected_requirements``.
-
-    Packing holds the parsed rows, their validated tuples and the packed
-    table together. The callback then releases the parsed rows, so when the
-    numerical phase starts the newly live memory (the packed table and freed
-    tuples that CPython keeps for reuse) is below the parsed-object bytes H
-    of the law. The saved state and the parameter text are allocated before
-    tracing and added to the measured peak.
+    tracemalloc follows NumPy's allocations and Python's containers. The
+    peak traced memory during ``reduce_scaled`` above its entry, plus the
+    packed table that is live through it, stays below the registered
+    workspace, for contiguous coordinates and for reversed ones whose
+    physical slice is gathered, with many rows and with few rows on more
+    coordinates. Row j has the letters of ``j*step`` in base 4. With
+    ``step=1`` the 1000 rows share 32 flip masks, and the odd multiplier
+    gives most rows a flip mask of their own, so the Pauli action keeps
+    hundreds of groups.
     """
     import gc
     import json
     import math
-    import sys
     import tracemalloc
     import numpy as np
     import nwqlib._quantum_readout as readout
     from nwqlib.core.planning import ObservationPoint, ReductionContext, execute_reduction
 
-    n, L = 12, 1000
-    terms = tuple(("".join("IXYZ"[(j >> (2*k)) & 3] for k in reversed(range(n))), (-1.)**j/(j+1))
-                  for j in range(1, L+1))
+    terms = tuple(("".join("IXYZ"[(j*step >> (2*k)) & 3] for k in reversed(range(n))), (-1.)**j/(j+1))
+                  for j in range(1, rows+1))
+    # A letter X or Y flips its qubit.
+    flips = {label.translate(str.maketrans("IXYZ", "0110")) for label, _ in terms}
+    if rows == 1000:
+        assert len(flips) == 32 if step == 1 else len(flips) > rows // 2
+    coordinates = tuple(range(n)) if contiguous else tuple(reversed(range(n)))
     point = ObservationPoint(id="end", kind="reduction", reducer=readout.PROJECTED_MOMENTS,
-        parameters=readout.projected_parameters(coordinates=range(n), success=((n, 0),), dimension=1 << n, terms=terms))
+        parameters=readout.projected_parameters(coordinates=coordinates, success=((n, 0),), dimension=1 << n,
+                                                terms=terms))
     state = np.ones(1 << (n+1), dtype=np.complex128)/math.sqrt(1 << (n+1))
-    size, _ = readout.projected_requirements(json.loads(point.parameters), n+1)
     execute_reduction(point, state, bindings=(), context=ReductionContext("r", 1e-12, ()))
-    entry = []
-    reduce_scaled = readout.reduce_scaled
+    measured, reduce_scaled = [], readout.reduce_scaled
 
-    def numerical_phase(*args, **kwargs):
-        entry.append(tracemalloc.get_traced_memory()[0])
-        return reduce_scaled(*args, **kwargs)
+    def traced(*args, table, **kwargs):
+        entry = tracemalloc.get_traced_memory()[0]
+        tracemalloc.reset_peak()
+        result = reduce_scaled(*args, table=table, **kwargs)
+        packed = table.x.nbytes + table.z.nbytes + table.coefficients.nbytes
+        measured.append(tracemalloc.get_traced_memory()[1] - entry + packed)
+        return result
 
-    monkeypatch.setattr(readout, "reduce_scaled", numerical_phase)
+    monkeypatch.setattr(readout, "reduce_scaled", traced)
     gc.collect()
     tracemalloc.start()
     try:
         execute_reduction(point, state, bindings=(), context=ReductionContext("r", 1e-12, ()))
-        whole = tracemalloc.get_traced_memory()[1]
-        tracemalloc.reset_peak()
-        fields = readout._projected_fields(json.loads(point.parameters))
-        table = readout._pauli_table(fields[4], n)
-        packing = tracemalloc.get_traced_memory()[1]
     finally:
         tracemalloc.stop()
-    assert len(table) == L and len(entry) == 1
-    parsed = json.loads(point.parameters)
-    rows, validated = parsed["terms"], readout._projected_fields(parsed)[4]
-    H = sys.getsizeof(rows) + sum(sys.getsizeof(row) + sys.getsizeof(label) + sys.getsizeof(value)
-                                  for row, (label, value) in zip(rows, rows, strict=True))
-    H += sys.getsizeof(validated) + sum(sys.getsizeof(row) for row in validated)
-    assert entry[0] < H
-    assert whole + state.nbytes + len(point.parameters) + 64 <= size
-    assert packing + state.nbytes + len(point.parameters) + 64 <= size
+    workspace = readout._projected_workspace(json.loads(point.parameters), n + 1)
+    assert workspace == 49 * (1 << n) + 320 * rows + (1 << 17)
+    assert len(measured) == 1 and 0 < measured[0] <= workspace
 
 
-@pytest.mark.parametrize("w, n, L, bytes_, work", [
-    (20, 18, 2, None, 41_160_944),
-    (13, 12, 1000, 1_218_664, 8_818_988),
-])
-def test_projected_requirements_match_the_derivation_owner_evaluations(w, n, L, bytes_, work):
-    """Scalar evaluations of the reduction law by its derivation owner, independent of this implementation.
+def test_ordered_action_constants_equal_the_formula_per_dimension_and_term_count():
+    """A repeated (N, L) gets the same exact constants, other inputs get their own, and a refused domain still raises.
 
-    Native float coefficients, one row per kept term, contiguous unpadded
-    coordinates and w - n success bits. A permuted coordinate order adds the
-    gather's (4n + 4)d visits.
+    The cached values equal the uncached formula for (8, 5), (16, 5),
+    (8, 6) and the empty action (8, 0). L = 2**52 has (2L + 4)u >= 1 and is
+    refused at every call.
     """
-    import json
-    from nwqlib._quantum_readout import projected_parameters, projected_requirements
+    from fractions import Fraction
+    from nwqlib._quantum_readout import ordered_action_constants
 
-    labels = ["Z" * n] * L if L < 1000 else [
-        "".join("IXYZ"[(j >> (2*k)) & 3] for k in reversed(range(n))) for j in range(1, L + 1)]
-    terms = tuple((label, .5 if L < 1000 else (-1.)**j/(j+1)) for j, label in enumerate(labels, start=1))
-
-    def law(coordinates):
-        parameters = projected_parameters(coordinates=coordinates, success=tuple((b, 0) for b in range(n, w)),
-                                          dimension=1 << n, terms=terms, moment=bool(L))
-        return projected_requirements(json.loads(json.dumps(parameters)), w)
-
-    size, visits = law(range(n))
-    assert visits == work and bytes_ in (None, size)
-    assert law(tuple(reversed(range(n))))[1] - visits == (4*n + 4) << n
+    inputs = ((8, 5), (16, 5), (8, 6), (8, 0))
+    for n, terms in inputs * 2:
+        assert ordered_action_constants(n, terms) == ordered_action_constants.__wrapped__(n, terms)
+    assert len({ordered_action_constants(n, terms) for n, terms in inputs}) == len(inputs)
+    assert ordered_action_constants(8, 0) == (Fraction(0), Fraction(0))
+    for _ in range(2):
+        with pytest.raises(ValueError, match="invalid action underflow domain"):
+            ordered_action_constants(8, 2**52)

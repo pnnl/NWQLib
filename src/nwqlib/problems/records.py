@@ -90,10 +90,11 @@ Pass one of these forms:
   `ingest_*` function of `nwqlib.operators`
 
 The field keeps the representation it receives and does not convert sparse
-or Pauli input to a dense matrix. Converting the input is limited to 10 GB
-(decimal) of known bytes. Pass `operator_input(value, max_bytes=...)` to set
-another limit. A saved description, a dict with a `manifest` entry, gives an
-input object with metadata only, which raises an error on numerical access.
+or Pauli input to a dense matrix. Converting the input is limited to the
+physical memory of the computer, counted as known bytes. Pass
+`operator_input(value, max_bytes=...)` to set another limit. A saved
+description, a dict with a `manifest` entry, gives an input object with
+metadata only, which raises an error on numerical access.
 Loading a saved Result or Run restores the data. See [Supply
 inputs](../inputs.md).
 """
@@ -110,10 +111,11 @@ Pass one of these forms:
   function of `nwqlib.problems`
 
 The field keeps the vector's magnitude and phase. A circuit is copied without
-simulating or synthesizing it. Converting the input is limited to 10 GB
-(decimal) of known bytes. Pass `state_input(value, max_bytes=...)` to set
-another limit. A saved description, a dict with a `manifest` entry, gives an
-input object with metadata only, which raises an error on numerical access.
+simulating or synthesizing it. Converting the input is limited to the
+physical memory of the computer, counted as known bytes. Pass
+`state_input(value, max_bytes=...)` to set another limit. A saved
+description, a dict with a `manifest` entry, gives an input object with
+metadata only, which raises an error on numerical access.
 Loading a saved Result or Run restores the data. See [Supply
 inputs](../inputs.md).
 """

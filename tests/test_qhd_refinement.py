@@ -40,6 +40,28 @@ def _independent_interval(masses, eta):
     return (min(kept), max(kept)), mass, deciding
 
 
+def test_a_level_whose_table_rounding_can_cover_its_potential_is_marked_unresolved(tmp_path):
+    # On four unit grid points exp(x/(3*2**49)) lies 0, 2/3, 4/3 and 2 binary64 steps above 1, so its table spans
+    # 2 steps unless exp errs by nearly a whole step at the top value. Its conditioning is then about 2.25e15, so
+    # 4 u conditioning >= 1 and its level, the selected one, is marked numerically unresolved in the record, the
+    # summary and the report, also after save and load. x**2 + x/7 has conditioning about 1 and is not marked.
+    # A top value near a half step would make the span, and so this level, depend on the math library.
+    from nwqlib.algorithms.qhd import load_box_refinement
+
+    qhd = QHD(num_grid_points=4, num_steps=1, total_time=0.2, encoding="binary", boundary="periodic")
+    for objective, unresolved in ((sp.exp(x / (3 * 2**49)), True), (x**2 + x / 7, False)):
+        problem = Optimization(objective=objective, variables=(x,), bounds=((0.0, 1.0),))
+        result = refine_box(problem, qhd=qhd, options=BoxRefinement(max_levels=1), execution="classical", seed=1,
+                            progress=False)
+        (level,) = result.levels
+        assert result.best is level and level.numerically_unresolved is unresolved
+        assert (level.conditioning > 2e15) is unresolved and (level.conditioning < 10) is not unresolved
+        assert ("is numerically unresolved" in str(result)) is unresolved
+        assert result.report()["levels"][0]["numerically_unresolved"] is unresolved
+        loaded = load_box_refinement(result.save(tmp_path / str(unresolved)))
+        assert loaded.best.numerically_unresolved is unresolved and str(loaded) == str(result)
+
+
 def test_next_box_follows_the_recorded_marginals_under_the_centered_rule():
     # The oracle recomputes Eq. (13) and the centered cells from each level's
     # recorded QHD marginals and the coordinates of the grid its Plan solved.
@@ -945,6 +967,7 @@ def test_an_early_stop_and_a_zero_level_record_report_stored_counts_and_unavaila
     assert resources["shots"]["meaning"].startswith("raw-shot reservations")
     assert resources["cx"]["meaning"].startswith("upper bound") and resources["circuit_attempts"]["meaning"].startswith(
         "exact count")
+    assert resources["arbitrary_rotations"]["meaning"].startswith("upper bound")
     lines = str(empty).splitlines()
     for line in ("Box refinement stopped: budget_exhausted. Completed levels: 0 of at most 4.",
                  "The remaining cumulative limits could not fund a level.",

@@ -11,6 +11,8 @@ nor identifies the ground state, and it never runs automatically.
 
 from math import fsum, isfinite, pi
 import numpy as np
+from nwqlib._limits import exceeds, memory_limit
+from nwqlib._linalg_laws import qr_work
 from nwqlib.core.records import Float64, Unit
 from nwqlib.evidence import Evidence, Fact
 from nwqlib.evidence.error_model import CheckDomain, CheckSpec, ErrorFrame, FramedFact
@@ -18,8 +20,13 @@ from nwqlib.evidence.verification import witness_check_facts
 from nwqlib.execution import KernelApplication, VerificationReceipt, verification_invocation
 from nwqlib.ir import Binding
 from nwqlib.problems import Eigenphase
+from nwqlib.problems.records import UNSPECIFIED_UNIT
 from .records import QPEVerification
 from . import numerical
+
+# Default clustering window of QPEVerification: relative to the spectral span
+# for a Hamiltonian, in radians for a unitary (_group_tolerance).
+GROUP_WINDOW = 1e-8
 
 
 def _groups(values, *, tau, atol):
@@ -44,24 +51,75 @@ def _groups(values, *, tau, atol):
         if current:
             groups.append(current)
         return groups
+    # In ascending phase order the unassigned values within atol of a
+    # cluster's first member are a run that follows it and, across the
+    # branch cut, a run at the end, so two pointers find each cluster.
     phases = np.angle(values)
     ordered = sorted(range(len(phases)), key=lambda index: float(phases[index]))
-    assigned, groups = set(), []
-    for index in ordered:
-        if index in assigned:
-            continue
-        group = [
-            candidate
-            for candidate in ordered
-            if candidate not in assigned
-            and abs(numerical.angle_principal(float(phases[candidate] - phases[index]))) <= atol
-        ]
-        assigned.update(group)
-        groups.append(group)
+
+    def near(position, first):
+        return abs(numerical.angle_principal(float(phases[ordered[position]] - phases[first]))) <= atol
+
+    groups, start, end = [], 0, len(ordered)
+    while start < end:
+        first, stop = ordered[start], start + 1
+        while stop < end and near(stop, first):
+            stop += 1
+        tail = end
+        while tail > stop and near(tail - 1, first):
+            tail -= 1
+        groups.append(ordered[start:stop] + ordered[tail:end])
+        start, end = stop, tail
     return groups
 
 
-def _projector_weight(vectors, indices, reference, occupation):
+def _group_tolerance(values, *, tau, atol):
+    """Return the clustering tolerance of ``_groups`` and the estimate of whether rounding resolves it.
+
+    Without an explicit ``atol`` a Hamiltonian uses ``a = GROUP_WINDOW*span``
+    with ``span = E_max - E_min``, and a unitary ``a = GROUP_WINDOW`` radians.
+    For ``E' = lambda E + c`` with ``lambda > 0``, ``span' = lambda span``, so
+    the clusters of exactly represented eigenvalues follow the scale of H and
+    do not depend on the offset c. A floor at ``u max|E|`` would break that
+    offset invariance, and no floor is applied.
+
+    The second value is ``a > D*u*max|E|`` for the D eigenvalues and
+    ``u = 2**-53``, the comparison stated at ``QPEVerification.group_atol``.
+    ``D*u*max|E|`` is a heuristic rounding scale, which does depend on the
+    offset because adding one does lose represented digits. The clusters do
+    not use it. A single-valued spectrum has no gap to split, so it counts
+    as resolved.
+    """
+    span = None if tau is None else float(np.max(values) - np.min(values))
+    if atol is None:
+        atol = GROUP_WINDOW if tau is None else GROUP_WINDOW * span
+    return atol, span == 0 or atol > len(values) * 2.0**-53 * float(np.max(np.abs(values)))
+
+
+def _admit(choice, step, work, data_bytes):
+    """Raise before one step of the reference computation whose work or bytes exceed the QPEVerification limits.
+
+    The message names the step and only the exceeded limits, with the value
+    each needs. Without max_bytes the byte limit is the physical memory.
+    """
+    memory = memory_limit(choice.max_bytes)
+    needs, remedies = [], []
+    if exceeds(work, choice.max_work):
+        needs.append(f"{work} work units")
+        remedies.append(f"Raise QPEVerification.max_work to at least {work}.")
+    if exceeds(data_bytes, memory):
+        if choice.max_bytes is None:
+            needs.append(f"{data_bytes} bytes, above the physical memory {memory} of this computer")
+        else:
+            needs.append(f"{data_bytes} bytes")
+            remedies.append(f"Raise QPEVerification.max_bytes to at least {data_bytes}.")
+    if needs:
+        raise ValueError(f"The {step} of QPE verification needs " + " and ".join(needs) + ". "
+                         + "".join(remedy + " " for remedy in remedies)
+                         + "These limits belong to QPEVerification, not the QPE Method.")
+
+
+def _projector_weight(vectors, indices, reference, occupation, scale):
     """Return (raw, weight, tolerance) for the prepared weight of one eigenvalue cluster.
 
     ``raw`` = ||Q^dagger psi||**2, where Q is the orthonormal basis that QR
@@ -73,7 +131,8 @@ def _projector_weight(vectors, indices, reference, occupation):
     u = 2**-53, the first factor is Higham's gamma_(2n) = 2n*u/(1 - 2n*u)
     (Accuracy and Stability of Numerical Algorithms, 2nd ed., SIAM 2002,
     doi:10.1137/1.9780898718027, Lemma 3.1),
-    with an untuned factor 16 in n.
+    with an untuned factor 16 in n. ``scale`` is |psi|**2, computed once
+    per verification.
     """
     basis, _ = np.linalg.qr(vectors[:, indices])
     projections = (
@@ -89,7 +148,6 @@ def _projector_weight(vectors, indices, reference, occupation):
     n_eps = n * np.finfo(float).eps
     if n_eps >= 1:
         raise ValueError("projector roundoff envelope is not informative")
-    scale = 1.0 if occupation is not None else fsum(float(abs(value) ** 2) for value in reference)
     tolerance = n_eps / (1 - n_eps) * max(1.0, scale)
     if not isfinite(raw) or raw < -tolerance or raw > 1 + tolerance:
         raise ValueError("nominal projector overlap is outside its probability domain")
@@ -146,6 +204,10 @@ def _frame(plan, name):
     """Return the ErrorFrame of one verification fact, conditioned on the compared cluster."""
     output_frame = plan.output.frame(plan.problem)
     unit = output_frame.unit if name in _OUTPUT_UNIT_FACTS else Unit(symbol="1", dimension="dimensionless")
+    if name == "group_tolerance":
+        # The clusters compare eigenvalues of H or eigenphase angles, whatever the output unit.
+        unit = (Unit(symbol="rad", dimension="angle") if plan.reconstruction.tau is None
+                else plan.problem.unit or UNSPECIFIED_UNIT)
     return ErrorFrame(
         quantity=name,
         metric="nominal_" + name,
@@ -187,7 +249,8 @@ def _verify(plan, result, choice):
     for phase output, absolute energy difference otherwise), the overlap
     deficit max(0, threshold - weight), the cluster's reference value, raw
     and clipped weight with its roundoff window, the cluster size and
-    count, the method resolution (_resolution) and the two pass flags. Only
+    count, the method resolution (_resolution), the two pass flags, and the
+    clustering tolerance with its rounding estimate (_group_tolerance). Only
     dense input is compared. A supplied-circuit preparation is simulated
     only with ``materialize_preparation=True``.
     """
@@ -225,16 +288,18 @@ def _verify(plan, result, choice):
         not in {"qiskit.direct", "qiskit.occupation", "qiskit.product"}
     ):
         raise ValueError("QPE reference direction is unavailable")
-    # Admit reference work before obtaining an eigensystem or materializing
-    # a supplied preparation, reusing matching stored data where available.
-    # Work: 32*D**3 for the eigendecomposition and the per-cluster QR, and
-    # 32*D**2 for the projections. Bytes: an allowance of sixteen D x D
-    # complex128 arrays (256*D**2) and eight complex128 D-vectors (128*D).
+    # Each step is checked before it runs. Its bytes are those it holds
+    # beside the stored arrays, and the steps run one after another, so
+    # their bytes are not added. A matching stored eigensystem or reference
+    # is reused without a charge. An eigendecomposition is charged
+    # numerical.nominal_eigensystem_work(D) and 80*D**2 bytes, as in
+    # method._host_construction, and a generated reference direction 16*D
+    # bytes. A supplied preparation is checked by prepare_qiskit.
     dimension = data.target.basis.dimension
-    work = 32 * dimension**3 + 32 * dimension**2
-    payload = 256 * dimension**2 + 128 * dimension
-    if work > choice.max_work or payload > choice.max_bytes:
-        raise ValueError("selected QPE reference exceeds max_work or max_bytes")
+    spectrum_work = 0 if reused else numerical.nominal_eigensystem_work(dimension, kind=kind)
+    spectrum_bytes = (0 if reused else 80 * dimension**2) + (
+        16 * dimension if not (reference_reused or supplied) else 0)
+    _admit(choice, "eigendecomposition and reference direction", spectrum_work, spectrum_bytes)
     (values, vectors), _ = _eigensystem(
         spectral.reference, spectral.dense_array(), kind=kind, context=context
     )
@@ -251,10 +316,18 @@ def _verify(plan, result, choice):
     reference, occupation = context["reference"]
     # The CDF threshold targets the lowest spectral component. A dominant
     # component reference would assess a different quantity in a mixed state.
-    groups = _groups(values, tau=data.tau, atol=choice.group_atol)
+    group_atol, resolved = _group_tolerance(values, tau=data.tau, atol=choice.group_atol)
+    groups = _groups(values, tau=data.tau, atol=group_atol)
+    # One QR of the D x g eigenvector columns of each cluster (qr_work) and
+    # the projection of the reference on its basis, 16*D*g. One cluster at a
+    # time holds its columns, Q and Q's conjugate, 48*D*g bytes.
+    cluster_work = sum(qr_work(dimension, len(group)) + 16 * dimension * len(group) for group in groups)
+    cluster_bytes = max(48 * dimension * len(group) for group in groups)
+    _admit(choice, "cluster QR", cluster_work, cluster_bytes)
+    scale = 1.0 if occupation is not None else fsum(float(abs(value) ** 2) for value in reference)
     candidates = []
     for group in groups:
-        raw, weight, window = _projector_weight(vectors, group, reference, occupation)
+        raw, weight, window = _projector_weight(vectors, group, reference, occupation, scale)
         estimate = (
             float(np.mean(values[group]))
             if data.tau is not None
@@ -299,7 +372,14 @@ def _verify(plan, result, choice):
         component_within_tolerance=float(error <= choice.tolerance),
         overlap_threshold=threshold,
         overlap_sufficient=float(deficit == 0),
+        group_tolerance=group_atol,
+        estimated_resolved=float(resolved),
     )
+    # The clusters are reported as formed. The qualification stays on the fact that a reader compares.
+    unresolved = () if resolved else (
+        "the clustering tolerance is at or below the heuristic rounding scale D*2**-53*max|E| of the eigenvalues, "
+        "so rounding may have split a degenerate eigenspace; pass QPEVerification(group_atol=...) to choose an "
+        "absolute tolerance",)
     facts = []
     for name, value in items.items():
         frame = _frame(plan, name)
@@ -314,6 +394,7 @@ def _verify(plan, result, choice):
                     availability="concrete",
                     value=Float64(value=float(value)),
                     evidence=Evidence(kind="numerical_estimate", source=choice.source),
+                    assumptions=unresolved if name == "estimated_resolved" else (),
                 ),
             )
         )
@@ -325,8 +406,8 @@ def _verify(plan, result, choice):
         qr_clusters=len(groups),
         preparation_materializations=int(supplied and not reference_reused),
         dimension=dimension,
-        known_work=work,
-        known_bytes=payload,
+        known_work=spectrum_work + cluster_work,
+        known_bytes=spectrum_bytes + cluster_bytes,
     )
     application = KernelApplication(
         name="nominal_cluster",

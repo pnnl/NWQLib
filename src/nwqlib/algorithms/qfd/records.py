@@ -15,6 +15,7 @@ from nwqlib.algorithms.gcim.fixed_basis import (
     ScalarEstimate,
     ShotAllocation,
     _check_shot_allocation,
+    fixed_pencil_noise,
 )
 from nwqlib.core.analysis import Result
 from nwqlib.core.planning import Plan
@@ -251,6 +252,8 @@ class QFDResult(Result):
             measurement, in measurement order.
         sampled_pair_variances: For a complete sampled pencil, the pooled
             sample-mean variances and overlap–H0 covariance of each pair.
+            `overlap_noise` summarizes the overlap part as an
+            [`OverlapNoiseEstimate`][nwqlib.algorithms.gcim.fixed_basis.OverlapNoiseEstimate].
         pencil: The [`ProjectedPencil`][nwqlib.algorithms.gcim.fixed_basis.ProjectedPencil]
             in basis order, or None for partial data or when the operator is
             a multiple of the identity, which needs no H or S. Under
@@ -307,7 +310,18 @@ class QFDResult(Result):
             lines.extend(self.pencil._sampled_summary())
         if self.shot_allocation is not None:
             lines.append(self.shot_allocation._summary(self.pencil))
+        if self._plan is not None:
+            lines.extend(self.overlap_noise._summary())
         return lines
+
+    @property
+    def overlap_noise(self):
+        """The empirical overlap noise of this Result, an [`OverlapNoiseEstimate`][nwqlib.algorithms.gcim.fixed_basis.OverlapNoiseEstimate].
+
+        It reads the saved moments and variances, so it measures nothing and does
+        not change with `analyze(overlap_cutoff=...)`.
+        """
+        return fixed_pencil_noise(self, self.plan.reconstruction.pencil)
 
     def validate_plan(self, plan: Plan) -> None:
         """Reject this Result unless its values and pencil follow from ``plan``.
@@ -343,7 +357,7 @@ class QFDResult(Result):
         _check_shot_allocation(self.shot_allocation, self.missing, plan, "QFD")
         rec = plan.reconstruction.pencil
         sampled = plan.shots is not None
-        grouped = sampled and bool(rec.nonidentity_coefficients)
+        grouped = sampled and rec._nonidentity_count() > 0
         if grouped and (not rec.groups or tuple(e.name for e in plan.experiments) != tuple(
                 s[0] for s in rec.settings())):
             raise ValueError("QFD sampled Plan differs from its declared group settings")
@@ -351,7 +365,7 @@ class QFDResult(Result):
             raise ValueError("QFD group statistics belong only to a sampled Plan with nonidentity terms")
         if sampled and self.pairs:
             raise ValueError("a sampled QFD Result holds no exact pair reductions")
-        if not rec.nonidentity_coefficients:
+        if not rec._nonidentity_count():
             shift = rec.identity_shift
             if (self.eigenvalue, self.reference_energy, self.lowering, self.pencil) != (shift, shift, 0.0, None):
                 raise ValueError("QFD identity values differ from the exact constant")

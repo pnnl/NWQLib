@@ -28,6 +28,28 @@ def _context() -> LCHSProblemContext:
     )
 
 
+@pytest.mark.parametrize("order", [1, 7, 64])
+def test_gauss_rules_integrate_polynomials_without_a_dense_companion(order, monkeypatch):
+    from nwqlib.algorithms.lchs.providers import composite_gauss_grid
+    from nwqlib.algorithms.lchs.inhomogeneous_theory import duhamel_quadrature
+
+    def dense_companion(*args, **kwargs):
+        raise AssertionError("quadrature constructed a dense companion matrix")
+
+    monkeypatch.setattr(np.polynomial.legendre, "legcompanion", dense_companion)
+    nodes, weights = composite_gauss_grid(interval_count_each_side=2, h1=.75, node_count=order)
+    times, time_weights = duhamel_quadrature(.7, order)
+    assert np.all(np.diff(nodes) > 0) and np.all(weights > 0)
+    assert np.all(np.diff(times) > 0) and np.all(time_weights > 0)
+    # Gauss order n integrates degree <= 2n-1 exactly in real arithmetic.
+    # Normalize the coordinate so powers stay within [-1, 1]. The tolerance
+    # covers node/weight formation and the finite sums at these small orders.
+    for degree in sorted(set(range(min(12, 2 * order))) | {2 * order - 2, 2 * order - 1}):
+        expected = 0. if degree % 2 else 3. / (degree + 1)
+        assert abs(np.dot(weights, (nodes / 1.5)**degree) - expected) <= 1e-12
+        assert abs(np.dot(time_weights, (times / .7)**degree) - .7 / (degree + 1)) <= 1e-12
+
+
 def _signed_request(*, num_qubits: int = 3, lsb_position: int = -1) -> ProviderConfig:
     return ProviderConfig(
         implementation="signed_binary_uniform",
@@ -144,15 +166,17 @@ def test_low_somma_paper_profile_grid_matches_independent_closed_form(
     assert derived == {
         "J": index_limit,
         "R": radius,
+        "allowance_kernel_approximation": epsilon_lchs,
+        "allowance_k_quadrature": epsilon_quad,
         "epsilon_lchs": epsilon_lchs,
         "epsilon_quad": epsilon_quad,
         "gamma": gamma,
         "h": step,
     }
-    assert plan.nodes == expected_nodes
+    np.testing.assert_array_equal(plan.nodes, expected_nodes)
     assert all(plan.nodes[index] == -plan.nodes[-index - 1] for index in range(index_limit))
     assert plan.nodes[index_limit] == 0.0
-    assert plan.base_weights == (step,) * len(expected_nodes)
+    np.testing.assert_array_equal(plan.base_weights, (step,) * len(expected_nodes))
     np.testing.assert_allclose(
         plan.coefficients,
         expected_coefficients,
@@ -268,8 +292,8 @@ def test_signed_binary_nodes_and_affine_certificate_are_exact(
         for state in range(state_count)
     )
 
-    assert plan.nodes == expected
-    assert plan.base_weights == (delta_k,) * state_count
+    np.testing.assert_array_equal(plan.nodes, expected)
+    np.testing.assert_array_equal(plan.base_weights, (delta_k,) * state_count)
     assert plan.quadrature.node_order == "computational_basis"
     assert plan.quadrature.physical_node_count == state_count
     assert plan.quadrature.padding_count == 0
@@ -327,7 +351,7 @@ def test_every_allowed_pair_has_independent_coefficients_and_status(
     gamma = float(plan.derived_parameters.get("gamma", 0.0))
     c_value = float(plan.resolved_lchs_kernel.parameters.get("c", 0.0))
     expected_coefficients = []
-    for node, weight in zip(plan.nodes, plan.base_weights, strict=True):
+    for node, weight in zip(plan.nodes.tolist(), plan.base_weights.tolist(), strict=True):
         if kernel_request.implementation == "near_optimal_eq7":
             kernel_value = _independent_eq7(beta, node)
         elif kernel_request.implementation == "cauchy_density":
@@ -340,13 +364,21 @@ def test_every_allowed_pair_has_independent_coefficients_and_status(
             )
         expected_coefficients.append(weight * kernel_value)
 
-    if kernel_request.implementation != "cauchy_density":
+    if kernel_request.implementation == "near_optimal_eq7":
+        # The oracle forms w = (1 + i k)**beta with Python's complex power and the plan with NumPy's. Each
+        # rounds w by a few units in the last place, and exp(-w) has relative condition |w|, so the two
+        # agree within 8u(1 + |w|) at each node.
+        w = np.abs((1.0 + 1.0j*plan.nodes)**beta)
+        relative = np.abs(plan.coefficients - expected_coefficients)/np.abs(expected_coefficients)
+        assert np.all(relative <= 8*2.0**-53*(1.0 + w))
+    if kernel_request.implementation == "low_somma_f2":
         np.testing.assert_allclose(
             plan.coefficients,
             expected_coefficients,
             rtol=2.0e-15,
             atol=0.0,
         )
+    if kernel_request.implementation != "cauchy_density":
         assert plan.coefficient_l1_norm == pytest.approx(
             sum(float(abs(value)) for value in expected_coefficients),
             rel=2.0e-15,
@@ -441,13 +473,13 @@ def test_default_pair_primary_record_preserves_provider_values():
 @pytest.mark.parametrize("execution", ["classical", "quantum"])
 def test_quadrature_work_limit_refuses_before_grid_allocation(execution, monkeypatch):
     """The composite-Gauss grid is built only after its complete work charge fits."""
+    from nwqlib.algorithms.lchs import providers
+
     problem = LinearDynamics(A=[[.4, .15], [.05, .25]], initial_state=[1, 0], time=.1)
-    leggauss = np.polynomial.legendre.leggauss
     with monkeypatch.context() as guard:
-        guard.setattr(np.polynomial.legendre, "leggauss", lambda *a: pytest.fail("unadmitted grid allocation"))
+        guard.setattr(providers, "roots_legendre", lambda *a: pytest.fail("unadmitted grid allocation"))
         with pytest.raises(ValueError, match=r"exceeding LCHS\.max_quadrature_work=1\."):
             plan(problem, method=LCHS(max_quadrature_work=1), execution=execution, seed=7)
-    assert np.polynomial.legendre.leggauss is leggauss
 
 
 def test_closed_tail_bound_keeps_small_cutoff_domain_and_positive_underflow():
@@ -458,3 +490,322 @@ def test_closed_tail_bound_keeps_small_cutoff_domain_and_positive_underflow():
     expected = 2/(beta*cb)*math.exp(-c*k**beta)/(c*k**beta)
     assert eq7_tail_bound(beta, k) == pytest.approx(expected, rel=2e-15, abs=0)
     assert eq7_tail_bound(beta, 1e6) == np.nextafter(0., 1.)  # Positive bound rounded upward.
+
+
+def _noncommuting_parts():
+    """A PSD L and Hermitian H on one qubit with ||[L, H]|| = 0.127, and ||L||."""
+    x = np.array([[0, 1], [1, 0]], complex)
+    y = np.array([[0, -1j], [1j, 0]], complex)
+    z = np.diag([1.0, -1.0]).astype(complex)
+    return 0.6 * np.eye(2) + 0.2 * z + 0.1 * x, 0.15 * x + 0.25 * y, 0.6 + math.hypot(0.2, 0.1)
+
+
+def _finite_sum_error(plan, l_part, h_part, time):
+    """Operator-norm error of sum_j c_j exp(-i t (k_j L + H)) against exp(-t (L + iH)), both by expm."""
+    from scipy.linalg import expm
+    total = sum(c * expm(-1j * time * (k * l_part + h_part)) for k, c in zip(plan.nodes, plan.coefficients))
+    return float(np.linalg.norm(total - expm(-time * (l_part + 1j * h_part)), 2))
+
+
+def test_apel_berntson_provider_bounds_noncommuting_exponential() -> None:
+    """The Apel-Berntson sum (arXiv:2610.03669v1) meets its component bounds for noncommuting L and H.
+
+    Unequal explicit allowances must each bound their own component, and the
+    finite coefficient mass must stay within its Corollary 9 bound of beta_R. The
+    reference exponentials are independent of the provider.
+    """
+    l_part, h_part, l_norm = _noncommuting_parts()
+    allowances = {"kernel_approximation": 5e-7, "k_discretization": 2e-7, "k_truncation": 1e-7}
+    plan = _resolve_coefficient_context(
+        lchs_kernel=ProviderConfig(implementation="apel_berntson"),
+        k_quadrature=ProviderConfig(implementation="tanh_sinh"),
+        problem_context=LCHSProblemContext(final_time=0.7, epsilon=1e-6, l_norm=l_norm,
+                                           component_allowances=allowances),
+    )
+    derived = plan.derived_parameters
+    assert plan.quadrature.approximate_lchs_error_bound == allowances["kernel_approximation"]
+    assert derived["discretization_bound"] <= allowances["k_discretization"]
+    assert derived["truncation_bound"] <= allowances["k_truncation"]
+    bound = plan.quadrature.approximate_lchs_error_bound + plan.quadrature.quadrature_error_bound
+    for time in (0.35, 0.7):
+        assert _finite_sum_error(plan, l_part, h_part, time) <= bound
+    assert abs(plan.coefficient_l1_norm - derived["beta_R"]) <= derived["beta_discretization_bound"]
+    assert plan.compatibility.certificate_status == "certified"
+
+
+@pytest.fixture(scope="module")
+def discrete_weight_artifact():
+    """One bounded fixed-node preparation: 16 nodes, b = 0.6, M = 64, 16 directions."""
+    from nwqlib.algorithms.lchs.coefficient_artifact import prepare_lchs_discrete_weights
+    return prepare_lchs_discrete_weights(
+        nodes=0.5 * (np.arange(16) - 7.5), support_endpoint=0.6, residual_allowance=2e-2,
+        residual_modes=64, polygon_directions=16, solver_time_limit=30.0)
+
+
+def _artifact_plan(artifact, final_time):
+    _, _, l_norm = _noncommuting_parts()
+    return _resolve_coefficient_context(
+        lchs_kernel=ProviderConfig(implementation="discrete_weights",
+                                   parameters={"artifact_id": artifact.content_id}),
+        k_quadrature=ProviderConfig(implementation="artifact_nodes"),
+        problem_context=LCHSProblemContext(final_time=final_time, epsilon=2e-2, l_norm=l_norm),
+        coefficient_artifact=artifact,
+    )
+
+
+def _independent_residual_bound(nodes, weights, b, modes):
+    """Local Wiener-norm bound of the weights on [0, b], with Gauss-Legendre cosine coefficients."""
+    nodes, weights = np.asarray(nodes, dtype=float), np.asarray(weights, dtype=complex)
+    points, quadrature_weights = np.polynomial.legendre.leggauss(400)
+    points, quadrature_weights = 0.5 * b * (points + 1), 0.5 * b * quadrature_weights
+    eta = np.exp(-1j * np.outer(points, nodes)) @ weights - np.exp(-points)
+    cosine = np.array([(2 / b) * np.sum(quadrature_weights * eta * np.cos(m * np.pi * points / b))
+                       for m in range(modes + 1)])
+    slope_zero = abs(1 - 1j * np.sum(nodes * weights))
+    slope_end = abs(np.exp(-b) - 1j * np.sum(nodes * weights * np.exp(-1j * nodes * b)))
+    curvature = b * np.sum(nodes**2 * np.abs(weights)) + 1 - np.exp(-b)
+    return (abs(cosine[0]) / 2 + np.sum(np.abs(cosine[1:]))
+            + 2 * b / (np.pi**2 * modes) * (slope_zero + slope_end + curvature))
+
+
+def test_discrete_weight_artifact_bounds_noncommuting_exponential(discrete_weight_artifact) -> None:
+    """Prepared weights meet the residual bound recomputed from them, and only within their support.
+
+    The local Wiener-norm bound on [0, b] holds for every t with
+    t*||L|| <= b, also when L and H do not commute. T_e*||L|| = 0.577 lies
+    inside b = 0.6 and 0.75*||L|| = 0.618 does not. At t = 0 the error is
+    |sum_j w_j - 1|, so the bound covers it. The recorded bound is compared
+    with one whose cosine coefficients come from 400-point Gauss-Legendre
+    quadrature instead of closed-form moments, for the prepared weights and
+    on the short support b = 1e-18. There zero weights have error one at
+    t = 0, and the unit weight at kappa = 0 is exact up to O(b). The
+    tolerance 1e-11 is far above the binary64 error of either sum, about
+    1e-13, and far below the tail floor 2b(1-exp(-b))/(pi**2 M) = 8.6e-4 at
+    b = 0.6.
+    """
+    from nwqlib.algorithms.lchs.coefficient_artifact import _residual_record
+    l_part, h_part, _ = _noncommuting_parts()
+    plan = _artifact_plan(discrete_weight_artifact, 0.7)
+    residual = discrete_weight_artifact.residual
+    bound = plan.quadrature.approximate_lchs_error_bound
+    assert bound == residual.residual_bound + residual.rounding_estimate <= 2e-2
+    assert residual.residual_bound == pytest.approx(
+        _independent_residual_bound(discrete_weight_artifact.nodes, discrete_weight_artifact.weights, 0.6, 64),
+        rel=0, abs=1e-11)
+    assert abs(sum(discrete_weight_artifact.weights) - 1) <= bound
+    for weights in (np.zeros(1), np.ones(1)):
+        short = _residual_record(np.zeros(1), weights, 1e-18, 1, 2e-2)
+        assert short.residual_bound == pytest.approx(_independent_residual_bound(np.zeros(1), weights, 1e-18, 1),
+                                                     rel=0, abs=1e-11)
+        assert abs(weights.sum() - 1) <= short.residual_bound + short.rounding_estimate
+    for time in (0.175, 0.35, 0.7):
+        assert _finite_sum_error(plan, l_part, h_part, time) <= bound
+    # Recursive and exact (fsum) summation of 16 moduli differ by at most 15 unit roundoffs.
+    assert plan.coefficient_l1_norm == pytest.approx(discrete_weight_artifact.coefficient_mass,
+                                                     rel=16 * 2.0**-53, abs=0)
+    with pytest.raises(ValueError, match=r"covers T_e\*B_Ls <= 0.6"):
+        _artifact_plan(discrete_weight_artifact, 0.75)
+
+
+def test_discrete_weight_artifact_reloads_and_is_used_without_a_solver(discrete_weight_artifact,
+                                                                       monkeypatch) -> None:
+    """A JSON save and reload keeps every weight bit and the bound, and using the weights runs no solver."""
+    import scipy.optimize
+    from nwqlib.algorithms.lchs.coefficient_artifact import LCHSDiscreteWeightArtifact
+    reloaded = LCHSDiscreteWeightArtifact.model_validate_json(discrete_weight_artifact.model_dump_json())
+    assert reloaded.content_id == discrete_weight_artifact.content_id
+    assert [(w.real.hex(), w.imag.hex()) for w in reloaded.weights] == [
+        (w.real.hex(), w.imag.hex()) for w in discrete_weight_artifact.weights]
+    assert reloaded.residual == discrete_weight_artifact.residual
+    monkeypatch.setattr(scipy.optimize, "linprog", lambda *args, **kwargs: pytest.fail("solver called"))
+    plan = _artifact_plan(reloaded, 0.7)
+    np.testing.assert_array_equal(plan.nodes, reloaded.nodes)
+    np.testing.assert_array_equal(plan.coefficients, reloaded.weights)
+
+
+@pytest.mark.parametrize("case, count", (
+    ("default_pair", 0), ("apel_berntson", None), ("discrete_weights", 16), ("empty", 0), ("one_zero_value", 1),
+))
+def test_sampled_held_bytes_charge_16_bytes_per_kernel_value(case, count, discrete_weight_artifact) -> None:
+    """`sampled_plan._held_bytes` charges each kernel value of a rule as one complex128 of 16 bytes.
+
+    Every other array here is empty and there are no inputs, so H is the
+    kernel-value charge alone. The default composite-Gauss rule has no kernel
+    values and charges nothing. The tanh-sinh and artifact_nodes rules supply
+    an array and charge their node count (None here means the rule's own
+    node_count). A single zero value still counts as one value, because the
+    charge depends on the array's length and not on its entries.
+    """
+    from types import SimpleNamespace as Fields
+    from nwqlib.algorithms.lchs.sampled_plan import _held_bytes
+
+    def grid_rule(kernel, quadrature):
+        context = LCHSProblemContext(final_time=0.7, epsilon=2e-2, l_norm=_noncommuting_parts()[2])
+        return _resolve_coefficient_context(lchs_kernel=ProviderConfig(implementation=kernel),
+                                            k_quadrature=ProviderConfig(implementation=quadrature),
+                                            problem_context=context).quadrature
+
+    rule = {
+        "default_pair": lambda: grid_rule("near_optimal_eq7", "composite_gauss"),
+        "apel_berntson": lambda: grid_rule("apel_berntson", "tanh_sinh"),
+        "discrete_weights": lambda: _artifact_plan(discrete_weight_artifact, 0.7).quadrature,
+        "empty": lambda: Fields(kernel_values=np.zeros(0, complex)),
+        "one_zero_value": lambda: Fields(kernel_values=np.zeros(1, complex)),
+    }[case]()
+    expected = 16 * (rule.node_count if count is None else count)
+    assert rule.kernel_values is None or rule.kernel_values.nbytes == expected
+    nothing = np.zeros(0)
+    raw = Fields(nodes=nothing, base_weights=nothing, coefficients=nothing, quadrature=rule)
+    data = Fields(quadrature=Fields(k_nodes=nothing, coefficients=nothing, coefficient_plan=raw),
+                  coefficient_plan=Fields(coefficients=nothing))
+    problem = Fields(A=None, initial_state=None, source=None)
+    common = Fields(generator=Fields(dissipative=None, hamiltonian=None))
+    assert _held_bytes(problem, None, common, data) == expected
+
+
+def test_discrete_weight_preparation_charges_before_building_its_program(monkeypatch) -> None:
+    """The byte charge and the tail floor refuse before any constraint matrix or solve."""
+    import scipy.optimize
+    import scipy.sparse
+    from nwqlib.algorithms.lchs.coefficient_artifact import prepare_lchs_discrete_weights
+    monkeypatch.setattr(scipy.sparse, "csr_array", lambda *args, **kwargs: pytest.fail("matrix built"))
+    monkeypatch.setattr(scipy.optimize, "linprog", lambda *args, **kwargs: pytest.fail("solver called"))
+    request = dict(nodes=np.linspace(-3, 3, 16), support_endpoint=0.6, residual_modes=64,
+                   polygon_directions=16, solver_time_limit=1.0)
+    with pytest.raises(ValueError, match="discrete-weight linear program"):
+        prepare_lchs_discrete_weights(residual_allowance=2e-2, max_bytes=1_000_000, **request)
+    # The tail term alone is 2b(1-exp(-b))/(pi**2 M) = 8.6e-4 at M = 64.
+    with pytest.raises(ValueError, match="tail bound alone"):
+        prepare_lchs_discrete_weights(residual_allowance=8e-4, **request)
+
+
+def test_discrete_weight_preparation_limits_bytes_and_solver_time_only(monkeypatch) -> None:
+    """J = 2048 nodes, M = 256 modes and D = 32 directions pass every check whose bytes fit, up to the program.
+
+    The program has about 3.4e7 matrix entries and about 2.2 GB of known arrays, below the 10 GB default.
+    The explicit solver time limit, not a work count, bounds the solve.
+    """
+    from nwqlib.algorithms.lchs import coefficient_artifact
+
+    class Reached(Exception):
+        pass
+
+    def stop(*args, **kwargs):
+        raise Reached
+
+    monkeypatch.setattr(coefficient_artifact, "_residual_affine_maps", stop)
+    with pytest.raises(Reached):
+        coefficient_artifact.prepare_lchs_discrete_weights(
+            nodes=np.linspace(-3, 3, 2048), support_endpoint=0.6, residual_allowance=2e-2, residual_modes=256,
+            polygon_directions=32, solver_time_limit=1.0)
+
+
+@pytest.mark.parametrize("request_", (ProviderConfig(implementation="apel_berntson"),
+                                      ProviderConfig(implementation="low_somma_f2", parameters={"c": 1.0})))
+def test_continuous_kernel_proposal_mean_matches_scalar_exponential(request_) -> None:
+    """The mean of the returned weight over the guarded proposal is the guarded kernel integral.
+
+    For U uniform on [0, 1], node(U) has density q_R/(1-2*guard) on
+    [-R_g, R_g] with R_g = tan((1-2*guard)*atan(R)), so the mean of
+    weight(k)*exp(-i x k) equals int_{-R_g}^{R_g} g(k) exp(-i x k) dk with no
+    further factor. The right side integrates a closed form of g directly in
+    k. scipy.integrate.quad reports absolute errors below 1e-9 for both
+    sides here. The tolerance 1e-8 lies far below the change
+    2*guard*|integral| >= 5e-6 that a weight for the unguarded proposal would
+    add. For a scalar L = lam >= 0 and x = t*lam, the mean is within kernel
+    plus guard error of exp(-x). The weight cap is attained at k = 0.
+    """
+    from scipy.integrate import quad
+    from nwqlib.algorithms.lchs.providers import resolve_lchs_continuous_kernel
+    plan = resolve_lchs_continuous_kernel(lchs_kernel=request_, kernel_allowance=1e-3, guard_allowance=1e-4)
+    derived = plan.derived_parameters
+    if request_.implementation == "apel_berntson":
+        def kernel(k):
+            ratio = math.log((plan.radius + k) / (plan.radius - k))
+            return (math.exp((1 - derived["mu"]) * derived["Delta"]) / (math.pi * (1 + k * k))
+                    * np.exp(-1j * derived["Delta"] / math.pi * ratio))
+    else:
+        def kernel(k):
+            return _independent_low_somma_coefficient(k, gamma=derived["gamma"], c_value=1.0)
+    guarded_radius = math.tan((1 - 2 * plan.guard) * math.atan(plan.radius))
+
+    def integral(function, lower, upper):
+        return complex(*(quad(lambda v, imaginary: (function(v).imag if imaginary else function(v).real),
+                              lower, upper, args=(flag,), limit=4000, epsabs=1e-12)[0] for flag in (False, True)))
+
+    assert plan.guard_omission_bound <= 1e-4
+    for x in (0.5, 2.0):
+        mean = integral(lambda u: plan.weight(plan.node(u)) * np.exp(-1j * x * plan.node(u)), 0, 1)
+        guarded = integral(lambda k: kernel(k) * np.exp(-1j * x * k), -guarded_radius, guarded_radius)
+        assert abs(mean - guarded) <= 1e-8
+        assert abs(mean - math.exp(-x)) <= plan.kernel_error_bound + plan.guard_omission_bound
+    # Binary64 rounding of the exponentials is about 1e-14 here, far below 2*guard.
+    assert abs(plan.weight(0.0)) == pytest.approx(plan.importance_weight_bound, rel=1e-12)
+    if request_.implementation == "apel_berntson":
+        # The guard 2.4e-19 rounds node(0) and node(1) to -R and R, where the kernel is undefined.
+        with pytest.raises(ValueError, match="numerical range"):
+            resolve_lchs_continuous_kernel(lchs_kernel=request_, kernel_allowance=1e-3, guard_allowance=1e-18)
+
+
+def test_public_lchs_helpers_apply_a_work_limit_only_when_given():
+    """The Cartesian check and the coefficient plan of a 512-dimensional A need no work limit.
+
+    The eigenvalue check of L costs d**3 = 134,217,728 work units at
+    d = 512. cartesian_decomposition runs it without a limit and refuses one
+    unit below it when that limit is given. resolve_lchs_coefficient_plan
+    runs the same check with the default LCHS, which sets no work limit.
+    """
+    from nwqlib import LinearDynamics
+    from nwqlib.algorithms.lchs import cartesian_decomposition, resolve_lchs_coefficient_plan
+
+    d = 512
+    shift = np.diag(np.ones(d - 1), 1)
+    a = 2 * np.eye(d) - shift - shift.T + 0.3j * (shift + shift.T)
+    l_part, _ = cartesian_decomposition(a)
+    np.testing.assert_array_equal(l_part, 2 * np.eye(d) - shift - shift.T)
+    with pytest.raises(ValueError, match=f"max_spectral_work={d**3 - 1}"):
+        cartesian_decomposition(a, max_spectral_work=d**3 - 1)
+    state = np.zeros(d)
+    state[0] = 1
+    coefficients = resolve_lchs_coefficient_plan(LinearDynamics(A=a, initial_state=state, time=0.5))
+    assert len(coefficients.nodes) == len(coefficients.coefficients) > 0
+
+
+@pytest.mark.parametrize("matrix, providers", (
+    (np.diag([.25, .5]), {"lchs_kernel": ProviderConfig(implementation="cauchy_density"),
+                          "k_quadrature": ProviderConfig(implementation="signed_binary_uniform",
+                                                         parameters={"num_qubits": 2, "lsb_position": -1})}),
+    (np.diag([.25, .5]), {"lchs_kernel": ProviderConfig(implementation="apel_berntson"),
+                          "k_quadrature": ProviderConfig(implementation="tanh_sinh")}),
+    (1j * np.diag([.25, .5]), {}),
+), ids=("signed_binary", "tanh_sinh_kernel_values", "zero_l_one_node"))
+def test_independent_plans_compare_by_exact_field_values(matrix, providers) -> None:
+    """Two resolves of one input are equal plans, and one changed array element or field makes them unequal."""
+    from dataclasses import replace
+    from nwqlib.algorithms.lchs import resolve_lchs_coefficient_plan
+
+    problem = LinearDynamics(A=matrix, initial_state=[1., 0.], time=.25)
+    left, right = (resolve_lchs_coefficient_plan(problem, **providers) for _ in range(2))
+    assert left is not right and left == right and not left != right
+    assert left.quadrature == right.quadrature
+    coefficients = left.coefficients.copy()
+    coefficients[-1] += 2.0**-40
+    assert replace(left, coefficients=coefficients) != left
+    weights = left.quadrature.base_weights.copy()
+    weights[0] = np.nextafter(weights[0], np.inf)
+    assert replace(left.quadrature, base_weights=weights) != left.quadrature
+    assert replace(left, quadrature=replace(left.quadrature, base_weights=weights)) != left
+    if left.quadrature.kernel_values is not None:
+        assert replace(left.quadrature, kernel_values=None) != left.quadrature
+    assert replace(left, recovery_exponent=left.recovery_exponent + 1) != left
+    assert left != left.quadrature and left != tuple(left.coefficients)
+
+
+def test_saved_plan_reopens_an_equal_coefficient_plan(tmp_path) -> None:
+    from nwqlib import load_result
+    from nwqlib.algorithms.lchs import resolve_lchs_coefficient_plan
+
+    chosen = plan(LinearDynamics(A=np.diag([.2, .5]), initial_state=[1., 0.], time=1.), method=LCHS(),
+                  execution="quantum")
+    reopened = load_result(solve(chosen).save(tmp_path / "saved")).plan
+    assert resolve_lchs_coefficient_plan(reopened) == resolve_lchs_coefficient_plan(chosen)

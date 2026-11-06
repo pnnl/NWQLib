@@ -54,8 +54,9 @@ Lifecycle rules and the failure each one prevents:
 
 Commits of one static acquisition, in the order they happen, and what reopening
 finds when the process stops after each one. A static Plan has a fixed list of
-experiments, each prepared and acquired once by ``prepare_static`` and
-``execute_static``. ``prepare_static`` prepares the first experiment, or all of
+points, its experiments and each range-axis point of an experiment with axes
+(``Plan._static_points``), each prepared and acquired once by ``prepare_static`` and
+``execute_static``. ``prepare_static`` prepares the first point, or all of
 them for ``prepare(plan, settings="all")``, and ``execute_static`` prepares each
 remaining one when it reaches it. The iteration code of an adaptive Method
 chooses its next experiment from data. It uses the same preparation, submission
@@ -66,23 +67,36 @@ these commits names it in its docstring. The docstrings of the other writes (lim
 reservations, cancellation requests, failure revisions and the Result row)
 state what a stop before or after them leaves.
 
-1. Workflow row, with the experiment's runtime seed and the RNG position
-   (``_static_item``). A restart before commit 2 prepares the experiment with this
-   same seed.
-2. Preparation charge and RNG position (``prepare_experiment``). If the
+1. Workflow rows of a template batch, with their runtime seeds and the RNG
+   position, in one transaction (``_static_items``). A restart before commit 2
+   prepares each point with its same seed. A refused or failed commit keeps
+   none of the seeds, so a retry draws them again from the same position.
+   A point prepared on its own has no
+   commit 1: its row and seed commit with its preparation charge, so a restart
+   before that charge draws the seed again from the same saved RNG position.
+2. Preparation charge and RNG position (``prepare_experiment``). A seed
+   drawn for the charge is kept only if the charge commits, so a retry of a
+   refused charge draws it again from the same position. If the
    preparation record has not committed, reopening counts the circuit
-   preparation against ``max_total_circuits`` and the static workflow does not
-   rebuild the preparation. The Run never repeats a failed or interrupted
-   preparation on its own, since that would be new counted work the caller did
-   not request, so a Run whose local preparation has a charge and no
-   preparation record cannot complete (``_unbuilt``), and ``execute_static``
-   raises ``PreparationNotRebuilt`` before it submits any further experiment. A
-   saved remote preparation can still be refreshed instead. A revision of the
-   charge reserves each exact dense synthesis before it starts, or records its
-   refusal and leaves the experiment unprepared (``Run._charge_synthesis``).
+   preparation against ``max_total_circuits``. The Run never repeats a failed
+   or interrupted preparation on its own, since that would be new counted work
+   the caller did not request, so a static row whose local preparation has a
+   charge and no preparation record stops the Run (``_unbuilt``), and
+   ``execute_static`` raises ``PreparationNotRebuilt`` before it submits any
+   further experiment. ``Run.resume(rebuild_preparations=True)`` is the caller's
+   request for that work. It prepares each such row once more under the row's
+   saved realization and seed (``_rebuild_static_preparations``), and the old
+   charge stays counted. The new charge and the row's pointer to it commit
+   together, so a reopen finds ``charged/no-record``,
+   ``new charged/no-record``, ``prepared record`` or ``submitted``, and never a
+   mix. A saved remote preparation can still be refreshed instead. An adaptive
+   Method has no workflow rows, so it keeps its own refusal.
 3. Preparation record and native payload (``_finish_native_preparation`` or
    ``_prepare_host``). A later resume submits the saved preparation without
-   lowering it again.
+   lowering it again. The charge row of this transaction adds the work of the
+   exact dense syntheses that the preparation made (``Run._record_synthesis``).
+   A remote preparation adds it when ``begin_preparation`` saves its local
+   data.
 4. Submission intent, reserved events and output-byte reservation
    (``Run._begin_submission``). The backend is contacted only after this
    commit. If no acknowledgement or outcome follows, reopening marks the intent
@@ -103,6 +117,8 @@ state what a stop before or after them leaves.
 7. Collection ordinal (``Run.collect``). The Method's collection of the
    observation is its own commit, so reopening restores the order in which the
    Method collected observations even when they completed in a different order.
+   The static workflow collects each synchronous outcome as it completes, so
+   its ordinals commit with commit 6 (``submit_experiment(collect=True)``).
 
 A refresh of a detached job (``refresh_submissions``) splits commit 6 in two. It
 first commits the provider status and item associations, which must survive a
@@ -117,13 +133,16 @@ an unhandled exception or a killed process. Recovery after power loss is not
 covered.
 """
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
+from nwqlib._limits import ResourceLimitError, check_memory, exceeds, known_sum, memory_limit
 
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from itertools import islice
 from pathlib import Path
 from threading import RLock
 from time import monotonic, perf_counter, sleep
+from typing import NamedTuple
 from uuid import uuid4
 import json
 import sys
@@ -137,26 +156,35 @@ from nwqlib.execution import (
     ConsumptionEvent, CountBin, EstimateValue, ExecutionLimits, ExecutionTrace, JobLocator, LimitAmendment,
     LogicalPreparationReceipt, MAX_COUNT, ObservationChunk, ObservationView, PauliValue, PayloadRef,
     PendingPreparation, PreparedArtifact, RegisterMap, SubmissionItem, _probability_mapping, point_chunk_key,
-    RunFailed, ScalarValue, SubmissionRecord, TimingObservation,
+    RunFailed, ScalarValue, SubmissionRecord, TimingObservation, _unbounded, LOCAL_SIMULATORS, with_paid_budgets,
 )
 from nwqlib._run_journal import (
     RUN_FORMAT, JSONBytesExceeded, LocalJournal, PreparationCharge, WorkflowItem, encode_records,
     unsupported_run_format,
 )
-from nwqlib.ir.validation import AdmissionStepsExceeded, _Admission, admission_refusal
-
-# Backend kinds that simulate on this machine: local Aer and a locally launched
-# NWQ-Sim runner. The Run bounds their circuit width before native work
-# (ExecutionLimits.max_simulation_qubits). They and host execution are also the
-# backends on which prepare(plan, settings="all") prepares every setting,
-# because their preparation is local lowering with no remote compilation or
-# provider charge.
-LOCAL_SIMULATORS = frozenset({"qiskit_aer", "nwqsim"})
+from nwqlib.ir.validation import _Admission, children
 # The recorded failure of a reopened synchronous Aer submission whose
 # in-process result is gone (Run._restore_submissions). Its attempt has no
 # route to an outcome, so resume raises the recovery error with this text
 # (Run._raise_unrecoverable_outcome).
 _AER_REOPEN_FAILURE = "interrupted synchronous Aer result is unavailable after reopen"
+# Run._write checks a write against the Run's own max_data_bytes unless a limit
+# amendment passes the proposed one, which may be None (no limit).
+_RUN_DATA_LIMIT = object()
+# Bytes that one prepared experiment keeps when it binds a shared template, whose
+# circuit counts once: its handle, preparation record and parameter values. Sampled
+# LCHS Runs grew about this much per row, linearly to 10**5 rows, with the handle
+# dominating, on Qiskit 2.6.0 and Aer 0.18.0. A coarse estimate, not a byte bound.
+_TEMPLATE_ROW_BYTES = 32 << 10
+# Circuit containers of a template's size that exist together while it is lowered and
+# compiled on Qiskit 2.6.0 and Aer 0.18.0, counted live on a small template. A new
+# template has three: its built root, the gate definition that ``circuit_to_gate``
+# fills, and either the copy in which that function assigns parameters or then the
+# definition that Aer translates. The template before it has two: its gate definition
+# and its translated definition. Containers can share operations, so these are coarse
+# allowances, not byte counts.
+_TEMPLATE_BUILD_COPIES = 3
+_TEMPLATE_PREDECESSOR_COPIES = 2
 
 
 def _now():
@@ -164,15 +192,27 @@ def _now():
 
 
 def _limit_remedy(name):
-    """The sentence of a refusal message that names both ways to raise the execution limit ``name``.
+    """The sentences of a refusal message that say how to go on past the execution limit ``name``.
 
-    ``solve``, ``prepare`` and ``Run`` take ``limits`` for the Run they create.
-    ``solve`` closes that Run when an error leaves it, so its caller passes a
-    larger limit to a new call. ``Run.extend_limits`` raises a limit of an
-    open Run, and the work already counted stays counted.
+    ``Run.extend_limits`` raises or removes a limit of the Run that refused,
+    which keeps its saved circuits, jobs and results. A preparation of a Plan
+    with fixed settings that the refusal left counted but not saved is prepared
+    again by ``Run.resume(rebuild_preparations=True)``, so the same steps lead
+    past both kinds of refusal there. An adaptive Method has no such rows, so the
+    way past that case is a new Run, which the message names. A closed Run,
+    including one that ``solve`` closed when the error left it, is reopened with ``load_run``
+    first. ``solve``, ``prepare`` and ``Run`` take ``limits`` for a new Run.
     """
-    return (f"Raise it with limits=ExecutionLimits({name}=...) in solve, prepare or Run, "
-            f"or with run.extend_limits({name}=...) on an open Run.")
+    return (f"Continue this Run with run.extend_limits({name}=...), a larger value or None for no limit, which keeps "
+            "its saved circuits, jobs and results, and then run.resume(). "
+            "If a Plan with fixed settings stopped while saving an already counted preparation, use "
+            "run.resume(rebuild_preparations=True), which prepares it once more and sends no job again. "
+            "A Method whose later settings depend on earlier outcomes cannot prepare it again: a new Run with a "
+            "larger limit prepares the Plan again and can repeat earlier jobs, and the original saved observations "
+            "stay readable. "
+            "A closed Run with a folder, including one that solve closed "
+            f"after this error, is reopened with load_run first. A new solve, prepare or Run takes "
+            f"limits=ExecutionLimits({name}=...).")
 
 
 def _data_limit_clause(run, unit=""):
@@ -186,29 +226,19 @@ def _data_limit_clause(run, unit=""):
             f"{_limit_remedy('max_data_bytes')}")
 
 
-def _cumulative_limit_error(name, limit, noun, used, requested, *, owner="this Run's"):
+def _cumulative_limit_error(name, limit, noun, used, requested, *, owner="this Run's", at_least=False):
     """Return the error that refuses ``requested`` more units of ``noun`` when ``used`` count against ``name``.
 
-    The message gives the limit, both amounts and the remedy. ``owner`` names
-    whose limit it is, ``"the proposed"`` for a value that ``extend_limits``
-    has not yet applied. For ``max_total_circuits`` and ``max_total_shots``
-    the request is an exact count, and the message names the sum of both
-    amounts as the smallest limit that accepts it. An adaptive Method requests
-    its work in steps, so its whole workload can need more than that sum.
-    For ``max_data_bytes`` the limit reserves nothing and the complete
-    requirement is not known at this point, so the message suggests
-    ``max(used + requested, 2 * limit, 100_000_000)`` and names the default
-    ``DEFAULT_MAX_BYTES``.
+    The message gives the limit, both amounts, their sum as the smallest
+    limit that accepts this request, and the remedy. ``owner`` names whose
+    limit it is, ``"the proposed"`` for a value that ``extend_limits`` has
+    not yet applied. The request is an exact amount, or a lower bound when
+    ``at_least`` is set. Later work of the Run, such as the next step of an
+    adaptive Method or the next saved result, can need more than that sum.
     """
-    if name == "max_data_bytes":
-        suggested = max(used + requested, 2 * limit, 100_000_000)
-        return ValueError(f"{owner} {name}={limit} cannot admit the requested {noun} ({used} counted, "
-                          f"{requested} requested). Raise max_data_bytes to at least {suggested}: the cap "
-                          "reserves nothing, and the complete requirement is not known at this point "
-                          f"(the default, DEFAULT_MAX_BYTES, is {DEFAULT_MAX_BYTES}, 10 GB). "
-                          f"{_limit_remedy(name)}")
     return ValueError(f"{owner} {name}={limit} cannot admit the requested {noun} ({used} counted, "
-                      f"{requested} requested, at least {used + requested} needed). {_limit_remedy(name)}")
+                      f"{'at least ' if at_least else ''}{requested} requested, at least {used + requested} needed). "
+                      f"{_limit_remedy(name)}")
 
 
 def _notebook_progress():
@@ -324,6 +354,9 @@ class Run:
         if backend is None and plan.execution == "quantum":
             from nwqlib.backends.connection import AerBackend
             backend = AerBackend()
+        # The header below saves the circuit and shot budgets of a backend
+        # that may charge for them, so a reopened Run keeps the same budgets.
+        limits = with_paid_budgets(limits, backend)
         # A synchronous backend returns results from submit. A detached backend admits and
         # launches a batch, then refreshes it from restored native handles. Reconcile and
         # cancel stay optional because their callers handle their absence.
@@ -339,7 +372,9 @@ class Run:
                                            or callable(getattr(backend, "prepare_local", None)))
         try:
             if directory is not None or durable:
-                path = Path(directory) if directory is not None else Path.home() / ".nwqlib" / "runs" / identity
+                # Resolved once here, so a later change of working directory cannot lose the folder.
+                # Nothing saved holds this path, so a moved folder still opens.
+                path = Path(directory).resolve() if directory is not None else Path.home() / ".nwqlib" / "runs" / identity
                 path.mkdir(parents=True, exist_ok=False)
                 self._state["directory"] = path
                 self._state["journal"] = LocalJournal(path / "run.sqlite", limits.max_data_bytes, create=True)
@@ -371,15 +406,42 @@ class Run:
           ``array_bytes`` (saved observation arrays), ``payload_bytes`` (other
           binary payloads) and ``external_bytes`` (files of the Run folder).
           Together with ``pending_output`` they count against ``max_data_bytes``.
-        - ``synthesis_work`` sums the exact dense synthesis work that preparations
-          reserved against ``max_synthesis_work`` (``_charge_synthesis``), and
-          ``synthesis_preparation`` names the preparation that is reserving it.
-          ``synthesis_cache`` holds the circuits of the syntheses that basis
-          lowering made in this Run object's preparations
-          (``_exact_dense_unitaries``), each reserved against
-          ``max_synthesis_work``.
-          :meth:`close` empties it. It is not saved, so a reopened Run starts
-          with an empty cache.
+        - ``synthesis_work`` sums the exact dense synthesis work of the saved
+          preparations. ``synthesis_preparation`` names the preparation in
+          progress, and ``synthesis_pending`` holds the work of the syntheses it
+          has made (``_record_synthesis``) until the transaction that first
+          saves its lowering result. ``synthesis_cache`` holds the circuits of
+          the syntheses that basis lowering made in this Run object's
+          preparations (``_exact_dense_unitaries``), each made once, and
+          ``synthesis_cache_kept`` the sum of their kept allowances
+          (``dense_synthesis_size``). :meth:`close` empties the cache. It is not
+          saved, so a reopened Run starts with an empty cache.
+        - ``receipt_commits`` maps the charge of a remote preparation that a
+          refresh may still complete to the ``(commit, withdraw)`` callbacks
+          of the instructions its lowering copied
+          (``_ConstructorContext.report_copies``) and to the specializations
+          it built. These become the frontier
+          that later preparations reuse only when a refresh saves its
+          record, so no other preparation borrows gates whose copies no saved
+          record counts. The commits run once its record is saved, and a
+          failed or cancelled preparation runs the withdrawals and drops both
+          (``_withdraw_preparation``). A local preparation publishes its
+          specializations just before its record is saved and passes its
+          callbacks to ``_finish_native_preparation`` directly. It is not
+          saved, and :meth:`close` empties it.
+        - ``native_held`` sums the memory estimates of the native circuits that
+          live handles hold (``PreparedHandle._native_bytes``). Saving a
+          preparation record adds to it, ``release_native`` subtracts only what
+          it releases, ``PreparedHandle._restore_native`` adds back and
+          :meth:`close` clears it. It is not saved, so a reopened Run starts it at
+          zero. An Aer handle's saved row keeps its estimate, which is compared
+          with the Method's limit before the circuit's file is read and added when
+          the circuit returns. A handle of any other backend restored from its
+          record adds nothing (``restore_prepared``, ``_held_bytes``).
+          ``_held_bytes`` adds the definitions and frontiers, which it reads from
+          the live caches.
+        - ``static_workload_admitted`` records that this Run object has checked
+          the known work of its remaining static points (``_admit_static_workload``).
         """
         for name, value in (("plan", plan), ("backend", backend), ("run_id", identity), ("_lock", RLock()),
                             ("forecast", forecast), ("allocation", allocation)):
@@ -389,9 +451,10 @@ class Run:
             rng=RandomStreams.restore(plan.randomness), closed=False, storage_failed=False,
             preparations=0, host_preparations=0, construction_work=0, host_preparation_work=0,
             shots=0, host_invocations=0, host_work=0, synthesis_work=0, synthesis_preparation=None,
-            synthesis_cache={},
+            synthesis_pending=0, synthesis_cache={}, synthesis_cache_kept=0,
             events=[], attempt_indices={}, submissions={}, submission_items={}, pending_submissions={},
             chunks={}, receipts={}, by_attempt={}, prepared_artifacts={}, local_prepared_ids=[], handles={},
+            template_sources={}, template_classes={}, receipt_commits={},
             refresh_cache={}, observation_view=None, trace_snapshot=None,
             counts_sources=None, counts_source_failure=None,
             preparation_charges={}, checkpoint_preparations={}, checkpoint_attempts={},
@@ -401,7 +464,8 @@ class Run:
             data_sizes={}, data_bytes=0, array_bytes=0, payload_sizes={}, payload_bytes=0, external_bytes=0,
             artifacts=None, publication_batch=None,
             artifact_payloads={}, journal=None, directory=None, started=False, result=None,
-            cancel_requested=None, termination_reason=None,
+            cancel_requested=None, termination_reason=None, native_held=0, template_circuits={},
+            static_workload_admitted=False,
             progress=_notebook_progress() if progress is None else progress, warnings=[]))
         from nwqlib._run_archive import bind_caches
         bind_caches(self)
@@ -426,7 +490,7 @@ class Run:
 
     @property
     def directory(self):
-        """The Run's folder, as a `pathlib.Path`, or `None` for a Run without one.
+        """The Run's folder, as an absolute `pathlib.Path`, or `None` for a Run without one.
 
         A backend that runs jobs outside this process always gets a folder,
         under `~/.nwqlib/runs/<run_id>` when `prepare` was given no
@@ -464,39 +528,44 @@ class Run:
         Cumulative saved data is checked separately by ``check_capacity`` and at
         each write to the run log.
         """
-        if type(size) is not int or size < 0:
-            raise ValueError("data byte count must be a nonnegative integer")
-        if size > self.limits.max_data_bytes:
+        if exceeds(size, self.limits.max_data_bytes):
             raise ValueError(f"native output or decoded data of {size} bytes exceeds this Run's "
                              f"max_data_bytes={self.limits.max_data_bytes}. {_limit_remedy('max_data_bytes')}")
 
     def _write(self, records=(), *, collected=(), payloads=(), release_output=None, reserve_output=0,
-               max_data_bytes=None, deleted=(), metadata_credit=0):
+               max_data_bytes=_RUN_DATA_LIMIT, deleted=()):
         """Check the changed records against the data limit, then commit them to the run log and the in-memory state.
 
-        This is the single write path of a Run. The saved-data invariant is::
+        This is the single write path of a Run. ``max_data_bytes`` is an
+        admission limit, the Run's own unless a limit amendment passes the
+        proposed one, and None sets no limit. Work and derived records are
+        admitted while::
 
             data_bytes + array_bytes + payload_bytes + external_bytes
                 + pending_output <= max_data_bytes
 
-        The new rows are checked and encoded against the space left by that sum
-        before any JSON text is allocated, and the actual encoded size is checked
-        again. Output reservations named by ``release_output`` leave the pending
-        total in the same step, because their acquisition's outcome is being
-        saved. A Run with a folder commits the rows in one SQLite transaction.
-        The in-memory byte counters change only after that commit. A failed
-        commit sets ``storage_failed`` so later work stops until the Run is
-        reopened from disk. Only cache rows and removed checkpoint fields may be
-        deleted. Preparation records, events and observations are permanent
-        records. metadata_credit is the part of a completion's metadata that
-        its reservation already covers, the declared host application records,
-        so only the rest is checked against max_completion_metadata_bytes.
+        A write that settles admitted work (``_settles``) is never refused by
+        this limit. Its rows are measured and counted, so the saved total can
+        exceed the limit by lifecycle rows of admitted attempts that no
+        reservation could bound, such as provider text. Every other write is
+        encoded once and refused when it adds bytes and the total would
+        exceed the limit, so after such an excess new work and new derived
+        records wait for ``Run.extend_limits(max_data_bytes=...)``. A write
+        that adds no bytes, such as one that only deletes cache rows, is not
+        refused. Output reservations named by ``release_output`` leave the
+        pending total in the same step, because their acquisition's outcome
+        is being saved. A Run with a folder commits the rows in one SQLite
+        transaction. The in-memory byte counters change only after that
+        commit. A failed commit sets ``storage_failed`` so later work stops
+        until the Run is reopened from disk. Only cache rows and removed
+        checkpoint fields may be deleted. Preparation records, events and
+        observations are permanent records.
 
         Returns:
             The encoded ``(kind, key, text)`` rows that were written.
         """
         state = self._state
-        data_limit = self.limits.max_data_bytes if max_data_bytes is None else max_data_bytes
+        data_limit = self.limits.max_data_bytes if max_data_bytes is _RUN_DATA_LIMIT else max_data_bytes
         released = set(release_output) if isinstance(release_output, tuple) else {release_output}
         pending = sum(value for key, value in state["pending_output"].items() if key not in released)
         # Published arrays are charged through array_bytes by their publication
@@ -518,54 +587,37 @@ class Run:
                 receipt = state["prepared_artifacts"].get(value.prepared_id)
                 if receipt is None or not value.declares_readout_of(receipt):
                     raise ValueError("an observation chunk must declare its preparation receipt's readout")
-        replaced_sizes = {key: state["data_sizes"].get(key, 0) for key in keys | removed}
-        replaced = sum(replaced_sizes.values())
+        replaced = sum(state["data_sizes"].get(key, 0) for key in keys | removed)
         counted = (state["data_bytes"] - replaced + state["array_bytes"] + state["payload_bytes"]
                    + state["external_bytes"] + pending)
-        available = data_limit - (counted + payload_added + reserve_output)
-        owner = "this Run's" if max_data_bytes is None else "the proposed"
-        if release_output is not None:
+        available = None if data_limit is None else data_limit - (counted + payload_added + reserve_output)
+        owner = "this Run's" if max_data_bytes is _RUN_DATA_LIMIT else "the proposed"
+        settles = self._settles(records, deleted=deleted, reserve_output=reserve_output,
+                                max_data_bytes=max_data_bytes)
+        if settles or data_limit is None:
+            # The rows of admitted work are bounded by their own decoding
+            # checks, so their encoding takes no bound from the data limit.
+            encoded = encode_records(records, None)
+        else:
+            # A row that replaces at least its own size adds nothing, so the
+            # encoding bound covers the replaced bytes even beyond the limit.
+            bound = max(0, available, replaced)
             try:
-                completed, metadata = _completion_metadata_bound(records, data_limit)
-                metadata -= _probability_header_credit(records, data_limit, run=self)
+                encoded = encode_records(records, bound)
             except JSONBytesExceeded as error:
-                raise ValueError(f"one completion record needs more than {owner} max_data_bytes={data_limit} "
-                                 f"by itself. {_limit_remedy('max_data_bytes')}") from error
-            allowance = self.limits.max_completion_metadata_bytes
-            if completed and metadata - replaced - metadata_credit > completed*allowance:
-                # Raising the limit does not clear a synchronous acquisition's
-                # stored terminal failure (_raise_terminal_failure re-raises it
-                # and does not reacquire the discarded output), so the open-Run
-                # remedy is not offered for it.
-                raise ValueError(f"completion metadata exceeds max_completion_metadata_bytes={allowance} per "
-                                 f"completed acquisition ({metadata - replaced - metadata_credit} bytes for "
-                                 f"{completed} completed, {completed*allowance} allowed). A synchronous result "
-                                 "refused here is discarded; acquiring it again needs a new Run with "
-                                 "limits=ExecutionLimits(max_completion_metadata_bytes=...) in solve, prepare "
-                                 "or Run. A detached job whose output is still retrievable can be refreshed "
-                                 "again after run.extend_limits(max_completion_metadata_bytes=...).")
-        # A reservation or payload beyond the limit leaves negative space. The
-        # encoder takes only a nonnegative limit, so zero space refuses every
-        # row with the message below, and a write without rows reaches the
-        # final comparison.
-        try:
-            encoded = encode_records(records, max(0, available))
-        except JSONBytesExceeded as error:
-            minimum = payload_added + reserve_output + max(0, available) + 1
-            raise _cumulative_limit_error(
-                "max_data_bytes", data_limit, "serialized-data admission bytes (lower bound)", counted, minimum,
-                owner=owner) from error
+                minimum = payload_added + reserve_output + bound + 1
+                raise _cumulative_limit_error("max_data_bytes", data_limit, "stored data bytes", counted, minimum,
+                                              owner=owner, at_least=True) from error
         sizes = {(kind, key): size for (kind, key, _), size in zip(encoded.rows, encoded.sizes, strict=True)}
         added = sum(sizes.values()) - replaced
         requested = sum(sizes.values()) + payload_added + reserve_output
-        if counted + requested > data_limit:
+        if not settles and added + payload_added + reserve_output > 0 and exceeds(counted + requested, data_limit):
             raise _cumulative_limit_error("max_data_bytes", data_limit, "stored data bytes", counted, requested,
                                           owner=owner)
         journal = state["journal"]
         if journal is not None:
             try:
-                journal.commit(records, collected=collected, payloads=payloads,
-                               deleted=deleted, encoded=encoded, replaced=replaced_sizes)
+                journal.commit(records, collected=collected, payloads=payloads, deleted=deleted, encoded=encoded)
             except BaseException:
                 state["storage_failed"] = True
                 raise
@@ -578,6 +630,57 @@ class Run:
         for key in released:
             state["pending_output"].pop(key, None)
         return encoded.rows
+
+    def _settles(self, records, *, deleted, reserve_output, max_data_bytes):
+        """Whether a write only settles admitted work, so that ``max_data_bytes`` does not refuse it.
+
+        Such a write reserves no output, is not a limit amendment, deletes no
+        row, and each of its rows is one of:
+
+        - a revision of an ``event`` or ``submission`` row already saved, or of
+          a saved ``remote_preparation`` row,
+        - a ``chunk`` or ``publication`` row of an attempt whose output is
+          still reserved or whose event is revised in the same write, or a
+          ``payload`` row of such a publication,
+        - the ``control`` row that only sets a cancellation request.
+
+        A write without rows, such as a collection ordinal, settles too. The
+        decision reads the rows, not ``release_output``. A ``remote_preparation``
+        revision that starts an upload or a compilation settles too, but the
+        stage is refused before it is written while the Run's counted data
+        exceed the limit (``_remote_preparation._advance``), because it starts
+        new remote work.
+        """
+        if reserve_output or max_data_bytes is not _RUN_DATA_LIMIT or deleted:
+            return False
+        state = self._state
+        saved, pending = state["data_sizes"], state["pending_output"]
+        revised = {value.attempt for kind, key, value in records if kind == "event" and (kind, key) in saved}
+
+        def admitted(attempt):
+            return attempt in pending or attempt in revised
+
+        payloads = set()
+        for kind, key, value in records:
+            if kind == "publication" and admitted(value["acquisition"][1]) and "payload" in value:
+                payloads.add(value["payload"].content_id)
+        for kind, key, value in records:
+            if kind in {"event", "submission", "remote_preparation"}:
+                settled = (kind, key) in saved
+            elif kind == "chunk":
+                settled = admitted(value.attempt)
+            elif kind == "publication":
+                settled = admitted(value["acquisition"][1])
+            elif kind == "payload":
+                settled = key in payloads
+            elif kind == "control":
+                settled = (value["cancel_requested"] is not None and state["cancel_requested"] is None
+                           and value["termination_reason"] == state["termination_reason"])
+            else:
+                settled = False
+            if not settled:
+                return False
+        return True
 
     def progress(self, stage, done=None, total=None):
         """Report a lifecycle stage to the observer callback, if any.
@@ -641,125 +744,100 @@ class Run:
         work already counted never frees capacity. A cancellation request blocks new
         preparation or acquisition.
         """
-        values = (preparations, circuits, shots, data_bytes)
-        if any(type(value) is not int or value < 0 for value in values):
-            raise ValueError("new work requires nonnegative integer counts")
         self._ensure_open()
         state = self._state
         if self.cancel_requested is not None and any((preparations, circuits, shots)):
             raise ValueError("run cancellation prevents new preparation or acquisition")
         limits = self.limits
         circuit_preparations = state["preparations"] - state["host_preparations"]
-        if circuit_preparations + preparations > limits.max_total_circuits:
+        if exceeds(circuit_preparations + preparations, limits.max_total_circuits):
             raise _cumulative_limit_error("max_total_circuits", limits.max_total_circuits, "circuit preparations",
                                           circuit_preparations, preparations)
         acquisitions = len(state["events"]) - state["host_invocations"]
-        if acquisitions + circuits > limits.max_total_circuits:
+        if exceeds(acquisitions + circuits, limits.max_total_circuits):
             raise _cumulative_limit_error("max_total_circuits", limits.max_total_circuits,
                                           "circuit acquisition attempts", acquisitions, circuits)
-        if state["shots"] + shots > limits.max_total_shots:
+        if exceeds(state["shots"] + shots, limits.max_total_shots):
             raise _cumulative_limit_error("max_total_shots", limits.max_total_shots, "raw shots",
                                           state["shots"], shots)
         stored = (state["data_bytes"] + state["array_bytes"] + state["payload_bytes"] + state["external_bytes"]
                   + sum(state["pending_output"].values()))
-        if stored + data_bytes > limits.max_data_bytes:
+        if exceeds(stored + data_bytes, limits.max_data_bytes):
             raise _cumulative_limit_error("max_data_bytes", limits.max_data_bytes, "stored data bytes",
                                           stored, data_bytes)
 
     def _available_data_bytes(self):
-        """Bytes of ``max_data_bytes`` not used by saved rows, arrays, payloads, external files or pending output."""
+        """Bytes of ``max_data_bytes`` not used by saved rows, arrays, payloads, external files or pending output, or None without a limit."""
+        if self.limits.max_data_bytes is None:
+            return None
         state = self._state
         stored = (state["data_bytes"] + state["array_bytes"] + state["payload_bytes"] + state["external_bytes"]
                   + sum(state["pending_output"].values()))
         return max(0, self.limits.max_data_bytes - stored)
 
-    def _charge_synthesis(self, work, operation):
-        """Reserve ``work`` units of exact dense synthesis for the preparation in progress, before the synthesis starts.
+    def _record_synthesis(self, work):
+        """Add ``work`` units of exact dense synthesis to the preparation in progress.
 
-        Backends that lower a circuit to a gate basis, through
-        :meth:`_exact_dense_unitaries`, and lowering that controls a
-        transformed block call this once per batch of syntheses.
-        ``ExecutionLimits.max_synthesis_work`` counts the total over the
-        Run, so a synthesis that a reopened Run makes again, with its empty
-        cache, is counted again. The reservation revises the preparation's
-        charge in one commit to the run log, so a reopened Run keeps it
-        counted even when the synthesis never finished.
-
-        When the Run's total would exceed the limit, the charge instead
-        records the refused work, and the same commit removes the
-        preparation from its static workflow item or checkpoint of the iteration
-        state.
-        The refused preparation stays counted against ``max_total_circuits``,
-        because its lowering had started, but its experiment is left
-        unprepared, so the workflow or the iteration code prepares it again
-        at its next call. ``ValueError`` is raised before any synthesis starts.
-
-        A backend called directly with this Run, outside ``prepare_experiment``,
-        makes no preparation of the Run, so its work is compared with the
-        remaining allowance and not recorded, like the rest of that call. Its
-        syntheses stay out of the Run's synthesis cache
-        (:meth:`_exact_dense_unitaries`).
+        Basis lowering (:meth:`_exact_dense_unitaries`) and lowering that
+        controls a transformed block call this for each batch of syntheses
+        they make. The amount waits in memory and is saved with the
+        transaction that first saves the preparation's lowering result
+        (``_finish_native_preparation``, ``_bind_template_rows`` or
+        ``begin_preparation``). Only then does it join
+        ``ExecutionTrace.synthesis_work``, so a preparation that fails or is
+        interrupted before that transaction counts no synthesis. A backend
+        called directly with this Run, outside ``prepare_experiment``, makes
+        no preparation of the Run, so its work is not counted.
         """
-        state = self._state
-        identity = state["synthesis_preparation"]
-        limit = self.limits.max_synthesis_work
-        if identity is None:
-            if state["synthesis_work"] + work > limit:
-                raise ValueError(f"{operation} needs {work} work units, beyond the rest of this Run's "
-                                 f"max_synthesis_work={limit}, of which {state['synthesis_work']} are already "
-                                 f"reserved. {_limit_remedy('max_synthesis_work')}")
-            return
-        charge = state["preparation_charges"][identity]
-        if state["synthesis_work"] + work <= limit:
-            revised = charge.revise(synthesis_work=charge.synthesis_work + work)
-            self._write((("preparation", identity, revised),))
-            state["preparation_charges"][identity] = revised
-            state["synthesis_work"] += work
-            return
-        refused = charge.revise(synthesis_refused=work)
-        records = [("preparation", identity, refused)]
-        current = state["workflow_current"]
-        item = None if current is None else state["workflow_items"][current]
-        if item is not None and item.preparation_id == identity:
-            item = item.revise(preparation_id=None)
-            records.append(("workflow_item", current, item))
-        else:
-            item = None
-        self._write(tuple(records))
-        state["preparation_charges"][identity] = refused
-        if item is not None:
-            state["workflow_items"][current] = item
-        if state["checkpoint_preparations"].get(charge.checkpoint_sequence) == identity:
-            del state["checkpoint_preparations"][charge.checkpoint_sequence]
-        raise ValueError(f"{operation} needs {work} work units, and this Run has already reserved "
-                         f"{state['synthesis_work']} of its max_synthesis_work={limit}. "
-                         f"{_limit_remedy('max_synthesis_work')} After run.extend_limits, the next "
-                         "call on the open Run prepares the experiment again.")
+        if self._state["synthesis_preparation"] is not None:
+            self._state["synthesis_pending"] += work
 
     def _exact_dense_unitaries(self, circuit):
         """Return ``circuit`` with its dense unitaries synthesized exactly, each distinct matrix once per Run object.
 
         The backends that lower a circuit to a gate basis call this before they
         compile. During a preparation of this Run it passes the Run's synthesis
-        cache and :meth:`_charge_synthesis` to
-        ``qiskit_compat.exact_dense_unitaries``. The Run keeps the circuit of
-        every synthesis that its preparations made, keyed by the content of its
-        matrix, so a later preparation that holds the same matrix, even in new
-        gate objects, reuses the circuit. Only the matrices missing from the
-        cache are reserved through :meth:`_charge_synthesis` and synthesized.
-        The cache lives until this Run object is closed. Reopening the Run
-        starts an empty cache, and a synthesis made again after reopening is
-        reserved again.
+        cache to ``qiskit_compat.exact_dense_unitaries``. The Run keeps the
+        circuit of every synthesis that its preparations made, keyed by the
+        content of its matrix, so a later preparation that holds the same
+        matrix, even in new gate objects, reuses the circuit. Only the
+        matrices missing from the cache are synthesized and counted
+        (:meth:`_record_synthesis`). The cache lives until this Run object is
+        closed. Reopening the Run starts an empty cache, and a synthesis made
+        again after reopening is counted again.
 
-        A backend called directly with this Run, outside its preparations,
-        reserves nothing, so its call neither reads nor adds to the cache and
-        every cached circuit stays reserved against ``max_synthesis_work``.
-        Its syntheses are still compared with the rest of that limit.
+        Before the syntheses start, the largest working allowance and every
+        kept allowance of ``dense_synthesis_size``, with the kept allowances
+        of the circuits already in the cache, are checked against the
+        physical memory. When the cache alone takes them over it, the cache
+        is emptied, which changes no circuit since the synthesis is
+        deterministic, and the syntheses of every matrix of the circuit are
+        checked by themselves. Syntheses that do not fit are refused before
+        any of them starts. A backend called directly with this Run, outside
+        its preparations, neither reads nor adds to the cache, and only its
+        own syntheses are checked.
         """
-        from nwqlib.subroutines.qiskit_compat import exact_dense_unitaries
+        from nwqlib.subroutines._dense_synthesis import admit_dense_syntheses, dense_synthesis_size
+        from nwqlib.subroutines.qiskit_compat import dense_unitary_census, exact_dense_unitaries
         state = self._state
-        cache = {} if state["synthesis_preparation"] is None else state["synthesis_cache"]
-        return exact_dense_unitaries(circuit, charge=self._charge_synthesis, cache=cache)
+        preparing = state["synthesis_preparation"] is not None
+        cache = state["synthesis_cache"] if preparing else {}
+        needed = dense_unitary_census(circuit, cached=True)[0]
+        widths = [width for key, width in needed.items() if key not in cache]
+        if widths:
+            sizes = [dense_synthesis_size(width) for width in widths]
+            data = max(size[1] for size in sizes) + sum(size[2] for size in sizes)
+            if cache and exceeds(data + state["synthesis_cache_kept"], memory_limit(None)):
+                cache.clear()
+                state["synthesis_cache_kept"] = 0
+                widths = list(needed.values())
+            _, work = admit_dense_syntheses(widths, max_work=None, max_bytes=None, operation=(
+                f"exact synthesis of {len(widths)} dense unitaries on at most {max(widths)} qubits"))
+        result = exact_dense_unitaries(circuit, cache=cache)
+        if widths and preparing:
+            state["synthesis_cache_kept"] += sum(dense_synthesis_size(width)[2] for width in widths)
+            self._record_synthesis(work)
+        return result
 
     def extend_limits(self, **changes):
         """Raise one or more limits of this Run, keeping everything it has counted.
@@ -777,7 +855,8 @@ class Run:
         Args:
             **changes (int): New values of
                 [`ExecutionLimits`][nwqlib.execution.ExecutionLimits] fields,
-                by name, as integers at least the current values.
+                by name, as integers at least the current values, or None
+                to remove an optional limit such as `max_total_shots`.
 
         Returns:
             run (Run): This Run.
@@ -795,20 +874,27 @@ class Run:
             previous = self.limits
             fields = {name: getattr(previous, name) for name in allowed}
             fields.update(changes)
+            # ExecutionLimits takes exact integers, including NumPy integer
+            # scalars, and refuses unknown names and other values.
             limits = ExecutionLimits(**fields)
-            if any(type(value) is not int or value < getattr(previous, name) for name, value in changes.items()):
+            if any(_unbounded(getattr(limits, name)) < _unbounded(getattr(previous, name)) for name in changes):
                 raise ValueError("extend_limits can only preserve or increase positive execution limits")
             # A no-op amendment must not consume history or change content identity.
-            if all(value == getattr(previous, name) for name, value in changes.items()):
+            if all(getattr(limits, name) == getattr(previous, name) for name in changes):
                 return self
             state = self._state
+            stored = state["data_bytes"] + state["array_bytes"] + state["payload_bytes"] + state["external_bytes"]
+            pending = sum(state["pending_output"].values())
+            # Records of admitted work can take the counted data beyond the
+            # current limit (Run._write), and every new limit must cover them.
+            if exceeds(stored + pending, limits.max_data_bytes):
+                raise _cumulative_limit_error("max_data_bytes", limits.max_data_bytes, "data bytes already counted",
+                                              stored + pending, 0, owner="the proposed")
             amendment = LimitAmendment(sequence=len(state["limit_amendments"]) + 1,
                 recorded_at=datetime.now(timezone.utc), old=previous, new=limits,
                 circuit_preparations=state["preparations"] - state["host_preparations"],
                 circuit_attempts=len(state["events"]) - state["host_invocations"],
-                raw_shots=state["shots"],
-                stored_data_bytes=state["data_bytes"] + state["array_bytes"] + state["payload_bytes"] + state["external_bytes"],
-                pending_output_bytes=sum(state["pending_output"].values()), synthesis_work=state["synthesis_work"])
+                raw_shots=state["shots"], stored_data_bytes=stored, pending_output_bytes=pending)
             # Write the new cap and one history row atomically under the new byte cap.
             # If storage fails, restore the previous limit before exposing any change.
             journal = state["journal"]
@@ -1120,18 +1206,20 @@ class Run:
             if receipt.content_id not in state["prepared_artifacts"] and receipt.content_id not in recorded:
                 records.append(("prepared", receipt.content_id, receipt))
                 recorded.add(receipt.content_id)
+        # The static workflow rows join their attempts in this transaction: one
+        # row named by workflow_current, or for a template job the tuple of
+        # row keys in the order of the events.
         current = state["workflow_current"]
-        changed = None
-        if current is not None:
-            if len(events) != 1:
-                raise ValueError("one static item requires exactly one acquisition")
-            changed = state["workflow_items"][current].revise(attempt=events[0].attempt)
-            records.append(("workflow_item", current, changed))
+        keys = () if current is None else current if isinstance(current, tuple) else (current,)
+        if keys and len(keys) != len(events):
+            raise ValueError("each static item requires exactly one acquisition")
+        changed = tuple((key, state["workflow_items"][key].revise(attempt=event.attempt))
+                        for key, event in zip(keys, events))
+        records.extend(("workflow_item", key, item) for key, item in changed)
         # Persist all reservations before installing counters in live memory.
         # The caller may contact the backend only after this transition succeeds.
         self._write(tuple(records), reserve_output=sum(event.data_bytes_reserved for event in events))
-        if changed is not None:
-            state["workflow_items"][current] = changed
+        state["workflow_items"].update(changed)
         state["submissions"][submission.submission_id] = submission
         state["pending_submissions"][submission.submission_id] = None
         for event, receipt, item in zip(events, prepared, submission.items, strict=True):
@@ -1164,13 +1252,15 @@ class Run:
         self._state["submissions"][identity] = value
         return value
 
-    def _finish_attempt(self, index, event, chunk, *, native_simulations=None, metadata_credit=0):
+    def _finish_attempt(self, index, event, chunk, *, native_simulations=None, collect=False):
         """Save one synchronous acquisition's outcome in one transaction.
 
         This is commit 6 of the module docstring. The completed event, its
         observation chunk, the completed submission with its locator and every
         array the acquisition saved commit together, and the attempt's output
-        reservation is released in the same write. The in-memory maps change
+        reservation is released in the same write. ``collect=True`` also gives
+        the chunks their collection ordinals in that transaction, in their
+        order, as ``Run.collect`` would right after it (commit 7). The in-memory maps change
         after the commit. The counts index learns the chunk last, so an index
         error cannot undo a saved outcome. Multi-item batches complete through
         ``refresh_submissions``, which saves all newly returned items of one
@@ -1192,7 +1282,8 @@ class Run:
                 native_simulations=native_simulations, timing=event.timing,
                 native_invocations=1 if event.timing is not None else previous.native_invocations, results_consumed=True)
             records.append(("submission", submission.submission_id, submission))
-        self._flush_publications(tuple(records), release_output=event.attempt, metadata_credit=metadata_credit)
+        self._flush_publications(tuple(records), release_output=event.attempt,
+                                 collected=tuple(item.content_id for item in chunks) if collect else ())
         self._state["events"][index] = event
         for item in chunks:
             self._state["receipts"][item.acquisition_key] = item
@@ -1202,6 +1293,9 @@ class Run:
             self._state["pending_submissions"].pop(submission.submission_id, None)
         for item in chunks:
             self._index_counts(chunk=item)
+        if collect:
+            for item in chunks:
+                self._state["chunks"][item.acquisition_key] = item
 
     def _fail_attempt(self, index, event, error, *, discarded=False):
         """Record an acquisition whose call raised, without claiming more than is known.
@@ -1285,7 +1379,7 @@ class Run:
             host_invocations=state["host_invocations"], host_work_reserved=state["host_work"],
             data_bytes_reserved=sum(event.data_bytes_reserved for event in state["events"]),
             data_bytes=state["data_bytes"] + state["array_bytes"] + state["payload_bytes"] + state["external_bytes"],
-            synthesis_work_reserved=state["synthesis_work"],
+            synthesis_work=state["synthesis_work"],
             local_prepared_ids=tuple(state["local_prepared_ids"]),
             cancel_requested=self.cancel_requested, termination_reason=state["termination_reason"],
             limits=self.limits, limit_amendments=self.limit_amendments)
@@ -1343,11 +1437,16 @@ class Run:
         The request is saved first, so a Run reopened after a crash while
         contacting the provider still rejects new preparations and
         measurements. Pending remote preparations and submissions are then
-        refreshed, which sends each job at most one cancellation request. A
-        request does not prove that a job was cancelled, and only a status
-        returned by the provider does. All counted work stays counted. A
-        backend without a cancellation operation, such as local NWQ-Sim,
-        receives no request.
+        refreshed, which sends each job at most one cancellation request and
+        then reads that job. A request does not prove that a job was cancelled,
+        and only a status returned by the provider does. All counted work stays
+        counted. A backend without a cancellation operation, such as local
+        NWQ-Sim, receives no request, and neither does a job already recorded
+        as ended, with or without a result. A request that fails is recorded as
+        not sent, so calling `cancel` again sends it until the job is recorded
+        as ended. It does not keep the other jobs from receiving theirs or keep
+        its own job from being read, so the result of a job that had already
+        ended is saved. The first such error is raised after all of them.
 
         Args:
             reason (str): Reason recorded with the request. Default
@@ -1362,13 +1461,31 @@ class Run:
                 self._write((("control", "current", dict(cancel_requested=reason,
                     termination_reason=self._state["termination_reason"])),))
                 self._state["cancel_requested"] = reason
-            from nwqlib._remote_preparation import refresh_preparation
-            for identity, pending in tuple(self._state["remote_preparations"].items()):
-                if pending.status not in {"completed", "failed", "cancelled"}:
-                    refresh_preparation(identity, run=self)
-            if callable(getattr(self.backend, "refresh", None)):
-                refresh_submissions(run=self)
+            self._forward_cancellation()
             return self
+
+    def _forward_cancellation(self):
+        """Refresh every pending remote preparation and job once, which forwards the cancellation, and then raise the first error.
+
+        One failing request must not keep the others from the provider, because
+        each job left running can keep charging. Only an ordinary ``Exception`` is
+        held back. An interruption such as ``KeyboardInterrupt`` propagates at once.
+        """
+        from nwqlib._remote_preparation import refresh_preparation
+        first = None
+        for identity, pending in tuple(self._state["remote_preparations"].items()):
+            if pending.status not in {"completed", "failed", "cancelled"}:
+                try:
+                    refresh_preparation(identity, run=self)
+                except Exception as error:
+                    first = first or error
+        if callable(getattr(self.backend, "refresh", None)):
+            try:
+                refresh_submissions(run=self)
+            except Exception as error:
+                first = first or error
+        if first is not None:
+            raise first
 
     def terminate(self, *, reason):
         """Record in the run log the reason that the iteration code of a Method gives for ending early. No job is cancelled.
@@ -1379,7 +1496,7 @@ class Run:
         self._write((("control", "current", dict(cancel_requested=self.cancel_requested, termination_reason=reason)),))
         self._state["termination_reason"] = reason
 
-    def resume(self, *, reanalyze=False):
+    def resume(self, *, reanalyze=False, rebuild_preparations=False):
         """Continue the Run once: retrieve pending results, let the Method go on, and return.
 
         `resume` reads each pending submission once, then lets the Method
@@ -1396,6 +1513,24 @@ class Run:
                 analysis of a Method that supports it, from its saved data,
                 before continuing. A completed Run is analyzed again with
                 `result.analyze(...)` instead.
+            rebuild_preparations (bool): Default `False`. `True` asks for new
+                counted work: each setting of a `Plan` with fixed settings
+                whose local preparation failed or was interrupted after it was
+                counted, and which has no preparation record, is prepared once
+                more in this call, before anything new is submitted. It keeps
+                its realization, bindings and runtime seed. The earlier attempt
+                stays counted and each new circuit preparation counts against
+                `max_total_circuits`. A compiled template that is already saved
+                is reused without compiling it again. No submitted job is sent
+                again, and an attempt whose outcome is uncertain keeps its
+                identity. The request covers this call only, so a preparation
+                that fails again needs another call with `True`, and `wait`
+                never rebuilds. With nothing to rebuild, including an adaptive
+                Method, whose later settings depend on earlier outcomes, or a
+                cancelled Run, it changes nothing and the call continues as
+                usual. [Continue an interrupted
+                run](../run_archives.md#rebuild-an-interrupted-preparation)
+                describes it.
 
         Returns:
             run (Run): This Run.
@@ -1403,8 +1538,19 @@ class Run:
         Raises:
             RunFailed: If no Result is available and an uncertain attempt
                 cannot be retrieved by any route (stage `"recovery"`).
+            RuntimeError: If a setting of a `Plan` with fixed settings has a
+                counted preparation without a record and `rebuild_preparations`
+                is `False` (`PreparationNotRebuilt`). Nothing further is
+                submitted.
             ValueError: If `reanalyze=True` is given for a Run that already
-                has its Result.
+                has its Result, or if a limit refuses a preparation that
+                `rebuild_preparations=True` needs. `Run.extend_limits` raises
+                the limit.
+            Exception: A provider's retrieval or cancellation error, in the
+                type the provider raises. A failed read propagates with the
+                job's locator saved. After `cancel`, the error of a failed
+                cancellation request propagates after that job has been read
+                and what the read found has been saved.
 
         Examples:
             A local Aer run completes in its first pass:
@@ -1422,8 +1568,12 @@ class Run:
             True 1.0
         """
         # Order: an explicit ``reanalyze`` recovery, then one refresh of
-        # existing submissions, then the Method's ``execute`` on the same Plan
-        # and Run. Changed caches are saved even when ``execute`` raises. A
+        # existing submissions, then an explicit rebuild, then the Method's
+        # ``execute`` on the same Plan and Run. The rebuild runs here rather
+        # than inside ``execute``, because a detached backend's ``execute``
+        # returns after its first new submission and a row later in the Plan
+        # would outlast this call's request. Changed caches are saved even
+        # when ``execute`` raises. A
         # returned Result that the Method already attached must belong to this
         # Plan, and its data must equal the Run's current observations,
         # receipts, forecast, allocation and trace. The stored byte counter is
@@ -1436,6 +1586,8 @@ class Run:
         # frontier.
         if type(reanalyze) is not bool:
             raise TypeError("reanalyze must be a boolean")
+        if type(rebuild_preparations) is not bool:
+            raise TypeError("rebuild_preparations must be a boolean")
         with self._lock:
             self._ensure_open()
             if self.result is not None:
@@ -1446,14 +1598,13 @@ class Run:
             # existing jobs and then lets the Method continue its saved frontier.
             if reanalyze:
                 self.plan.method.recover_analysis(self.plan, run=self)
-            if callable(getattr(self.backend, "refresh", None)):
-                refresh_submissions(run=self)
             if self.cancel_requested is not None:
-                from nwqlib._remote_preparation import refresh_preparation
-                for identity, pending in tuple(self._state["remote_preparations"].items()):
-                    if pending.status not in {"completed", "failed", "cancelled"}:
-                        refresh_preparation(identity, run=self)
+                self._forward_cancellation()
+            elif callable(getattr(self.backend, "refresh", None)):
+                refresh_submissions(run=self)
             try:
+                if rebuild_preparations and self.cancel_requested is None:
+                    _rebuild_static_preparations(self)
                 result = self.plan.method.execute(self.plan, run=self)
             finally:
                 if not self._state["storage_failed"]:
@@ -1524,7 +1675,9 @@ class Run:
                         continue
             raise RunFailed(stage="recovery", status="uncertain",
                 locator=None if submission is None else submission.locator,
-                failure=event.failure if submission is None else submission.failure or event.failure,
+                # The attempt's own text is what its call raised. Reopening a
+                # synchronous Aer Run replaces the submission's text with its own.
+                failure=event.failure or (None if submission is None else submission.failure),
                 directory=self.directory, trace=self.trace, exposure=self.exposure,
                 attempt=event.attempt)
 
@@ -1537,7 +1690,9 @@ class Run:
         A retrieval error propagates and keeps the job's locator (a
         `JobLocator` with the provider, the job identifier and the account
         context, without credentials), so a later `resume` or `wait` can read
-        the same job, and an uncertain submission is never resubmitted.
+        the same job, and an uncertain submission is never resubmitted. After
+        `cancel`, the error of a cancellation request that fails propagates
+        the same way, after its job has been read.
 
         Args:
             timeout (float | None): Seconds to wait before raising
@@ -1553,13 +1708,18 @@ class Run:
 
         Raises:
             RunFailed: If a preparation, classical computation or submission
-                ended in failure or cancellation, or an uncertain attempt cannot
-                be recovered.
+                ended in failure or cancellation, an uncertain attempt cannot
+                be recovered, or the provider or local system has confirmed that a
+                job ended without a result. A result that arrives later can still
+                be collected with `resume`.
             TimeoutError: If the Run is still pending after `timeout`. The
                 same Run can be continued later.
             RuntimeError: If `cancel` was called on this Run before it
                 completed and no failed or cancelled work is confirmed yet. Its
-                pending work is saved in its folder.
+                pending work is saved in its folder. Also `PreparationNotRebuilt`,
+                if a setting of a `Plan` with fixed settings has a counted
+                preparation without a record. Nothing further is submitted, and
+                `run.resume(rebuild_preparations=True)` prepares it again.
 
         Examples:
             See [`submit`][nwqlib.scientist.submit].
@@ -1581,10 +1741,12 @@ class Run:
         """Raise ``RunFailed`` for a confirmed terminal outcome that ``wait`` cannot pass.
 
         Confirmed outcomes are a failed host event, a failed or cancelled remote
-        preparation, and a failed or cancelled submission with items that have no
+        preparation, a failed or cancelled submission with items that have no
         observation, other than a reopened synchronous Aer submission
         (``_AER_REOPEN_FAILURE``), whose failed status records only failed
-        retrieval.
+        retrieval, and a job that ended without a result
+        (``SubmissionRecord.terminal_without_result``), whose outcome stays
+        uncertain because its output could still arrive.
         ``wait`` calls this only after the Method has had its chance to return a
         partial Result from the data it has.
         """
@@ -1607,6 +1769,12 @@ class Run:
                 raise RunFailed(stage="execute", status=submission.status,
                     locator=submission.locator, failure=submission.failure,
                     directory=self.directory, trace=self.trace, exposure=self.exposure)
+            if submission.terminal_without_result:
+                missing = next((item.attempt for item in submission.items if item.attempt not in state["by_attempt"]), None)
+                if missing is not None:
+                    raise RunFailed(stage="recovery", status="uncertain", locator=submission.locator,
+                        failure=submission.failure, directory=self.directory, trace=self.trace,
+                        exposure=self.exposure, attempt=missing)
 
     @property
     def artifacts(self):
@@ -1634,17 +1802,19 @@ class Run:
         """The reader of a saved observation array's bytes in the run log, or None when the run log has none.
 
         Returns ``(read_chunks, chunk_bytes)`` for ``ArtifactStore._hydrate``.
-        The block size must reproduce the blocks that ``LocalJournal.commit``
-        saved (1 MiB, or one block under a smaller data limit), because
-        ``_hydrate`` rejects a block of any other size. The payload is also
-        checked against the data limit for one object before it is read.
+        The block size is the one that ``LocalJournal.commit`` saved
+        (``_run_journal.PAYLOAD_BLOCK_BYTES``), because ``_hydrate`` rejects a
+        block of any other size. The payload is also checked against the data
+        limit for one object before it is read.
         """
+        from nwqlib._run_journal import PAYLOAD_BLOCK_BYTES
+
         reference = self._state["artifact_payloads"].get(manifest.content_id)
         journal = self._state["journal"]
         if reference is None or journal is None:
             return None
         self.check_data(manifest.data_bytes)
-        return (lambda: journal.payload_chunks(reference)), min(1024**2, self.limits.max_data_bytes//16*16)
+        return (lambda: journal.payload_chunks(reference)), PAYLOAD_BLOCK_BYTES
 
     def _reserve_publication(self, data_bytes, provenance):
         """Check one array against the output bytes reserved for its running acquisition before copying or hashing it.
@@ -1705,8 +1875,8 @@ class Run:
             self.artifacts._data_bytes = batch["store_bytes"]
             self._state["publication_batch"] = None
 
-    def _flush_publications(self, rows, *, release_output=None, metadata_credit=0):
-        """Commit the queued arrays and the outcome rows in one transaction.
+    def _flush_publications(self, rows, *, release_output=None, collected=()):
+        """Commit the queued arrays and the outcome rows, with any collection ordinals, in one transaction.
 
         On failure the array byte counter and the store's handles return to their
         state before the batch, so no array becomes visible without its
@@ -1714,7 +1884,7 @@ class Run:
         """
         batch = self._state["publication_batch"]
         if batch is None:
-            self._write(rows, release_output=release_output, metadata_credit=metadata_credit)
+            self._write(rows, release_output=release_output, collected=collected)
             return
         records = {(kind, key): (kind, key, value) for kind, key, value in batch["records"]}
         payloads = {reference.content_id: (reference, buffer) for reference, buffer in batch["payloads"]}
@@ -1722,7 +1892,7 @@ class Run:
         self._state["array_bytes"] += batch["array_bytes"]
         try:
             self._write((*records.values(), *rows), payloads=tuple(payloads.values()), release_output=release_output,
-                        metadata_credit=metadata_credit)
+                        collected=collected)
         except BaseException:
             self._state["array_bytes"] = old
             self._abort_publications()
@@ -1836,9 +2006,11 @@ class Run:
     def _restore_limits(self, journal):
         """Restore the current limits and their amendment chain before larger rows are read.
 
-        The current ``max_data_bytes`` becomes the run log's byte limit for the
-        rows read after this step. The saved amendments populate the Run's
-        limit history.
+        The current ``max_data_bytes`` becomes the run log's limit on each
+        array or binary payload read after this step. The rows themselves are
+        read whatever their total, which the rows of admitted work can take
+        beyond that limit (``Run._write``). The saved amendments populate the
+        Run's limit history.
         """
         state = self._state
         limit_rows = list(journal.rows("limits"))
@@ -1860,27 +2032,28 @@ class Run:
         Identities and charges come from the saved records. No quantum circuit
         is rebuilt and no host preparation is repeated. A charge whose
         ``prepared_id`` is None is a failed or interrupted preparation (commit
-        2 of the module docstring), which stays counted against the limits. Its
-        reserved synthesis work stays counted too. A charge refused by
-        ``max_synthesis_work`` names no checkpoint preparation, because its
-        experiment was left unprepared (``Run._charge_synthesis``).
+        2 of the module docstring), which stays counted against the limits.
+        The synthesis work of each charge, saved with its lowering result,
+        joins the trace's total, so a reopened Run reports the same total as
+        the live one.
         """
         state = self._state
         for key, fields, _ in journal.rows("prepared"):
             record = PreparedArtifact.model_validate(fields)
             state["prepared_artifacts"][key] = record
+            _index_template_record(state, record)
         for key, fields, _ in journal.rows("preparation"):
             charge = PreparationCharge.model_validate(fields)
             state["preparations"] += 1
             state["host_preparations"] += int(charge.execution == "host_kernel")
             state["preparation_charges"][key] = charge
             state["synthesis_work"] += charge.synthesis_work
-            if charge.checkpoint_sequence is not None and charge.synthesis_refused is None:
+            if charge.checkpoint_sequence is not None:
                 state["checkpoint_preparations"][charge.checkpoint_sequence] = key
             if charge.prepared_id is not None:
                 record = state["prepared_artifacts"][charge.prepared_id]
                 state["local_prepared_ids"].append(charge.prepared_id)
-                state["construction_work"] += record.construction_work_reserved
+                state["construction_work"] = known_sum(state["construction_work"], record.construction_work_reserved)
                 state["host_preparation_work"] += record.host_preparation_work_reserved
         for key, fields, _ in journal.rows("remote_preparation"):
             record = PendingPreparation.model_validate(fields)
@@ -1932,12 +2105,13 @@ class Run:
         restoration below then makes its reserved event uncertain, and
         ``_restore_observations`` removes its pending reservation. The failed
         submission records failed retrieval. It does not establish a failed
-        execution, return counted work or retry the quantum call. The capacity
-        invariant is::
+        execution, return counted work or retry the quantum call. New work is
+        admitted while::
 
             D_stored + D_arrays + D_payloads + D_external + sum_pending R_a <= max_data_bytes
 
-        ``R_a`` reserves capacity for an output that may still be saved. Once
+        and the rows of admitted work can take the left side beyond the limit
+        (``Run._write``). ``R_a`` reserves capacity for an output that may still be saved. Once
         the original synchronous Aer output cannot be recovered, nothing is
         left to save, so releasing ``R_a`` leaves saved data unchanged and keeps
         the event, circuit, job and shot counters, as
@@ -2044,7 +2218,7 @@ class Run:
                     state["pending_output"].pop(item.attempt, None)
 
     def _restore_workflow(self, journal):
-        """Restore the static workflow rows (commit 1) and the cancellation or termination control row."""
+        """Restore the static workflow rows (commits 1 and 2) and the cancellation or termination control row."""
         state = self._state
         for key, fields, _ in journal.rows("workflow_item"):
             item = WorkflowItem.model_validate(fields)
@@ -2087,7 +2261,10 @@ class Run:
 
         Raises:
             ValueError: If the Run is in the middle of a step, for example
-                while an outcome is being saved.
+                while an outcome is being saved, or if its counted data
+                exceed `max_data_bytes`. Records of work that had already
+                started can raise the total above the limit. Raise it with
+                `run.extend_limits(max_data_bytes=...)` and save again.
         """
         from nwqlib._run_archive import save
         return save(self, path=path)
@@ -2101,8 +2278,10 @@ class Run:
         QPY file (Qiskit's binary circuit format) once, and nothing is built,
         transpiled or submitted again.
         Circuits of other backends, unsaved circuits and circuits still in use
-        are kept. Aer is the backend whose circuits are released. The counts
-        describe released circuits, not measured memory.
+        are kept. Aer is the backend whose circuits are released. A circuit that
+        the experiments of one template share stays in memory until the last of
+        them is released. The counts describe released circuits, not measured
+        memory.
 
         Returns:
             released (dict): `released`, the content hashes of the released
@@ -2128,13 +2307,17 @@ class Run:
                 if self._state["journal"] is not None:
                     self._state["journal"].close()
                 # Scientific snapshots own their immutable arrays separately.
-                # Closing releases execution caches, the synthesis cache
-                # included, without resetting exposure, the reserved synthesis
-                # work, stored-data charges, receipts or the already attached
-                # Result.
-                self._state.update(method_context=None, handles={}, refresh_cache={}, definitions=({}, {}),
-                    counts_sources=None, counts_source_failure=None, synthesis_cache={},
-                    specializations={}, backend_context={}, archive_files=None, progress=None,
+                # Closing releases execution caches, including the synthesis
+                # cache and the template circuits, template QPY bytes and
+                # mapped observable that IBM preparation keeps, without
+                # resetting exposure, the recorded synthesis work, stored-data
+                # charges, receipts or the already attached Result. Saved
+                # payload files stay.
+                self._state.update(method_context=None, handles={}, native_held=0, template_circuits={}, refresh_cache={},
+                    definitions=({}, {}),
+                    counts_sources=None, counts_source_failure=None, synthesis_cache={}, synthesis_cache_kept=0,
+                    template_bases={}, template_payloads={}, ibm_templates={}, ibm_observable=None,
+                    specializations={}, receipt_commits={}, backend_context={}, archive_files=None, progress=None,
                     cache_changes={}, cache_rows={}, cache_keys={}, cache_file_refs={}, cache_row_refs={})
 
     def __enter__(self):
@@ -2171,13 +2354,14 @@ class PreparedHandle:
     _setting: str = field(repr=False)
     _bindings: tuple = field(repr=False)
     _saved_native: object = field(repr=False)
+    _native_bytes: int = field(repr=False)
 
     @classmethod
-    def _make(cls, record, realization, native, items, setting, bindings):
+    def _make(cls, record, realization, native, items, setting, bindings, *, native_bytes=0):
         value = object.__new__(cls)
         for name, item in (("record", record), ("realization", realization), ("_native", native),
                            ("_items", items), ("_setting", setting), ("_bindings", bindings),
-                           ("_saved_native", None)):
+                           ("_saved_native", None), ("_native_bytes", native_bytes)):
             object.__setattr__(value, name, item)
         return value
 
@@ -2186,16 +2370,39 @@ class PreparedHandle:
 
         The reload reads the circuit file named in the handle's cache row, and the
         backend rebuilds its native object from that circuit and the saved
-        metadata (``restore_native_data``). Nothing is lowered or transpiled.
+        metadata (``restore_native_data``). The saved source vector of a
+        directly set preparation, if any, is read only when a compiled
+        inspection or a cache copy needs it. Nothing is lowered or transpiled,
+        and nothing is charged. The circuit is compared with the Method's memory
+        limit before its file is read, and it counts in the Run's ``native_held``
+        again. A row bound to a template reuses the circuit that another of its
+        rows holds in memory, and otherwise brings it back for the rest of them
+        (``_LiveTemplate``). Sharing the object is safe because Aer binds counts
+        readouts only, whose restoration leaves the circuit as it is. A copy
+        returned for inspection is not counted.
         """
         if self._native is None:
             if self._saved_native is None:
                 raise ValueError("prepared handle has no stored native snapshot")
+            from functools import partial
             from nwqlib._choice_archive import ArchiveFiles
-            backend, path, name, metadata = self._saved_native
-            circuit = ArchiveFiles(path, None).read_circuit(name)
-            native = backend.restore_native_data(self.record, circuit, metadata, run=None)
+            backend, path, name, metadata, initial_state, run = self._saved_native
+            state = run._state
+            key = _template_key(self.record)
+            live = state["template_circuits"].get(key)
+            new = _restored_bytes(state, self)
+            _admit_circuit_memory(run, _CircuitMemory(new, 0, {}, 0, None, 0), "restoring this prepared circuit")
+            files = ArchiveFiles(path, None)
+            circuit = files.read_circuit(name) if live is None else live.circuit
+            native = backend.restore_native_data(self.record, circuit, metadata, run=None,
+                                                 initial_state=None if initial_state is None
+                                                 else partial(files.read_array, initial_state))
             object.__setattr__(self, "_native", native)
+            if key is not None:
+                if live is None:
+                    live = state["template_circuits"][key] = _LiveTemplate(circuit, new - _TEMPLATE_ROW_BYTES)
+                live.owners += 1
+            state["native_held"] += new
         return self._native
 
     def inspect_circuit(self):
@@ -2205,35 +2412,45 @@ class PreparedHandle:
         own operation objects (checked against the installed Qiskit), so
         changing the copy leaves the circuit that executes unchanged.
 
+        A preparation bound to a shared template (`record.template`) returns
+        the template with this experiment's values assigned.
+
         Returns:
             circuit (QuantumCircuit): The copy.
 
         Raises:
             ValueError: If this preparation is a classical computation
-                (`execution="host_kernel"`) without a circuit.
+                (`execution="host_kernel"`) without a circuit, or if its
+                circuit was released and reading it back would exceed the
+                Method's memory limit.
         """
         self._restore_native()
         if self.record.execution != "quantum_circuit" or self._native.circuit is None:
             raise ValueError("this prepared handle has no live circuit to inspect")
+        if self.record.template is not None:
+            return _bound_template(self._native.circuit, self.record.template)
         return self._native.circuit.copy()
 
-    def inspect_resources(self, *, transpile_options=None, max_operations=100_000, max_bytes=DEFAULT_MAX_BYTES):
+    def inspect_resources(self, *, transpile_options=None, max_bytes=None):
         """Count the operations of the prepared circuit, without changing or running it.
 
         Each top-level instruction of the circuit counts once under its
         operation name, measurements, barriers, simulator saves, `Clifford`
         objects and user-defined gates included, and names are reported as
         they are. Gate definitions and control-flow bodies are not expanded.
-        With `transpile_options`, a transpiled copy is counted instead, with
-        the simulator saves removed first. The circuit
-        that executes is never changed or run.
+        With nonempty `transpile_options`, a transpiled copy is counted
+        instead, with the simulator saves removed first. A state that Aer
+        sets directly in place of a direct state preparation
+        (`PreparedArtifact.initial_state_error`) is compiled in that copy as
+        the preparation's own circuit, built from the prepared vector, the
+        same circuit as without direct setting. The circuit that executes is
+        never changed or run.
 
         Args:
             transpile_options (dict | None): Options for Qiskit's `transpile`.
-                `None`, the default, counts the prepared circuit as it is.
-            max_operations (int): Default `100_000`. Largest number of
-                operations of the circuit, and of its transpiled copy.
-            max_bytes (int): Default 10 GB (decimal, `10_000_000_000`).
+                `None` or `{}`, the default `None` included, counts the
+                prepared circuit as it is.
+            max_bytes (int | None): Default `None`, the physical memory of this computer.
                 Largest size of the known inspection data and options. It
                 does not bound the compiler's own memory.
 
@@ -2246,16 +2463,29 @@ class PreparedHandle:
                 barriers and simulator saves).
 
         Raises:
-            ValueError: If this preparation has no circuit or a limit is
-                exceeded.
+            ValueError: If this preparation has no circuit, `max_bytes` is
+                exceeded, or its circuit was released and reading it back
+                would exceed the Method's memory limit.
         """
         self._restore_native()
         if self.record.execution != "quantum_circuit" or self._native.circuit is None:
             raise ValueError("this prepared handle has no live circuit to inspect")
         from nwqlib.backends.inspection import inspect_circuit_resources
-        return inspect_circuit_resources(self._native.circuit, native_basis=self.record.native_basis,
+        circuit = self._native.circuit
+        if self.record.template is not None:
+            circuit = _bound_template(circuit, self.record.template)
+        state = getattr(self._native, "initial_state", None)
+        return inspect_circuit_resources(circuit, native_basis=self.record.native_basis,
             label=f"prepared circuit {self.record.content_id}",
-            transpile_options=transpile_options, max_operations=max_operations, max_bytes=max_bytes)
+            transpile_options=transpile_options, max_bytes=max_bytes,
+            initial_state=None if state is None else (state, self._native.metadata["initial_state_qubits"]))
+
+
+def _bound_template(circuit, binding):
+    """A copy of the template ``circuit`` with the values of ``binding`` (`TemplateBinding`) assigned by parameter name."""
+    by_name = {parameter.name: parameter for parameter in circuit.parameters}
+    return circuit.assign_parameters({by_name[name]: value for name, value in zip(binding.parameters, binding.values)},
+                                     inplace=False)
 
 
 @dataclass(frozen=True)
@@ -2308,10 +2538,11 @@ class Prepared:
             circuit (QuantumCircuit): The copy.
 
         Raises:
-            ValueError: If no circuit has this index. After the default
-                `prepare(plan, settings="first")` only the first setting is
-                prepared, and `settings="all"` prepares every setting of
-                fixed experiments.
+            ValueError: If no circuit has this index, or if the circuit was
+                released and reading it back would exceed the Method's memory
+                limit. After the default `prepare(plan, settings="first")` only
+                the first setting is prepared, and `settings="all"` prepares
+                every setting of fixed experiments.
         """
         return self._circuit_handle(index).inspect_circuit()
 
@@ -2332,14 +2563,16 @@ class Prepared:
         Entry i is the name (`Experiment.name` in `plan.experiments`) of the
         experiment that circuit i implements. After
         `prepare(plan, settings="all")` the names of fixed experiments are
-        those of the Plan's circuit experiments, in Plan order. The default
+        those of the Plan's circuit experiments, in Plan order, with an
+        experiment whose batch has range axes repeated once per axis point,
+        in increasing axis order. The default
         `settings="first"` prepares only the setting that the Method submits
         first, and an adaptive Method can prepare one experiment several
         times with different parameter values.
         """
         return tuple(handle.realization.experiment for handle in self._circuit_handles())
 
-    def inspect_resources(self, *, index=0, transpile_options=None, max_operations=100_000, max_bytes=DEFAULT_MAX_BYTES):
+    def inspect_resources(self, *, index=0, transpile_options=None, max_bytes=None):
         """Count the operations of one prepared circuit, without changing or running it.
 
         Each top-level instruction of the circuit counts once under its
@@ -2347,16 +2580,17 @@ class Prepared:
         objects and user-defined gates included, and names are reported as
         they are. Gate definitions and control-flow bodies are not expanded.
         With `transpile_options`, a transpiled copy is counted instead, with
-        the simulator saves removed first. The circuit
-        that executes is never changed or run.
+        the simulator saves removed first. A state that Aer sets directly in
+        place of a direct state preparation
+        (`PreparedArtifact.initial_state_error`) is compiled in that copy as
+        the preparation's circuit. The circuit that executes is never changed
+        or run.
 
         Args:
             index (int): Default `0`. Position of the circuit in `circuits`.
             transpile_options (dict | None): Options for Qiskit's `transpile`.
                 `None`, the default, counts the prepared circuit as it is.
-            max_operations (int): Default `100_000`. Largest number of
-                operations of the circuit, and of its transpiled copy.
-            max_bytes (int): Default 10 GB (decimal, `10_000_000_000`).
+            max_bytes (int | None): Default `None`, the physical memory of this computer.
                 Largest size of the known inspection data and options. It
                 does not bound the compiler's own memory.
 
@@ -2369,10 +2603,11 @@ class Prepared:
                 barriers and simulator saves).
 
         Raises:
-            ValueError: If no circuit has this index or a limit is exceeded.
+            ValueError: If no circuit has this index, `max_bytes` is exceeded,
+                or the circuit was released and reading it back would exceed
+                the Method's memory limit.
         """
-        return self._circuit_handle(index).inspect_resources(transpile_options=transpile_options,
-                                                             max_operations=max_operations, max_bytes=max_bytes)
+        return self._circuit_handle(index).inspect_resources(transpile_options=transpile_options, max_bytes=max_bytes)
 
 
 def _check_scope(run, point):
@@ -2401,30 +2636,13 @@ def _refuse_unsupported_target(run, observation):
                          f"supported readouts: {target.readouts}")
 
 
-def _named_admission_refusal(plan, error, action="preparation"):
-    """Name the Method field that sets the planning work limit of the refused Program.
-
-    A Method with a ``max_admission_steps`` field (FixedGCIM,
-    ExpectationMethod, LCHS, QLS) sets its Programs' ``max_steps`` from it,
-    so the refusal names that field, the refused stage and the work it
-    needed (``admission_refusal``). ``action`` names the step that checked it: preparation,
-    restoration of a saved Run, or loading saved evidence. Another Method's
-    refusal is returned unchanged.
-    """
-    name = type(plan.method).__name__
-    if "max_admission_steps" not in type(plan.method).model_fields:
-        return error
-    return admission_refusal(f"{name}.max_admission_steps", error, subject=f"{action} of the selected {name} Program")
-
-
 def _admitted_readout(admission, experiment, construction):
     """Read the widths and resolve the observation of a checked Program.
 
     ``admission`` has run ``admitted()``. The root binding context, one
     width reading per quantum and classical bit register and the observation
-    are counted against its planning work limit, as preparation counts them.
-    Returns ``(qwidths, cwidths, setting, observation)``. QLS planning runs
-    the same calls to count the preparation's planning work before any charge.
+    are counted in its work count, as preparation counts them.
+    Returns ``(qwidths, cwidths, setting, observation)``.
     """
     program = construction.program
     context = admission.expressions(admission.binding_map(program.bindings))
@@ -2457,104 +2675,42 @@ def prepare_experiment(point, *, run, runtime=None, held=None):
     """Prepare one point of the Plan, saving its random draw for the backend before native work.
 
     The checks run in order of increasing cost, so an unsupported request fails before
-    any circuit exists. The checks are Program readiness, simulator width,
-    readout shape and cardinality, target readout support, the largest direct
-    state preparation of the Plan, amplitude materialization size and the
+    any circuit exists. The checks are Program readiness, simulator memory,
+    readout shape and cardinality, target readout support, the direct state
+    preparations of the circuit, amplitude materialization size and the
     cumulative circuit limit, in that order, except that a trajectory's target
-    support is checked before its readout shape and metadata allowance, so a
+    support is checked before its readout shape and storage reservation, so a
     backend that cannot execute it refuses with the name of the missing
     capability. The chosen IR (the Program) of a trajectory must be one
     coherent evolution along its executed prefix (``admit_pure_trajectory`` with
     ``_selected_body_issues``), checked before its reductions. A trajectory
-    also checks the registered classical work of its reductions against the
-    allowance of the Method's ``reduction_allowance`` hook, which first applies
-    the Method's own check of its private reduction workspace
-    (``_method_reduction_allowance``), and checks the saved simulator states of its
-    amplitude and reduction points (``_admit_trajectory_work``). Then,
+    also checks its reductions' registered shape and execution, their
+    registered classical work against the finite allowance that the Method's
+    optional ``reduction_allowance`` hook returns, after the hook's own check
+    of its private reduction workspace (``_method_reduction_allowance``),
+    and the saved simulator states of its amplitude and reduction points with
+    the largest registered reduction workspace (``_admit_trajectory_work``). Then,
     unless the caller supplies ``runtime``, the runtime seed is drawn, and the
     preparation charge commits with the RNG position. Only after that commit does
     lowering start, reusing the Run's definition cache, and the backend prepares
     the native circuit. A remote-compiling backend continues in
     ``_remote_preparation``. A local one saves its preparation record through
     ``_finish_native_preparation``. The charge is commit 2 of the module
-    docstring.
+    docstring. When the Run's current workflow key names a static point
+    without a workflow row, the row, with the seed just drawn, commits with
+    the charge.
 
     ``held`` is the point's ``(Experiment, SelectedConstruction)`` pair
     when the caller already holds it (``prepare_static`` holds its first
     experiment's), so the point is not resolved again. It must name the
     point's experiment and effective bindings.
     """
-    _check_scope(run, point)
-    plan = run.plan
-    if held is None:
-        experiment, construction = point._selected_construction(plan)
-    else:
-        experiment, construction = held
-        if experiment.name != point.experiment or construction.program.bindings != point.bindings:
-            raise ValueError("the held selection belongs to another point of the Plan")
-    try:
-        admission, qwidths, cwidths, setting, observation, header = _selected_readout(plan, point, experiment,
-                                                                                     construction)
-    except AdmissionStepsExceeded as error:
-        raise _named_admission_refusal(plan, error) from error
-    width = sum(item for _, item in qwidths)
-    cwidth = sum(item for _, item in cwidths)
-    host = observation.kind == "host_scalars"
-    if not host and getattr(run.backend, "kind", None) in LOCAL_SIMULATORS and width > run.limits.max_simulation_qubits:
-        remedy = _limit_remedy('max_simulation_qubits')
-        if plan.method.descriptor.method == "qhd" and plan.method.encoding == "one_hot":
-            k = plan.method.num_grid_points
-            if plan.method.boundary == "periodic" and k & (k - 1) == 0:
-                binary_width = len(plan.problem.variables) * (k.bit_length() - 1)
-                remedy += f' A new QHD Plan with encoding="binary" uses {binary_width} qubits for this periodic grid.'
-            else:
-                remedy += (' QHD encoding="binary" requires a periodic grid with a power-of-two '
-                           'num_grid_points; switching changes the grid or boundary of this computation.')
-        raise ValueError(f"selected circuit has {width} qubits, exceeding the Run's "
-                         f"max_simulation_qubits={run.limits.max_simulation_qubits} before native preparation. "
-                         f"{remedy}")
-    # A backend that cannot execute a trajectory refuses with its capability
-    # message before the trajectory's metadata allowance is checked.
-    if observation.kind == "trajectory":
-        _refuse_unsupported_target(run, observation)
-    # Resolve the readout items, their payload reservation and backend support
-    # before any native preparation or large amplitude materialization.
-    items = _admit_readout(observation, width=width, classical_width=cwidth, run=run, header=header)
-    if not host:
-        if observation.kind != "trajectory":
-            _refuse_unsupported_target(run, observation)
-        if observation.kind == "trajectory":
-            # The selected IR must be one coherent evolution along the
-            # executed prefix. The adapter checks its own facts later.
-            try:
-                selected_length, body_issue, view_issues = _selected_body_issues(construction, admission, observation,
-                                                                                 dict(qwidths))
-            except AdmissionStepsExceeded as error:
-                raise _named_admission_refusal(plan, error) from error
-            admit_pure_trajectory(observation, backend_name="selected IR", body_length=selected_length,
-                classical_width=cwidth, body_issue=body_issue, view_issues=view_issues)
-            _admit_trajectory_work(observation, width=width, run=run,
-                                   allowance=_method_reduction_allowance(run, point, observation, width))
-            # A view's tail and inverse are definitions of the selected Program.
-            defined = {item.id for item in construction.program.definitions}
-            for scheduled in observation.positions:
-                if scheduled.view is not None and not {scheduled.view.tail, scheduled.view.inverse} <= defined:
-                    raise ValueError(f"the readout view of point {scheduled.id!r} names a tail or inverse that is not a "
-                                     "definition of the selected Program")
-        # A direct state preparation is synthesized during lowering, after the
-        # charge below. Checking every native block of the Plan here rejects an
-        # over-limit Plan before its first preparation.
-        from nwqlib.blocks.selection import SelectedBlock, direct_preparation_amplitudes
-        amplitudes = max((direct_preparation_amplitudes(block) for block in plan.blocks
-                          if isinstance(block, SelectedBlock)), default=0)
-        if amplitudes > run.limits.max_direct_amplitudes:
-            raise ValueError(f"selected direct preparation has {amplitudes} amplitudes, exceeding the Run's "
-                             f"max_direct_amplitudes={run.limits.max_direct_amplitudes} before native preparation. "
-                             f"{_limit_remedy('max_direct_amplitudes')}")
-    if observation.amplitudes is not None:
-        observation.amplitudes.admit_materialization(max_bytes=run.limits.max_data_bytes,
-                                                     max_bytes_source=_data_limit_clause(run))
+    construction, setting, observation, items, selected_length, admission, counted, native_bytes = _admitted_point(
+        point, run=run, held=held)
+    plan, host = run.plan, observation.kind == "host_scalars"
     run.check_capacity(preparations=int(not host))
+    # A seed drawn here is kept only with the charge that saves it.
+    start = None if runtime is not None else run.rng.backend.bit_generator.state
     runtime = runtime or RuntimeOptions(seed=run.rng.next_seed())
     identity = str(uuid4())
     charge = PreparationCharge(execution="host_kernel" if host else "quantum_circuit", preparation_id=identity,
@@ -2562,12 +2718,26 @@ def prepare_experiment(point, *, run, runtime=None, held=None):
     state = run._state
     records = [("preparation", identity, charge), ("rng", "current", run.rng.snapshot())]
     current = state["workflow_current"]
-    item = None if current is None else state["workflow_items"][current].revise(preparation_id=identity)
+    if current is None:
+        item = None
+    elif current in state["workflow_items"]:
+        item = state["workflow_items"][current].revise(preparation_id=identity)
+    else:
+        # A static point's first preparation creates its workflow row here,
+        # with the seed just drawn, in the charge's transaction.
+        item = WorkflowItem(realization=point, runtime=runtime, preparation_id=identity)
     if item is not None:
         records.append(("workflow_item", current, item))
     # Save the preparation charge and consumed RNG position before execution.
     # An interruption therefore cannot silently reuse or skip a random draw.
-    run._write(tuple(records))
+    try:
+        run._write(tuple(records))
+    except BaseException:
+        # A refused or failed charge saves nothing, so the backend stream
+        # returns to the position that the run log still holds.
+        if start is not None:
+            run.rng.backend.bit_generator.state = start
+        raise
     if item is not None:
         state["workflow_items"][current] = item
     state["preparations"] += 1
@@ -2584,17 +2754,18 @@ def prepare_experiment(point, *, run, runtime=None, held=None):
     blocks = tuple(block for block in plan.blocks if block.record.content_id in selected)
     # Lower only the selected reachable blocks, reusing this run's definition
     # cache and giving parameter specializations their own bounded lifetime.
-    # 4096 is the lowering owner's default width ceiling. Local simulators also
-    # apply the Run's max_simulation_qubits before any register is allocated.
-    # The Run's direct-amplitude limit reaches each preparation constructor.
-    # Lowering and the backend reserve each exact dense synthesis that they
-    # make on this charge (Run._charge_synthesis) before it starts.
-    state["synthesis_preparation"] = identity
+    # Lowering and the backend count the exact dense syntheses that they make
+    # for this preparation (Run._record_synthesis), and the total is saved
+    # with its charge once its lowering result is saved.
+    state["synthesis_preparation"], state["synthesis_pending"] = identity, 0
+    # Copies that constructors report join the receipt below, and their
+    # commits run only once its record is saved (_finish_native_preparation).
+    commits = []
     try:
         logical = _lower_qiskit(construction, blocks=blocks, definition_cache=state["definitions"],
             specialization_cache=(state["specializations"], specializations), method_context=run._method_context,
-            max_direct_amplitudes=run.limits.max_direct_amplitudes, synthesis_charge=run._charge_synthesis,
-            max_qubits=min(4096, run.limits.max_simulation_qubits) if getattr(run.backend, "kind", None) in LOCAL_SIMULATORS else 4096)
+            receipt_commits=commits, record_synthesis=run._record_synthesis, admission=admission,
+            counted=counted[None])
         owned = logical.circuit
         # The bound logical body is the lowered logical circuit, one operation
         # per bound call, before native lowering expands any of them. A
@@ -2619,9 +2790,9 @@ def prepare_experiment(point, *, run, runtime=None, held=None):
                         lowered = _lower_qiskit(construction, definition=definition, blocks=blocks,
                             definition_cache=state["definitions"],
                             specialization_cache=(state["specializations"], specializations),
-                            method_context=run._method_context,
-                            max_direct_amplitudes=run.limits.max_direct_amplitudes,
-                            synthesis_charge=run._charge_synthesis, max_qubits=owned.num_qubits)
+                            method_context=run._method_context, receipt_commits=commits,
+                            record_synthesis=run._record_synthesis, admission=admission,
+                            counted=counted[definition])
                         views[definition] = lowered.circuit
                         tails.append(lowered)
                     if (definition, scheduled.view.wires) not in checked:
@@ -2646,59 +2817,436 @@ def prepare_experiment(point, *, run, runtime=None, held=None):
             source_definitions=tuple(state["definitions"][0].values()) + tuple(state["definitions"][1].values())
                 + tuple(state["specializations"].values()) + tuple(specializations.values()), run=run, snapshot=snapshot,
             **({"views": views} if views else {}))
-    except AdmissionStepsExceeded as error:
-        raise _named_admission_refusal(plan, error) from error
+    except BaseException:
+        _abandon_copies(commits)
+        raise
     finally:
         state["synthesis_preparation"] = None
+        synthesis, state["synthesis_pending"] = state["synthesis_pending"], 0
     charge = state["preparation_charges"][identity]
     fields = dict(plan_id=plan.content_id, realization_id=point.content_id, construction_id=construction.content_id,
         realization=point, runtime=runtime, snapshot=snapshot, observation=observation,
         quantum_layout=tuple(RegisterMap(name=name, bits=bits) for name, bits in logical.quantum_layout),
         classical_layout=tuple(RegisterMap(name=reg.name, bits=tuple(owned.find_bit(bit).index for bit in reg)) for reg in owned.cregs),
         logical=LogicalPreparationReceipt(dynamic_visits=logical.dynamic_visits + sum(item.dynamic_visits for item in tails),
-            reserved_work=logical.construction_work + sum(item.construction_work for item in tails),
+            reserved_work=known_sum(logical.construction_work, *(item.construction_work for item in tails)),
             defined_selections=tuple(dict.fromkeys(logical.defined_selections
                                                    + tuple(s for item in tails for s in item.defined_selections)))))
     if observation.kind == "trajectory":
         fields.update(body_length=body_length, boundaries=position)
-    # The new specializations replace the frontier row at the next cache commit.
-    # The committed ones are kept until then, so a failed commit can restore them.
+    try:
+        if callable(getattr(run.backend, "prepare_local", None)):
+            from nwqlib._remote_preparation import begin_preparation
+            # A remote preparation saves its record when a later refresh
+            # completes it. Until then its copy commits and its
+            # specializations stay with its charge, so another preparation
+            # cannot reuse gates whose copies no saved record counts.
+            state["receipt_commits"][identity] = commits, specializations
+            return begin_preparation(native, run=run, reservation=charge, fields=fields, items=items,
+                                     setting=setting, bindings=construction.program.bindings, synthesis=synthesis)
+        _publish_specializations(state, specializations)
+        return _finish_native_preparation(native, run=run, reservation=charge, fields=fields, items=items,
+                                         setting=setting, bindings=construction.program.bindings, commits=commits,
+                                         synthesis=synthesis, native_bytes=native_bytes)
+    except BaseException:
+        if identity not in state["remote_preparations"]:
+            _withdraw_preparation(state, identity, specializations, commits)
+        raise
+
+
+def _publish_specializations(state, specializations):
+    """Make ``specializations`` the Run's frontier, which the next preparation can reuse.
+
+    They replace the frontier row at the next cache commit. The committed
+    ones are kept until then, so a failed commit can restore them.
+    """
     state.setdefault("cache_previous_specializations", state["specializations"])
     state["specializations"] = specializations
     state["cache_frontier_dirty"] = True
-    if callable(getattr(run.backend, "prepare_local", None)):
-        from nwqlib._remote_preparation import begin_preparation
-        return begin_preparation(native, run=run, reservation=charge, fields=fields, items=items,
-                                 setting=setting, bindings=construction.program.bindings)
-    return _finish_native_preparation(native, run=run, reservation=charge, fields=fields, items=items,
-                                     setting=setting, bindings=construction.program.bindings)
 
 
-def _finish_native_preparation(preparation, *, run, reservation, fields, items, setting, bindings, remote=None):
+def _withdraw_preparation(state, identity, specializations, copies=()):
+    """Undo what the preparation of charge ``identity`` built or published before its record, once it ends without one.
+
+    No record was saved and none can be refreshed. The withdrawals of its
+    copies run, those waiting with its charge or else ``copies``, so each
+    constructor retires what it built for it, and its commits are
+    dropped. Its specializations, while still the published ones, give way
+    to the committed ones, as after a failed cache commit
+    (``_run_archive.finish_caches``). Their gates hold copies that no
+    receipt counts, so a retry of the same point builds them again.
+    """
+    waiting = state["receipt_commits"].pop(identity, None)
+    _abandon_copies(copies if waiting is None else waiting[0])
+    if state["specializations"] is specializations and "cache_previous_specializations" in state:
+        state["specializations"] = state.pop("cache_previous_specializations")
+
+
+def _abandon_copies(copies):
+    """Run the withdraw callback of each ``(commit, withdraw)`` pair of a preparation that saved no record."""
+    for _, withdraw in copies:
+        withdraw()
+
+
+def _admitted_point(point, *, run, held=None, admit_memory=True):
+    """Run the checks of ``prepare_experiment`` that come before its charge, and return what preparation needs.
+
+    Returns ``(construction, setting, observation, items, selected_length,
+    admission, counted, native_bytes)``, with ``selected_length`` the body
+    length of a trajectory's selected IR and None otherwise, ``admission``
+    the ready ``_Admission`` of the construction's Program, ``counted`` the
+    counting passes of ``_admit_direct_preparations`` (empty for a
+    classical routine), both of which lowering reuses, and ``native_bytes``
+    the memory estimate of the native circuit that its handle will hold. The
+    last check compares that circuit's memory estimate and what the Run
+    already holds with the Method's memory limit (``_admit_circuit_memory``),
+    unless ``admit_memory`` is False, as for a template's rows, which
+    ``_admit_template_rows`` compares together. Nothing is charged, drawn or
+    lowered.
+    """
+    _check_scope(run, point)
+    plan = run.plan
+    selected_length, counted, native_bytes = None, {}, 0
+    if held is None:
+        experiment, construction = point._selected_construction(plan)
+    else:
+        experiment, construction = held
+        if experiment.name != point.experiment or construction.program.bindings != point.bindings:
+            raise ValueError("the held selection belongs to another point of the Plan")
+    admission, qwidths, cwidths, setting, observation, header = _selected_readout(plan, point, experiment,
+                                                                                 construction)
+    width = sum(item for _, item in qwidths)
+    cwidth = sum(item for _, item in cwidths)
+    host = observation.kind == "host_scalars"
+    # The simulator memory of a readout other than a trajectory follows from
+    # the width and the readout kind alone, so it is checked before the
+    # readout is sized or anything is charged. A trajectory is checked with
+    # its points (_admit_trajectory_work).
+    admit = getattr(run.backend, "admit_simulation_memory", None)
+    memory_mb = run.limits.simulator_memory()
+    if not host and observation.kind != "trajectory" and admit is not None and memory_mb is not None:
+        try:
+            admit(observation, width=width, memory_mb=memory_mb, run=run)
+        except ValueError as error:
+            state = f"{16 << width} bytes" if width < 64 else f"16*2**{width} bytes"
+            remedy = _limit_remedy('simulator_memory_mb')
+            if plan.method.descriptor.method == "qhd" and plan.method.encoding == "one_hot":
+                k = plan.method.num_grid_points
+                if plan.method.boundary == "periodic" and k & (k - 1) == 0:
+                    binary_width = len(plan.problem.variables) * (k.bit_length() - 1)
+                    remedy += (f' A new QHD Plan with encoding="binary" uses {binary_width} qubits for this periodic '
+                               'grid.')
+                else:
+                    remedy += (' QHD encoding="binary" requires a periodic grid with a power-of-two '
+                               'num_grid_points. Switching changes the grid or boundary of this computation.')
+            raise ValueError(f"the selected circuit has {width} qubits, whose complex128 state alone takes {state}, "
+                             f"and its simulation exceeds simulator_memory_mb={memory_mb} ({memory_mb << 20} bytes) "
+                             f"before native preparation ({error}). {remedy}") from None
+    # A backend that cannot execute a trajectory refuses with its capability
+    # message before the trajectory's storage reservation is checked.
+    if observation.kind == "trajectory":
+        _refuse_unsupported_target(run, observation)
+    # Resolve the readout items, their payload reservation and backend support
+    # before any native preparation or large amplitude materialization.
+    items = _admit_readout(observation, width=width, classical_width=cwidth, run=run, header=header)
+    if not host:
+        if observation.kind != "trajectory":
+            _refuse_unsupported_target(run, observation)
+        if observation.kind == "trajectory":
+            # The selected IR must be one coherent evolution along the
+            # executed prefix. The adapter checks its own facts later.
+            selected_length, body_issue, view_issues = _selected_body_issues(construction, admission, observation,
+                                                                             dict(qwidths))
+            admit_pure_trajectory(observation, backend_name="selected IR", body_length=selected_length,
+                classical_width=cwidth, body_issue=body_issue, view_issues=view_issues)
+            _admit_trajectory_work(observation, width=width, run=run,
+                                   allowance=_method_reduction_allowance(run, point, observation, width))
+            # A view's tail and inverse are definitions of the selected Program.
+            defined = {item.id for item in construction.program.definitions}
+            for scheduled in observation.positions:
+                if scheduled.view is not None and not {scheduled.view.tail, scheduled.view.inverse} <= defined:
+                    raise ValueError(f"the readout view of point {scheduled.id!r} names a tail or inverse that is not a "
+                                     "definition of the selected Program")
+        counted, trees = _admit_direct_preparations(run, construction, admission, observation)
+    if observation.amplitudes is not None:
+        observation.amplitudes.admit_materialization(max_bytes=run.limits.max_data_bytes,
+                                                     max_bytes_source=_data_limit_clause(run))
+    if not host:
+        # Limits that the adapter can decide from the readout and its own
+        # configuration refuse here, before any charge or random draw, so
+        # Run.extend_limits leads past them.
+        admit_preparation = getattr(run.backend, "admit_preparation", None)
+        if callable(admit_preparation):
+            admit_preparation(observation, classical_widths=tuple(item for _, item in cwidths if item), run=run)
+        memory = _circuit_memory(run, counted, trees)
+        if admit_memory:
+            _admit_circuit_memory(run, memory, "preparing this circuit")
+        native_bytes = memory.kept
+    return construction, setting, observation, items, selected_length, admission, counted, native_bytes
+
+
+def _admit_direct_preparations(run, construction, admission, observation):
+    """Check the direct state preparation trees of one point's circuit against the physical memory, before its charge.
+
+    The circuit and, for a trajectory, the tail and inverse of each readout
+    view are counted by ``lowering._count_definition``, which lowering then
+    reuses. Each occurrence of a call of a block that declares a direct
+    state preparation counts one tree (``direct.direct_tree_bytes``), with
+    Repeat counts multiplied, and a Plan's blocks that this circuit does
+    not call count nothing. The tree of a control or adjoint is built by
+    lowering, so every such call in the circuit and in each lowered view
+    counts. The tree of an untransformed preparation is built when the
+    backend translates that occurrence. On the noiseless Aer statevector
+    target and the local NWQ-Sim runner an exact Pauli readout or a
+    trajectory translates only the instructions before its position or last
+    boundary (``connection.executed_stop``), so only those occurrences
+    count. A trajectory on Aer applies each view as often as
+    ``qiskit_aer._view_applications`` says, and NWQ-Sim translates each
+    view's tail once and derives its inverse from that translation. Every
+    other readout and backend translates the whole circuit. When the circuit's first instruction is an untransformed
+    preparation that Aer sets as the whole initial state for this readout,
+    which ``qiskit_aer._direct_initial_state_bytes`` decides as
+    ``AerBackend.prepare`` does, that one occurrence counts the
+    ``48 * 2**n`` bytes of the set state on all n qubits of the circuit
+    instead of its tree. Returns ``({definition: count}, need)``, with None for
+    the circuit itself in the mapping and ``need`` the bytes of the trees.
+    """
+    from nwqlib.backends.connection import AerBackend, _run_state_threads, executed_stop
+    from nwqlib.backends.nwqsim import NWQSimBackend
+    from nwqlib.blocks.lowering import _count_definition
+    selected = {record.content_id for record in construction.selections}
+    blocks = tuple(block for block in run.plan.blocks if block.record.content_id in selected)
+    counted = {}
+    root = counted[None] = _count_definition(construction, blocks=blocks, admission=admission)
+    if observation.kind == "trajectory":
+        for scheduled in observation.positions:
+            for definition in () if scheduled.view is None else (scheduled.view.tail, scheduled.view.inverse):
+                if definition not in counted:
+                    counted[definition] = _count_definition(construction, blocks=blocks, admission=admission,
+                                                            definition=definition)
+    # Lowering builds the trees of controls and adjoints, in the circuit and
+    # in each view definition, once each.
+    need = sum(count.eager_bytes for count in counted.values())
+    aer_backend = isinstance(run.backend, AerBackend)
+    truncates = (aer_backend and run.backend.noise_model_id is None) or isinstance(run.backend, NWQSimBackend)
+    if truncates and observation.kind in ("pauli_expectation", "trajectory"):
+        if observation.kind == "pauli_expectation":
+            stop = executed_stop(root.instructions, position=(root.instructions if observation.position is None
+                                                              else observation.position))
+            applications = {}
+        else:
+            boundaries = observation.boundaries(root.instructions)
+            stop = executed_stop(root.instructions, last=boundaries[-1])
+            if aer_backend:
+                from nwqlib.backends import qiskit_aer as aer
+                applications = aer._view_applications(aer._trajectory_saves(observation, boundaries)[0])
+            else:
+                applications = {point.view.tail: 1 for point in observation.positions if point.view is not None}
+        need += root.lazy_bytes_before(stop)
+        need += sum(number * counted[definition].lazy_bytes for definition, number in applications.items())
+    else:
+        need += root.lazy_bytes
+    opening = root.opening_direct
+    if opening is not None and aer_backend:
+        from nwqlib.backends import qiskit_aer as aer
+        from nwqlib.subroutines.state_preparation.direct import direct_tree_bytes
+        # An explicit position 0 observes before the first instruction, and
+        # the end shorthand observes after it.
+        points = observation.positions if observation.kind == "trajectory" else (observation,)
+        injected = aer._direct_initial_state_bytes(
+            observation, noiseless=run.backend.noise_model_id is None,
+            observes=any(point.position is None or point.position > 0 for point in points),
+            width=sum(root.widths.values()), memory_mb=run.limits.simulator_memory() or 0,
+            state_threads=_run_state_threads(run))
+        if injected is not None:
+            # The opening call lies in every prefix that observes after it.
+            need += injected - direct_tree_bytes(opening)
+    try:
+        check_memory(need, None, "building the direct state preparations of this circuit")
+    except ValueError as error:
+        raise ValueError(f"{error}. Each direct preparation of a vector builds a circuit of about 1 KiB per "
+                         "amplitude, once for every time the circuit applies it, and this point was refused before "
+                         "native preparation. Use a compact state preparation, such as a product state or a "
+                         "supplied circuit, or a computer with more memory") from None
+    return counted, need
+
+
+class _CircuitMemory(NamedTuple):
+    """The memory estimates of a circuit, or of several circuits together, for ``_admit_circuit_memory``.
+
+    ``kept`` stays with the prepared handles until ``Run.release_native`` or
+    ``Run.close``. ``temporary`` is the instruction list that lowering holds
+    until the backend has translated it, with the new frontier of definitions
+    with parameters, which replaces the previous frontier. ``static`` holds the
+    new static definitions by content hash, each counted once. ``calls`` and
+    ``definitions`` count what has no estimate, with ``first_call`` the block
+    of the first such call. ``frontier`` is the size of the definitions with
+    parameters that one circuit's calls use, summed over the calls because
+    arguments equal at this point can differ at another. ``logical`` is the
+    instruction list alone. Only the whole-Plan check reads these two
+    (``_static_points_workload``).
+    """
+
+    kept: int
+    temporary: int
+    static: dict
+    calls: int
+    first_call: str | None
+    definitions: int
+    frontier: int = 0
+    logical: int = 0
+
+
+def _circuit_memory(run, counted, trees):
+    """Return the ``_CircuitMemory`` of one circuit from its counting passes and direct preparation ``trees``.
+
+    Definitions are found by the keys of lowering's own caches
+    (``lowering._definition_closure``): a static one is new when the Run has not
+    built it, and one with parameters when the current frontier does not hold
+    it, the only frontier that lowering reuses.
+    """
+    from nwqlib.blocks.lowering import INSTRUCTION_BYTES, _definition_closure
+    from nwqlib.blocks.selection import direct_preparation
+    state = run._state
+    gates, frontier = state["definitions"][0], state["specializations"]
+    logical = temporary = INSTRUCTION_BYTES * sum(count.instructions for count in counted.values())
+    static, definitions = {}, 0
+    for key, block in _definition_closure(pair for count in counted.values() for pair in count.selected.values()).items():
+        if key in frontier if key[1] else key[0] in gates:
+            continue
+        # The tree bytes of a direct preparation are its estimate (``trees``).
+        definitions += block._definition_bytes is None and direct_preparation(block) is None
+        if key[1]:
+            temporary += block._definition_bytes or 0
+        else:
+            static[key[0]] = block
+    calls = sum(count.native_unknown for count in counted.values())
+    first = next((count.first_unknown for count in counted.values() if count.first_unknown is not None), None)
+    frontier_bytes = sum(block._definition_bytes or 0 for count in counted.values()
+                         for block, arguments in count.selected.values() if arguments)
+    return _CircuitMemory(sum(count.native_bytes for count in counted.values()) + trees, temporary, static,
+                          calls, first, definitions, frontier_bytes, logical)
+
+
+def _held_bytes(run):
+    """Return the memory estimate of the circuits and gate definitions that the Run holds now.
+
+    Static definitions and frontiers are read from the live caches, whose
+    owners already commit, roll back, close and restore them, so this cannot
+    drift from them. Their sizes come from everything the bound blocks reach
+    (``lowering._definition_closure``), because lowering keeps a transform's base
+    whether or not the Plan also binds that base by name. A frontier counts while
+    it is the current one, the committed one that a failed cache commit would
+    restore, or the one of a remote preparation that waits for its record. A
+    frontier held in two of those places counts twice, at most one frontier too
+    many, and a replaced frontier counts no more. Native circuits are read from
+    ``native_held``, because scanning the handles at every preparation would grow
+    quadratically. Other Runs and objects of this process are not included.
+
+    A reopened Run on a backend other than Aer starts ``native_held`` at zero, and
+    the handles restored from their records add nothing to it, so this total and
+    the number a refusal prints are low by what was prepared and not yet submitted
+    when the Run stopped. Each of those circuits was compared with the same limit
+    when it was prepared, unless ``max_bytes`` is None and the Run reopens on a
+    computer with less memory. The whole-Plan comparison of the reopened Run
+    (``_admit_static_workload``) covers the points not yet prepared. Charging the
+    position law here would be wrong: such a handle holds a backend's request text
+    or provider reference, or a decoded circuit for which the law is not calibrated,
+    and a false refusal would strand a saved, possibly paid Run, which keeps the
+    limit of its Method.
+
+    The controlled gates that lowering keeps per base (group 1 of ``definitions``)
+    are not read, because their key is the base's hash and the base's size does not
+    describe them. A forward controlled gate is the object that group 0 holds under
+    that block's own hash, so its law counts it once. One that only a controlled
+    adjoint reaches has no size of its own, so only that adjoint's law can cover it.
+    """
+    from nwqlib.blocks.lowering import _definition_closure
+    from nwqlib.blocks.selection import SelectedBlock
+    state = run._state
+    # ponytail: restored records of backends other than Aer are not counted; add them only once a
+    # memory law for those backends is calibrated or an over-admission is measured.
+    # A bound kernel runs on the host and enters no gate cache.
+    closure = _definition_closure((block, ()) for block in run.plan.blocks if isinstance(block, SelectedBlock))
+    sizes = {identity: block._definition_bytes or 0 for (identity, _), block in closure.items()}
+    frontiers = (state["specializations"], state.get("cache_previous_specializations", ()),
+                 *(frontier for _, frontier in state["receipt_commits"].values()))
+    return (state["native_held"] + sum(sizes.get(key, 0) for key in state["definitions"][0])
+            + sum(sizes.get(key[0], 0) for frontier in frontiers for key in frontier))
+
+
+def _admit_circuit_memory(run, memory, stage, *, whole=False):
+    """Refuse the circuits of ``memory`` when they and what the Run holds exceed the Method's memory limit.
+
+    The limit is the Method's ``max_bytes``, or the physical memory when that is
+    None. The peak is about what stays from earlier stages plus what this stage
+    adds, so the compared size is
+
+        held + kept + temporary + new static definitions
+
+    It is a coarse estimate of the parts that have one, not a bound on process
+    memory, and its target is the order of the measured increase, usually within
+    a factor of two. A call without an estimate does not switch the comparison
+    off, so a small uncovered gate leaves a large known block protected. The
+    refusal says how much it left out. Nothing is built and no scientific choice
+    changes. The check runs before the charge of a point, or before the first
+    new work of a static Run, so a refusal counts nothing.
+
+    The native positions behind the estimate are counted and calibrated on Aer.
+    Other backends have no calibration of their own and use the same count, and
+    the refusal says so. ``Run.release_native`` frees circuits on Aer only, so a
+    refusal of one circuit offers it for Aer. On another backend it keeps every
+    handle, as "no durable QPY snapshot", and frees nothing. A refusal of several
+    circuits at once (``whole``) does not offer it, because it comes before they
+    run, so no circuit of theirs has results to release, and a larger limit is what
+    gets past it.
+    """
+    held, limit = _held_bytes(run), getattr(run.plan.method, "max_bytes", None)
+    new = memory.kept + memory.temporary + sum(block._definition_bytes or 0 for block in memory.static.values())
+    try:
+        check_memory(held + new, limit, stage)
+    except ValueError as error:
+        left_out = ""
+        if memory.calls or memory.definitions:
+            left_out = (f"Not counted, for lack of an estimate: calls {memory.calls}"
+                        + (f" (first of block {memory.first_call!r})" if memory.calls else "")
+                        + f", gate definitions {memory.definitions}. ")
+        computer = "use a computer with more memory, " if limit is None else ""
+        raise ResourceLimitError(f"{error}. This is a coarse estimate of the parts that have one: {held} bytes "
+                                 f"already held by this Run and {new} bytes new. The estimate counts each circuit's "
+                                 "top-level instructions and is calibrated on Aer, and other backends, which have no "
+                                 f"calibration of their own, use the same count. {left_out}Reduce the size or accuracy "
+                                 f"of the problem, {computer}or plan again with a larger max_bytes in the Method, "
+                                 "because a Run keeps the limit of its Method. "
+                                 + ("" if whole else "On Aer, in a Run with a folder, Run.release_native frees "
+                                                     "circuits whose results have been collected. ")
+                                 + "Nothing was built or counted for this request") from None
+
+
+def _finish_native_preparation(preparation, *, run, reservation, fields, items, setting, bindings, remote=None,
+                               commits=None, synthesis=0, native_bytes=0):
     """Save one completed preparation, its payload and its original charge together.
 
     This is commit 3 of the module docstring. The charge row gains the content
     hash of the preparation record in the same transaction, so a reopened Run can tell a finished
-    preparation from an interrupted one (a charge without ``prepared_id``). For a
-    remote compilation, the pending record becomes ``completed`` in the same
-    transaction.
+    preparation from an interrupted one (a charge without ``prepared_id``), and
+    adds ``synthesis``, the exact dense synthesis work of a local preparation
+    (``Run._record_synthesis``). For a remote compilation, whose charge saved
+    that work when it began (``begin_preparation``), the pending record
+    becomes ``completed`` in the same transaction.
     """
     observation = fields["observation"]
     if observation.kind != "counts" and observation.population == "unconditional" and preparation.population != "unconditional":
         raise ValueError("selected unconditional readout has a conditioned or unknown population")
     payload = None if preparation.payload is None else PayloadRef(format=preparation.payload_format,
                                                                bytes=len(preparation.payload), key=str(uuid4()))
-    record = PreparedArtifact(**fields, target=preparation.target, compiler=preparation.compiler,
-        native_quantum_layout=preparation.quantum_layout, native_classical_layout=preparation.classical_layout,
-        logical_to_native=preparation.logical_to_native, native_basis=preparation.native_basis,
-        environment=preparation.environment, payload=payload, backend_configuration_id=run.backend.content_id,
-        preparation_time=_now(), construction_work_reserved=fields["logical"].reserved_work,
-        native_operations=preparation.operations, population=preparation.population, transformation=preparation.transformation,
-        counts_sampling=preparation.counts_sampling, provider_options_json=preparation.provider_options_json,
-        probability_window_exclusions=preparation.probability_window_exclusions,
-        statevector_roundoff=preparation.statevector_roundoff, native_depth=preparation.native_depth)
-    handle = PreparedHandle._make(record, fields["realization"], preparation.native, items, setting, bindings)
-    records = [("preparation", reservation.preparation_id, reservation.revise(prepared_id=record.content_id)),
+    record = PreparedArtifact(**fields, **_native_fields(preparation, payload),
+        backend_configuration_id=run.backend.content_id, preparation_time=_now(),
+        construction_work_reserved=fields["logical"].reserved_work)
+    handle = PreparedHandle._make(record, fields["realization"], preparation.native, items, setting, bindings,
+                                  native_bytes=native_bytes)
+    charge = reservation.revise(prepared_id=record.content_id, synthesis_work=reservation.synthesis_work + synthesis)
+    records = [("preparation", reservation.preparation_id, charge),
                ("prepared", record.content_id, record)]
     payloads = ()
     if payload is not None:
@@ -2719,17 +3267,555 @@ def _finish_native_preparation(preparation, *, run, reservation, fields, items, 
     # the native payload the backend supplied for it.
     from nwqlib._run_archive import write_caches
     run._state["handles"][record.content_id] = handle
+    if commits is None:
+        # A completed remote preparation publishes its specializations with
+        # its record, and a failed commit restores the earlier ones.
+        commits, published = run._state["receipt_commits"].get(reservation.preparation_id, ((), None))
+        if published is not None:
+            _publish_specializations(run._state, published)
     write_caches(run, tuple(records), payloads=payloads)
+    run._state["native_held"] += native_bytes
+    run._state["receipt_commits"].pop(reservation.preparation_id, None)
     if item is not None:
         run._state["workflow_items"][current] = item
     run._state["prepared_artifacts"][record.content_id] = record
     run._state["local_prepared_ids"].append(record.content_id)
-    run._state["preparation_charges"][reservation.preparation_id] = reservation.revise(prepared_id=record.content_id)
-    run._state["construction_work"] += record.construction_work_reserved
+    run._state["preparation_charges"][reservation.preparation_id] = charge
+    run._state["synthesis_work"] += synthesis
+    run._state["construction_work"] = known_sum(run._state["construction_work"], record.construction_work_reserved)
+    for commit, _ in commits:
+        commit()
     if remote is not None:
         run._state["remote_preparations"][remote.preparation_id] = remote
     run.progress("prepare", len(run._state["local_prepared_ids"]), None)
     return handle
+
+
+# The preparation-record fields that describe the native circuit rather than
+# the experiment. The records of one compiled template share them.
+_NATIVE_FIELDS = ("snapshot", "target", "compiler", "native_quantum_layout", "native_classical_layout",
+                  "logical_to_native", "native_basis", "environment", "payload", "native_operations", "population",
+                  "transformation", "counts_sampling", "provider_options_json", "probability_window_exclusions",
+                  "statevector_roundoff", "initial_state_error", "native_depth")
+
+
+def _native_fields(preparation, payload):
+    """The preparation-record fields of a backend's ``NativePreparation`` other than ``snapshot``, with ``payload`` saved for it."""
+    return dict(target=preparation.target, compiler=preparation.compiler,
+        native_quantum_layout=preparation.quantum_layout, native_classical_layout=preparation.classical_layout,
+        logical_to_native=preparation.logical_to_native, native_basis=preparation.native_basis,
+        environment=preparation.environment, payload=payload, native_operations=preparation.operations,
+        population=preparation.population, transformation=preparation.transformation,
+        counts_sampling=preparation.counts_sampling, provider_options_json=preparation.provider_options_json,
+        probability_window_exclusions=preparation.probability_window_exclusions,
+        statevector_roundoff=preparation.statevector_roundoff, initial_state_error=preparation.initial_state_error,
+        native_depth=preparation.native_depth)
+
+
+def _groups_points(plan, run):
+    """Whether the remaining points of a static Plan are collected for the Method to group (``_row_templates``).
+
+    They are on a backend that binds parameterized circuits, for a Method
+    that can group the Plan's points (``Method.has_row_templates``) and, on
+    a backend that binds only some readout kinds (``template_readouts``),
+    when an experiment's batch declares one of them. Otherwise each point is
+    generated, prepared and run in turn.
+    """
+    if not getattr(run.backend, "supports_template_pubs", False) or not plan.method.has_row_templates(plan):
+        return False
+    kinds = getattr(run.backend, "template_readouts", None)
+    return kinds is None or any(experiment.batch is not None
+                                and plan._program_nodes[experiment.batch].observation_kind in kinds
+                                for experiment in plan.experiments)
+
+
+def _row_templates(plan, run, points):
+    """The Method's templates with parameters of the static points ``points`` (`StaticPoint`), or None when there are none to bind.
+
+    Only a backend that binds parameterized circuits (``supports_template_pubs``)
+    asks the Method (``Method.row_templates``), so planning, estimates,
+    archive reads and other backends do no template work. A backend that
+    binds only some readout kinds (``template_readouts``) asks about the
+    points whose batch declares one of them. A template without parameters
+    has nothing to bind, so its points, like the points the Method is not asked
+    about, are prepared on their own. Whether the backend can translate a template
+    is asked when ``prepare_template_rows`` has its circuit, because reading the
+    circuit of a ``_DeferredRowTemplate`` builds it.
+    """
+    if not points or not getattr(run.backend, "supports_template_pubs", False):
+        return None
+    kinds = getattr(run.backend, "template_readouts", None)
+    if kinds is not None:
+        points = tuple(point for point in points if point.experiment.batch is not None
+                       and plan._program_nodes[point.experiment.batch].observation_kind in kinds)
+        if not points:
+            return None
+    templates = run.plan.method.row_templates(plan, points)
+    if templates is None:
+        return None
+    if sorted(key for template in templates for key, _ in template.rows) != sorted(point.key for point in points):
+        raise ValueError("Method.row_templates must place each requested point in exactly one template")
+    return tuple(template for template in templates if template.parameters) or None
+
+
+def prepare_template_rows(plan, *, run, points, templates, rebuild=frozenset()):
+    """Prepare the points of ``templates`` as bindings of compiled templates and return ``{key: handle}`` in Plan order.
+
+    Every point of ``points``, the static points held together, gets its
+    workflow row first. The points that no template holds keep that row and
+    are prepared on their own later, with its seed.
+    Each template is compiled at most once per Run: a point whose
+    template a preparation record of this Run already holds binds that
+    compiled circuit, or a circuit folded from it, restored from its saved
+    QPY after reopening, without lowering or compiling (``_bind_template``).
+    A point that is already prepared returns its handle, and one whose
+    preparation was charged without a record raises ``PreparationNotRebuilt``,
+    unless its key is in ``rebuild`` (``_rebuild_static_preparations``). Such a
+    point is prepared like a point without a charge. It binds the template that a
+    saved record holds, and compiles only when no record holds it.
+
+    After the comparison with the memory limit (``_admit_template_rows``), a new
+    template's circuit is read once, before that template's charge, and it is
+    released before the next template's circuit is read. A compiled template's
+    circuit is not read at all. The rows of a template that the backend cannot
+    translate with its angles as parameters (``translates_template``) need each
+    point's values, so they stay for their own preparation with their seeds.
+    """
+    state = run._state
+    # The missing workflow rows, and their seeds, are created in the order of
+    # the points (Plan order), in one transaction, so each point has the seed
+    # that preparing the points one by one would draw.
+    items = _static_items(plan, run, points)
+    _admit_template_rows(plan, run, templates, items, rebuild)
+    translates = getattr(run.backend, "translates_template", None)
+    handles = {}
+    for template in templates:
+        circuit = None
+        missing = []
+        for name, values in template.rows:
+            item = items[name]
+            if item.prepared_id is not None:
+                handles[name] = (state["handles"].get(item.prepared_id)
+                                 or restore_prepared(item.prepared_id, run=run, for_submission=True))
+            elif item.preparation_id is not None and name not in rebuild:
+                raise _not_rebuilt(name)
+            else:
+                missing.append((name, item, values))
+        if not missing:
+            continue
+        if (run.backend.content_id, template.key) not in state["template_sources"]:
+            circuit = template.circuit
+            if translates is not None and not translates(circuit):
+                continue
+        handles.update(_bind_template(plan, run, template, circuit, missing))
+    return {name: handles[name] for name in items if name in handles}
+
+
+@dataclass
+class _LiveTemplate:
+    """A compiled template circuit in memory, which the template's bound rows share (Aer's ``bind_template``).
+
+    ``bytes`` is the circuit's estimate and ``owners`` counts the rows that hold
+    the circuit now, so the estimate stays in ``native_held`` until the last of
+    them is released, whichever row compiled it. Only ``Run._state`` holds these,
+    and nothing is saved: after reopening, the estimate comes from the compiling
+    row's saved ``native_bytes`` (``_restored_bytes``).
+    """
+
+    circuit: object
+    bytes: int
+    owners: int = 0
+
+
+def _template_key(record):
+    """Return the ``state["template_circuits"]`` key of the template circuit that ``record`` shares, or None.
+
+    A record of IBM's folded correction classes has None. Its circuits are never
+    released, because only Aer saves a handle's circuit, so its compiling row
+    keeps their one estimate and no claim is made per class.
+    """
+    template = record.template
+    return None if template is None or template.correction is not None else (record.backend_configuration_id, template.key)
+
+
+def _restored_bytes(state, handle):
+    """Return what restoring the released ``handle`` adds to ``native_held``.
+
+    A row of a template adds its own ``_TEMPLATE_ROW_BYTES`` when another row holds
+    the circuit in memory. Otherwise it brings the circuit back too, which together
+    is what the compiling row's saved ``native_bytes`` states.
+    """
+    key = _template_key(handle.record)
+    if key is None:
+        return handle._native_bytes
+    if key in state["template_circuits"]:
+        return _TEMPLATE_ROW_BYTES
+    source = state["template_sources"].get(key)
+    compiling = None if source is None else state["handles"].get(source.content_id)
+    return _TEMPLATE_ROW_BYTES if compiling is None else compiling._native_bytes
+
+
+def _release_held(state, handle):
+    """Take what releasing ``handle`` frees out of ``native_held``, and return whether its circuit leaves memory."""
+    key = _template_key(handle.record)
+    live = state["template_circuits"].get(key)
+    if live is None:
+        state["native_held"] -= handle._native_bytes
+        return True
+    state["native_held"] -= _TEMPLATE_ROW_BYTES
+    live.owners -= 1
+    if live.owners:
+        return False
+    state["native_held"] -= live.bytes
+    del state["template_circuits"][key]
+    return True
+
+
+def _admit_template_rows(plan, run, templates, items, rebuild=frozenset()):
+    """Compare the rows of ``templates`` not yet prepared, and their new circuits, with the memory limit before any charge.
+
+    The actual population is known here. A row in ``rebuild`` counts as missing
+    (``prepare_template_rows``). Each missing row keeps
+    ``_TEMPLATE_ROW_BYTES``, and each template without a compiled record adds one
+    circuit, sized from its first missing row, which is one more counting pass per
+    new template. Their temporaries do not overlap, so the largest counts, and a
+    static definition counts once. A compiled template whose circuit was released
+    comes back for its new rows. A row that reuses a compiled template builds no
+    circuit, so ``_bind_template_rows`` does not compare a circuit for it again.
+
+    A template that states its size B (``_DeferredRowTemplate``) is not built yet,
+    so its temporary also takes what building and lowering it hold together, for
+    the one call of its block that the Program makes:
+
+        usual temporary + _TEMPLATE_BUILD_COPIES * B + _TEMPLATE_PREDECESSOR_COPIES * B_before
+
+    with ``B_before`` the size that the template before it in this request states.
+    The last term is what Aer holds from that template:
+    ``_AerPreparation._blocks`` keeps its source gate and translated definition until
+    the next ``AerBackend.prepare`` calls ``keep_sources``, and
+    ``_CacheEntries.previous`` keeps them until that preparation commits. The selected
+    block's own definition stays in the total though the template replaces it, because
+    it may already be cached and so contribute nothing here, and subtracting its size
+    could leave too little. These are declared allowances for objects traced in the
+    source, not an enclosure of what the process allocates, and calibration judges
+    them. A template that a Program calls more than once has one gate definition per
+    call, and a gate left by an earlier request is counted only when its template is
+    the one before in this request. After the last template, ``_held_bytes`` does not
+    read what Aer keeps of it.
+
+    This covers the known parts only, as a coarse estimate. It does not cover:
+
+    - what an eager ``Method.row_templates`` built before this call, as sampled QSP
+      and a custom Method can, or what any Method allocates to group its rows;
+    - the class circuits and kept base of IBM's folded templates, because folding
+      needs the compilation that follows the first charge;
+    - bodies of input preparations and what backend translation holds in passing.
+
+    Rows of a template that the backend turns out not to bind count here as rows,
+    and they pass the check of their own preparation afterwards.
+    """
+    state = run._state
+    kept = temporary = calls = definitions = preceding = 0
+    static, first_call = {}, None
+    for template in templates:
+        stated = template._retained_bytes or 0
+        missing = [name for name, _ in template.rows
+                   if items[name].prepared_id is None and (items[name].preparation_id is None or name in rebuild)]
+        if missing:
+            kept += len(missing) * _TEMPLATE_ROW_BYTES
+            source = state["template_sources"].get((run.backend.content_id, template.key))
+            if source is None:
+                first = _admitted_point(items[missing[0]].realization, run=run, admit_memory=False)
+                memory = _circuit_memory(run, first[6], 0)
+                kept += first[7]
+                temporary = max(temporary, (memory.temporary + _TEMPLATE_BUILD_COPIES * stated
+                                            + _TEMPLATE_PREDECESSOR_COPIES * preceding))
+                static.update(memory.static)
+                calls += memory.calls
+                first_call = first_call or memory.first_call
+                definitions = max(definitions, memory.definitions)
+            else:
+                handle = state["handles"].get(source.content_id)
+                if handle is not None and handle._native is None:
+                    kept += _restored_bytes(state, handle)
+        preceding = stated
+    _admit_circuit_memory(run, _CircuitMemory(kept, temporary, static, calls, first_call, definitions),
+                          "preparing the rows of these templates", whole=True)
+
+
+def _index_template_record(state, record):
+    """Index a record bound to a template by backend configuration and key, and by its correction class too.
+
+    ``_bind_template_rows`` reads these indexes to find the record that
+    holds a compiled template, and the record of a correction class already
+    built. The first record of each index entry is kept, in the order the
+    Run made its records or a reopened Run restores them from the run log.
+    """
+    if record.template is not None:
+        key = (record.backend_configuration_id, record.template.key)
+        state["template_sources"].setdefault(key, record)
+        state["template_classes"].setdefault((*key, record.template.correction), record)
+
+
+def _bind_template(plan, run, template, circuit, missing):
+    """Prepare the experiments ``missing`` of one template (``_bind_template_rows``), withdrawing copies if no record is saved."""
+    copies = []
+    try:
+        return _bind_template_rows(plan, run, template, circuit, missing, copies)
+    except BaseException:
+        _abandon_copies(copies)
+        raise
+
+
+def _bind_template_rows(plan, run, template, circuit, missing, copies):
+    """Prepare the experiments ``missing`` of one template and return ``{name: handle}``.
+
+    ``circuit`` is the template's circuit when no record of this Run holds the
+    template, and None otherwise, when nothing here reads it.
+
+    Every experiment passes the checks of ``prepare_experiment`` before its
+    charge (``_admitted_point``), except the comparison of one bound circuit
+    with the memory limit, because a row builds none and
+    ``_admit_template_rows`` has compared what these rows do keep. The capacity
+    check counts one preparation per experiment, so a template does not shrink
+    the population that ``max_total_circuits`` protects. When no record of this Run holds
+    the template, the first experiment's charge commits first (commit 2),
+    its point is lowered with the template in place of the Method's block
+    (``_lower_qiskit(templates=...)``) and the backend compiles that circuit
+    once with the experiment's runtime seed. Binding a value row does no
+    backend work, so the other experiments' charges commit with their
+    records. Each record takes the template's native fields and runtime
+    except the fields that ``bind_template`` returns for its experiment
+    (Aer returns its runtime and counts sampling). All records, their charges, workflow rows and the template's
+    one saved QPY commit in one transaction (commit 3). Construction work
+    is counted on the compiling record only.
+
+    When the backend folds the compiled template for each experiment
+    (``fold_template``: IBM fractional gates with parameterized RZZ
+    angles), the compiled template is the base from which the circuit of
+    each correction class is built once (``template_class``), without
+    another compilation, layout or seed. The experiments of a class bind
+    its circuit with their transformed values, taken by name in that
+    circuit's own parameter order. The compiled template's QPY is saved
+    once, in the same transaction as the first class records, and every
+    folded record refers to it (``TemplateBinding.base``). A later call
+    loads it at most once per open Run (``restore_template``), reuses the
+    record of a class already built and builds only new classes, all before
+    its one commit, so an interruption leaves its experiments unprepared.
+    Without saved compiled template bytes, new preparation refuses as for a
+    record without a payload, and nothing is compiled again.
+    """
+    from nwqlib.execution import TemplateBinding
+    state = run._state
+    checked = [_admitted_point(item.realization, run=run, admit_memory=False) for _, item, _ in missing]
+    admitted = [(*entry, *result[:4]) for entry, result in zip(missing, checked, strict=True)]
+    source = state["template_sources"].get((run.backend.content_id, template.key))
+    # The compiled circuit and every class circuit folded from it carry the
+    # readout and shots of the experiment that compiled them, and the
+    # unconditional-population check below runs only at compilation. So
+    # every experiment, in this call or a later one, must have that readout.
+    observation = admitted[0][5] if source is None else source.observation
+    if any(entry[5] != observation for entry in admitted):
+        raise ValueError("experiments of one template must share one readout (ObservationSpec, shots included), "
+                         "because their circuits carry the readout and shots of the template's first prepared "
+                         "experiment. Method.row_templates must give experiments with different readouts "
+                         "different RowTemplate.key values. None of the template's new experiments was prepared.")
+    run.check_capacity(preparations=len(admitted))
+    names = tuple(parameter.name for parameter in template.parameters)
+    rows = tuple(dict(zip(names, values, strict=True)) for _, _, values, *_ in admitted)
+    # The compiled templates of this Run that are folded per experiment,
+    # kept in memory after compilation or after their first load.
+    bases = state.setdefault("template_bases", {})
+    charges, payloads, compiled, synthesis = {}, [], source is None, 0
+    if compiled:
+        name, item, _, construction = admitted[0][:4]
+        charge = PreparationCharge(execution="quantum_circuit", preparation_id=str(uuid4()),
+                                   checkpoint_sequence=run.checkpoint_sequence or None)
+        item = item.revise(preparation_id=charge.preparation_id)
+        run._write((("preparation", charge.preparation_id, charge), ("workflow_item", name, item)))
+        state["workflow_items"][name] = item
+        state["preparations"] += 1
+        state["preparation_charges"][charge.preparation_id] = charge
+        run.progress("prepare")
+        charges[name] = charge.preparation_id
+        snapshot = str(uuid4())
+        logical, owned, preparation, synthesis = _compile_template(plan, run, template, circuit, construction, observation,
+                                                         item.runtime, charge.preparation_id, name, snapshot, copies)
+        if observation.kind != "counts" and observation.population == "unconditional" and preparation.population != "unconditional":
+            raise ValueError("selected unconditional readout has a conditioned or unknown population")
+        reference = None if preparation.payload is None else PayloadRef(format=preparation.payload_format,
+                                                                     bytes=len(preparation.payload), key=str(uuid4()))
+        if reference is not None:
+            payloads.append((reference, preparation.payload))
+        shared = dict(snapshot=snapshot, **_native_fields(preparation, reference))
+        parameters, native, runtime = preparation.parameters, preparation.native, item.runtime
+        layouts = dict(quantum_layout=tuple(RegisterMap(name=name, bits=bits) for name, bits in logical.quantum_layout),
+                       classical_layout=tuple(RegisterMap(name=reg.name, bits=tuple(owned.find_bit(bit).index for bit in reg))
+                                              for reg in owned.cregs))
+        receipt = LogicalPreparationReceipt(dynamic_visits=logical.dynamic_visits, reserved_work=logical.construction_work,
+                                            defined_selections=logical.defined_selections)
+        folded = run.backend.fold_template(native, rows)
+    else:
+        shared = {name: getattr(source, name) for name in _NATIVE_FIELDS}
+        runtime, reference = source.runtime, source.template.base
+        layouts = dict(quantum_layout=source.quantum_layout, classical_layout=source.classical_layout)
+        receipt = source.logical
+        if source.template.correction is None:
+            # A handle with a saved native snapshot (Aer) reloads it; another
+            # is restored from its preparation record and saved payload.
+            handle = state["handles"].get(source.content_id)
+            if handle is None or handle._native is None and handle._saved_native is None:
+                handle = restore_prepared(source.content_id, run=run, for_submission=True)
+            parameters, native, folded = source.template.parameters, handle._restore_native(), None
+        else:
+            native = bases.get(template.key)
+            if native is None:
+                if reference is None or state["journal"] is None:
+                    raise ValueError("saved preparation has no native payload for new execution")
+                native = bases[template.key] = run.backend.restore_template(
+                    source, state["journal"].read_payload(reference), run=run)
+            folded = run.backend.fold_template(native, rows)
+    # A bound record repeats the template's lowering counts but reserves no work.
+    bound = LogicalPreparationReceipt(dynamic_visits=receipt.dynamic_visits, reserved_work=0,
+                                      defined_selections=receipt.defined_selections)
+    # Each template circuit that runs, by correction class: its native
+    # object, parameter names in binding-column order and record fields. A
+    # backend that records native depths (IBM, template_depth) gives each new
+    # class the depth of its circuit bound to the class's first row, and a
+    # class read from its saved record keeps the saved depth.
+    depth = getattr(run.backend, "template_depth", None)
+    if folded is None:
+        if sorted(names) != sorted(parameters):
+            raise ValueError("the compiled template's parameters differ from the Method's template parameters")
+        if compiled and depth is not None:
+            shared = {**shared, "native_depth": depth(native, rows[0], run=run)}
+        classes, folded = {None: (native, parameters, shared)}, tuple((None, row) for row in rows)
+    else:
+        classes = {}
+        for correction in dict.fromkeys(correction for correction, _ in folded):
+            record = state["template_classes"].get((run.backend.content_id, template.key, correction))
+            if record is not None:
+                handle = state["handles"].get(record.content_id)
+                if handle is None or handle._native is None:
+                    handle = restore_prepared(record.content_id, run=run, for_submission=True)
+                classes[correction] = (handle._native, record.template.parameters,
+                                       {name: getattr(record, name) for name in _NATIVE_FIELDS})
+                continue
+            # A new class is built from the compiled template, so its record
+            # keeps the compilation's target, compiler, layouts and options,
+            # with its own snapshot, saved circuit, operation count and the
+            # environment of the process that built it.
+            snapshot = str(uuid4())
+            variant, variant_parameters, data, operations, environment = run.backend.template_class(
+                native, correction, snapshot=snapshot, run=run)
+            payload = None if data is None else PayloadRef(format=reference.format, bytes=len(data), key=str(uuid4()))
+            if payload is not None:
+                payloads.append((payload, data))
+            fields = {**shared, "snapshot": snapshot, "payload": payload, "native_operations": operations,
+                      "environment": environment}
+            if depth is not None:
+                first = next(columns for row_correction, columns in folded if row_correction == correction)
+                fields["native_depth"] = depth(variant, first, run=run)
+            classes[correction] = (variant, variant_parameters, fields)
+    records, prepared, handles = [], [], {}
+    for index, ((correction, columns), (name, item, _, construction, setting, _, items)) in enumerate(
+            zip(folded, admitted, strict=True)):
+        variant, variant_parameters, fields = classes[correction]
+        # Each value is found by the name of the circuit's own parameter:
+        # the Method's parameter for the compiled template, or the folded
+        # value from fold_template for a class circuit.
+        if not set(variant_parameters) <= set(columns):
+            raise ValueError("the compiled template's parameters differ from the Method's template parameters")
+        binding = TemplateBinding(key=template.key, parameters=variant_parameters, compiled=compiled and index == 0,
+                                  values=tuple(columns[parameter] for parameter in variant_parameters),
+                                  correction=correction, base=None if correction is None else reference)
+        logical_receipt = receipt if binding.compiled else bound
+        # The backend states the record fields that this experiment does not
+        # share with the template, such as Aer's runtime seed (bind_template).
+        bound_native, own = run.backend.bind_template(variant, binding.values, runtime=item.runtime)
+        own = dict(own)
+        record = PreparedArtifact(**{**fields, **own, "runtime": own.get("runtime", runtime)}, **layouts,
+            plan_id=plan.content_id, realization_id=item.realization.content_id,
+            construction_id=construction.content_id, realization=item.realization, observation=observation,
+            logical=logical_receipt, backend_configuration_id=run.backend.content_id, preparation_time=_now(),
+            construction_work_reserved=logical_receipt.reserved_work, template=binding)
+        if name in charges:
+            # The compiling experiment's charge saves the work of the
+            # syntheses that its compilation made.
+            charge = state["preparation_charges"][charges[name]]
+            charge = charge.revise(prepared_id=record.content_id, synthesis_work=charge.synthesis_work + synthesis)
+        else:
+            charge = PreparationCharge(execution="quantum_circuit", preparation_id=str(uuid4()),
+                                       checkpoint_sequence=run.checkpoint_sequence or None,
+                                       prepared_id=record.content_id)
+        item = (state["workflow_items"][name] if name in charges else item.revise(preparation_id=charge.preparation_id))
+        item = item.revise(prepared_id=record.content_id)
+        records += [("preparation", charge.preparation_id, charge), ("prepared", record.content_id, record),
+                    ("workflow_item", name, item)]
+        prepared.append((name, record, charge, item))
+        # The compiling row's saved bytes state the circuit's estimate, which outlasts that
+        # row while another row runs the circuit (_LiveTemplate).
+        handles[name] = PreparedHandle._make(record, item.realization, bound_native,
+                                             items, setting, construction.program.bindings,
+                                             native_bytes=_TEMPLATE_ROW_BYTES + (checked[index][7] if binding.compiled
+                                                                                 else 0))
+    records.extend(("payload", payload.content_id, payload) for payload, _ in payloads)
+    from nwqlib._run_archive import write_caches
+    for name, record, _, _ in prepared:
+        state["handles"][record.content_id] = handles[name]
+    write_caches(run, tuple(records), payloads=tuple(payloads))
+    state["synthesis_work"] += synthesis
+    state["native_held"] += sum(handles[name]._native_bytes for name, _, _, _ in prepared)
+    if folded[0][0] is None:
+        state["template_circuits"].setdefault((run.backend.content_id, template.key), _LiveTemplate(
+            native.circuit, checked[0][7] if compiled else 0)).owners += len(prepared)
+    if compiled and folded[0][0] is not None:
+        bases[template.key] = native
+    for name, record, charge, item in prepared:
+        state["preparations"] += name not in charges
+        state["workflow_items"][name] = item
+        state["prepared_artifacts"][record.content_id] = record
+        _index_template_record(state, record)
+        state["local_prepared_ids"].append(record.content_id)
+        state["preparation_charges"][charge.preparation_id] = charge
+        state["construction_work"] = known_sum(state["construction_work"], record.construction_work_reserved)
+    for commit, _ in copies:
+        commit()
+    run.progress("prepare", len(state["local_prepared_ids"]), None)
+    return handles
+
+
+def _compile_template(plan, run, template, circuit, construction, observation, runtime, identity, name, snapshot, copies):
+    """Lower one experiment's point with the template's ``circuit`` in place of its block, and let the backend compile it as ``snapshot``.
+
+    Returns ``(logical, circuit, preparation, synthesis)``. The ``(commit,
+    withdraw)`` callbacks of copies that constructors report join
+    ``copies``, for the caller to run once the records are saved or after a
+    failure. ``synthesis`` is the work of the exact dense syntheses that
+    lowering and the backend made for the charge ``identity``
+    (``Run._record_synthesis``), which the caller saves with that charge, as
+    in ``prepare_experiment``.
+    """
+    from nwqlib.blocks.lowering import _lower_qiskit
+    state = run._state
+    selected = {record.content_id for record in construction.selections}
+    blocks = tuple(block for block in plan.blocks if block.record.content_id in selected)
+    state["synthesis_preparation"], state["workflow_current"], state["synthesis_pending"] = identity, name, 0
+    try:
+        logical = _lower_qiskit(construction, blocks=blocks, definition_cache=state["definitions"],
+            method_context=run._method_context, receipt_commits=copies, record_synthesis=run._record_synthesis,
+            templates={template.block_id: circuit})
+        owned = logical.circuit
+        position = len(owned.data) if observation.position is None else observation.position
+        if position > len(owned.data):
+            raise ValueError("observation position exceeds the selected circuit")
+        preparation = run.backend.prepare(owned, observation=observation, runtime=runtime, position=position,
+            source_definitions=tuple(state["definitions"][0].values()) + tuple(state["definitions"][1].values())
+                + tuple(state["specializations"].values()), run=run, snapshot=snapshot)
+    finally:
+        state["synthesis_preparation"], state["workflow_current"] = None, None
+        synthesis, state["synthesis_pending"] = state["synthesis_pending"], 0
+    return logical, owned, preparation, synthesis
 
 
 def _publishes_arrays(observation):
@@ -2744,7 +3830,7 @@ def _publishes_arrays(observation):
     return observation.kind in kinds or any(point.kind in kinds for point in observation.positions)
 
 
-def submit_experiment(prepared, *, run, checkpoint_sequence=None):
+def submit_experiment(prepared, *, run, checkpoint_sequence=None, collect=False):
     """Reserve the acquisition before the backend call, without rebuilding the preparation.
 
     ``Method.before_submit`` runs once, before the intent, so a Method can reject
@@ -2754,6 +3840,9 @@ def submit_experiment(prepared, *, run, checkpoint_sequence=None):
     outcome is saved by ``Run._finish_attempt`` (commit 6) or recorded by
     ``Run._fail_attempt``. A synchronous backend has no commit 5. Classical routines
     and detached backends take their own routes with the same ordering.
+    ``collect=True`` collects a synchronous outcome in its own transaction
+    (commit 7 joins commit 6), as the static workflow does. A detached
+    submission is collected after its refresh.
 
     Returns the observation chunk, or for a trajectory the tuple of its point
     chunks in schedule order, all from one acquisition.
@@ -2761,7 +3850,7 @@ def submit_experiment(prepared, *, run, checkpoint_sequence=None):
     _check_scope(run, prepared.realization)
     prepared._restore_native()
     if prepared.record.execution == "host_kernel":
-        return _submit_host(prepared, run=run, checkpoint_sequence=checkpoint_sequence)
+        return _submit_host(prepared, run=run, checkpoint_sequence=checkpoint_sequence, collect=collect)
     if prepared.record.backend_configuration_id != run.backend.content_id:
         raise ValueError("prepared artifact belongs to another backend configuration")
     if not getattr(run.backend, "supports_synchronous", True):
@@ -2772,8 +3861,7 @@ def submit_experiment(prepared, *, run, checkpoint_sequence=None):
     event = ConsumptionEvent(attempt=attempt, prepared_id=prepared.record.content_id, status="reserved",
         submission=str(uuid4()), shots=observation.shots, evaluations=int(observation.kind != "counts"), started=_now(),
         checkpoint_sequence=checkpoint_sequence, provider_managed_sampling=observation.kind == "estimated_observable",
-        data_bytes_reserved=readout_bytes(prepared, metadata_bytes=run.limits.max_completion_metadata_bytes,
-            max_bytes=run.limits.max_data_bytes, run=run, attempt=attempt))
+        data_bytes_reserved=readout_bytes(prepared, max_bytes=run.limits.max_data_bytes, run=run, attempt=attempt))
     submission = SubmissionRecord(submission_id=event.submission, run_id=run.run_id, backend=prepared.record.target,
         items=(SubmissionItem(attempt=attempt, prepared_id=prepared.record.content_id, item=0),), status="intent", started=event.started)
     index, event = run._begin_submission(submission, (event,), (prepared.record,))[0]
@@ -2797,7 +3885,8 @@ def submit_experiment(prepared, *, run, checkpoint_sequence=None):
         else:
             complete = event.revise(status="completed", finished=_now(), returned_shots=chunk.returned_shots,
                                     observation_id=chunk.content_id)
-        run._finish_attempt(index, complete, chunk, native_simulations=result.metadata.get("native_simulations"))
+        run._finish_attempt(index, complete, chunk, native_simulations=result.metadata.get("native_simulations"),
+                            collect=collect)
         return chunk
     except BaseException as error:
         run._fail_attempt(index, event, error, discarded=(
@@ -2806,7 +3895,7 @@ def submit_experiment(prepared, *, run, checkpoint_sequence=None):
         raise
 
 
-def _statistic_stride(kind, *, key_width, shots=0, max_bytes=DEFAULT_MAX_BYTES):
+def _statistic_stride(kind, *, key_width, shots=0, max_bytes=None):
     """Bytes one saved statistic reserves.
 
     A JSON statistic reserves the JSON size of its prototype and one
@@ -2835,8 +3924,8 @@ def _admit_readout(observation, *, width, classical_width, run, header=None):
     """Check a readout's items and payload bytes before native preparation, and return its item count.
 
     These checks precede native construction and submission. Subtract the
-    known declaration and metadata reservations before deriving any payload
-    capacity. For positive homogeneous
+    known declaration reservation before deriving any payload capacity. For
+    positive homogeneous
     item count ``L``, check ``K <= remaining_items//L`` before forming
     ``K*L``. For a marginal and nonnegative remaining item capacity
     ``M_items``, reject when ``q_k >= M_items.bit_length()`` before forming
@@ -2846,24 +3935,22 @@ def _admit_readout(observation, *, width, classical_width, run, header=None):
     counted as zero. Pauli and count values use the conservative JSON size of
     the prototype of ``_statistic_stride``, and probabilities the eight bytes
     per possible outcome of their binary array. Amplitude arrays keep their
-    own binary payload and scalar-metadata accounting. An unsupported reduction or a reduction with
+    own binary payload. An unsupported reduction or a reduction with
     unresolved output shape fails before native preparation.
 
     For a single-endpoint readout the declaration reservation is the
     observation's own JSON, the part of the declaration's JSON ``J`` known
-    before lowering, and the metadata reservation ``M`` is the Run's
-    ``max_completion_metadata_bytes``. At submission ``readout_bytes``
-    counts the complete reservation, including the bindings and layouts,
-    against the remaining data budget. The item capacity of each readout is
-    the remaining payload bytes divided by its statistic stride
-    (``_statistic_stride``), 16 bytes per complex128 amplitude, so
-    ``items*stride`` never exceeds the remaining bytes.
+    before lowering. At submission ``readout_bytes`` counts the complete
+    reservation, including the bindings and layouts, against the remaining
+    data budget. The item capacity of each readout is the remaining payload
+    bytes divided by its statistic stride (``_statistic_stride``), 16 bytes
+    per complex128 amplitude, so ``items*stride`` never exceeds the
+    remaining bytes.
 
     A trajectory subtracts the full known future storage for all points
-    and one ``M`` before deriving a value capacity. The complete contribution
-    of the acquisition, including the newly saved declaration of its
-    preparation record, is
-    ``R_new selection = J_T + sum_k (D_k + H_k + V_k) + M``
+    before deriving a value capacity. The complete contribution of the
+    acquisition, including the newly saved declaration of its preparation
+    record, is ``R_new selection = J_T + sum_k (D_k + H_k + V_k)``
     (``trajectory_reservation``, ``_trajectory_fixed_bounds``,
     ``_trajectory_value_bounds``). ``header`` holds the context that does not
     depend on lowering (experiment, setting, bindings, Plan and realization
@@ -2875,27 +3962,20 @@ def _admit_readout(observation, *, width, classical_width, run, header=None):
     lowering. It is counted at its shortest form, so this check counts no more
     than the final one, and the completed preparation record supplies the final
     bound at submission (``readout_bytes``). Without ``header``
-    (when a Run is restored), the point headers are not counted. The early condition ``M_min(K) <= M`` applies as well,
-    except when a detached NWQ-Sim or NWQ-Sim Slurm preparation is restored. The
-    outcome transaction of a retrieval credits the event and status rows
-    actually saved, and a new submission from a restored handle is checked
-    against the minimum for a new acquisition by ``readout_bytes`` before launch.
-    The per-point item count is ``point_items``.
+    (when a Run is restored), the point headers are not counted. The
+    per-point item count is ``point_items``.
     """
     from nwqlib._run_journal import _json_bound
     from nwqlib.core.planning import point_items
 
     limit = run.limits.max_data_bytes
     declaration = _json_bound(observation, limit)
-    remaining = limit - declaration - run.limits.max_completion_metadata_bytes
-    if remaining < 0:
-        raise _cumulative_limit_error(
-            "max_data_bytes", limit, "readout declaration and completion metadata bytes", declaration,
-            run.limits.max_completion_metadata_bytes)
+    remaining = None if limit is None else limit - declaration
+    if remaining is not None and remaining < 0:
+        raise _cumulative_limit_error("max_data_bytes", limit, "readout declaration bytes", 0, declaration)
 
     def clause(stride):
-        return _data_limit_clause(run, f" less the readout declaration and completion metadata, at {stride} bytes "
-                                       "per entry")
+        return _data_limit_clause(run, f" less the readout declaration, at {stride} bytes per entry")
 
     kind = observation.kind
     if kind == "counts" and observation.shots > MAX_COUNT:
@@ -2906,27 +3986,19 @@ def _admit_readout(observation, *, width, classical_width, run, header=None):
         if kind == "amplitudes":
             stride = 16
         elif kind == "estimated_observable":
-            stride = 1  # One provider estimate. Its size is completion metadata.
+            stride = 1  # One provider estimate, counted at its actual size when saved.
         else:
             key_width = {"pauli_expectation": width, "probabilities": len(observation.qubits),
                          "counts": classical_width}.get(kind, 0)
             stride = _statistic_stride(kind, key_width=key_width, shots=observation.shots, max_bytes=limit)
-        items = readout_shape(kind=kind, details=observation, width=width, classical_width=classical_width,
-                             repetitions=observation.shots, max_items=remaining // stride,
+        return readout_shape(kind=kind, details=observation, width=width, classical_width=classical_width,
+                             repetitions=observation.shots, max_items=None if remaining is None else remaining // stride,
                              max_items_source=clause(stride))
-        if kind == "probabilities" and header is not None:
-            required = _probability_endpoint_minimum(observation, header, run=run, max_bytes=limit)
-            _check_probability_endpoint_metadata(required, run.limits.max_completion_metadata_bytes)
-        elif header is not None:
-            required = _known_endpoint_metadata(observation, header, run=run, max_bytes=limit)
-            if required is not None:
-                _check_completion_metadata(required, run.limits.max_completion_metadata_bytes)
-        return items
     # Validate the whole schedule and its dimensions first. Every item costs
     # at least one byte, so the remaining bytes bound the item count.
     readout_shape(kind=kind, details=observation, width=width, classical_width=classical_width,
                   max_items=remaining, max_items_source=clause(1))
-    # Then the complete trajectory law R = J_T + sum_k (D_k + H_k + V_k) + M
+    # Then the complete trajectory law R = J_T + sum_k (D_k + H_k + V_k)
     # (``trajectory_reservation``): the receipt's declaration J_T is new here,
     # the point headers use the fields known before lowering, and fields known
     # only after native preparation are charged by readout_bytes at submission.
@@ -2943,24 +4015,16 @@ def _admit_readout(observation, *, width, classical_width, run, header=None):
     # Preparation checks against the Run's remaining stored-data capacity,
     # and restoration, whose receipt is already stored, against the cap.
     available = limit if header is None else run._available_data_bytes()
-    declarations, headers, minimum = _trajectory_fixed_bounds(observation, common=common, per_point=per_point,
-                                                              max_bytes=limit, job_length=_job_length(run),
-                                                              completion_minimum=_completion_minimum(run, limit))
-    if header is None and getattr(getattr(run, "backend", None), "kind", None) in {"nwqsim", "slurm"}:
-        # Fetch restoration has no new acquisition to admit. Its outcome
-        # transaction credits the actual stored event and status rows.
-        minimum = 0
-    capacity = available - receipt - run.limits.max_completion_metadata_bytes - sum(declarations) - sum(headers)
-    if capacity < 0 or minimum > run.limits.max_completion_metadata_bytes:
-        trajectory_reservation(declarations, headers, (0,) * len(headers),
-                               metadata_bytes=run.limits.max_completion_metadata_bytes, available_bytes=available,
-                               new_receipt_bytes=receipt, minimum_metadata_bytes=minimum,
-                               points=observation.positions, limit=limit)
+    declarations, headers = _trajectory_fixed_bounds(observation, common=common, per_point=per_point,
+                                                     max_bytes=limit, job_length=_job_length(run))
+    capacity = None if available is None else available - receipt - sum(declarations) - sum(headers)
+    if capacity is not None and capacity < 0:
+        trajectory_reservation(declarations, headers, (0,) * len(headers), available_bytes=available,
+                               new_receipt_bytes=receipt, points=observation.positions, limit=limit)
     values = _trajectory_value_bounds(observation, width=width, capacity=capacity, max_bytes=limit,
-                                      source=_data_limit_clause(run, " less the trajectory declarations, point "
-                                                                     "headers and completion metadata"))
-    trajectory_reservation(declarations, headers, values, metadata_bytes=run.limits.max_completion_metadata_bytes,
-                           available_bytes=available, new_receipt_bytes=receipt, minimum_metadata_bytes=minimum,
+                                      source=_data_limit_clause(run, " less the trajectory declarations and point "
+                                                                     "headers"))
+    trajectory_reservation(declarations, headers, values, available_bytes=available, new_receipt_bytes=receipt,
                            points=observation.positions, limit=limit)
     return sum(point_items(point, width=width) for point in observation.positions)
 
@@ -3102,30 +4166,29 @@ def _selected_body_issues(construction, admission, observation, widths):
 
 
 def _method_reduction_allowance(run, point, observation, width):
-    """Ask the Run's Method for the reduction-work allowance of one trajectory point, or return None.
+    """Ask the Run's Method for the reduction-work allowance of one trajectory point, or return None for no limit.
 
-    The shared lifecycle counts the work of registered reductions against
-    the Method's own work budget. A Method whose Plans can declare reduction points defines
-    the hook
+    A Method whose reductions count against an explicit work limit of its
+    own defines the optional hook
 
-        reduction_allowance(self, plan, point, *, observation, width, run) -> int
+        reduction_allowance(self, plan, point, *, observation, width, run) -> int | None
 
     which receives the Plan, the point's ``Realization``, its resolved
     trajectory ``ObservationSpec``, the logical width of its selected
-    Program and the Run. The hook first applies the Method's own check of the
-    private workspace its reducers allocate, raising ``ValueError`` to
+    Program and the Run. The hook may first apply the Method's own check of
+    the private workspace its reducers allocate, raising ``ValueError`` to
     refuse the point, and then returns the remaining allowance in the unit
-    of the registered ``work`` functions. ``admit_reductions`` checks the
-    summed registered work against it. The call happens before native
-    work: before the preparation charge in ``prepare_experiment``, and
-    again when the static path hands an existing preparation, live or saved
-    by an earlier process, to submission (``_prepare_static_item``), so a
-    resumed static Run is checked against its current work budget and limits.
-    The hook can therefore be asked more than once for one point. It reads
-    the Method's work count and does not change it. Only a trajectory with a
-    reduction point asks.
-    A Method without the hook supplies no allowance, and
-    ``admit_reductions`` then refuses its reductions.
+    of the registered ``work`` functions, or None when the Method sets no
+    work limit. ``admit_reductions`` checks the summed registered work
+    against a finite allowance. The call happens before native work: before
+    the preparation charge in ``prepare_experiment``, and again when the
+    static path hands an existing preparation, live or saved by an earlier
+    process, to submission (``_prepare_static_item``), so a resumed static
+    Run is checked against its current work budget and limits. The hook can
+    therefore be asked more than once for one point. It reads the Method's
+    work count and does not change it. Only a trajectory with a reduction
+    point asks. A Method without the hook sets no work limit on its
+    reductions.
     """
     if observation.kind != "trajectory" or not any(item.kind == "reduction" for item in observation.positions):
         return None
@@ -3133,22 +4196,22 @@ def _method_reduction_allowance(run, point, observation, width):
     if hook is None:
         return None
     allowance = hook(run.plan, point, observation=observation, width=width, run=run)
-    if type(allowance) is not int or allowance < 0:
+    if allowance is not None and (type(allowance) is not int or allowance < 0):
         raise ValueError(f"{type(run.plan.method).__name__}.reduction_allowance must return a nonnegative integer "
-                         f"work allowance, not {allowance!r}")
+                         f"work allowance or None, not {allowance!r}")
     return allowance
 
 
 def _admit_trajectory_work(observation, *, width, run, allowance):
     """Check a trajectory's reduction work and saved simulator states before native preparation.
 
-    Reductions: the registered classical work of every reduction point, summed
-    against ``allowance``, the calling Method's remaining work allowance
-    (``core.planning.admit_reductions``). A size that the caller supplies is
-    never the reservation, which comes from the registry's shape, work and
-    execution functions.
+    Reductions: every reduction point's registered shape and execution, and
+    with a finite ``allowance``, the calling Method's remaining work
+    allowance, their summed registered work (``core.planning.admit_reductions``).
+    A size that the caller supplies is never the reservation, which comes
+    from the registry's shape, work, workspace and execution functions.
 
-    Saved buffers: a backend with ``admit_trajectory_buffers`` (Aer) checks
+    Saved buffers: a backend with ``admit_simulation_memory`` (Aer) checks
     the live state, every save it keeps (probability marginals, saved
     expectations and states) and its transient marginal workspace against
     ``simulator_memory_mb``. Otherwise the saved states are checked here. An
@@ -3160,34 +4223,60 @@ def _admit_trajectory_work(observation, *, width, run, allowance):
     state, ``(1+S)*16*2**w`` bytes for the full native width ``w``, must fit
     the Run's ``simulator_memory_mb`` before native preparation. ``S`` counts
     the distinct declared positions of those points (the end shorthand as
-    one), at least the number of distinct saved states.
+    one), at least the number of distinct saved states. The reductions run
+    one at a time after the simulation, while the kept saves are held and
+    the live state is released, so the kept saves plus the largest
+    registered reduction workspace (``Reducer.workspace``) must also fit
+    ``simulator_memory_mb``. The kept saves are the bytes that
+    ``admit_simulation_memory`` returns (Aer: saved states, probabilities
+    and expectations), and otherwise the ``S*16*2**w`` bytes of the saved
+    states.
 
     Outputs: each amplitude point's materialization
     (``AmplitudeReadout.admit_materialization``). The saved JSON of the
     reduction outputs is a point value payload ``V_k`` of the saved-data
     reservation (``_trajectory_value_bounds``).
     """
-    from nwqlib.core.planning import admit_reductions
+    from types import MappingProxyType
+    from nwqlib.core.planning import admit_reductions, registered_reducer
 
     admit_reductions(observation, width=width, allowance=allowance)
     # A backend that executes trajectories admits its own simulation-phase
-    # arrays (AerBackend.admit_trajectory_buffers: live state, kept
+    # arrays (AerBackend.admit_simulation_memory: live state, kept
     # saves, marginal workspace), also when no state is saved.
-    admit = getattr(run.backend, "admit_trajectory_buffers", None)
-    if admit is not None:
+    admit = getattr(run.backend, "admit_simulation_memory", None)
+    memory_mb = run.limits.simulator_memory()
+    kept = None
+    if admit is not None and memory_mb is not None:
         try:
-            admit(observation, width=width, memory_mb=run.limits.simulator_memory_mb, run=run)
+            kept = admit(observation, width=width, memory_mb=memory_mb, run=run)
         except ValueError as error:
             raise ValueError(f"the trajectory's simulation-phase arrays exceed the Run's memory limit before native "
                              f"preparation: {error}. {_limit_remedy('simulator_memory_mb')}") from None
     saved = len({point.position for point in observation.positions if point.kind in ("amplitudes", "reduction")})
-    if saved and admit is None:
-        limit = run.limits.simulator_memory_mb << 20
+    if saved and admit is None and memory_mb is not None:
+        limit = memory_mb << 20
         needed = (1 + saved) * 16 << width
         if needed > limit:
             raise ValueError(f"the trajectory saves {saved} simulator state(s) of {width} qubits; with the live "
                              f"state they need {needed} bytes, more than simulator_memory_mb="
-                             f"{run.limits.simulator_memory_mb} ({limit} bytes) before native preparation. "
+                             f"{memory_mb} ({limit} bytes) before native preparation. "
+                             f"{_limit_remedy('simulator_memory_mb')}")
+    # The reductions run one at a time while every kept save is held, so
+    # the largest registered reduction workspace adds to the kept saves.
+    workspace = max((reducer.workspace(MappingProxyType(json.loads(point.parameters)), width)
+                     for point in observation.positions if point.kind == "reduction"
+                     for reducer in (registered_reducer(point.reducer),) if reducer.workspace is not None),
+                    default=0)
+    if workspace and memory_mb is not None:
+        limit = memory_mb << 20
+        held = saved * 16 << width if kept is None else kept
+        needed = held + workspace
+        if needed > limit:
+            raise ValueError(f"the trajectory's reductions run while its saves, {held} bytes with {saved} saved "
+                             f"simulator state(s) of {width} qubits, are held, and their largest reduction needs "
+                             f"{workspace} bytes of arrays besides them, {needed} bytes together, more than "
+                             f"simulator_memory_mb={memory_mb} ({limit} bytes) before native preparation. "
                              f"{_limit_remedy('simulator_memory_mb')}")
     # An amplitude point materializes its selected output as a single-endpoint
     # amplitude readout does, and is admitted by the same owner before work.
@@ -3197,40 +4286,14 @@ def _admit_trajectory_work(observation, *, width, run, allowance):
                                                    max_bytes_source=_data_limit_clause(run))
 
 
-_READOUT_DECLARATION_FIELDS = (
-    "observation", "bindings", "quantum_layout", "classical_layout", "experiment", "setting",
-)
-
 # Encoded-length prototypes of an attempt UUID (``str(uuid4())``, 36 ASCII
 # characters) and of a SHA-256 content identity. Both have known encoded
 # lengths before their values exist.
 _UUID_PROTOTYPE = "0" * 36
 _CONTENT_ID_PROTOTYPE = "sha256:" + "0" * 64
 
-# The fields walked by the point completion-metadata check. A funded
-# probability header receives the bounded credit described below. Every other
-# field of a point chunk is its declaration (``observation``, D_k) or a fixed
-# header field (H_k, ``_point_chunk_headers``). A Pauli or reduction point's
-# JSON value elements are its value payload V_k, so only the empty
-# ``values`` envelope stays variable. A probability point's binary arrays are
-# its V_k. Its ``values`` are counted by the completion walker and credited
-# up to their funded header bound by _probability_header_credit.
-_POINT_VARIABLE_FIELDS = ("job", "values")
-_AMPLITUDE_POINT_VARIABLE_FIELDS = ("job", "values", "physical_scale", "physical_scale_unavailable", "artifacts",
-                                    "unavailable")
-# The smallest legal value of each variable field: a nonempty job text, an
-# empty value array, and an absent scale, explanation and array list.
-_POINT_VARIABLE_MINIMUM = dict(job="x", values=(), physical_scale=None, physical_scale_unavailable=None,
-                               artifacts=(), unavailable=())
-
-
-def _point_variable_fields(kind):
-    """The variable fields of a point chunk whose one-point readout has ``kind``."""
-    return _AMPLITUDE_POINT_VARIABLE_FIELDS if kind == "amplitudes" else _POINT_VARIABLE_FIELDS
-
-
-def trajectory_reservation(declarations, headers, values, *, metadata_bytes, available_bytes, new_receipt_bytes=0,
-                           minimum_metadata_bytes=0, points=(), limit=None):
+def trajectory_reservation(declarations, headers, values, *, available_bytes, new_receipt_bytes=0, points=(),
+                           limit=None):
     """Return a trajectory acquisition's saved-data reservation, checked against the available bytes.
 
     For one acquisition with ``K >= 1`` points, with ``J`` the
@@ -3247,76 +4310,50 @@ def trajectory_reservation(declarations, headers, values, *, metadata_bytes, ava
       net rows written when its arrays are saved, once per point.
     - ``V_k`` (``values``): worst-case value payload of the actual
       representation, excluding the fields in ``D_k`` or ``H_k``.
-    - ``M`` (``metadata_bytes``): ``max_completion_metadata_bytes``, once per
-      acquisition. It covers the variable remainder ``J(U_k)`` of every point
-      chunk and the net other completion rows of the acquisition.
 
     The complete contribution of the acquisition, including a newly saved
     declaration in the preparation record, is ``R_new selection = J_T +
-    sum_k (D_k + H_k + V_k) + M``. After the preparation record has been
-    saved the execution reservation is ``R_pending = sum_k (D_k + H_k + V_k) +
-    M`` (``new_receipt_bytes=0``, the submission-time case). Adding ``J_T``
+    sum_k (D_k + H_k + V_k)``. After the preparation record has been saved
+    the execution reservation is ``R_pending = sum_k (D_k + H_k + V_k)``
+    (``new_receipt_bytes=0``, the submission-time case). Adding ``J_T``
     again would reserve a second copy of an already counted declaration.
+    The variable fields of each point chunk, such as its job text, and the
+    other completion rows of the acquisition are not reserved. They are
+    counted at their actual size when the outcome is saved (``Run._write``).
+    Each amount is compared with the remaining bytes before it is added, so
+    no product is formed beyond the available budget.
 
-    Split each actual row into the declaration, fixed and variable maps. For
-    disjoint nonempty maps, the sum of their JSON bounds exceeds the bound of
-    their union by one byte per additional map, and replacing a scalar
-    ``values`` array by ``()`` removes the element bounds that the scalar
-    prototype formula restores. Binary values are counted by the code that
-    saves the arrays. Therefore ``A(point row k) + B_binary,k <= D_k + H_k +
-    V_k + J(U_k)``, and the completion condition is ``sum_k J(U_k) +
-    sum_(other completion rows) J(r) - C_meta - G_meta <= M``
-    (``_completion_metadata_bound``). The early condition
-    ``M_min(K) <= M`` (``minimum_metadata_bytes``), where ``M_min`` includes
-    the upper bounds on the variable fields and the established completion-row
-    allowance, is checked before native work. The costs of the probability
-    record and of saving its arrays are covered by H_k at their largest
-    valid encoding. For probability and
-    Pauli trajectories on Aer, and on the fresh success path of NWQ-Sim and
-    NWQ-Sim Slurm, the variable fields and completion-row growth have
-    upper bounds, so this metadata check is sufficient for those fields.
-    Another backend's completion-row allowance is a temporary zero
-    (``_completion_minimum``). Each amount is compared with the remaining bytes
-    before it is added, so no product is formed beyond the available budget.
-
-    The derivation is given above. The refusal messages name the point, the
-    counted, requested and remaining bytes and the limit.
+    The refusal messages name the point, the counted, requested and
+    remaining bytes and the limit.
 
     Args:
         declarations: ``D_k`` per point, in schedule order.
         headers: ``H_k`` per point.
         values: ``V_k`` per point.
-        metadata_bytes: ``M``, counted once.
-        available_bytes: The remaining ``max_data_bytes`` of the Run.
+        available_bytes: The remaining ``max_data_bytes`` of the Run, or None without a limit.
         new_receipt_bytes: ``J_T`` when the preparation record is not yet saved, else zero.
-        minimum_metadata_bytes: ``M_min(K)``.
         points: The trajectory's points, named in a refusal.
         limit: ``max_data_bytes``, named in a refusal.
     """
-    if minimum_metadata_bytes > metadata_bytes:
-        raise ValueError(f"trajectory metadata envelopes of {len(headers)} point chunk(s) and the completion rows "
-                         f"need at least {minimum_metadata_bytes} bytes, more than "
-                         f"max_completion_metadata_bytes={metadata_bytes}, "
-                         f"before native work. {_limit_remedy('max_completion_metadata_bytes')}")
     remaining = available_bytes
     total = 0
-    for name, amount in (("the receipt declaration", new_receipt_bytes),
-                         ("the completion metadata allowance", metadata_bytes)):
-        if amount > remaining:
-            raise ValueError(f"trajectory fixed storage exceeds remaining max_data_bytes: {name} requests {amount} "
-                             f"bytes, {remaining} remain after {total} counted (max_data_bytes={limit}). "
-                             f"{_limit_remedy('max_data_bytes')}")
-        total += amount
-        remaining -= amount
+    if exceeds(new_receipt_bytes, remaining):
+        raise ValueError(f"trajectory fixed storage exceeds remaining max_data_bytes: the receipt declaration "
+                         f"requests {new_receipt_bytes} bytes, {remaining} remain (max_data_bytes={limit}). "
+                         f"{_limit_remedy('max_data_bytes')}")
+    total += new_receipt_bytes
+    if remaining is not None:
+        remaining -= new_receipt_bytes
     for index, (declaration, header, payload) in enumerate(zip(declarations, headers, values, strict=True)):
         for amount in (declaration, header, payload):
-            if amount > remaining:
+            if exceeds(amount, remaining):
                 point = points[index].id if index < len(points) else index
                 raise ValueError(f"trajectory point {point!r} storage exceeds remaining max_data_bytes: it requests "
                                  f"{amount} bytes, {remaining} remain after {total} counted "
                                  f"(max_data_bytes={limit}). {_limit_remedy('max_data_bytes')}")
             total += amount
-            remaining -= amount
+            if remaining is not None:
+                remaining -= amount
     return total
 
 
@@ -3390,41 +4427,30 @@ def _job_length(run):
     return length() if callable(length) else 1
 
 
-def _trajectory_fixed_bounds(observation, *, common, per_point, max_bytes, job_length=1, completion_minimum=0):
-    """Return point declarations D_k, point headers H_k and the required metadata allowance.
+def _trajectory_fixed_bounds(observation, *, common, per_point, max_bytes, job_length=1):
+    """Return the point declarations D_k and point headers H_k of a trajectory.
 
     D_k is J of the point's declaration field map. H_k contains its known
     chunk fields and, for probabilities, the ProbabilityArrays record of the
     largest valid encoding, the growth of the publication rows and the
     payload-reference rows (``_probability_point_metadata``). Binary arrays
-    are V_k, counted separately by ``_trajectory_value_bounds``.
+    are V_k, counted separately by ``_trajectory_value_bounds``. The
+    variable fields of a point chunk, such as its job text, are counted when
+    the outcome is saved.
 
     The field-tree rule for a map is two braces, one comma per adjacent pair
     and J(key) + one colon + J(value) for every field. Adding a field to the
     nonempty common map therefore adds J(key) + 2 + J(value). The singleton
     probability record adds exactly its J to the empty values tuple.
-    Splitting declaration, header and variable maps conservatively counts
-    their delimiters, so their sum bounds the combined chunk.
-
-    The variable allowance includes each point's job and the JSON of its
-    empty values, plus the amplitude-specific variable fields where present,
-    and ``completion_minimum``, the required growth allowance for the other
-    completion rows. Aer uses their established maximum, G_max. Its UUID
-    gives J({"job": job, "values": ()}) = 58, hence probability and Pauli
-    trajectories without a forecast require 58*K + 1113 bytes. A fresh
-    detached NWQ-Sim or NWQ-Sim Slurm outcome uses 168 bytes, or 99 with a
-    forecast (``detached_completion_growth``). NWQ-Sim's 36-character UUID
-    gives 58 bytes per point, and a Slurm job ID of at most ten ASCII digits
-    gives at most 32, hence 58*K + 168 and 32*K + 168 bytes without a
-    forecast. Another backend's completion allowance is a temporary zero
-    (``_completion_minimum``).
+    Splitting declaration and header maps conservatively counts their
+    delimiters, so their sum bounds the reserved part of the chunk.
 
     Without common headers, as in the cardinality check when a Run is
-    restored, H_k is zero and this is only a preliminary metadata check.
-    Submission counts the complete headers from the saved preparation record
-    before it runs another acquisition. The preparation record holds the
-    complete trajectory declaration. The run log omits the chunk's
-    observation field, so D_k is a conservative reservation.
+    restored, H_k is zero. Submission counts the complete headers from the
+    saved preparation record before it runs another acquisition. The
+    preparation record holds the complete trajectory declaration. The run
+    log omits the chunk's observation field, so D_k is a conservative
+    reservation.
     """
     from nwqlib._run_journal import _json_bound
 
@@ -3432,34 +4458,24 @@ def _trajectory_fixed_bounds(observation, *, common, per_point, max_bytes, job_l
     declarations = [_json_bound({"observation": ObservationSpec.point_readout_fields(point)}, max_bytes)
                     for point in points]
     if common is None:
-        headers = [0] * len(points)
-    else:
-        shared = _json_bound(common, max_bytes)
-        headers = [shared + sum(_json_bound(name, max_bytes) + 2 + _json_bound(value, max_bytes)
-                                for name, value in fields.items()) for fields in per_point]
-    smallest = dict(_POINT_VARIABLE_MINIMUM, job="x" * job_length)
-    minimum = {kind: _json_bound({name: smallest[name] for name in _point_variable_fields(kind)}, max_bytes)
-               for kind in ("amplitudes", "other")}
-    total = completion_minimum
+        return declarations, [0] * len(points)
+    shared = _json_bound(common, max_bytes)
+    headers = [shared + sum(_json_bound(name, max_bytes) + 2 + _json_bound(value, max_bytes)
+                            for name, value in fields.items()) for fields in per_point]
     for index, point in enumerate(points):
-        if point.kind == "probabilities" and common is not None:
-            fixed, variable = _probability_point_metadata(
-                point, common, per_point[index], smallest["job"], max_bytes)
-            headers[index] += fixed
-            total += variable
-        else:
-            total += minimum["amplitudes" if point.kind == "amplitudes" else "other"]
-    return declarations, headers, total
+        if point.kind == "probabilities":
+            headers[index] += _probability_point_metadata(point, common, per_point[index], "x" * job_length,
+                                                          max_bytes)
+    return declarations, headers
 
 
 def _probability_point_metadata(point, common, fields, job, max_bytes):
-    """Return ``(F_k, J(U_k))`` for one probability point's fixed JSON and variable JSON.
+    """Return ``F_k``, the reserved JSON of one probability point's record and array rows.
 
-    ``J(U_k) = J({"job": job, "values": ()})``. For encoding E, ``F_k(E)``
-    is ``J(ProbabilityArrays_E)`` plus, for every array, the publication
-    row's net growth and its payload-reference row. A singleton values tuple
-    adds exactly ``J(ProbabilityArrays_E)`` to the empty tuple. The complete
-    probability metadata bound is ``F_k + J(U_k)``.
+    For encoding E, ``F_k(E)`` is ``J(ProbabilityArrays_E)`` plus, for every
+    array, the publication row's net growth and its payload-reference row. A
+    singleton values tuple adds exactly ``J(ProbabilityArrays_E)`` to the
+    empty tuple.
 
     ``F_k`` is the maximum over dense and sparse encodings. The sparse
     case uses ``s_max = (2**q - 1)//(W + 1)``, from the strict binary
@@ -3467,15 +4483,12 @@ def _probability_point_metadata(point, common, fields, job, max_bytes):
     their nonnegative maxima, and each scalar float has the JSON upper bound
     of 32 bytes. Digests and record identities have fixed encoded lengths.
     The publication reservation contains only integers and strings, so its
-    actual encoded size equals J and its replacement credit is exact.
+    actual encoded size equals J.
 
     The trajectory reserves F_k in its point header. ``job`` supplies a
     prototype of the job identifier with the escaped size that the adapter
-    establishes, an exact upper bound for Aer's ASCII UUID. When the bound
-    on the job size is unknown, use the shortest valid text and leave any
-    excess in completion metadata. When the arrays are saved, at most the
-    reserved F_k is credited, and only bytes included in that completion's
-    net count (``_probability_header_credit``).
+    establishes, or the shortest valid text when that size is unknown. A
+    longer job text is counted when the arrays are saved.
 
     This constructs scalar metadata only. Callers check the logical outcome
     count before this function forms powers of two.
@@ -3511,318 +4524,8 @@ def _probability_point_metadata(point, common, fields, job, max_bytes):
         dense = manifest("probabilities", (1 << width,))
         candidates.append((ProbabilityArrays(encoding="dense", width=width, entries=1 << width, nonzero=1 << width,
                                              mass=0., maximum=0., probabilities=dense), (dense,)))
-    variable = _json_bound(dict(job=job, values=()), max_bytes)
-    fixed = max(_json_bound(record, max_bytes) + sum(publication(item) for item in items)
-                for record, items in candidates)
-    return fixed, variable
-
-
-def _probability_header_credit(records, max_bytes, *, run):
-    """Credit, once, the JSON of probability points that their header reservation covers, up to that reservation.
-
-    The uncredited completion bound includes each ProbabilityArrays record,
-    publication row and payload-reference row. Only a manifest named by a
-    probability trajectory chunk can receive this credit. For changed rows,
-    credit their positive net growth after the actual old row size, since
-    Run._write already applies that replacement credit. A shared payload row
-    is assigned to one point and counted once. Existing payload rows have
-    zero net growth because their scalar bound equals their saved size.
-
-    Per point, credit min(actual included growth, reserved F_k). An unknown
-    job string or extra publication metadata therefore still uses M when it
-    exceeds the reserved prototype. No array values are read. Work is
-    linear in the completion's records and metadata field trees.
-    """
-    from nwqlib._run_journal import _json_bound
-
-    caps, costs, owners, payload_owners = {}, {}, {}, {}
-    job = "x" * _job_length(run)
-    for kind, _, chunk in records:
-        if (kind != "chunk" or not isinstance(chunk, ObservationChunk)
-                or chunk.point is None or chunk.observation.kind != "probabilities"):
-            continue
-        key = chunk.acquisition_key
-        common = {name: getattr(chunk, name) for name in
-                  ("plan_id", "realization_id", "prepared_id", "run_id", "attempt")}
-        fields = dict(chunk=chunk.chunk, source=chunk.source)
-        caps[key], _ = _probability_point_metadata(chunk.observation, common, fields, job, max_bytes)
-        costs[key] = _json_bound(chunk.values, max_bytes) - 2
-        record = chunk.values[0]
-        for manifest in (record.probabilities, record.indices):
-            if manifest is not None:
-                owners[manifest.content_id] = key
-    if not caps:
-        return 0
-    previous = run._state["data_sizes"]
-    for kind, key, value in records:
-        if kind != "publication" or "manifest" not in value:
-            continue
-        owner = owners.get(value["manifest"].content_id)
-        if owner is None:
-            continue
-        costs[owner] += max(0, _json_bound(value, max_bytes) - previous.get((kind, key), 0))
-        payload_owners.setdefault(value["payload"].content_id, owner)
-    for kind, key, value in records:
-        if kind == "payload" and key in payload_owners:
-            costs[payload_owners[key]] += max(0, _json_bound(value, max_bytes) - previous.get((kind, key), 0))
-    return sum(min(costs[key], cap) for key, cap in caps.items())
-
-
-def _probability_endpoint_minimum(observation, header, *, run, max_bytes,
-                                  prepared_id=_CONTENT_ID_PROTOTYPE, attempt=_UUID_PROTOTYPE,
-                                  result_key="0", target_version=None, population=None):
-    """Required metadata for a probability endpoint under its existing B + J_decl + M reservation.
-
-    The endpoint has no trajectory header credit. Its metadata map contains
-    every chunk field except _READOUT_DECLARATION_FIELDS. Count that map
-    with empty values, then add the probability record and the growth of the
-    publication rows at the largest valid encoding, and the completion-row
-    allowance. This is the full remainder of the endpoint, not only the job
-    text of a trajectory point. The caller supplies the header derived before
-    lowering, or the header of the completed preparation record at
-    submission. When adapter text lengths or completion growth are unknown,
-    the result is not guaranteed to suffice. The
-    completion-row allowance comes from ``_completion_minimum``. For a
-    backend other than Aer, NWQ-Sim and NWQ-Sim Slurm it is zero, a
-    temporary allowance that is not derived, until a
-    derivation of that backend's completion lifecycle establishes the
-    growth of its completion rows.
-    """
-    from nwqlib._run_journal import _json_bound
-
-    if target_version is None:
-        version = getattr(run.backend, "native_target_version", None)
-        target_version = version() if callable(version) else "x"
-    job = "x" * _job_length(run)
-    fields = {name: field.default for name, field in ObservationChunk.model_fields.items()
-              if not field.is_required()}
-    fields.update(header, run_id=run.run_id, prepared_id=prepared_id, attempt=attempt,
-                  job=job, chunk=result_key, observation=observation, values=(),
-                  population=observation.population if population is None else population,
-                  returned_shots=None, trajectories=1,
-                  source=Source(name=f"{run.backend.kind} acquisition", version=target_version,
-                                domain="backend observation", reference=f"{run.run_id}/{attempt}/{result_key}"))
-    fixed, _ = _probability_point_metadata(observation, fields, fields, job, max_bytes)
-    rest = {name: value for name, value in fields.items() if name not in _READOUT_DECLARATION_FIELDS}
-    return fixed + _json_bound(rest, max_bytes) + _completion_minimum(run, max_bytes)
-
-
-def _check_probability_endpoint_metadata(required, allowance):
-    """Refuse an endpoint whose known metadata cannot fit before native work."""
-    if required > allowance:
-        raise ValueError(f"probability endpoint metadata and completion rows need at least {required} bytes, "
-                         f"more than max_completion_metadata_bytes={allowance}, before native work. "
-                         f"{_limit_remedy('max_completion_metadata_bytes')}")
-
-
-def _scalar_endpoint_metadata(observation, header, *, run, max_bytes,
-                              prepared_id=_CONTENT_ID_PROTOTYPE,
-                              attempt=_UUID_PROTOTYPE, result_key="0",
-                              target_version=None, population=None):
-    """Required completion metadata M of a synchronous Aer counts or exact Pauli scalar endpoint.
-
-    This applies the accounting split of the probability endpoint
-    (``_probability_endpoint_minimum``) before preparation. The
-    ``readout_bytes`` of a single chunk outside a trajectory already covers
-    its readout declaration and numerical value elements. Its remaining field
-    map, with ``values=()``, and the net growth of its event/submission rows
-    use M.
-
-    Let J be ``_run_journal._json_bound``, U the chunk fields other than the
-    declaration fields with empty values, and G the completion-row growth
-    after crediting the initial event and intent actually saved. The
-    sufficient requirement is::
-
-        M_required = J(U_max) + G_max
-
-    All fixed identities, logical layouts and source fields have their
-    actual or bounded lengths, with the backend's established maximum job-ID
-    and timestamp widths. For synchronous Aer exact scalars, G is 1,113 bytes
-    without a forecast and 1,044 with one (``_completion_minimum``). Counts
-    change one further event field, ``returned_shots: None -> returned_count``,
-    so::
-
-        G_counts = G_scalar + max(0, digits(shots) - 4)
-
-    is sufficient even when the returned-shot field may remain null. On the
-    successful counts path it is the tighter ``G_scalar + digits(shots) - 4``,
-    which this function uses. The chunk also holds ``returned_shots``, counted
-    at J(shots) for the successful counts-only domain. Counts have
-    ``trajectories=None``. Exact Pauli scalars have ``trajectories=1`` and
-    ``returned_shots=None``. For the measured 92-setting RFE Plan, the
-    difference between a three-digit and a four-digit (pooled, 1,200-shot)
-    setting is exactly these two returned-shot occurrences, one byte each, so
-    its allowance grows from 2,079 to 2,081.
-
-    This byte formula suffices for a successful completion on Aer with the
-    qualified Source and job domains. A detached adapter must add the change
-    of its event's returned-shot field to its own completion-growth bound,
-    and backend text or provider estimate records that are not counted here
-    are not bounded by it, so the callers apply it on Aer only
-    (``_known_endpoint_metadata``). The derivation is given above. Its
-    allowances were measured on an exact Expectation (2,078 bytes, completed
-    at that value) and the 92-setting RFE Plan (2,079 or 2,081 by pooled
-    shots, largest counted size 2,081).
-    """
-    from nwqlib._run_journal import _json_bound
-
-    counts = observation.kind == "counts"
-    if observation.kind not in {"counts", "pauli_expectation"}:
-        raise ValueError("scalar metadata sizing requires counts or Pauli expectations")
-    if target_version is None:
-        version = getattr(run.backend, "native_target_version", None)
-        target_version = version() if callable(version) else "x"
-    job = "x" * _job_length(run)
-    fields = {
-        name: field.default for name, field in ObservationChunk.model_fields.items()
-        if not field.is_required()
-    }
-    fields.update(
-        header, run_id=run.run_id, prepared_id=prepared_id, attempt=attempt,
-        job=job, chunk=result_key, observation=observation, values=(),
-        population=observation.population if population is None else population,
-        returned_shots=observation.shots if counts else None,
-        trajectories=None if counts else 1,
-        source=Source(
-            name=f"{run.backend.kind} acquisition", version=target_version,
-            domain="backend observation",
-            reference=f"{run.run_id}/{attempt}/{result_key}",
-        ),
-    )
-    rest = {name: value for name, value in fields.items()
-            if name not in _READOUT_DECLARATION_FIELDS}
-    growth = _completion_minimum(run, max_bytes)
-    if counts:
-        growth += _json_bound(observation.shots, max_bytes) - _json_bound(None, max_bytes)
-    return _json_bound(rest, max_bytes) + growth
-
-
-def _amplitude_endpoint_metadata(observation, header, *, run, max_bytes):
-    """Required completion metadata M of a synchronous Aer amplitude endpoint (a fresh result key ``"0"``).
-
-    For each valid amplitude outcome o, U_o is the full chunk remainder:
-    scalar mass summaries, physical scale and either the array manifest or
-    the declared unavailability record. The successful-array branch also adds
-    ``J(publication_completed) - J(publication_reserved) + J(payload_reference)``.
-    The reserved publication row holds only integers and strings, so its J
-    equals its saved size. The sufficient allowance is the maximum of these
-    branch totals plus G_max (``_completion_minimum``). The binary array bytes
-    stay in the separate data reservation.
-
-    The text domains are fixed by ``amplitudes.reduce_amplitudes`` and
-    ``_publish_amplitudes``. Finite float values use J's upper bound of 32 bytes. A
-    produced finite native norm has a bounded binary exponent: for output
-    dimension D and selected recovery exponent e_R,
-    ``abs(e_R) + 1076 + bit_length(D)`` conservatively bounds the magnitude of
-    the composed exponent, covering subnormals and normalization, and a
-    negative prototype at that magnitude bounds its decimal length. The two
-    unavailable-output reasons and the scalar-mass unavailability message come
-    from those two functions. No provider text is bounded by an invented
-    length.
-
-    The prototype identities have the fixed lengths of the actual prepared
-    and attempt identities. A trajectory amplitude point uses its own header
-    split instead. The derivation is given above. Its allowance was measured
-    on the exact default QLS (four qubits, accepted at 5,316 bytes, which
-    cover the 5,264 bytes counted) and LCHS (nine qubits, accepted at 5,132,
-    which cover 5,128) Plans.
-    """
-    from nwqlib._run_journal import _json_bound
-    from nwqlib.artifacts import ArtifactManifest, UnavailableOutput
-    from nwqlib.problems.inputs import PhysicalScale
-    from nwqlib.amplitudes import AMPLITUDE_MASS_LABELS, AMPLITUDE_MASS_UNAVAILABLE
-
-    readout = observation.amplitudes
-    output = readout.output
-    attempt = _UUID_PROTOTYPE
-    job = "x" * _job_length(run)
-    acquisition = (run.run_id, attempt, job, "0")
-
-    def bound(value):
-        return _json_bound(value, max_bytes)
-
-    manifest = ArtifactManifest(
-        output=output, digest=_CONTENT_ID_PROTOTYPE, data_bytes=output.data_bytes,
-        encoding=output.encoding, plan_id=header["plan_id"],
-        realization_id=header["realization_id"], construction_id=readout.construction_id,
-        producer_id=_CONTENT_ID_PROTOTYPE, acquisition=acquisition, source=readout.source,
-    )
-    payload = PayloadRef(format=f"nwqlib.array/{output.storage_dtype}",
-                         bytes=output.data_bytes, key=manifest.digest)
-    charge = dict(data_bytes=output.data_bytes, acquisition=acquisition)
-    publication = (bound(dict(charge, manifest=manifest, duplicate=False, payload=payload))
-                   - bound(charge) + bound(payload))
-    masses = []
-    for label in AMPLITUDE_MASS_LABELS if readout.keep_masses else ():
-        numeric = ScalarValue(label=label, value=0., frame="encoded_branch")
-        absent = ScalarValue(label=label, value=None, frame="encoded_branch",
-                             unavailable=AMPLITUDE_MASS_UNAVAILABLE)
-        masses.append(max((numeric, absent), key=bound))
-    scale = None
-    if readout.recovery is not None:
-        exponent = -(abs(readout.recovery.exponent) + 1076 + output.basis.dimension.bit_length())
-        scale = PhysicalScale(mantissa=.5, exponent=exponent)
-    fields = {name: field.default for name, field in ObservationChunk.model_fields.items()
-              if not field.is_required()}
-    fields.update(
-        header, run_id=run.run_id, prepared_id=_CONTENT_ID_PROTOTYPE,
-        attempt=attempt, job=job, chunk="0", observation=observation,
-        population="unconditional", classical_layout=(), returned_shots=None,
-        trajectories=1, source=readout.source, values=tuple(masses), physical_scale=scale,
-        physical_scale_unavailable=None if scale is not None else "physical recovery is unavailable",
-    )
-    candidates = []
-    outcomes = (
-        ((manifest,), (), publication),
-        ((), (UnavailableOutput(output=output,
-            reason="unit vector is undefined for a zero selected branch"),), 0),
-        ((), (UnavailableOutput(output=output,
-            reason="selected physical vector is not representable in complex128"),), 0),
-    )
-    for artifacts, unavailable, growth in outcomes:
-        rest = {name: value for name, value in
-                dict(fields, artifacts=artifacts, unavailable=unavailable).items()
-                if name not in _READOUT_DECLARATION_FIELDS}
-        candidates.append(bound(rest) + growth + _completion_minimum(run, max_bytes))
-    return max(candidates)
-
-
-def _known_endpoint_metadata(observation, header, *, run, max_bytes, **identities):
-    """Known completion metadata of a counts, exact Pauli scalar or amplitude endpoint, or None.
-
-    The byte formulas of ``_scalar_endpoint_metadata`` and
-    ``_amplitude_endpoint_metadata`` are sufficient for the synchronous Aer
-    lifecycle only, so another backend or readout kind returns None and is
-    checked when its outcome is saved. ``identities`` are the identifiers of
-    the preparation and attempt, the result key, the target version and the
-    population of a completed preparation record. The amplitude formula uses
-    the fixed-length prototypes and the result key ``"0"`` of a new
-    synchronous acquisition.
-    """
-    if getattr(run.backend, "kind", None) != "qiskit_aer":
-        return None
-    if observation.kind in {"counts", "pauli_expectation"}:
-        return _scalar_endpoint_metadata(observation, header, run=run, max_bytes=max_bytes, **identities)
-    if observation.kind == "amplitudes":
-        return _amplitude_endpoint_metadata(observation, header, run=run, max_bytes=max_bytes)
-    return None
-
-
-def _check_completion_metadata(required, allowance):
-    """Refuse acquisitions whose known completion metadata cannot fit, before native preparation.
-
-    A capacity refusal before the attempt is launched can be cleared on the
-    open Run, unlike a refusal while the outcome is saved, which has already
-    made a synchronous acquisition terminal (``Run._write``).
-    """
-    if required > allowance:
-        raise ValueError(
-            f"The selected acquisitions need max_completion_metadata_bytes "
-            f"of at least {required} per completion, exceeding {allowance}, "
-            "before native preparation. Set "
-            f"ExecutionLimits(max_completion_metadata_bytes={required}) "
-            "or raise this limit on the open Run before resuming preparation."
-        )
+    return max(_json_bound(record, max_bytes) + sum(publication(item) for item in items)
+               for record, items in candidates)
 
 
 def _repeated_bound(element_bound, count):
@@ -3900,322 +4603,97 @@ def _trajectory_value_bounds(observation, *, width, capacity, max_bytes, source=
     return values
 
 
-def readout_bytes(prepared, *, metadata_bytes, max_bytes=DEFAULT_MAX_BYTES, run=None, attempt=None, result_key="0"):
+def readout_bytes(prepared, *, max_bytes=None, run=None, attempt=None, result_key="0"):
     """Reserve an acquisition's saved bytes before it runs, without enumerating outcomes.
 
-    A probability endpoint keeps R = B + J_decl + M, where B = 8*2**q
-    bounds the dense or adaptively sparse binary payload, J_decl covers
-    _READOUT_DECLARATION_FIELDS, and M covers the full remaining chunk map
-    and the net JSON of the rows written when its arrays and completion are
-    saved. With a Run, check that required metadata allowance before
-    submission. Preparation performs the same check, with the fields the
-    observation will have, before lowering. Without a Run this function only
-    sizes the endpoint reservation.
+    A single endpoint reserves its declared values and J_decl, the JSON
+    bound of the chunk's observation, bindings, quantum and classical
+    layouts, experiment and setting. A probability endpoint's values
+    are B = 8*2**q, which bounds the dense or adaptively sparse binary
+    payload.
 
-    A trajectory reserves sum_k(D_k + H_k + V_k) + M. Its preparation record
-    holds the complete trajectory declaration and is counted when it is
-    saved. D_k bounds each point's declaration, H_k covers its known chunk
-    fields and the largest valid encoding of the probability record and its
-    publication rows, and V_k covers the values in their representation. M
-    covers the job text of the points of one acquisition and its other
-    completion growth. When probability arrays are saved, only the included
-    net metadata bytes are credited, up to each H_k.
-    Shared payload rows receive one credit. Probability and Pauli
-    trajectories without a forecast require 58*K + 1113 metadata bytes on
-    Aer, 58*K + 168 on NWQ-Sim and 32*K + 168 on NWQ-Sim Slurm, whose
-    growth for a new detached completion ``_completion_minimum`` counts.
-    Another backend's completion allowance is a temporary zero there. A
-    single probability endpoint on NWQ-Sim or NWQ-Sim Slurm includes the
-    same 168-byte allowance, or 99 bytes with a forecast.
+    A trajectory reserves sum_k(D_k + H_k + V_k) and needs its Run and
+    attempt. Its preparation record holds the complete trajectory
+    declaration and is counted when it is saved. D_k bounds each point's
+    declaration, H_k covers its known chunk fields and the largest valid
+    encoding of the probability record and its publication rows, and V_k
+    covers the values in their representation.
 
     Counts and Pauli statistics use the JSON bounds of their prototypes.
     Counts have at most min(shots, 2**width) entries, each at most shots.
     Host scalars use their declared labels and the JSON size of their
     prototypes, alongside the declared bytes of the kernel's arrays and
     application records. Amplitudes reserve the binary bytes of the declared
-    output.
+    output. A provider estimate reserves its declaration and the fields of its
+    value that are known before submission, which the backend adapter bounds
+    (``estimate_bytes``). Its provider metadata, known only after the paid
+    job, is counted at its actual size when the outcome is saved.
 
-    Run._write releases the acquisition's pending reservation and counts
-    its actual JSON and binary bytes. The uncredited completion bound from
-    _completion_metadata_bound, less actual replacement-row credits,
-    declared host application credits and _probability_header_credit, must
-    fit max_completion_metadata_bytes per completed acquisition. These are
-    serialized-data bounds, not process-memory bounds.
+    The other fields of the saved chunk and the completion rows of the
+    acquisition, such as its job text, timing and provider status, are not
+    reserved. Run._write releases the acquisition's pending reservation and
+    counts its actual JSON and binary bytes. These are serialized-data
+    bounds, not process-memory bounds.
     """
     from nwqlib._run_journal import _json_bound
 
     record = prepared.record
     spec = record.observation
-    # Only the metadata checks against a Run read the receipt's header.
-    header = None if run is None else _receipt_header(prepared)
     if spec.kind == "trajectory":
         if run is None or attempt is None:
             raise ValueError("a trajectory reservation needs its Run and attempt, whose values its point chunks hold")
-        common, per_point = _point_chunk_headers(spec, header, run_id=run.run_id, prepared_id=record.content_id,
-                                                 attempt=attempt, boundaries=record.boundaries,
-                                                 backend_kind=run.backend.kind, target_version=record.target.version,
-                                                 result_key=result_key)
-        declarations, headers, minimum = _trajectory_fixed_bounds(spec, common=common, per_point=per_point,
-                                                                  max_bytes=max_bytes, job_length=_job_length(run),
-                                                                  completion_minimum=_completion_minimum(run, max_bytes))
+        common, per_point = _point_chunk_headers(spec, _receipt_header(prepared), run_id=run.run_id,
+                                                 prepared_id=record.content_id, attempt=attempt,
+                                                 boundaries=record.boundaries, backend_kind=run.backend.kind,
+                                                 target_version=record.target.version, result_key=result_key)
+        declarations, headers = _trajectory_fixed_bounds(spec, common=common, per_point=per_point,
+                                                         max_bytes=max_bytes, job_length=_job_length(run))
         width = sum(len(reg.bits) for reg in prepared.record.quantum_layout)
         values = _trajectory_value_bounds(spec, width=width, capacity=None, max_bytes=max_bytes)
-        return trajectory_reservation(declarations, headers, values, metadata_bytes=metadata_bytes,
-                                      available_bytes=run._available_data_bytes(),
-                                      minimum_metadata_bytes=minimum, points=spec.positions, limit=max_bytes)
+        return trajectory_reservation(declarations, headers, values, available_bytes=run._available_data_bytes(),
+                                      points=spec.positions, limit=max_bytes)
     # These declaration fields have a fixed reservation, even for thousands
-    # of Pauli labels. The endpoint's remaining chunk metadata and net
-    # publication/completion JSON spend the metadata allowance.
+    # of Pauli labels.
     declaration = _json_bound(dict(observation=spec, bindings=prepared._bindings,
         quantum_layout=prepared.record.quantum_layout,
         classical_layout=prepared.record.classical_layout,
         experiment=prepared.realization.experiment, setting=prepared._setting), max_bytes)
-    metadata_reservation = declaration + metadata_bytes
-    if run is not None and spec.kind in {"counts", "pauli_expectation", "amplitudes"}:
-        # The counts, exact Pauli scalar and amplitude laws repeat the
-        # preparation-time check with the completed receipt's identities.
-        identities = {} if spec.kind == "amplitudes" else dict(
-            prepared_id=prepared.record.content_id, attempt=_UUID_PROTOTYPE if attempt is None else attempt,
-            result_key=result_key, target_version=prepared.record.target.version,
-            population=prepared.record.population)
-        required = _known_endpoint_metadata(spec, header, run=run, max_bytes=max_bytes, **identities)
-        if required is not None:
-            _check_completion_metadata(required, metadata_bytes)
     if spec.kind == "amplitudes":
-        return spec.amplitudes.output.data_bytes + metadata_reservation
+        return spec.amplitudes.output.data_bytes + declaration
     if spec.kind == "estimated_observable":
-        return metadata_reservation  # The provider estimate itself has variable size.
+        return declaration + run.backend.estimate_bytes(prepared.record, max_bytes=max_bytes)
     if spec.kind == "host_scalars":
         # Per scalar: the bound of a prototype ScalarValue minus its one-letter
         # label, plus the actual escaped label. The prototype has the 32-byte
         # float envelope, the longest frame name, a full-length parent identity
-        # and no unavailability text, which _completion_metadata_bound charges
-        # to the metadata allowance instead. Then add the declared bytes of the
-        # kernel's output arrays and application receipts, one comma between
-        # consecutive scalars, and the metadata reservation.
+        # and no unavailability text, which is counted when it is saved. Then
+        # add the declared bytes of the kernel's output arrays and application
+        # receipts, one comma between consecutive scalars, and the declaration.
         kernel = prepared._native.record
         base = ScalarValue(label="x", value=0., frame="encoded_branch", parent_id="sha256:"+"f"*64)
         constant = _json_bound(base, max_bytes)-_json_bound(base.label, max_bytes)
         values = sum(constant+_json_bound(label, max_bytes) for label in kernel.scalars)
         return (kernel.data_bytes + kernel.application_bytes + values + max(0, len(kernel.scalars)-1)
-                + metadata_reservation)
+                + declaration)
     if spec.kind == "probabilities":
-        if run is not None:
-            required = _probability_endpoint_minimum(
-                spec, header, run=run, max_bytes=max_bytes, prepared_id=prepared.record.content_id,
-                attempt=_UUID_PROTOTYPE if attempt is None else attempt, result_key=result_key,
-                target_version=prepared.record.target.version, population=prepared.record.population)
-            _check_probability_endpoint_metadata(required, metadata_bytes)
         # B = 8*D for the D = 2**k possible outcomes (prepared._items, from
         # readout_shape): the adaptive encoding stores at most 8*D bytes, and
         # before acquisition the sparse count is unknown.
-        return 8 * prepared._items + metadata_reservation
+        return 8 * prepared._items + declaration
     if spec.kind == "counts":
         width = sum(len(reg.bits) for reg in prepared.record.classical_layout)
         prototype = CountBin(bits="0"*max(1, width), count=spec.shots)
     else:
         prototype = PauliValue(label="I"*max(map(len, spec.labels)), value=0.)
     # Terms: prepared._items statistics, each bounded by the prototype, one comma
-    # between consecutive items, and the metadata reservation. The prototype has the
+    # between consecutive items, and the declaration. The prototype has the
     # widest key, and either the 32-byte envelope of a real value or, for a
     # count, the decimal length of the requested shot number, which no single
     # count can exceed.
     item = _json_bound(prototype, max_bytes)
-    return prepared._items*item + max(0, prepared._items-1) + metadata_reservation
+    return prepared._items*item + max(0, prepared._items-1) + declaration
 
 
-def _completion_metadata_bound(records, max_bytes):
-    """Separate bounded numeric statistics from one completion's other JSON.
-
-    Array bytes are counted by the code that saves the arrays. The caller
-    credits rows being replaced, so updating a large batch header counts only
-    its growth. This visits metadata and any scalar-unavailability messages,
-    without copying or examining amplitude or probability arrays or count
-    values. A probability chunk's values are its array manifests and scalar
-    summaries, which are counted here. Run._write subtracts the credit for
-    the probability point headers with _probability_header_credit before
-    testing M. Single endpoints have no such credit. Binary payloads are
-    counted when the arrays are saved.
-
-    A trajectory point chunk excludes its declaration and header only because
-    that particular occurrence was reserved (``readout_bytes``: ``D_k`` and
-    ``H_k``, built by ``_point_chunk_headers`` and checked when saved by
-    ``_trajectory_chunks``), and its JSON value elements because the value
-    formula reserved them (``V_k``). Its remainder ``U_k`` is its variable fields
-    (``_point_variable_fields``) with empty ``values``, except that
-    an amplitude or probability point keeps its ``values`` (masses, or array
-    manifests and summaries). The
-    total covers all ``U_k`` and the other completion rows, and the
-    acquisition count is the cardinality of the set of ``(run_id,
-    attempt)``, not the number of chunks. ``Run._write`` checks
-    ``sum_k J(U_k) + sum_(other completion rows) J(r) - C_meta - G_meta <= M``
-    per acquisition after subtracting the probability header credit as
-    another G_meta term. It releases that attempt's one pending reservation
-    and counts all its actual rows and binary bytes atomically.
-    """
-    from nwqlib._run_journal import _json_bound
-
-    acquisitions, total = set(), 0
-    for kind, _, value in records:
-        if kind == "chunk" and isinstance(value, ObservationChunk):
-            acquisitions.add((value.run_id, value.attempt))
-            if value.point is not None:
-                readout = value.observation.kind
-                rest = {name: getattr(value, name) for name in _point_variable_fields(readout)}
-                if readout not in ("amplitudes", "probabilities"):
-                    rest["values"] = ()  # elements were charged by the value law
-                total += _json_bound(rest, max_bytes)
-                continue
-            # These fields were funded at preparation, using the same JSON
-            # owner. Splitting the two field maps counts one extra delimiter,
-            # so their summed bound also covers the combined map.
-            fields = {name: getattr(value, name) for name in type(value).model_fields
-                      if name not in _READOUT_DECLARATION_FIELDS}
-            readout = value.observation.kind
-            if readout in {"counts", "pauli_expectation", "host_scalars"}:
-                fields["values"] = ()
-                if readout == "host_scalars":
-                    total += sum(max(0, _json_bound(item.unavailable, max_bytes)-4)
-                                 for item in value.values if item.unavailable is not None)
-            total += _json_bound(fields, max_bytes)
-            continue
-        total += _json_bound(value, max_bytes)
-    return len(acquisitions), total
-
-
-def synchronous_completion_growth(*, provider, timing_reference, job_length, max_bytes,
-                                  event_already_revised=False):
-    """Return ``(minimum, maximum)`` of the net JSON growth of a synchronous acquisition's completion rows.
-
-    The metadata check of a trajectory includes the minimum JSON of its
-    points and the net growth of its synchronous completion rows. The
-    row-growth calculation includes revision parents, completion timestamps,
-    the observation identity, the job locator and timing evidence, with the
-    original saved rows credited once. Fields copied unchanged, including
-    the output reservation, cancel out. The minimum is a necessary
-    condition. The check on Aer uses the maximum because its UUID, timestamp
-    and completion-field domains establish an upper bound. Variable metadata
-    is also checked against the acquisition's allowance when it is saved.
-
-    Let ``E_r, S_i`` be the event and submission saved before the
-    synchronous call and ``E_c, S_c`` their completed forms, ``J`` the
-    run-log bound and ``A`` the actual encoded length. The net count is
-    ``G = J(E_c) + J(S_c) - A(E_r) - A(S_i) = [J(E_c) - J(E_r)] + [J(S_c) -
-    J(S_i)] + [J(E_r) - A(E_r)] + [J(S_i) - A(S_i)]``. The last two terms are
-    nonnegative (zero for these initial rows, whose field trees hold no
-    floats or array encodings). The same keys occur before and after, so
-    braces, keys, colons and commas cancel in each difference and only the
-    changed field values remain. The reservation integer cancels for any
-    number of digits. The changed fields are the event's parent, status,
-    finish time, observation identity and timing, and the submission's
-    parent, status, locator, finish time, invocation count, timing and
-    ``results_consumed``. A quoted SHA-256 content identity costs 73 bytes,
-    a shortest ``_now()`` UTC timestamp 27 and one with microseconds 34, so
-    the maximum adds seven timestamp bytes in each row. ``J`` counts every
-    finite float as 32 bytes, so durations change neither result. For the
-    Aer timing source ``nwqlib.backends.connection.AerBackend.submit`` and a
-    ``qiskit_aer`` locator with a 36-character UUID this gives ``G_min =
-    2*J_t + J_l + 241 = 1099`` and ``G_max = G_min + 14 = 1113`` with
-    ``J_t = 322`` and ``J_l = 214``. A forecast revises the event before it
-    is saved (``Run._begin_submission``), so its parent contributes nothing
-    (``event_already_revised``). ``job_length`` is an established
-    escaped-size bound for the job identifier, a lower bound for the minimum
-    and an upper bound for the maximum. Aer's ASCII UUID has the same bound in
-    both directions. The derivation is given above.
-    """
-    from nwqlib._run_journal import _json_bound
-
-    # All input text and the job-ID width have already passed their input cap.
-    def bound(value):
-        return _json_bound(value, max_bytes)
-
-    cid = "sha256:" + "0" * 64
-    time_min = "0001-01-01T00:00:00+00:00"
-    timing = TimingObservation(
-        seconds=0.0, scope="native_call_wall",
-        source=Source(name="perf_counter", version="python", domain="one local backend call",
-                      reference=timing_reference),
-    )
-    locator = JobLocator(provider=provider, job_id="x" * job_length)
-    changes = [
-        (cid if event_already_revised else None, cid),
-        ("reserved", "completed"), (None, time_min), (None, cid), (None, timing),
-        (None, cid), ("intent", "completed"), (None, locator), (None, time_min),
-        (None, 1), (None, timing), (False, True),
-    ]
-    minimum = sum(bound(new) - bound(old) for old, new in changes)
-    return minimum, minimum + 14
-
-
-def detached_completion_growth(*, max_bytes, event_already_revised=False):
-    """Return minimum and maximum JSON growth of a fresh detached outcome write.
-
-    The successful provider-status row has already committed. The outcome
-    transaction replaces that row and the reserved event, and changes the
-    submission's results_consumed from False to True. Its counted row growth is
-    J(E_completed) + J(S_consumed) - A(E_reserved) - A(S_status).
-
-    J equals A for these string/integer rows. The event gains its revision
-    parent (69 bytes unless already revised), completed status (1 byte),
-    finish time (23 or 30 bytes), and observation identity (69 bytes).
-    Consuming the submission saves one byte. Thus the pair is (161, 168),
-    or (92, 99) when a forecast already revised the reserved event.
-
-    The locator, provider status and simulation count cancel against the
-    saved status row. The reservation integer also cancels. This formula is
-    independent of the number of trajectory points. It covers a new
-    successful NWQ-Sim or NWQ-Sim Slurm acquisition with one event, no
-    timing evidence and no prior event failure. Recovery must credit its
-    actual saved rows. These are JSON bytes, not process memory. The
-    derivation is given above.
-    """
-    from nwqlib._run_journal import _json_bound
-
-    cid = "sha256:" + "0" * 64
-    changes = (
-        (cid if event_already_revised else None, cid),
-        ("reserved", "completed"),
-        (None, "0001-01-01T00:00:00+00:00"),
-        (None, cid),
-        (False, True),
-    )
-    minimum = sum(_json_bound(new, max_bytes) - _json_bound(old, max_bytes)
-                  for old, new in changes)
-    return minimum, minimum + 7
-
-
-def _completion_minimum(run, max_bytes):
-    """Return the required completion-row allowance G_max of a new acquisition, or zero for a backend without a derived bound.
-
-    The synchronous Aer lifecycle establishes both the job's ASCII UUID
-    size and every completion field's upper bound. Count the maximum of
-    ``synchronous_completion_growth`` so the two timestamps' fractional
-    seconds cannot exhaust a metadata allowance that was accepted. This is 1113
-    bytes without a forecast and 1044 when the event already has a revision
-    parent. A fresh detached NWQ-Sim or NWQ-Sim Slurm outcome uses the
-    maximum of ``detached_completion_growth``: 168 bytes, or 99 bytes with
-    a forecast. Another backend requires its own lifecycle and field bounds.
-    Its zero is a temporary allowance that is not derived, for
-    trajectories and single-endpoint probability readouts alike. It ends
-    when a derivation of that backend's completion lifecycle, as for
-    ``detached_completion_growth``, establishes the growth of its
-    completion rows. Despite its name, ``_completion_minimum`` returns the
-    upper end of the row-growth range for Aer and NWQ-Sim, the allowance its
-    callers require.
-    """
-    backend = getattr(run, "backend", None)
-    kind = getattr(backend, "kind", None)
-    already_revised = getattr(run, "forecast", None) is not None
-    if kind in {"nwqsim", "slurm"}:
-        return detached_completion_growth(
-            max_bytes=max_bytes, event_already_revised=already_revised)[1]
-    if kind == "qiskit_aer":
-        return synchronous_completion_growth(
-            provider=kind,
-            timing_reference=f"{type(backend).__module__}.{type(backend).__name__}.submit",
-            job_length=_job_length(run), max_bytes=max_bytes,
-            event_already_revised=already_revised)[1]
-    return 0
 
 
 def _native_timing(started, reference):
@@ -4253,7 +4731,7 @@ def _trajectory_chunks(prepared, result, *, run, attempt, result_key):
     chunk of the acquisition shares its run, attempt and job. Its fixed
     fields are the header maps whose bytes ``readout_bytes`` counted
     (``_point_chunk_headers``), and each saved chunk is checked against
-    them, so the completion-metadata check may exclude them.
+    them.
     """
     from nwqlib.core.planning import ReductionContext, execute_reduction, point_items, registered_reducer
     record = prepared.record
@@ -4418,36 +4896,61 @@ def _decoded_chunk(prepared, result, *, run, attempt, result_key):
     return ObservationChunk(returned_shots=returned, values=values, **fields)
 
 
-def _static_item(plan, run, experiment, *, program=None):
-    """The saved workflow row of one static experiment, created once.
+def _point_realization(plan, point, *, program=None):
+    """The Realization of one static point (`StaticPoint`).
 
-    Its runtime seed is drawn and committed with the RNG position before any
-    preparation (commit 1 of the module docstring), so the experiment's seed never
-    changes across restarts. The row later records the preparation charge, the
-    preparation record and the attempt that belong to it. A caller that already holds the experiment's
-    selected Program passes it as ``program``, whose bindings are the point's
-    effective bindings, so the point is not resolved again.
+    A caller that already holds the point's selected Program passes it as
+    ``program``, whose bindings are the point's effective bindings, so the
+    point is not resolved again.
     """
-    key = experiment.name
-    item = run._state["workflow_items"].get(key)
-    if item is None:
-        point = plan.resolve(key) if program is None else Realization(
-            plan_id=plan.content_id, experiment=key, bindings=program.bindings)
-        item = WorkflowItem(realization=point, runtime=RuntimeOptions(seed=run.rng.next_seed()))
-        run._write((("workflow_item", key, item), ("rng", "current", run.rng.snapshot())))
-        run._state["workflow_items"][key] = item
-    return item
+    name = point.experiment.name
+    return plan.resolve(name, bindings=point.bindings) if program is None else Realization(
+        plan_id=plan.content_id, experiment=name, bindings=program.bindings)
+
+
+def _static_items(plan, run, points):
+    """The saved workflow rows of the static points ``points`` (`StaticPoint`), creating the missing ones together.
+
+    The rows are those of a template batch, which ``prepare_template_rows``
+    holds before any of its points is prepared. Each missing row draws its
+    runtime seed in the order of ``points`` (Plan order), and all of them
+    commit with the RNG position in one transaction (commit 1 of the module
+    docstring), so the seeds never change across restarts. The seeds are
+    kept only with that transaction. If it is refused, for example by
+    ``max_data_bytes``, or fails, the backend stream returns to its position
+    before the first draw, so a retry after ``Run.extend_limits`` draws the
+    same seeds as a reopened Run. A point prepared on its own creates its
+    row with its preparation charge instead (``_prepare_static_item``).
+    """
+    state, created = run._state, {}
+    start = run.rng.backend.bit_generator.state
+    try:
+        for point in points:
+            if point.key not in state["workflow_items"] and point.key not in created:
+                created[point.key] = WorkflowItem(realization=_point_realization(plan, point),
+                                                  runtime=RuntimeOptions(seed=run.rng.next_seed()))
+        if created:
+            run._write((*(("workflow_item", key, item) for key, item in created.items()),
+                        ("rng", "current", run.rng.snapshot())))
+    except BaseException:
+        run.rng.backend.bit_generator.state = start
+        raise
+    state["workflow_items"].update(created)
+    return {point.key: state["workflow_items"][point.key] for point in points}
 
 
 class PreparationNotRebuilt(RuntimeError):
-    """A static item's local preparation has a charge but no preparation record, and the Run does not build it again.
+    """A static item's local preparation has a charge but no preparation record, and the Run was not asked to build it again.
 
     ``_unbuilt`` decides this and ``_not_rebuilt`` builds the error.
     ``execute_static`` raises it before it submits any new experiment, and
-    ``_prepare_static_item`` raises it for its own item. A caller that
+    ``_prepare_static_item`` raises it for its own item.
+    ``Run.resume(rebuild_preparations=True)`` is the explicit request that
+    leads past it. A caller that
     continues a reopened Run can tell this outcome, which only new counted
     work could complete, from an error that an uninterrupted Run meets as well
-    (``algorithms.qhd._durable.unrecoverable``).
+    (``algorithms.qhd._durable.unrecoverable``, whose resume functions make no
+    such request).
     """
 
 
@@ -4457,10 +4960,10 @@ def _unbuilt(run, item):
     Such a preparation failed or was interrupted after its charge (commit 2
     of the module docstring). The charge is already counted, and the Run never
     repeats a preparation attempt on its own, since that would be new counted
-    work the caller did not request, so the Plan cannot complete in this Run.
+    work the caller did not request, so the Plan cannot complete in this Run
+    without that request (``_rebuild_static_preparations``).
     A saved remote preparation does not count, because its compilation can
-    still be refreshed, and a refused synthesis removes the preparation from
-    its item (``Run._charge_synthesis``), which can then be prepared again.
+    still be refreshed.
     """
     return (item.prepared_id is None and item.preparation_id is not None
             and item.preparation_id not in run._state["remote_preparations"])
@@ -4469,24 +4972,101 @@ def _unbuilt(run, item):
 def _not_rebuilt(setting):
     """The ``PreparationNotRebuilt`` error for ``setting``, with one message for both raisers."""
     return PreparationNotRebuilt(f"the original preparation of setting {setting!r} failed or was interrupted "
-                                 "and no replacement was built, so this Run cannot complete and submits "
-                                 "nothing more. A new Run prepares the Plan again")
+                                 "and no replacement was built, so this Run submits nothing more. "
+                                 "run.resume(rebuild_preparations=True) prepares each such setting once more in "
+                                 "this Run. The failed attempt stays counted, each new circuit preparation counts "
+                                 "against max_total_circuits, and no job already submitted is sent again. If a "
+                                 "limit caused the failure, raise it first with run.extend_limits")
 
 
-def _prepare_static_item(plan, run, experiment, *, held=None):
+def _rebuild_static_preparations(run):
+    """Prepare again, once each, the static rows that a counted local preparation left without a record.
+
+    This is the caller's explicit request, ``Run.resume(rebuild_preparations=True)``.
+    Preparation attempts P and execution attempts are counted separately and
+    nothing is refunded. With U the eligible rows captured by this call, the bound
+    applies to the charges of this one rebuild, and over the whole continuation
+
+        P_after = P_before + k_rebuild + k_new,    0 <= k_rebuild <= |U|
+
+    with k_new the first preparations of rows not prepared before. These count
+    committed charges, including those whose preparation then fails, and they are
+    lifecycle facts, not numerical claims. A rebuild creates no execution attempt.
+    The request is not saved, so a later ``wait`` or ``resume`` makes no new attempt
+    from it, and a second failure needs a new explicit request.
+
+    A row is eligible only when all of these hold: it points at a counted local
+    preparation (``_unbuilt``, and its charge has no record), there is no remote
+    preparation for it, and no submitted or uncertain execution is attached to it,
+    either on the row or as an event of a record of its realization. Known and
+    uncertain submissions keep their identity and are never sent again.
+
+    The row keeps its realization, bindings and runtime seed. The new charge and the
+    row's new pointer commit in one transaction, which ``prepare_experiment`` or
+    ``_bind_template_rows`` already does for a row that exists, and restore reads
+    each charge on its own, so one row with several charges needs no format
+    change. Each interruption therefore reopens at a committed prefix of
+    ``charged/no-record -> new charged/no-record -> prepared record -> submitted``.
+
+    Limits are checked before the first new charge (``_admit_static_workload``), and
+    each new charge is refused on its own as any preparation is. The new preparation
+    payload has no way around ``max_data_bytes``. A row of a template goes through
+    ``prepare_template_rows``, so a template that a saved record holds is reused and
+    never compiled again to get a new row. A row that no template takes is prepared
+    on its own. The seed and the deterministic offline harness make the recovered
+    result equal an uninterrupted one there. A live backend's compilation or
+    randomness can differ, and only the associations and the absence of repeated
+    submissions are claims for it.
+    """
+    plan, state = run.plan, run._state
+    items = state["workflow_items"]
+    unbuilt = {key: item for key, item in items.items() if _unbuilt(run, item)}
+    if not unbuilt:
+        return
+    records = state["prepared_artifacts"]
+    attached = {records[event.prepared_id].realization_id for event in state["events"]}
+    eligible = frozenset(key for key, item in unbuilt.items()
+                         if state["preparation_charges"][item.preparation_id].prepared_id is None
+                         and item.attempt is None and item.realization.content_id not in attached)
+    if not eligible:
+        return
+    _admit_static_workload(plan, run)
+    points = tuple(point for point in plan._static_points() if point.key in eligible)
+    templates = _row_templates(plan, run, points) if _groups_points(plan, run) else None
+    if templates is not None:
+        prepare_template_rows(plan, run=run, points=points, templates=templates, rebuild=eligible)
+    for point in points:
+        if items[point.key].prepared_id is None:
+            _prepare_static_item(plan, run, point, rebuild=True)
+
+
+def _prepare_static_item(plan, run, point, *, held=None, rebuild=False):
     """Return the item's one preparation, in memory, restored from its preparation record, or new.
 
-    An item that ``_unbuilt`` finds is refused rather than rebuilt, with
-    ``PreparationNotRebuilt``. The item's seed stays in its workflow row.
+    A point without a workflow row is prepared at once, and
+    ``prepare_experiment`` draws its runtime seed and creates its row in the
+    transaction of its preparation charge (commit 2 of the module
+    docstring), so a refusal before that charge leaves neither. An item that
+    ``_unbuilt`` finds is refused rather than rebuilt, with
+    ``PreparationNotRebuilt``, unless ``rebuild`` carries the caller's request
+    (``_rebuild_static_preparations``), and it then takes a new charge. The item's
+    seed stays in its workflow row.
     The reductions of an existing preparation are checked again against
     the allowance of the Method's ``reduction_allowance`` hook before it is
     returned (``_method_reduction_allowance``). A new preparation is
     checked inside ``prepare_experiment``.
-    ``held`` is the experiment's ``(Experiment, SelectedConstruction)``
+    ``held`` is the point's ``(Experiment, SelectedConstruction)``
     pair when the caller already holds it, which a new preparation reuses.
     """
-    key = experiment.name
-    item = _static_item(plan, run, experiment, program=None if held is None else held[1].program)
+    key = point.key
+    item = run._state["workflow_items"].get(key)
+    if item is None:
+        realization = _point_realization(plan, point, program=None if held is None else held[1].program)
+        run._state["workflow_current"] = key
+        try:
+            return prepare_experiment(realization, run=run, held=held)
+        finally:
+            run._state["workflow_current"] = None
     if item.prepared_id is not None:
         # An existing preparation, live or saved by an earlier process, is
         # submitted under the Method's current ledger and limits, so its
@@ -4498,7 +5078,7 @@ def _prepare_static_item(plan, run, experiment, *, held=None):
             from nwqlib.core.planning import admit_reductions
             admit_reductions(record.observation, width=width, allowance=allowance)
         return run._state["handles"].get(item.prepared_id) or restore_prepared(item.prepared_id, run=run, for_submission=True)
-    if item.preparation_id is not None:
+    if item.preparation_id is not None and not rebuild:
         if _unbuilt(run, item):
             raise _not_rebuilt(key)
         from nwqlib._remote_preparation import refresh_preparation
@@ -4510,13 +5090,240 @@ def _prepare_static_item(plan, run, experiment, *, held=None):
         run._state["workflow_current"] = None
 
 
-def prepare_static(plan, *, run, settings="first"):
-    """Check all experiments of a static Plan, then prepare its first item or every item.
+def _fixes_footprint(plan, experiment):
+    """Whether every point of the batch ``experiment`` has the memory of its first point.
 
-    The check covers every experiment's readout against the backend target,
-    and the circuits, preparations and shots of the whole Plan against the
+    A point's Program comes from the Plan's own selections with the point's
+    bindings (``Plan._selected_program``), and ``Method.specialize_experiment``
+    can change only its readout. In the counting pass
+    (``lowering._count_definition``), what a circuit keeps, its instructions and
+    its direct preparation trees depend on the reachable Repeat counts, the widths
+    of the registers it allocates, and each block's values, which do not vary with
+    its arguments. So when no such count or width reads an axis, they are the same
+    at every point. The expressions are evaluated without the axis values, as
+    ``Plan._point_shots`` does, so that a value depending on an axis is None.
+    """
+    from nwqlib.ir import Allocate, ExprRef, Measure, Repeat, Reset
+    batch = plan._program_nodes[experiment.batch]
+    if not batch.axes:
+        return True
+    admission = plan._program_admission
+    context = admission.binding_map(admission.p.bindings)
+    context.update(admission.binding_map(batch.settings[experiment.setting_index].bindings))
+    values = admission.expressions(context)
+    seen, pending = set(), [batch.body]
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        node = admission.nodes[name]
+        count = (node.count if isinstance(node, Repeat) else
+                 admission.registers[node.wire].width if isinstance(node, (Allocate, Measure, Reset)) else None)
+        if isinstance(count, ExprRef) and values[count.expression] is None:
+            return False
+        pending.extend(children(node))
+    return True
+
+
+def _static_points_workload(plan, run, fixed, *, whole):
+    """Check the readouts of a static Plan against the backend and return ``(circuits, shots, held, workload)``.
+
+    ``fixed`` pairs each experiment with its ``Plan._point_shots``. A counts,
+    Pauli or probability batch whose Program fixes the shots gives every point
+    the same shots and a readout kind that a target treats alike, the only
+    fields that a target reads for these kinds (a Method can turn probabilities
+    into their amplitude form). Its first point stands for the others, which
+    are counted from the axis bounds and resolved only when each is prepared.
+    Any other experiment is resolved point by point, because its shots or the
+    readout fields that a target reads, such as an estimate's coefficients or a
+    trajectory's positions, can differ between points.
+
+    ``circuits`` and ``shots`` count the whole Plan and ``held`` is the first
+    point's ``(Experiment, SelectedConstruction)``, kept for its preparation.
+    With ``whole``, ``workload`` is the ``_CircuitMemory`` of every point that is
+    not yet prepared: the native circuits of all of them, which their handles keep,
+    the new static definitions of all of them once each, and the largest temporary.
+    One point's instruction list gives way to the next, but its frontier stays live
+    while the next one is built, so a temporary includes the preceding frontier.
+
+    With ``whole``, a first point stands for the others of its experiment only when
+    they have its memory (``_fixes_footprint``), and it then multiplies what it keeps
+    by their number. Arguments equal at the first point can differ at later ones, so
+    its own keys do not bound a later frontier. Such a point takes
+    ``_CircuitMemory.frontier``, the sizes summed over the calls, beside at most the
+    same amount from the point before it, which the Run already holds when only one
+    point remains. That overcounts by at most one frontier when the arguments of the
+    two points coincide. Otherwise every point is visited, at one selection and
+    counting pass each, until what is kept exceeds the limit. The caller's refusal
+    then follows with the known total so far. Nothing is built.
+
+    On a backend that binds templates (``_groups_points``), the experiments it binds
+    count one circuit and ``_TEMPLATE_ROW_BYTES`` per point, as a first coarse check,
+    because the number of templates is known only once the Method has grouped them.
+    ``prepare_template_rows`` compares the actual templates before their charge.
+    Rows of a template that the backend cannot bind stay under the check of each
+    point's own preparation, though they count as rows here. Without ``whole``,
+    ``workload`` is empty and no point is counted unless the Plan has direct
+    preparations, whose trees are checked for every resolved point.
+    """
+    from nwqlib.blocks.selection import SelectedBlock, direct_preparation
+    items = run._state["workflow_items"]
+    prepared = Counter(item.realization.experiment for item in items.values() if item.prepared_id is not None)
+    templated = whole and _groups_points(plan, run)
+    template_kinds = getattr(run.backend, "template_readouts", None)
+    circuits = shots = kept = temporary = calls = definitions = previous_frontier = 0
+    held, first_call, static, bound_experiments = None, None, {}, set()
+    direct = any(isinstance(block, SelectedBlock) and direct_preparation(block) is not None for block in plan.blocks)
+    already = _held_bytes(run) if whole else 0
+    limit = memory_limit(getattr(plan.method, "max_bytes", None)) if whole else None
+    for experiment, point_shots in fixed:
+        kind = None if experiment.batch is None else plan._program_nodes[experiment.batch].observation_kind
+        uniform = (point_shots is not None and kind in {"counts", "pauli_expectation", "probabilities"}
+                   and (not whole or _fixes_footprint(plan, experiment)))
+        binds = templated and experiment.batch is not None and (template_kinds is None or kind in template_kinds)
+        points = plan._static_points((experiment,))
+        for point in islice(points, 1) if uniform else points:
+            construction = None
+            if held is None:
+                # The first point is prepared right after this loop, so its
+                # Experiment and construction are kept for that preparation.
+                held = plan._selected_construction(experiment.name, point.bindings)
+                construction = held[1]
+                if held[0].batch is None:
+                    spec = held[0].observation
+                else:
+                    admission = _Admission(held[1].program)
+                    admission.admitted().require_ready()
+                    _, spec = held[0]._resolved_observation(admission, construction_id=held[1].content_id)
+            else:
+                _, spec = plan.resolve(experiment.name, bindings=point.bindings).resolved_observation(plan)
+            if spec.kind == "host_scalars":
+                continue
+            label = experiment.name if uniform else point.key
+            try:
+                run.backend.target_for(spec)
+            except ValueError as error:
+                # A counts readout names its shots per program. Any other readout
+                # kind names the kind, which is what the target refuses.
+                request = (f"{spec.shots} shots per program" if spec.kind == "counts"
+                           else f"readout kind {spec.kind!r}")
+                raise ValueError(f"Experiment {label!r} requests {request}: {error}") from error
+            count = plan._point_count((experiment,)) if uniform else 1
+            circuits += count
+            shots += count * spec.shots
+            remaining = (count - prepared[experiment.name] if uniform else
+                         int(getattr(items.get(point.key), "prepared_id", None) is None))
+            if direct or (whole and remaining):
+                # The trees of the Plan's direct preparations are checked for
+                # every resolved point, as its preparation will check them, so
+                # a later setting is not refused after earlier ones were paid for.
+                if construction is None:
+                    construction = plan._selected_construction(experiment.name, point.bindings)[1]
+                try:
+                    admission = _Admission(construction.program)
+                    admission.admitted().require_ready()
+                    counted, trees = _admit_direct_preparations(run, construction, admission, spec)
+                except ValueError as error:
+                    raise ValueError(f"Experiment {label!r}: {error}") from None
+                if whole and remaining:
+                    memory = _circuit_memory(run, counted, trees)
+                    if binds:
+                        kept += remaining * _TEMPLATE_ROW_BYTES
+                        if experiment.name not in bound_experiments:
+                            kept += memory.kept
+                            calls += memory.calls
+                            bound_experiments.add(experiment.name)
+                    else:
+                        kept += remaining * memory.kept
+                        calls += remaining * memory.calls
+                    temporary = max(temporary, memory.temporary + previous_frontier)
+                    if uniform and count > 1:
+                        temporary = max(temporary, memory.logical + min(remaining, 2) * memory.frontier)
+                    previous_frontier = memory.frontier
+                    static.update(memory.static)
+                    first_call = first_call or memory.first_call
+                    definitions = max(definitions, memory.definitions)
+                    if exceeds(already + kept, limit):
+                        return circuits, shots, held, _CircuitMemory(kept, temporary, static, calls, first_call, definitions)
+    return circuits, shots, held, _CircuitMemory(kept, temporary, static, calls, first_call, definitions)
+
+
+def _admit_static_workload(plan, run):
+    """Check the known work of a static Plan's remaining points before this Run object adds any.
+
+    Paid work is counted when each attempt reserves it, so without this check a
+    Run reached without ``prepare_static``, or a Plan whose later points do not
+    fit, would spend its budget on the first points before a refusal. Each check
+    uses the same readout walk as ``prepare_static``. Without any attempt yet,
+    the circuits and shots of the whole Plan go against the cumulative limits.
+    Each point acquires its circuit once, so attempts need no further count.
+    Preparations do, whether or not attempts exist, because a charge without a
+    record stays counted and its row needs another: the circuit preparations counted
+    so far plus one for each circuit point without a record or remote preparation go
+    against ``max_total_circuits``, which caps preparations and execution attempts
+    independently, not their sum, and leaves host kernels out of both. Without a
+    charge left over that total is the
+    Plan's own count, so this refuses only a Run that an explicit rebuild would
+    otherwise take through paid jobs to a refusal at its last point. Data limits
+    stay incremental: what results will
+    save is not known in advance, and adding their upper bounds would refuse Plans
+    that fit. The memory of the points not yet prepared goes against the Method's
+    limit whether or not attempts exist. The check runs once per open Run object
+    unless it refuses, so a retry after ``Run.extend_limits`` checks again, and
+    ``_rebuild_static_preparations`` runs it again for the limits and preparations
+    of its call. The
+    counts that the axis bounds give go first, because the walk of a point-dependent
+    experiment (``_static_points_workload``) costs a pass per point.
+    """
+    fixed = [(experiment, plan._point_shots(experiment)) for experiment in plan.experiments]
+    if not run._state["events"]:
+        run.check_capacity(circuits=plan._point_count(tuple(experiment for experiment, _ in fixed
+                                                            if experiment.batch is not None)),
+                           shots=sum(plan._point_count((experiment,)) * shots for experiment, shots in fixed
+                                     if shots is not None))
+    circuits, shots, _, workload = _static_points_workload(plan, run, fixed, whole=True)
+    if not run._state["events"]:
+        run.check_capacity(circuits=circuits, shots=shots)
+    _admit_circuit_memory(run, workload, "running the remaining circuits of this Plan", whole=True)
+    # The walk above returned early only for the memory refusal, so circuits is complete here.
+    state = run._state
+    charges, remote = state["preparation_charges"], state["remote_preparations"]
+    saved = sum(1 for item in state["workflow_items"].values()
+                if (item.prepared_id is not None or item.preparation_id in remote)
+                and charges[item.preparation_id].execution == "quantum_circuit")
+    run.check_capacity(preparations=circuits - saved)
+    state["static_workload_admitted"] = True
+
+
+def prepare_static(plan, *, run, settings="first"):
+    """Check all points of a static Plan, then prepare its first item or every item.
+
+    The items are the Plan's points (`Plan._static_points`): each experiment,
+    or for an experiment with range axes each point of its axes, under the
+    point's key. Before any point is generated, the circuits of the batch
+    experiments are counted from their axis bounds (`Plan._point_count`),
+    one for each point, and a count beyond ``max_total_circuits`` refuses at
+    once. The shots of each batch experiment whose Program fixes the shots
+    of every point (`Plan._point_shots`), such as a counts batch with
+    constant repetitions, are counted the same way against
+    ``max_total_shots``. A direct experiment, whose readout the Method can
+    specialize, and shots that depend on the point are counted once the
+    point is resolved, so with either the early counts are lower bounds and
+    a refusal says so. The readouts are then checked against the backend
+    target. A counts, Pauli expectation or probability batch whose Program
+    fixes the shots of every point gives each point the same shots and a
+    readout kind that an adapter's ``target_for`` treats alike, and
+    ``target_for`` reads only these fields for these kinds
+    (docs/development/execution.md, Backend adapter contract).
+    Only its first point is resolved and checked for the whole experiment,
+    and its points are counted from the axis bounds. Every other point,
+    whose shots, estimate or trajectory positions can depend on the point,
+    is resolved and checked one at a time. Each point's own Program checks
+    run when that point is prepared, before its charge. The check covers
+    the circuits, preparations and shots of the whole Plan against the
     Run's cumulative limits, whichever items are prepared now. ``settings="all"``
-    therefore needs no limit of its own. It prepares every experiment in Plan
+    therefore needs no limit of its own. It prepares every point in Plan
     order through ``_prepare_static_item`` and submits nothing. That function
     returns an item's existing preparation when there is one, so each item is
     prepared and counted once, and a Run with a folder records it in its run
@@ -4525,134 +5332,124 @@ def prepare_static(plan, *, run, settings="first"):
     or is interrupted stops the loop. If it stopped after its charge, the
     charge stays on the item's workflow row without a preparation record
     (``_unbuilt``), and ``execute_static`` raises
-    ``PreparationNotRebuilt`` before it submits anything. A
-    refused synthesis clears the row instead, and a check that fails before
-    the charge counts nothing, so in those cases the item can be prepared
-    again.
+    ``PreparationNotRebuilt`` before it submits anything, unless the caller asks
+    for ``_rebuild_static_preparations``. A check that fails
+    before the charge counts nothing, so the item can then be prepared again.
     Each workflow row draws its runtime seed when it is created, which happens
     in Plan order in both modes, so both modes prepare with the same seeds.
     Through ``scientist.prepare``, ``"all"`` reaches this function only for
-    ``LOCAL_SIMULATORS`` and host execution.
-    A target refusal during this check names the Experiment and, for a
-    counts readout, the shots per program that it requests, the pooled
+    ``LOCAL_SIMULATORS`` and host execution. ``"all"`` also compares the memory
+    of every point that is not yet prepared with the Method's limit before the
+    first preparation (``_static_points_workload``), and ``"first"`` leaves that
+    to the first static execution, so a first circuit can be inspected without
+    the rest of the Plan fitting in memory.
+    A target refusal during this check names the point's key, or the
+    experiment when one point stands for it, and, for a counts readout, the shots per program that it requests, the pooled
     product for a pooled query, or, for any other readout, its readout kind,
-    before any preparation or submission. The first experiment's Experiment
+    before any preparation or submission. The first point's Experiment
     and construction, resolved during the check, are passed to its
     preparation, so that point is not resolved again.
-    On Aer the check also covers, once, the largest known completion
-    metadata requirement over all counts, exact Pauli scalar and amplitude
-    settings (``_known_endpoint_metadata``) against
-    ``max_completion_metadata_bytes``, so a later setting's larger requirement
-    refuses before the first preparation rather than after earlier settings
-    ran. An adaptive Method, whose later settings are not known, is checked
-    for each newly known setting in ``prepare_experiment``. On Aer a setting
-    whose observation comes from its Program's batch, or whose readout kind
-    has a metadata formula, is checked once in this scan, by the readout
-    resolution (``_selected_readout``) that gives both its observation and the
-    header whose bytes its metadata formula counts, until a cumulative limit
-    is known to be exceeded. A refusal of the planning work limit in the scan
-    names the Method's ``max_admission_steps`` field when it has one. Once
-    the circuits or shots counted so far, with the Run's existing ones,
-    exceed ``max_total_circuits`` or ``max_total_shots``, the remaining
-    settings are counted from their observations without counting their
-    metadata, and the limit refuses with the complete counts before the
-    metadata check.
+    When the Method can group the Plan's points on this backend
+    (``_groups_points``), the selected points are held together, the
+    points of the Method's templates that the backend
+    binds are prepared as bindings (``_row_templates``,
+    ``prepare_template_rows``), each template compiled once, and the other
+    points are prepared on their own, in Plan order. Otherwise each point
+    is prepared as it is generated. The axis-bound refusal of
+    ``max_total_circuits`` bounds this scan whenever that limit is set.
     """
     if run.plan is not plan:
         raise ValueError("static preparation requires the same live Plan")
-    priced = {"counts", "pauli_expectation", "amplitudes"}
-    aer = getattr(run.backend, "kind", None) == "qiskit_aer"
     state, limits = run._state, run.limits
     # Circuit preparations and acquisition attempts are each capped by
     # max_total_circuits, so the larger of the two counts decides below.
     counted = max(state["preparations"] - state["host_preparations"],
                   len(state["events"]) - state["host_invocations"])
-    circuits = shots = required = 0
-    held = None
-    over = False
-    for index, experiment in enumerate(plan.experiments):
-        header = None
-        try:
-            if index == 0:
-                # The first experiment is prepared right after this loop, so its
-                # Experiment and construction are kept for that preparation.
-                held = plan._selected_construction(experiment.name, ())
-            if aer and not over:
-                # One readout resolution gives both the observation and the
-                # header that the Aer completion-metadata law prices.
-                point = plan.resolve(experiment.name)
-                selected = held[0] if index == 0 else point._selected_program(plan)[0]
-                if selected.batch is None and selected.observation.kind not in priced:
-                    spec = selected.observation
-                else:
-                    selected, construction = held if index == 0 else point._selected_construction(plan)
-                    *_, spec, header = _selected_readout(plan, point, selected, construction)
-            elif index == 0:
-                if held[0].batch is None:
-                    spec = held[0].observation
-                else:
-                    admission = _Admission(held[1].program)
-                    admission.admitted().require_ready()
-                    _, spec = held[0]._resolved_observation(admission, construction_id=held[1].content_id)
-            else:
-                _, spec = plan.resolve(experiment.name).resolved_observation(plan)
-        except AdmissionStepsExceeded as error:
-            raise _named_admission_refusal(plan, error) from error
-        if spec.kind == "host_scalars":
-            continue
-        try:
-            run.backend.target_for(spec)
-        except ValueError as error:
-            # A counts readout names its shots per program. Any other readout
-            # kind names the kind, which is what the target refuses.
-            request = (f"{spec.shots} shots per program" if spec.kind == "counts"
-                       else f"readout kind {spec.kind!r}")
-            raise ValueError(f"Experiment {experiment.name!r} requests {request}: {error}") from error
-        circuits += 1
-        shots += spec.shots
-        # Once the population counted so far exceeds a cumulative cap, later
-        # settings are still counted, so the refusal names the complete
-        # population, but their completion metadata is not priced.
-        over = over or counted + circuits > limits.max_total_circuits or state["shots"] + shots > limits.max_total_shots
-        if header is not None and not over and spec.kind in priced:
-            required = max(required, _known_endpoint_metadata(spec, header, run=run,
-                                                              max_bytes=limits.max_data_bytes))
-    # The capacity checks and the first preparation follow the whole loop. A
-    # population known to exceed a cap refuses before the metadata check.
-    if over:
-        run.check_capacity(preparations=circuits, circuits=circuits, shots=shots)
-    _check_completion_metadata(required, run.limits.max_completion_metadata_bytes)
+    # Each point of a batch experiment is one circuit, so the axis bounds give
+    # those circuits before any point is generated or resolved, and their
+    # shots when the Program fixes the shots of every point
+    # (Plan._point_shots). A direct experiment is one point whose readout the
+    # Method can specialize, so it is counted only once resolved, below, and
+    # so are point-dependent shots. Until then these counts are lower bounds.
+    batches = tuple(experiment for experiment in plan.experiments if experiment.batch is not None)
+    total = plan._point_count(batches)
+    if exceeds(counted + total, limits.max_total_circuits):
+        if len(batches) == len(plan.experiments):
+            run.check_capacity(preparations=total, circuits=total)
+        raise _cumulative_limit_error("max_total_circuits", limits.max_total_circuits, "circuits", counted, total,
+                                      at_least=True)
+    fixed = [(experiment, plan._point_shots(experiment)) for experiment in plan.experiments]
+    known = sum(plan._point_count((experiment,)) * shots for experiment, shots in fixed if shots is not None)
+    if exceeds(state["shots"] + known, limits.max_total_shots):
+        raise _cumulative_limit_error("max_total_shots", limits.max_total_shots, "raw shots", state["shots"], known,
+                                      at_least=any(shots is None for _, shots in fixed))
+    circuits, shots, held, workload = _static_points_workload(plan, run, fixed, whole=settings == "all")
+    # The capacity check and the first preparation follow the whole loop.
     run.check_capacity(preparations=circuits, circuits=circuits, shots=shots)
-    for index, experiment in enumerate(plan.experiments if settings == "all" else plan.experiments[:1]):
-        _prepare_static_item(plan, run, experiment, held=held if index == 0 else None)
+    if settings == "all":
+        _admit_circuit_memory(run, workload, "preparing every circuit of this Plan", whole=True)
+    selected = plan._static_points() if settings == "all" else islice(plan._static_points(), 1)
+    if _groups_points(plan, run):
+        # A backend that binds parameterized circuits prepares the selected
+        # points, held together for the Method to group, as bindings of their
+        # templates, each compiled once. The loop below returns those
+        # preparations and prepares the other points on their own.
+        selected = tuple(selected)
+        templates = _row_templates(plan, run, selected)
+        if templates is not None:
+            prepare_template_rows(plan, run=run, points=selected, templates=templates)
+    for index, point in enumerate(selected):
+        _prepare_static_item(plan, run, point, held=held if index == 0 else None)
 
 
 def execute_static(plan, *, run):
-    """Run the fixed experiments of a static Plan in order. Completed attempts are never repeated.
+    """Run the fixed points of a static Plan in order. Completed attempts are never repeated.
 
-    Experiments run in Plan order, one attempt each. The loop returns None at the
-    first experiment that cannot contribute an observation yet, because its
+    The points (`Plan._static_points`) are the experiments, and each range-axis
+    point of an experiment with axes, and they run in Plan order, one attempt
+    each, generated one at a time. The loop returns None at the
+    first point that cannot contribute an observation yet, because its
     attempt has not completed, its preparation is still compiling remotely or its
     detached submission is still running. After cancellation it returns None
     before new work. An existing attempt is never submitted again. Analysis runs
-    once every experiment has a collected observation.
+    once every point has a collected observation.
+
+    Before the first new work of this Run object, the known circuits, shots and
+    memory of the remaining points are checked (``_admit_static_workload``).
 
     An item with a local preparation charge but no preparation record
-    (``_unbuilt``) means that the Plan cannot complete in this Run. The loop
+    (``_unbuilt``) means that the Plan cannot complete in this Run unless the
+    caller asks for a rebuild, which ``Run.resume`` does before this function
+    (``_rebuild_static_preparations``). The loop
     raises ``PreparationNotRebuilt`` before it submits any new experiment,
     whose work would otherwise be counted without a Result. After
     ``prepare(plan, settings="all")`` such an item can come before items that
     were never submitted. With the default ``settings="first"`` only the last
     item created can be one, so there the check raises the error that
     ``_prepare_static_item`` would raise for that item.
+
+    When the Method can group the Plan's points on a backend that binds
+    parameterized circuits (``_groups_points``), the first point without
+    an attempt and every later one without an attempt are
+    held together, and the points of the templates that the backend binds
+    (``_row_templates``) are prepared as template bindings, each keeping its
+    own workflow row, attempt and shots. A detached backend sends them in
+    one job (``submit_detached``), and the loop waits for that job. A
+    synchronous backend (Aer) runs each bound point as its own attempt, in
+    Plan order, as for any other point. The other held points are prepared
+    on their own. Points with attempts are never part of it. The
+    remaining points are held together once, at the first point
+    without an attempt, and the Method is asked once per call.
     """
     if run.plan is not plan:
         raise ValueError("static execution requires the same live Plan")
     unbuilt = next((key for key, item in run._state["workflow_items"].items() if _unbuilt(run, item)), None)
-    for experiment in plan.experiments:
-        key = experiment.name
-        item = _static_item(plan, run, experiment)
-        if item.attempt is not None:
+    points = plan._static_points()
+    group = _groups_points(plan, run)
+    while (point := next(points, None)) is not None:
+        key = point.key
+        item = run._state["workflow_items"].get(key)
+        if item is not None and item.attempt is not None:
             event = run.attempt_record(item.attempt)
             if event.status != "completed":
                 return None
@@ -4664,19 +5461,49 @@ def execute_static(plan, *, run):
             return None
         if unbuilt is not None:
             raise _not_rebuilt(unbuilt)
-        prepared = _prepare_static_item(plan, run, experiment)
+        if not run._state["static_workload_admitted"]:
+            _admit_static_workload(plan, run)
+        if group:
+            # When the Method can group the Plan's points here, this and
+            # every later point without an attempt are held together, and the
+            # points of the templates that it binds are prepared as bindings
+            # (prepare_template_rows). A detached backend sends those in one
+            # job, and the loop waits for that job. A synchronous one (Aer)
+            # runs them below, one attempt each in Plan order. The Method is
+            # asked once, and every other point is prepared on its own.
+            group = False
+            rest = tuple(points)
+            items = run._state["workflow_items"]
+            pending = tuple(later for later in (point, *rest)
+                            if getattr(items.get(later.key), "attempt", None) is None)
+            templates = _row_templates(plan, run, pending)
+            if templates is not None:
+                handles = prepare_template_rows(plan, run=run, points=pending, templates=templates)
+                if handles and callable(getattr(run.backend, "launch", None)):
+                    run._state["workflow_current"] = tuple(handles)
+                    try:
+                        submit_detached(tuple(handles.values()), run=run)
+                    finally:
+                        run._state["workflow_current"] = None
+                    return None
+            points = iter(rest)
+        prepared = _prepare_static_item(plan, run, point)
         if isinstance(prepared, PendingPreparation):
             return None
         run._state["workflow_current"] = key
         try:
-            chunk = submit_experiment(prepared, run=run)
+            # A synchronous outcome commits with its collection ordinals.
+            chunk = submit_experiment(prepared, run=run, collect=True)
         finally:
             run._state["workflow_current"] = None
         chunks = chunk if isinstance(chunk, tuple) else (chunk,)
         if not all(isinstance(item, ObservationChunk) for item in chunks):
             return None
-        for item in chunks:
-            run.collect(item)
+        # Reported once the submission returns, so an interruption in the
+        # progress observer cannot reach its error handling.
+        collected = len(run._state["chunks"])
+        for done in range(collected - len(chunks) + 1, collected + 1):
+            run.progress("collect", done, None)
     run.progress("analyze", 0, 1)
     result = plan.method.analyze(plan, run.data, settings={})
     run.progress("analyze", 1, 1)
@@ -4758,27 +5585,25 @@ def _prepare_host(point, construction, observation, runtime, charge, run, items,
     return handle
 
 
-def _submit_host(prepared, *, run, checkpoint_sequence=None):
+def _submit_host(prepared, *, run, checkpoint_sequence=None, collect=False):
     """Reserve one bound host invocation and atomically save its declared scalar/array
     outputs.
 
     The reserved event commits before the kernel runs (commit 4 of the module
     docstring). There is no submission record, because nothing leaves the
     process. The chunk, the completed event and the kernel's arrays then commit
-    together (commit 6). The kernel must return exactly its declared scalars in
+    together (commit 6), with its collection ordinal when ``collect`` is
+    True. The kernel must return exactly its declared scalars in
     their declared frames, and each declared array or an explicit reason that it
     is unavailable. An ordinary exception raised by the kernel, or by these
     output checks after it returns, makes the attempt failed. An interruption
     such as ``KeyboardInterrupt`` leaves it uncertain (``Run._fail_attempt``).
     """
-    from nwqlib._run_journal import _json_bound
-
     run.plan.method.before_submit(run.plan, (prepared,), run=run)
     kernel, native = prepared._native.record, prepared._native
     if native._realization_id is not None and native._realization_id != prepared.realization.content_id:
         raise ValueError("host closure differs from its prepared point")
-    expected_bytes = readout_bytes(prepared, metadata_bytes=run.limits.max_completion_metadata_bytes,
-            max_bytes=run.limits.max_data_bytes)
+    expected_bytes = readout_bytes(prepared, max_bytes=run.limits.max_data_bytes)
     run.check_capacity(data_bytes=expected_bytes)
     attempt = str(uuid4())
     event = ConsumptionEvent(execution="host_kernel", attempt=attempt, prepared_id=prepared.record.content_id,
@@ -4830,12 +5655,8 @@ def _submit_host(prepared, *, run, checkpoint_sequence=None):
             artifacts=tuple(manifests), applications=output.applications, unavailable=output.unavailable,
             physical_scale=output.physical_scale, physical_scale_unavailable=output.physical_scale_unavailable,
             selected_kernel_id=kernel.content_id, source=kernel.implementation)
-        # Declared receipts were reserved with the outputs. Only receipt bytes
-        # beyond the declaration spend the variable metadata allowance.
-        credit = (min(kernel.application_bytes, _json_bound(output.applications, run.limits.max_data_bytes))
-                  if kernel.application_bytes else 0)
         event = event.revise(status="completed", finished=_now(), observation_id=chunk.content_id)
-        run._finish_attempt(index, event, chunk, metadata_credit=credit)
+        run._finish_attempt(index, event, chunk, collect=collect)
         return chunk
     except BaseException as error:
         run._fail_attempt(index, event, error)
@@ -4872,9 +5693,9 @@ def _publish_amplitudes(prepared, result, *, run, attempt, result_key="0", point
     validate_amplitude_masses(declaration, values)
     job, manifests = result.metadata["native_job_id"], ()
     if array is not None:
-        # reduce_amplitudes returns a new array that nothing else holds, so it
-        # is handed over to publication instead of being copied again.
-        handle = run.artifacts._publish(array, output=declaration.output, private=True, provenance=dict(
+        # reduce_amplitudes returns a new array with finite entries that nothing
+        # else holds, so publication neither copies nor scans it again.
+        handle = run.artifacts._publish(array, output=declaration.output, private=True, finite=True, provenance=dict(
             plan_id=run.plan.content_id, realization_id=prepared.realization.content_id,
             construction_id=prepared.record.construction_id, producer_id=declaration.content_id,
             acquisition=(run.run_id, attempt, job, result_key), source=declaration.source))
@@ -4900,15 +5721,18 @@ def restore_prepared(prepared_id, *, run, for_submission=False):
     decode results of a known job. A handle for new execution also needs the
     saved native payload, which a Run with a folder saved with the
     preparation record.
+
+    A handle restored here adds nothing to ``native_held``, and its payload is not
+    compared with ``max_bytes`` before it is read. Only Aer keeps a memory
+    estimate with its saved circuit, which ``PreparedHandle._restore_native``
+    compares before the file is read. ``_held_bytes`` says what this leaves out on
+    other backends.
     """
     record = run.prepared_artifact(prepared_id)
     experiment, construction = record.realization._selected_construction(run.plan)
     admission = _Admission(construction.program)
-    try:
-        admission.admitted().require_ready()
-        setting, observation = experiment._resolved_observation(admission, construction_id=construction.content_id)
-    except AdmissionStepsExceeded as error:
-        raise _named_admission_refusal(run.plan, error, "restoration") from error
+    admission.admitted().require_ready()
+    setting, observation = experiment._resolved_observation(admission, construction_id=construction.content_id)
     if record.plan_id != run.plan.content_id or record.observation != observation or record.construction_id != construction.content_id:
         raise ValueError("saved preparation differs from its original selected science/readout")
     items = _admit_readout(observation, width=sum(len(reg.bits) for reg in record.quantum_layout),
@@ -4925,7 +5749,12 @@ def restore_prepared(prepared_id, *, run, for_submission=False):
         if for_submission and record.payload is not None:
             if run._state["journal"] is None:
                 raise ValueError("new execution requires its original saved native bytes")
-            payload = run._state["journal"].read_payload(record.payload)
+            # The records of one template share its saved circuit, which is
+            # read once per open Run.
+            shared = run._state.setdefault("template_payloads", {}) if record.template is not None else {}
+            payload = shared.get(record.payload.content_id) or run._state["journal"].read_payload(record.payload)
+            if record.template is not None:
+                shared[record.payload.content_id] = payload
         if for_submission and record.payload is None and getattr(run.backend, "requires_prepared_payload", True):
             raise ValueError("saved preparation has no native payload for new execution")
         native = run.backend.restore_native(record, payload, run=run)
@@ -4950,7 +5779,13 @@ def submit_detached(prepared, *, run, checkpoint_sequences=None):
     can find the job. An error while starting the job marks the submission
     and its attempts uncertain, with their work still counted, because the
     provider may have accepted the request before the error reached this
-    process. The job is never resubmitted or replaced. Read its results with
+    process. A request that the backend can refuse from its saved bytes and
+    configuration is refused before the submission is saved, with nothing
+    counted, so `Run.extend_limits` can lead past it. Each circuit is one
+    attempt with its own shots, also when the
+    backend sends several circuits as rows of one parameterized unit, and
+    the submission records each circuit's position in the job before it
+    starts. The job is never resubmitted or replaced. Read its results with
     `run.resume()`, `run.wait()` or `refresh_submissions`.
 
     Args:
@@ -4970,8 +5805,9 @@ def submit_detached(prepared, *, run, checkpoint_sequences=None):
             a circuit belongs to another backend, or `checkpoint_sequences`
             does not match `prepared`.
     """
-    # The backend admits the whole batch and the Method's ``before_submit``
-    # runs before the intent commits (commit 4 of the module docstring). Then
+    # The Method's ``before_submit`` runs and the backend admits the whole
+    # batch, by ``admit_batch`` and by ``admit_submission`` for what depends on
+    # the Run's limits, before the intent commits (commit 4 of the module docstring). Then
     # ``launch`` starts the provider job and the returned locator is
     # acknowledged (commit 5). Only the backend's ``reconcile`` (by the
     # original submission identity) can recover a job whose acknowledgement
@@ -4991,20 +5827,30 @@ def submit_detached(prepared, *, run, checkpoint_sequences=None):
         _check_scope(run, handle.realization)
         if handle.record.backend_configuration_id != run.backend.content_id:
             raise ValueError("batch contains another backend's prepared artifact")
+    # The backend admits the batch before the intent, after the Method's
+    # check, and launch sends these same native objects.
+    run.plan.method.before_submit(run.plan, prepared, run=run)
     natives = tuple(handle._native for handle in prepared)
     run.backend.admit_batch(natives)
-    run.plan.method.before_submit(run.plan, prepared, run=run)
+    admit_submission = getattr(run.backend, "admit_submission", None)
+    if callable(admit_submission):
+        admit_submission(natives, run=run)
+    # An adapter that places several items in one provider unit names each
+    # item's position (result_keys), which the intent saves before launch.
+    result_keys = getattr(run.backend, "result_keys", None)
+    keys = result_keys(natives) if callable(result_keys) else tuple(str(index) for index in range(len(natives)))
     identity, started = str(uuid4()), _now()
     events, items = [], []
     for index, handle in enumerate(prepared):
         observation, attempt = handle.record.observation, str(uuid4())
         events.append(ConsumptionEvent(attempt=attempt, prepared_id=handle.record.content_id, submission=identity,
             status="reserved", started=started, shots=observation.shots, evaluations=int(observation.kind != "counts"),
-            data_bytes_reserved=readout_bytes(handle, metadata_bytes=run.limits.max_completion_metadata_bytes,
-            max_bytes=run.limits.max_data_bytes, run=run, attempt=attempt, result_key=str(index)),
+            data_bytes_reserved=readout_bytes(handle, max_bytes=run.limits.max_data_bytes, run=run, attempt=attempt,
+                                              result_key=keys[index]),
             provider_managed_sampling=observation.kind == "estimated_observable",
             checkpoint_sequence=None if checkpoint_sequences is None else checkpoint_sequences[index]))
-        items.append(SubmissionItem(attempt=attempt, prepared_id=handle.record.content_id, item=index, result_key=str(index)))
+        items.append(SubmissionItem(attempt=attempt, prepared_id=handle.record.content_id, item=index,
+                                    result_key=keys[index]))
     submission = SubmissionRecord(submission_id=identity, run_id=run.run_id, backend=prepared[0].record.target,
                                   items=tuple(items), status="intent", started=started)
     installed = run._begin_submission(submission, tuple(events), tuple(handle.record for handle in prepared))
@@ -5015,8 +5861,10 @@ def submit_detached(prepared, *, run, checkpoint_sequences=None):
     except BaseException as error:
         if not run._state["storage_failed"]:
             previous = run._state["submissions"][identity]
+            # The exception's type keeps the text nonempty for KeyboardInterrupt()
+            # and TimeoutError(), which have no message of their own.
             value = previous.revise(status="uncertain", failure=f"{type(error).__name__}: {error}")
-            failed = [(index, event.revise(status="uncertain", failure=str(error))) for index, event in installed]
+            failed = [(index, event.revise(status="uncertain", failure=value.failure)) for index, event in installed]
             run._write((("submission", identity, value), *(("event", event.attempt, event) for _, event in failed)))
             run._state["submissions"][identity] = value
             for index, event in failed:
@@ -5076,7 +5924,13 @@ def refresh_submissions(*, run: Run):
     counted. If reading a job fails, the failure is recorded on its
     submission and the original exception propagates, with the job's
     locator, counted work and earlier results kept, so a later call can read
-    the same job again.
+    the same job again. After `Run.cancel`, each job is sent its cancellation
+    before it is read, and an error from either step does not keep the other
+    jobs from theirs. A failed request does not stop the read of its own job, so
+    what the read finds is saved first, including the result of a job that
+    had already ended. The first error is raised after all the jobs. When the
+    request and the read of one job both fail, the request's error is raised
+    and names the read's failure, and the submission records both.
 
     Args:
         run (Run): The Run whose pending jobs are read.
@@ -5091,10 +5945,12 @@ def refresh_submissions(*, run: Run):
     # is acknowledged (commit 5) before the refresh reads the job. A
     # cancellation request is written before it is sent
     # (``_request_cancellation``), and a failed refresh is recorded on its
-    # submission (``_record_refresh_failure``).
+    # submission (``_record_refresh_failure``). The error of a failed request
+    # waits until both transactions have run, so a provider that refuses to
+    # cancel a finished job cannot keep that job's result from being saved.
     with run._lock:
         run._ensure_open()
-        observed = []
+        observed, first_error = [], None
         for submission_id in tuple(run._state["pending_submissions"]):
             submission = run._state["submissions"][submission_id]
             pending = tuple(item for item in submission.items if item.attempt not in run._state["by_attempt"])
@@ -5104,6 +5960,7 @@ def refresh_submissions(*, run: Run):
             if submission.locator is None and not callable(getattr(run.backend, "reconcile", None)):
                 continue  # Method may still publish a lawful partial Result before recovery fails.
             run._backend_notice()
+            held = None
             try:
                 handles, natives = _refresh_natives(run, submission, pending)
                 if submission.locator is None:
@@ -5111,7 +5968,7 @@ def refresh_submissions(*, run: Run):
                     if locator is None:
                         continue
                     submission = run._ack_submission(submission_id, locator)
-                submission = _request_cancellation(run, submission_id, submission)
+                submission, held = _request_cancellation(run, submission_id, submission)
                 update = run.backend.refresh(submission.locator, natives, run=run)
                 submission, revised = _commit_refresh_status(run, submission_id, submission, update)
                 if any(_publishes_arrays(handle.record.observation) for handle in handles.values()):
@@ -5128,9 +5985,15 @@ def refresh_submissions(*, run: Run):
                         run._state["pending_output"].pop(item.attempt, None)
                 if update.error is not None:
                     raise update.error
+                if held is not None:
+                    raise held
             except Exception as error:
-                _record_refresh_failure(run, submission_id, error)
-                raise
+                surfaced = _record_refresh_failure(run, submission_id, error, held)
+                if run.cancel_requested is None:
+                    raise
+                first_error = first_error or surfaced
+        if first_error is not None:
+            raise first_error
         return tuple(observed)
 
 
@@ -5178,24 +6041,41 @@ def _refresh_natives(run, submission, pending):
 
 
 def _request_cancellation(run, submission_id, submission):
-    """Forward a Run cancellation to one unfinished job at most once, and return the submission.
+    """Forward a Run cancellation to one unfinished job at most once, and return the submission and the request's error.
 
     The request is written on the submission before the backend call, so a
     process that stops during the call reopens with the request recorded and
-    never sends it a second time. Only a later refresh reports whether the job
-    was cancelled, and the reserved work stays counted.
+    never sends it a second time. A call that raises an ordinary ``Exception``
+    did not deliver a request that this process can count on, so only this
+    submission's flag returns to unset, the Run's own request stays, and a later
+    refresh or ``Run.cancel`` sends it again. That error is returned, or None
+    without one, and ``refresh_submissions`` raises it after reading the job,
+    because the provider may be refusing a job that already ended. A failed
+    write to the run log still raises here, and no read follows it. Only a later
+    refresh reports whether the job was cancelled, and the reserved work stays
+    counted. A job recorded as ended receives no request. That includes one
+    that ended without a result (``terminal_without_result``), so a refused
+    request cannot hide the recovery failure that ``Run.wait`` reports for it.
     """
+    held = None
     if (run.cancel_requested is not None and submission.cancel_requested is None
-            and submission.status not in {"completed", "failed", "cancelled"}):
+            and submission.status not in {"completed", "failed", "cancelled"}
+            and not submission.terminal_without_result):
         submission = submission.revise(cancel_requested=run.cancel_requested)
         run._write((("submission", submission_id, submission),))
         run._state["submissions"][submission_id] = submission
         cancel = getattr(run.backend, "cancel", None)
         if callable(cancel):
-            cancel(submission.locator, run=run)
+            try:
+                cancel(submission.locator, run=run)
+            except Exception as error:
+                submission = submission.revise(cancel_requested=None)
+                run._write((("submission", submission_id, submission),))
+                run._state["submissions"][submission_id] = submission
+                held = error
         else:
             run._state["warnings"].append("backend has no cancellation operation; original job remains observable")
-    return submission
+    return submission, held
 
 
 def _commit_refresh_status(run, submission_id, submission, update):
@@ -5222,7 +6102,7 @@ def _commit_refresh_status(run, submission_id, submission, update):
                 else _now() if terminal else None)
     revised = submission.revise(status=update.status, provider_status=update.provider_status,
         failure=update.failure, refresh_failure=None, native_simulations=update.native_simulations,
-        finished=finished)
+        finished=finished, terminal_without_result=update.terminal_without_result)
     # A revision records its parent. Every other field is compared.
     if all(getattr(revised, name) == getattr(stored, name) for name in type(stored).model_fields
            if name != "parent_id"):
@@ -5322,23 +6202,36 @@ def _commit_refresh_outcomes(run, submission_id, revised, changes, chunks):
     return published
 
 
-def _record_refresh_failure(run, submission_id, error):
-    """Record a failed refresh on its submission before the caller re-raises ``error``.
+def _record_refresh_failure(run, submission_id, error, held):
+    """Record a failed refresh on its submission and return the error that the caller raises.
 
-    An unfinished array batch is discarded first. After a failed write to
+    ``held`` is the error of this refresh's failed cancellation request, or
+    None (``_surfaced_failure``). The record is written after the refresh's own
+    commits, because a good status clears the previous one
+    (``_commit_refresh_status``) and this is the only saved trace of a failed
+    request. An unfinished array batch is discarded first. After a failed write to
     the run log nothing more is written, because the Run must be reopened
     from its folder. The original job locator stays saved. When the
-    submission has a locator, a note added to ``error`` names that saved job
-    and says that no replacement job was submitted.
+    submission has a locator, a note added to the returned error names that
+    saved job, says that no replacement job was submitted and gives the next step.
     """
+    from nwqlib._remote_preparation import _surfaced_failure
     run._abort_publications()
+    surfaced, text = _surfaced_failure(error, held)
     if run._state["storage_failed"]:
-        return
+        return surfaced
     previous = run._state["submissions"][submission_id]
-    interrupted = previous.revise(refresh_failure=f"{type(error).__name__}: {error}")
+    interrupted = previous.revise(refresh_failure=text)
     run._write((("submission", submission_id, interrupted),))
     run._state["submissions"][submission_id] = interrupted
     if previous.locator is not None:
-        error.add_note(f"Original {previous.locator.provider} job {previous.locator.job_id} is stored; "
-                       "no replacement job was submitted. Resolve the retrieval failure, then call "
-                       "refresh_submissions on the same run.")
+        next_step = ("Its cancellation request failed. While the job has not ended, a later Run.cancel or "
+                     "refresh_submissions on the same run sends the request again and reads the job. Once the job "
+                     "is recorded as ended, no further request is sent. Run.wait returns the Result when the saved "
+                     "outcomes complete it. Otherwise a cancelled Run starts no new work and Run.wait raises "
+                     "RuntimeError naming its folder."
+                     if held is not None else
+                     "Resolve the retrieval failure, then call refresh_submissions on the same run.")
+        surfaced.add_note(f"Original {previous.locator.provider} job {previous.locator.job_id} is stored; "
+                          f"no replacement job was submitted. {next_step}")
+    return surfaced

@@ -236,3 +236,72 @@ def test_native_signed_centered_two_qubit_public_chain(monkeypatch, terms):
     # trajectory, inverse included, contains no matrix unitary.
     receipt, = run.data.receipts
     assert "unitary" not in receipt.probability_window_exclusions
+
+
+def test_moment_reduction_is_exact_for_counts_and_within_its_sum_bound_for_probabilities():
+    """Counts reduce to correctly rounded quotients of exact integers, also past int64.
+
+    Probabilities reduce to a NumPy sum within gamma_(M-1) times the sum of
+    their magnitudes of the exact rational sum, the bound of
+    ``reduce_moments``. The vectorized decoder agrees with the scalar
+    ``outcome`` at the end outcomes 0 and 2**64 - 1, and on a padding
+    address.
+    """
+    from fractions import Fraction
+    from types import SimpleNamespace
+    from nwqlib.algorithms.lanczos.readout import outcome, reduce_moments, signed_outcomes
+
+    values = np.array([1, -1, 0, 1], dtype=np.int8)
+    for weights in (np.array([3, 5, 7, 2], dtype=np.int64),
+                    np.array([2**62, 2**62 - 1, 5, 2**61], dtype=np.int64)):
+        statistics = reduce_moments(values, weights, counts=True)
+        exact = [int(v) * int(w) for v, w in zip(values, weights)]
+        population = sum(int(w) for w in weights)
+        assert statistics.shots == population
+        assert statistics.mean == float(Fraction(sum(exact), population))
+        assert statistics.second_moment == float(Fraction(sum(abs(x) for x in exact), population))
+    rng = np.random.default_rng(5)
+    signs = rng.integers(-1, 2, size=4096).astype(np.int8)
+    probabilities = rng.random(4096) * 2.0**-12
+    statistics = reduce_moments(signs, probabilities, counts=False)
+    exact = sum(int(s) * Fraction(p) for s, p in zip(signs, probabilities))
+    u, m = 2.0**-53, len(probabilities)
+    gamma = (m - 1) * u / (1 - (m - 1) * u)
+    assert abs(Fraction(statistics.mean) - exact) <= Fraction(gamma) * sum(map(Fraction, probabilities))
+    assert statistics.shots is None
+    readout = SimpleNamespace(index_width=2, signs=np.array([1, -1, 1], dtype=np.int8),
+                              masks=np.array([[3], [1 << 61], [(1 << 62) - 1]], dtype=np.uint64))
+    readout.wide_masks = lambda: [int(mask) for mask in readout.masks[:, 0]]
+    ends = np.array([0, 2**64 - 1, 3, 2, (1 << 63) | 1], dtype=np.uint64)
+    for kind in ("select", "reflection"):
+        vectorized = signed_outcomes(ends, index_width=2, histogram_width=64, signs=readout.signs,
+                                     masks=readout.masks[:, 0], reflection=kind == "reflection")
+        assert vectorized.tolist() == [outcome(readout, kind, int(bits)) for bits in ends]
+
+
+def test_exact_readout_wider_than_twenty_bits_plans_runs_and_meets_the_data_limit():
+    """An exact trajectory marginal on 21 qubits is bounded by the Run's data limit alone.
+
+    Lanczos for H = Z_0 + 0.5 X_1 on 20 qubits from |0...0> with two Krylov
+    directions reads its odd moments from 21 measured qubits, the system
+    and one index qubit. The Run's ``max_data_bytes`` of one million refuses
+    the 2**21-entry marginal before execution, and the default limits run
+    it. From |0...0> the trial space holds |0...0> and qubit 1 flipped,
+    where H is [[1, 0.5], [0.5, 1]], so the projected value is 0.5.
+    """
+    import nwqlib
+    from nwqlib.algorithms.lanczos import Lanczos
+    from nwqlib.execution import ExecutionLimits
+    from nwqlib.operators import ingest_pauli
+    from nwqlib.problems import ingest_occupation
+
+    n = 20
+    terms = (("I" * (n - 1) + "Z", 1.0), ("I" * (n - 2) + "XI", 0.5))
+    problem = nwqlib.Eigenproblem(A=ingest_pauli(terms, num_qubits=n))
+    method = Lanczos(initial_state=ingest_occupation("0" * n, num_qubits=n), krylov_dimension=2)
+    plan = nwqlib.plan(problem, method=method, execution="quantum", seed=3)
+    assert max(setting.histogram_width for setting in plan.reconstruction.settings) == 21
+    with pytest.raises(ValueError, match=r"2\*\*21 entries, more than max_items=.*max_data_bytes=1000000"):
+        Run(plan, limits=ExecutionLimits(max_data_bytes=10**6)).wait(timeout=60, poll_interval=0)
+    result = Run(plan).wait(timeout=300, poll_interval=0)
+    assert result.eigenvalue == pytest.approx(0.5, abs=1e-12, rel=0)

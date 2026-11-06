@@ -10,7 +10,6 @@ from uuid import uuid4
 from nwqlib.core.records import Float64, Source
 from nwqlib.evidence import Evidence
 from nwqlib.ir import Binding
-from nwqlib.operators.access import DEFAULT_INPUT_BYTES, _check_bytes
 from nwqlib.resources.records import ResourceLaw
 from .records import BlockSemantics, SelectedDefinition
 from .selection import SelectedBlock, _no_arguments, _signature
@@ -98,19 +97,19 @@ def _encoding_record(name, *, operator, alpha, error, ancillas, system_qubits,
         fields["cost_parameters"] += (Binding(parameter="snapshot_data_bytes",value=snapshot_bytes),)
     if query is not None:
         fields["cost_parameters"] += tuple(Binding(parameter=key,value=value) for key,value in census)
-        law_source=Source(name="encoding.native.family_law",version="2" if family=="dense_dilation" else "1",domain=family,
+        law_source=Source(name="encoding.native.family_law",version="2" if family in ("dense_dilation","banded") else "1",domain=family,
             reference="caller-supplied family census; nwqlib.backends.resources.block_encoding_per_query_cx")
         fields["resource_laws"]=(ResourceLaw(metric="cx",basis="cx",
             value=Float64(value=query),interpretation="estimate",bindings=fields["cost_parameters"],
             evidence=Evidence(kind="user_assertion",source=law_source),
             assumptions=("per-query synthesis model of the caller-asserted family; native length not verified",
-                "SBM arXiv:quant-ph/0406176v5 Table 1 QSD count, which the exact synthesis can exceed" if family=="dense_dilation" else "four caller-supplied exact synthesis counts",
+                "SBM arXiv:quant-ph/0406176v5 Table 1 QSD count, which the exact synthesis can exceed" if family=="dense_dilation" else "caller-supplied exact synthesis counts",
                 "uncontrolled forward query only; controlled/adjoint synthesis remains unknown")),)
     return SelectedDefinition(**fields)
 
 
 def _native_family_census(encoding):
-    """Read only the four named integer counts used by the family's resource formula.
+    """Read only the named integer counts used by the family's resource formula.
 
     Returns ``(census, query)``: the ``(name, count)`` pairs read from the
     encoding metadata and the CX count per query from
@@ -118,7 +117,8 @@ def _native_family_census(encoding):
     counts or a formula value that overflows or is not finite give
     ``((), None)``. A count that is not an ordinary integer raises. The dense
     dilation reads no counts because its formula depends only on the system
-    width.
+    width. A banded encoding has six counts, including its QFT pairs and the
+    CX of its paired-label gates, and a Pauli encoding four.
     """
     import numpy as np
     from nwqlib._validation import integer
@@ -128,7 +128,8 @@ def _native_family_census(encoding):
     if family=="dense_dilation":
         keys=()
     elif family=="banded":
-        keys=("ucrz_multiplexor_gates","ucrz_basis_cx_per_gate","control_diagonal_basis_cx","prep_pair_cx")
+        keys=("qft_pairs","ucrz_multiplexor_gates","ucrz_basis_cx_per_gate","control_diagonal_basis_cx",
+              "prep_pair_cx","paired_label_cx")
     elif family in ("pauli_lcu","multiplexed_pauli"):
         keys=("ucg_core_cx","ucg_completion_diagonal_cx","coefficient_diagonal_cx","prep_pair_cx")
     else:
@@ -156,7 +157,7 @@ def _native_family_census(encoding):
     return tuple(counts.items()),query
 
 
-def select_block_encoding(name, encoding, *, operator, max_bytes=DEFAULT_INPUT_BYTES):
+def select_block_encoding(name, encoding, *, operator, max_bytes=None):
     """Wrap a block-encoding circuit you built as a block that a Program can call.
 
     Pass a `BlockEncoding`, for example from
@@ -177,12 +178,24 @@ def select_block_encoding(name, encoding, *, operator, max_bytes=DEFAULT_INPUT_B
     caller's assertion rather than a verified gate count. Qiskit is imported only
     by this call.
 
+    Of the encoding's metadata the block keeps only three structural facts,
+    each True, False or None (unknown): `"target_operator_is_hermitian"`
+    (A is Hermitian), `"encoded_operator_is_hermitian"` (the encoded block
+    is Hermitian) and `"full_unitary_involution"` (the whole circuit unitary
+    U satisfies `U = U^dagger`, so `U @ U = I`). The builders of
+    `nwqlib.subroutines.block_encoding` derive them from the construction.
+    For a circuit you supply they are your assertion, as the relation is.
+    QSP Hamiltonian evolution reads the first two, and a direct quantum
+    walk on U needs the third.
+
     Args:
         name (str): Signature name of the block.
         encoding (BlockEncoding): The encoding circuit and its metadata.
         operator (OperatorInput): The operator input A.
-        max_bytes (int): Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
-            the stored data of the copied circuit.
+        max_bytes (int | None): Default `None`, the physical memory of this computer. Limit on
+            the coarse byte estimate of the copied circuit, which counts 256
+            bytes per instruction and qubit of each copied circuit plus the
+            parameter data of gates other than Qiskit's standard gates.
 
     Returns:
         block (SelectedBlock): The block, with ports `ancillas` (a qubits, omitted when
@@ -192,10 +205,11 @@ def select_block_encoding(name, encoding, *, operator, max_bytes=DEFAULT_INPUT_B
         TypeError: If `encoding` is not a `BlockEncoding`.
         ValueError: If the circuit width is not ancillas plus system qubits, the
             system width is not log2 of A's power-of-two dimension, alpha is not
-            finite and positive, or a given error bound is not finite and
-            nonnegative.
+            finite and positive, a given error bound is not finite and
+            nonnegative, a structural fact is not True, False or None, or the
+            facts declare an involution whose encoded block is not Hermitian.
     """
-    from nwqlib.subroutines.block_encoding.core import BlockEncoding
+    from nwqlib.subroutines.block_encoding.core import STRUCTURE_FACT_KEYS, BlockEncoding
     from ._qiskit_intake import snapshot_circuit
 
     if type(encoding) is not BlockEncoding:
@@ -203,36 +217,36 @@ def select_block_encoding(name, encoding, *, operator, max_bytes=DEFAULT_INPUT_B
     if encoding.circuit.num_qubits != encoding.num_ancillas+encoding.system_qubits:
         raise ValueError("native encoding circuit differs from its declared widths")
     _validate_encoding(operator, encoding.alpha, encoding.error_bound, encoding.num_ancillas, encoding.system_qubits)
+    facts = {key: encoding.metadata[key] for key in STRUCTURE_FACT_KEYS if key in encoding.metadata}
+    if any(type(value) not in (bool, type(None)) for value in facts.values()):
+        raise ValueError("encoding structural facts must be True, False or None")
+    # A unitary involution is Hermitian, and so is every compression of it.
+    if facts.get("full_unitary_involution") is True and facts.get("encoded_operator_is_hermitian") is False:
+        raise ValueError("an involutory encoding unitary cannot have a non-Hermitian encoded block")
     census,query = _native_family_census(encoding)
     circuit,data_bytes = snapshot_circuit(encoding.circuit, max_bytes=max_bytes)
     record = _encoding_record(name, operator=operator, alpha=encoding.alpha, error=encoding.error_bound,
         ancillas=encoding.num_ancillas, system_qubits=encoding.system_qubits,
         family=encoding.implementation, implementation="encoding.native", work=len(circuit.data),
         snapshot_bytes=data_bytes,census=census,query=query)
-    return SelectedBlock.bind(record, payload=replace(encoding, circuit=circuit, metadata={}),
+    return SelectedBlock.bind(record, payload=replace(encoding, circuit=circuit, metadata=facts),
                               constructor=_encoding_circuit)
 
 
-def construct_block_encoding(block, *, max_bytes=DEFAULT_INPUT_BYTES, max_work=1_000_000_000):
+def construct_block_encoding(block, *, max_bytes=None, max_work=None):
     """Construct the exact selected encoding, only when its Qiskit circuit is built.
 
-    Known construction arrays are checked before dense completion or multiplexor
-    table allocation. This does not bound undocumented Qiskit workspace.
+    The builder checks its known construction arrays before dense completion
+    or multiplexor table allocation, against the physical memory by default
+    and with no work limit unless one is given. This does not bound
+    undocumented Qiskit workspace.
     """
     from nwqlib.subroutines.block_encoding.core import build_block_encoding_from_plan
 
     if block.record.implementation.name == "encoding.native":
         return block._payload
     if block.record.implementation.name == "encoding.planned":
-        plan=block._payload
-        n,a=plan.system_qubits,plan.num_ancillas
-        size=(2 << n)**2 if plan.implementation=="dense_dilation" else (1 << a)*max(1,n)
-        # A cheaper necessary check before the builder runs. The 64 bytes are
-        # one 2x2 complex128 matrix per (label, system qubit) table entry, or
-        # four complex128 values per entry of the 2**(n+1)-dimensional dense
-        # dilation. The builder then checks its own complete byte law.
-        _check_bytes(64*size,max_bytes,"block-encoding construction arrays")
-        return build_block_encoding_from_plan(plan, max_bytes=max_bytes, max_work=max_work)
+        return build_block_encoding_from_plan(block._payload, max_bytes=max_bytes, max_work=max_work)
     raise ValueError("selected block is not a registered native/deferred encoding")
 
 
@@ -249,15 +263,15 @@ def _select_planned_encoding(name, plan, *, operator, dense_svd_selected=False):
     _validate_encoding(operator, plan.alpha, plan.error_bound, plan.num_ancillas, plan.system_qubits)
     n, a = plan.system_qubits, plan.num_ancillas
     size = (2 << n)**2 if plan.implementation=="dense_dilation" else (1 << a)*max(1,n)
-    # Dense completion counts 8D^3 for the SVD, D^3 for the complement and 8D^3
-    # for the unitarity product, D = 2**n. A method that already selected the
-    # SVD frames omits the first term. ENGINEERING_CONSTANTS.md, DEFAULT_MAX_BLOCK_WORK.
+    # Dense completion counts 8D^3 for the SVD and D^3 for the complement,
+    # D = 2**n. A method that already selected the SVD frames omits the first
+    # term. ENGINEERING_CONSTANTS.md, "Dense block-encoding arrays and work".
     # Table families charge 32 work units for each of the 2**a*max(1,n)
     # (label, system qubit) table entries, times max(1,n) system qubits, that
     # is 32*2**a*max(1,n)**2, the same law the block-encoding builder checks
     # against max_work. The untuned coefficient 32 is registered in
     # ENGINEERING_CONSTANTS.md.
-    work = (9 if dense_svd_selected else 17)*(1 << n)**3 if plan.implementation=="dense_dilation" else 32*size*max(1,n)
+    work = (1 if dense_svd_selected else 9)*(1 << n)**3 if plan.implementation=="dense_dilation" else 32*size*max(1,n)
     record = _encoding_record(name, operator=operator, alpha=plan.alpha, error=plan.error_bound,
         ancillas=a, system_qubits=n, family=plan.implementation, implementation="encoding.planned",work=work)
     return SelectedBlock.bind(record, payload=plan, constructor=_encoding_circuit)

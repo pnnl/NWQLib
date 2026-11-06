@@ -21,6 +21,50 @@ def test_spe_verification_compares_the_lowest_cluster_and_declared_overlap(monke
     assert values["overlap_threshold"] == .3
 
 
+def _cluster_facts(energies, **options):
+    """Verify one diagonal Hamiltonian at tau = 1/spread and return its record's facts by name."""
+    from nwqlib.algorithms.qpe import QCELS
+
+    spread = max(energies) - min(energies) or 1.0
+    state = np.full(len(energies), 1 / np.sqrt(len(energies)))
+    result = solve(Eigenproblem(A=np.diag(energies)), execution="classical", seed=7,
+                   method=QCELS(initial_state=state, tau=1 / spread, num_times=4, max_time=4 / spread, grid_size=64))
+    receipt, _ = result.verify(checks=QPEVerification(tolerance=1e30, **options))
+    return {item.fact.quantity: item.fact for item in receipt.applications[0].facts}
+
+
+@pytest.mark.parametrize("scale, offset", [(1.0, 0.0), (1e-13, 0.0), (1e7, 0.0), (1.0, 5.0), (1e-13, 2e-13)])
+def test_default_clusters_follow_the_units_of_the_hamiltonian_and_ignore_an_offset(scale, offset):
+    """For E' = lambda E + c the span scales with lambda and ignores c, so the partition of a separated spectrum stays.
+
+    The pair differs by 1e-10 lambda, below a/10 with a = 1e-8 span = 1.8e-8 lambda, and the other gaps are above
+    10 a, so rounding of a diagonal input cannot move a value across the window (``verification._group_tolerance``).
+    A fixed window of 1e-8 merges this whole spectrum at scale 1e-13 and splits the pair at scale 1e7.
+    """
+    facts = _cluster_facts([scale * e + offset for e in (-1.3, -1.3 + 1e-10, -.4, .5)])
+    assert facts["cluster_count"].value.value == 3
+    assert facts["cluster_dimension"].value.value == 2
+    assert facts["group_tolerance"].value.value == pytest.approx(1.8e-8 * scale, rel=1e-12, abs=0)
+    assert facts["estimated_resolved"].value.value == 1
+    assert facts["estimated_resolved"].assumptions == ()
+
+
+def test_explicit_cluster_tolerance_and_the_rounding_estimate_keep_their_own_meaning():
+    # An explicit tolerance is used as given: 1e-11 separates the pair that the default keeps together.
+    facts = _cluster_facts([-1.3, -1.3 + 1e-10, -.4, .5], group_atol=1e-11)
+    assert facts["cluster_count"].value.value == 4 and facts["group_tolerance"].value.value == 1e-11
+    # A single-valued spectrum has tolerance 0, one cluster and no gap for rounding to split.
+    facts = _cluster_facts([.7, .7])
+    assert facts["cluster_count"].value.value == 1 and facts["group_tolerance"].value.value == 0
+    assert facts["estimated_resolved"].value.value == 1
+    # max|E|/span = 3.3e8 puts a = 1e-8 span below D u max|E| = 4 * 2**-53 * 1e9. The flag warns and names the
+    # remedy, and the clusters are still reported as formed.
+    facts = _cluster_facts([1e9, 1e9 + 1, 1e9 + 2, 1e9 + 3])
+    assert facts["group_tolerance"].value.value == pytest.approx(3e-8, rel=1e-12, abs=0)
+    assert facts["cluster_count"].value.value == 4 and facts["estimated_resolved"].value.value == 0
+    assert "group_atol" in facts["estimated_resolved"].assumptions[0]
+
+
 @pytest.mark.parametrize("access", ["dense", "pauli"])
 def test_rwpe_noninteger_time_has_the_declared_native_interference_probability(access):
     from qiskit.quantum_info import Statevector
@@ -191,6 +235,81 @@ def test_reference_limit_precedes_reference_work(monkeypatch, phase):
         result.verify(checks=QPEVerification(tolerance=0.1, max_work=1))
 
 
+def test_classical_eigendecomposition_is_charged_eighty_matrix_bytes():
+    """Classical QPE declares 80*D**2 bytes for the eigendecomposition, which verification then reuses.
+
+    For the 2-dimensional Hamiltonian of make_plan the host routine's
+    workspace is 80*4 bytes. A verification of its Result reuses that
+    eigensystem and counts only the QR of its two one-vector clusters,
+    48*2 bytes at a time, so it is refused at half that and runs at it.
+    """
+    selected = make_plan(execution="classical")
+    (kernel,) = selected.construction.kernels
+    assert [item.bytes for item in kernel.workspace] == [80 * 4]
+    result = solve(selected)
+    with pytest.raises(ValueError, match="cluster QR .* needs 96 bytes. Raise QPEVerification.max_bytes to at least 96"):
+        result.verify(checks=QPEVerification(tolerance=1.0, max_bytes=48))
+    receipt, _ = result.verify(checks=QPEVerification(tolerance=1.0, max_bytes=96))
+    assert receipt.applications
+
+
+def test_verification_counts_the_eigendecomposition_only_when_computed_and_the_qr_by_cluster(monkeypatch):
+    """QPEVerification counts the QR of each cluster at its size, and an eigendecomposition only when it runs one.
+
+    For diag(-0.65, -0.65, 0.55, 0.7) the clusters have 2, 1 and 1
+    eigenvectors, so reusing the stored spectrum counts
+    qr_work(4, 2) + 2*qr_work(4, 1) + 16*4*4 = 432 units and 48*4*2 bytes
+    for three QR calls. With the eigensystem removed from the context, the
+    eigendecomposition adds hermitian_eigensystem_work(4) = 1024 units,
+    refused before it runs. Each refusal names only the exceeded limit.
+    """
+    from nwqlib._linalg_laws import hermitian_eigensystem_work, qr_work
+    from nwqlib.algorithms.qpe import SPE, numerical
+    from nwqlib.algorithms.qpe import method as owner, verification
+
+    result = solve(Eigenproblem(A=np.diag([-.65, -.65, .55, .7])), execution="classical",
+        method=SPE(initial_state=[np.sqrt(.15), np.sqrt(.15), np.sqrt(.35), np.sqrt(.35)], tau=1.,
+                   overlap_lower_bound=.3, num_samples=8, fourier_degree=4, grid_size=64), seed=7)
+    law = qr_work(4, 2) + 2 * qr_work(4, 1) + 16 * 4 * 4
+    assert law == 432 and hermitian_eigensystem_work(4) == 1024
+    calls = []
+    qr, eigensystem = np.linalg.qr, numerical.nominal_eigensystem
+    monkeypatch.setattr(np.linalg, "qr", lambda *a, **k: calls.append("qr") or qr(*a, **k))
+    monkeypatch.setattr(numerical, "nominal_eigensystem",
+                        lambda *a, **k: calls.append("eigensystem") or eigensystem(*a, **k))
+
+    def verify(**limits):
+        calls.clear()
+        receipt, _ = result.verify(checks=QPEVerification(tolerance=.1, **limits))
+        return {item.parameter: item.value for item in receipt.applications[0].arguments}
+
+    with pytest.raises(ValueError, match="cluster QR .* 432 work units. Raise QPEVerification.max_work to at least 432"):
+        verify(reuse_only=True, max_work=law // 2)
+    assert calls == []
+    assert verify(reuse_only=True, max_work=law)["known_work"] == law and calls == ["qr"] * 3
+    with pytest.raises(ValueError, match="needs 384 bytes. Raise QPEVerification.max_bytes") as refused:
+        verify(reuse_only=True, max_bytes=192)
+    assert "max_work" not in str(refused.value)
+    monkeypatch.setattr(verification, "memory_limit", lambda value: 100 if value is None else value)
+    with pytest.raises(ValueError, match="384 bytes, above the physical memory 100 of this computer") as refused:
+        verify(reuse_only=True)
+    assert "max_work" not in str(refused.value) and "Raise" not in str(refused.value)
+    monkeypatch.undo()
+    check = owner._check_context
+
+    def without_eigensystem(context, *args):
+        check(context, *args)
+        context["eigensystem"] = None
+
+    monkeypatch.setattr(owner, "_check_context", without_eigensystem)
+    monkeypatch.setattr(numerical, "nominal_eigensystem",
+                        lambda *a, **k: calls.append("eigensystem") or eigensystem(*a, **k))
+    with pytest.raises(ValueError, match="eigendecomposition .* 1024 work units"):
+        verify(max_work=512)
+    assert calls == []
+    assert verify(max_work=1024)["known_work"] == 1024 + law and calls[0] == "eigensystem"
+
+
 def test_static_same_seed_rejects_before_second_submission(monkeypatch):
     from nwqlib import prepare, submit
     from nwqlib.core.planning import RandomStreams
@@ -335,3 +454,90 @@ def test_saved_samples_load_without_estimator_work(readout, tmp_path, monkeypatc
     folder = result.save(tmp_path / "legal")
     loaded = load_result(folder)
     assert loaded.samples == result.samples and loaded.data.observations == result.data.observations
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_unitary_clusters_follow_the_first_member_rule_across_the_branch_cut(seed):
+    """Unitary eigenvalues group as the direct rule groups them, including a cluster across +-pi.
+
+    The direct rule scans the phase-ordered values and gives each unassigned
+    value a cluster of every unassigned value within atol of it, in phase
+    order. Clusters near pi and -pi, values just outside atol and repeated
+    phases are included.
+    """
+    from nwqlib.algorithms.qpe import numerical
+    from nwqlib.algorithms.qpe.verification import _groups
+
+    rng = np.random.default_rng(seed)
+    atol = 1e-3
+    centers = np.concatenate([[np.pi - 2e-4, -np.pi + 3e-4, 0.5, 0.5 + 1.5 * atol], rng.uniform(-np.pi, np.pi, 6)])
+    phases = np.concatenate([center + rng.uniform(-0.6 * atol, 0.6 * atol, rng.integers(1, 4)) for center in centers])
+    phases = np.concatenate([phases, phases[:3]])
+    values = np.exp(1j * phases)
+    angles = np.angle(values)
+    ordered = sorted(range(len(angles)), key=lambda index: float(angles[index]))
+    assigned, expected = set(), []
+    for index in ordered:
+        if index not in assigned:
+            group = [c for c in ordered if c not in assigned
+                     and abs(numerical.angle_principal(float(angles[c] - angles[index]))) <= atol]
+            assigned.update(group)
+            expected.append(group)
+    groups = _groups(values, tau=None, atol=atol)
+    assert groups == expected
+    assert any(min(angles[g]) < -3 and max(angles[g]) > 3 for g in groups)
+
+
+def test_unitary_eigendecomposition_is_counted_as_a_complex_schur_decomposition(monkeypatch):
+    """A unitary target counts complex_schur_work, 13*8 + 32*4 = 232 units for D = 2, where a Hamiltonian counts 192.
+
+    Classical planning refuses half of the Schur count plus the projection,
+    296 = 232 + 16*4. A verification that diagonalizes again is refused at
+    116 before the Schur decomposition and passes at 232, 336 in
+    all with its cluster QR. Reusing the stored spectrum counts the 104 of
+    the QR alone.
+    """
+    from nwqlib.algorithms.qpe import QCELS, method as owner, numerical
+    from nwqlib.operators import ingest_dense
+    from nwqlib.problems import Eigenphase, SpectralEstimation
+
+    assert numerical.nominal_eigensystem_work(2, kind="unitary") == 232
+    assert numerical.nominal_eigensystem_work(2, kind="hamiltonian") == 192
+    theta = np.array([.25, .7])
+    basis = np.array([[1, 1], [1, -1]], complex) / np.sqrt(2)
+    problem = SpectralEstimation(unitary=ingest_dense((basis * np.exp(1j * theta)) @ basis.conj().T),
+                                 initial_state=basis @ np.sqrt([.75, .25]))
+
+    def method(**limits):
+        return QCELS(num_times=4, max_time=8, **limits)
+
+    with pytest.raises(ValueError, match="needs 296 work units"):
+        plan(problem, method=method(max_work=148), output=Eigenphase(), execution="classical", seed=7)
+    result = solve(problem, method=method(), output=Eigenphase(), execution="classical", seed=7)
+    schur, decompose = [], numerical.schur
+    monkeypatch.setattr(numerical, "schur", lambda *a, **k: schur.append(1) or decompose(*a, **k))
+
+    def verify(**options):
+        receipt, _ = result.verify(checks=QPEVerification(tolerance=.2, **options))
+        application = receipt.applications[0]
+        return ({item.fact.quantity: item.fact.value.value for item in application.facts},
+                {item.parameter: item.value for item in application.arguments})
+
+    reused, saved = verify(reuse_only=True)
+    assert saved["known_work"] == 104 and schur == []
+    # A unitary target clusters by angle at the default 1e-8 radians, whatever its output unit.
+    assert reused["group_tolerance"] == 1e-8 and reused["estimated_resolved"] == 1
+    check = owner._check_context
+
+    def without_eigensystem(context, *args):
+        check(context, *args)
+        context["eigensystem"] = None
+
+    monkeypatch.setattr(owner, "_check_context", without_eigensystem)
+    with pytest.raises(ValueError, match="needs 232 work units"):
+        verify(max_work=116)
+    assert schur == []
+    fresh, computed = verify(max_work=232)
+    assert computed["known_work"] == 336 and schur == [1]
+    assert fresh["reference_value"] == pytest.approx(reused["reference_value"], rel=0, abs=1e-14)
+    assert fresh["valid_overlap"] == pytest.approx(.75, rel=0, abs=1e-14)

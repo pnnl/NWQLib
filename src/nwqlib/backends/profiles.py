@@ -224,9 +224,14 @@ class ModelDomain(Record):
         max_resets: Required. Largest supported reset count.
         max_measurements: Required. Largest supported measurement count.
         max_classical_work: Required. Largest supported `classical_work` count
-            of the resource estimate.
-        max_adaptive_rounds: Required. Largest supported number of adaptive
-            rounds.
+            of the resource estimate, which covers the classical stages and
+            kernels declared in the Program, not a Method's controller or
+            analysis outside it. This limits where the time model applies, not
+            what a device can do.
+        max_adaptive_rounds: Required. Largest supported `adaptive_rounds` count
+            of the resource estimate, which covers the `AdaptiveLoop` rounds
+            declared in the Program, not a Method's controller outside it. This
+            limits where the time model applies, not what a device can do.
         bindings: Default `()`. Parameter values the model is restricted to, at
             most one per parameter.
 

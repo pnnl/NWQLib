@@ -183,9 +183,10 @@ def test_shared_moment_covariance_and_rank_policy():
     # two-sided union bound at cutoff/(2m) spends exactly delta=.05.
     assert 4*np.exp(-100*(cutoff/4)**2/2) == pytest.approx(.05, rel=2e-14, abs=0)
     assert numerical._allocate(101, np.array([1e308, 1e308])).sum() == 101
-    # Scalar cancellation after overflowing intermediate multiplication.
-    values = numerical.restore_ritz_values(np.array([2.0]), -1.7e308, 1e308)
-    assert values[0] == pytest.approx(3e307, rel=2e-15, abs=0)
+    # An overflowing product that the opposite-sign center cancels, and a
+    # value whose exact restoration is outside binary64.
+    values = numerical.restore_ritz_values(np.array([2.0, -2.0]), -1.7e308, 1e308)
+    assert values[0] == pytest.approx(3e307, rel=2e-15, abs=0) and values[1] == -np.inf
 
 
 def test_sampling_cutoff_does_not_treat_zero_sample_variance_as_certainty():
@@ -465,7 +466,7 @@ def test_classical_gershgorin_frame_encloses_the_spectrum_with_empty_rows(repres
     )
     rec = plan.reconstruction
     spectrum = np.linalg.eigvalsh(matrix)
-    assert rec.enclosure_source == "scaled_gershgorin"
+    assert rec.enclosure_source == "gershgorin"
     assert rec.spectral_lower <= spectrum[0] and spectrum[-1] <= rec.spectral_upper
     check_gershgorin_union(matrix, rec.spectral_lower, rec.spectral_upper)
     if representation == "dense":
@@ -491,3 +492,79 @@ def test_classical_gershgorin_frame_encloses_the_spectrum_with_empty_rows(repres
     error = 3 * ku / (1 - ku) + 64 * Q(1, 2**1022) + 16 * Q(1, 2**1074)
     assert -error <= Q(rec.spectral_lower) <= 0
     assert 3 <= Q(rec.spectral_upper) <= 3 + error
+
+
+def test_gershgorin_frame_encloses_the_spectrum_at_extreme_scales(monkeypatch):
+    """Direct magnitudes give an enclosing frame at every representable scale.
+
+    H = [[2, 3+4i], [3-4i, -1]] has eigenvalues 0.5 +/- sqrt(27.25). Scaled
+    by 1, 2**-500 and 2**500, its dense, CSR and CSC frames enclose them,
+    and the rows are formed once, without scaling.
+    With a diagonal 2**60 times its off-diagonal entry, the frame contains
+    the exact Gershgorin union [a - b, a + b] and the spectrum
+    +/- sqrt(a**2 + b**2), compared as rationals. Near the binary64 maximum,
+    [[0, 1e308], [1e308, 0]] has a finite frame, and
+    [[1e308, 1e308], [1e308, -1e308]] is refused because its Gershgorin
+    endpoints exceed the binary64 maximum, although its eigenvalues do not.
+    """
+    from scipy.sparse import csc_matrix, csr_matrix
+    from nwqlib.algorithms import _eigen_inputs
+    from nwqlib.algorithms._eigen_inputs import gershgorin_frame
+    from nwqlib.operators import ingest_dense, ingest_sparse
+
+    exponents = []
+    rows = _eigen_inputs._gershgorin_rows
+    monkeypatch.setattr(_eigen_inputs, "_gershgorin_rows", lambda *a: exponents.append(a[-1]) or rows(*a))
+
+    def frames(matrix):
+        return [gershgorin_frame(source, max_bytes=None) for source in (
+            ingest_dense(matrix), ingest_sparse(csr_matrix(matrix)), ingest_sparse(csc_matrix(matrix)))]
+
+    regular = np.array([[2, 3 + 4j], [3 - 4j, -1]])
+    for scale in (1.0, 2.0**-500, 2.0**500):
+        spectrum = np.array([0.5 - np.sqrt(27.25), 0.5 + np.sqrt(27.25)]) * scale
+        for low, high, center, alpha in frames(regular * scale):
+            assert low <= spectrum[0] and spectrum[1] <= high and np.max(np.abs(spectrum - center)) <= alpha
+    assert exponents == [0] * 9
+    a, b = 2.0**60, 1.0
+    for low, high, _, _ in frames(np.array([[a, b], [b, -a]])):
+        assert Fraction(high) >= Fraction(a) + Fraction(b) and Fraction(low) <= -Fraction(a) - Fraction(b)
+        assert Fraction(high)**2 >= Fraction(a)**2 + Fraction(b)**2 <= Fraction(low)**2
+    for low, high, center, alpha in frames(np.array([[0.0, 1e308], [1e308, 0.0]])):
+        assert low <= -1e308 and 1e308 <= high and np.isfinite(alpha)
+    for source in (ingest_dense, lambda m: ingest_sparse(csr_matrix(m))):
+        with pytest.raises(ValueError, match="outside binary64 range"):
+            gershgorin_frame(source(np.array([[1e308, 1e308], [1e308, -1e308]])), max_bytes=None)
+
+
+@pytest.mark.parametrize("exponent, widening", [
+    (-500, 1.0000000000000058), (-1020, 1.000000000000006), (-1039, 1.0000000000582077),
+    (-1045, 1.0000000037252903), (-1065, 1.00390625),
+])
+def test_subnormal_hamiltonian_keeps_an_accurate_frame_and_its_ritz_value(exponent, widening):
+    """H = a X near or below the smallest normal binary64 keeps a frame close to its spectrum.
+
+    Its Gershgorin interval is exactly [-a, a], and the frame encloses it.
+    A matrix whose largest row extent is below 2**-969 is framed after an
+    exact power-of-two scaling, so alpha/a stays at most the listed value,
+    1 + 2**-8 at a = 2**-1065, whose entries carry 9 significant bits.
+    Classical Lanczos with two Krylov directions from |0> then keeps both
+    directions and returns the eigenvalue -a exactly in dense, CSR and CSC
+    storage.
+    """
+    from math import ldexp
+    from scipy import sparse
+    from nwqlib import solve
+    from nwqlib.algorithms._eigen_inputs import gershgorin_frame
+    from nwqlib.operators import ingest_dense, ingest_sparse
+
+    a = ldexp(1.0, exponent)
+    matrix = np.array([[0.0, a], [a, 0.0]])
+    for source in (ingest_dense(matrix), ingest_sparse(sparse.csr_matrix(matrix)),
+                   ingest_sparse(sparse.csc_matrix(matrix))):
+        low, high, center, alpha = gershgorin_frame(source, max_bytes=None)
+        assert low <= -a and a <= high and center - alpha <= low and high <= center + alpha
+        assert float(Fraction(alpha) / Fraction(a)) <= widening
+        result = solve(Eigenproblem(A=source), method=Lanczos(initial_state=[1.0, 0.0], krylov_dimension=2),
+                       execution="classical", seed=3)
+        assert result.eigenvalue == -a

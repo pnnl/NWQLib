@@ -2,6 +2,7 @@
 
 from fractions import Fraction
 
+import numpy as np
 import pytest
 
 from nwqlib import Expectation, plan, prepare, scan, solve, submit
@@ -34,7 +35,7 @@ def test_selected_shots_reach_actual_prepare_submit_and_report(monkeypatch):
     )
     assert [number(row[0]) for row in result.selection.values] == [8, 32]
     assert result.selection.nondominated == (0,)
-    first = result.select(0)
+    first = result.select(np.int64(0))
     assert first is result.comparison.rows[0] and first.plan is plans[0]
 
     def forbidden(*args, **kwargs):
@@ -226,7 +227,8 @@ def test_cached_folds_and_supplied_prior_occurrences_survive_rescoring(monkeypat
     assert result.selection.prior_work[0] == (prior, prior)
     assert result.selection.nondominated == (0, 1)
     blocked = ComparisonRow(plans[0].method, None, reason="known unsupported population")
-    comparison = Comparison(plans[0].problem, (*result.comparison.rows, blocked))
+    limited = ComparisonRow(plans[0].method, None, reason="known memory refusal", resource_limited=True)
+    comparison = Comparison(plans[0].problem, (*result.comparison.rows, blocked, limited))
 
     def forbidden(*args, **kwargs):
         pytest.fail("stored comparison reran folding, planning or model evaluation")
@@ -236,8 +238,12 @@ def test_cached_folds_and_supplied_prior_occurrences_survive_rescoring(monkeypat
     monkeypatch.setattr("nwqlib.search.estimate_plan", forbidden)
     rescored = scan(comparison, objectives=result.selection.objectives)
     assert rescored.comparison is comparison and rescored.select(3) is blocked
-    assert rescored.selection.nondominated == (0, 1) and rescored.selection.incomparable == (3,)
+    assert rescored.selection.nondominated == (0, 1) and rescored.selection.incomparable == (3, 4)
     assert rescored.selection.values[3][0].reason == blocked.reason
+    # Both rows without a Plan rank nowhere, and the saved selection tells them apart.
+    saved = SearchSelection.model_validate_json(rescored.selection.model_dump_json())
+    assert [row[0].resource_limited for row in saved.values] == [False, False, False, False, True]
+    assert saved.incomparable == (3, 4) and saved.values[4][0].reason == limited.reason
     assert rescored.selection.prior_work[0] == (prior, prior)
     assert rescored.selection.work.base_folds == rescored.selection.work.assessed_points == 0
 
@@ -309,6 +315,51 @@ def test_frontier_domain_ties_and_partial_comparability():
         )
 
 
+def test_adjacent_counts_beyond_binary64_precision_stay_distinct():
+    """Shot totals 2**53 and 2**53 + 1 round to one binary64 number, but the stored integers differ.
+
+    Only the smaller row is on the front, in either row order.
+    """
+    selection = scan(tuple(Candidate(p) for p in choices((4, 8))),
+                     objectives=(Objective(kind="requested_shots"),)).selection
+    for counts, front in (((2**53, 2**53 + 1), (0,)), ((2**53 + 1, 2**53), (1,))):
+        rows = tuple((value[0].revise(value=Rational(numerator=n, denominator=1)),)
+                     for value, n in zip(selection.values, counts, strict=True))
+        assert float(counts[0]) == float(counts[1])
+        assert selection.revise(values=rows, nondominated=None, incomparable=None).nondominated == front
+
+
+def test_predicted_seconds_whose_sum_exceeds_binary64_are_unavailable():
+    """A row whose forecast points sum beyond binary64 is incomparable, and the other row keeps its sum.
+
+    The Expectation of Z + X measures two batches, so each Plan has two
+    forecast points. The model predicts 2.2e307 s per shot: at 4 shots a
+    point takes 8.8e307 s and the two sum to 1.76e308 s, at 8 shots they
+    would sum to 3.52e308 s, beyond the largest binary64 number.
+    """
+    import math
+
+    problem = Expectation(state=[1.0, 0.0],
+                          observable=ingest_pauli((("Z", 1.0), ("X", 1.0)), num_qubits=1))
+    plans = tuple(plan(problem, method=ExpectationMethod(), shots=n, seed=7) for n in (4, 8))
+    original, allocation = original_forecast(selected(3))
+    model = original.profile.models[0]
+    model = model.revise(
+        coefficients=tuple(c.revise(seconds_per_unit=0.0 if c.feature == "invocations" else 2.2e307)
+                           for c in model.coefficients),
+        domain=model.domain.revise(batch_schedule="serial", acquisition="measurement_batch",
+                                   primitive_gates=("h",), max_operations=64, max_measurements=64,
+                                   max_shots=8, max_readout_items=4))
+    timed = Objective(kind="predicted_seconds", model_id=model.content_id, scope=model.scope)
+    result = scan(tuple(Candidate(p, allocation=allocation) for p in plans), objectives=(timed,),
+                  profile=original.profile.revise(models=(model,)),
+                  context=ResourceContext(batch_schedule="serial"), assessed_at=original.assessed_at)
+    first, second = (row[0] for row in result.selection.values)
+    assert number(first) == Fraction(math.fsum([2.2e307 * 4] * 2)) and first.status == "conditional"
+    assert second.value is None and second.reason == "the sum of the predicted seconds exceeds binary64"
+    assert result.selection.nondominated == (0,) and result.selection.incomparable == (1,)
+
+
 def test_two_objective_front_keeps_both_sides_of_a_shots_width_trade_off():
     """Sampled Lanczos and FixedGCIM Plans trade shots against width, so both stay on the front.
 
@@ -347,33 +398,3 @@ def test_two_objective_front_keeps_both_sides_of_a_shots_width_trade_off():
         result = solve(ranked.select(index))
         assert result.plan is plans[index]
         assert sum(event.shots for event in result.data.trace.events) == expected[index][0]
-
-
-def test_finite_caps_precede_folding_and_exact_frontier_work(monkeypatch):
-    plans = choices()
-    candidates = tuple(Candidate(p) for p in plans)
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("inadmissible search performed work")
-
-    monkeypatch.setattr("nwqlib.resources.estimate", forbidden)
-    with pytest.raises(ValueError, match="max_candidates"):
-        scan(candidates, objectives=(Objective(kind="requested_shots"),), max_candidates=1)
-    with pytest.raises(ValueError, match="max_pair_comparisons"):
-        scan(candidates, objectives=(Objective(kind="requested_shots"),), max_pair_comparisons=1)
-    with pytest.raises(ValueError, match="max_values"):
-        scan(
-            candidates[:1],
-            objectives=(Objective(kind="requested_shots"), Objective(kind="logical_width")),
-            max_values=1,
-        )
-    forecast, allocation = original_forecast(selected())
-    monkeypatch.setattr("nwqlib.search.estimate_plan", forbidden)
-    with pytest.raises(ValueError, match="max_assessments"):
-        scan(
-            (Candidate(selected(), allocation=allocation),),
-            objectives=(Objective(kind="requested_shots"),),
-            profile=forecast.profile,
-            assessed_at=forecast.assessed_at,
-            max_assessments=1,
-        )

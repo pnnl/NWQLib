@@ -1,12 +1,12 @@
 """Planned Pauli product-formula actions for finite classical LCHS outputs."""
 
+from nwqlib._limits import ResourceLimitError, exceeds
 from math import cos, sin
 import numpy as np
 
-from nwqlib.operators._pauli import apply_terms, _pauli_masks, pauli_action_requirements
+from nwqlib.operators._pauli import _pauli_masks, pauli_action_requirements
 from nwqlib.operators.access import _check_bytes
 from .time_independent_terms import (
-    _PAULI_COEFFICIENT_ATOL,
     _trotter_pauli_decomposition, _pauli_decomposition_requirements,
     _distinct_combined_nodes, _node_bound_coefficients, _node_cache_bytes, _node_key, _first_use,
     _coefficient_preparation_work, _selected_node_table, _union_nonidentity_labels, _BorrowedRows,
@@ -15,37 +15,10 @@ from .time_independent_terms import (
 )
 
 
-# Logical payloads and qualified CPython allowances for compact host PF records.
-
-
-def integer_bytes_from_bits(bits):
-    """32 header/sign bytes plus four bytes per 30-bit magnitude limb."""
-    return 32 + 4*((max(1, bits)+29)//30)
-
-
-def integer_bytes(value):
-    return integer_bytes_from_bits(abs(int(value)).bit_length())
-
-
-def host_position_record_reserve(union, *, budgeted, fixed_steps, max_work):
-    """Return the byte allowance for one classical quadrature position before its record or route is constructed.
-
-    8192 covers the fixed-layout wrappers, floats and status strings.
-    All integer fields are additional. A budgeted independent selection
-    has at most 8500 step-count bits under the finite binary64 coefficient,
-    time and remainder assumptions. Fixed steps use their own width.
-    This allowance also covers a budgeted count that the method's step limit
-    refuses. Position work cannot exceed max_work once accepted.
-    """
-    pairs = union*(union-1)//2
-    nested = union*(union-1)*(2*union-1)//6
-    step_bytes = (integer_bytes_from_bits(8500) if budgeted
-                  else integer_bytes(fixed_steps))
-    counters = integer_bytes(union)+integer_bytes(pairs)+integer_bytes(nested)
-    total = 8192 + step_bytes + counters + integer_bytes(max_work)
-    if budgeted:
-        total += integer_bytes(2) + step_bytes + counters
-    return total
+# Coarse bytes of one classical quadrature position of one application: its
+# step record (one small dataclass of scalars) and the dict holding it with
+# its route and work, about 1 KB of objects, allowed 2048.
+_POSITION_RECORD_BYTES = 2048
 
 
 def host_phase_and_accumulation_work(dimension):
@@ -60,14 +33,15 @@ def host_phase_and_accumulation_work(dimension):
 
 
 def _action_route(dimension, steps, rotations, *, max_work, max_bytes, retained_bytes=0):
-    """Choose the cheaper action route within the limits for one node.
+    """Choose the action route of one node by its registered work, then accept or refuse it within the limits.
 
     These are matrix/vector operation size proxies, not a wall-time ranking.
     The work excludes shared selection and accumulation, checked by the caller.
 
     The vector route applies r*R Pauli rotations to one vector, with
-    r = max(1, steps). Each rotation uses one single-label apply_terms action,
-    priced by pauli_action_requirements(D, 1, 1, complex_input=True,
+    r = max(1, steps). Each rotation uses one single-label Pauli action
+    (_word_action, equal to apply_terms with that label), priced by
+    pauli_action_requirements(D, 1, 1, complex_input=True,
     label_width=q), followed by a D-entry scaling and a D-entry scaled
     addition. Its work is r*R*(W_action + 2*D) action/pass units. The scalar
     cosine, sine and imaginary-factor preparations are bundled into these
@@ -78,21 +52,29 @@ def _action_route(dimension, steps, rotations, *, max_work, max_bytes, retained_
     Binary powering needs floor(log2 r) squarings and popcount(r) - 1
     further products, each D**3.
 
+    The dense route is chosen when its work is strictly smaller, and equal
+    work chooses the vector route. Both routes apply the same saved product
+    formula and differ only in the order of floating-point evaluation, so the
+    choice depends on D, r and R alone, never on the limits. The chosen route
+    is then refused when its work exceeds ``max_work`` or its arrays, with
+    ``retained_bytes`` held beside them, exceed ``max_bytes`` (None: the
+    physical memory). It is never replaced by the other route.
+
     Returns:
-        (route, work, known peak bytes, dense matrix products), with route
-        ``vector`` or ``dense_power``. Equal work selects ``vector``.
+        (route, work, known peak bytes including ``retained_bytes``, dense
+        matrix products), with route ``vector`` or ``dense_power``.
     """
     vector_work, vector_bytes, _ = _route_requirements(dimension, steps, rotations, "vector")
     dense_work, dense_bytes, products = _route_requirements(dimension, steps, rotations, "dense_power")
-    vector_bytes += retained_bytes
-    dense_bytes += retained_bytes
-    vector = vector_work <= max_work and vector_bytes <= max_bytes
-    dense = dense_work <= max_work and dense_bytes <= max_bytes
-    if vector and (not dense or vector_work <= dense_work):
-        return "vector", vector_work, vector_bytes, 0
-    if dense:
-        return "dense_power", dense_work, dense_bytes, products
-    raise ValueError("selected Pauli action exceeds max_select_work or max_bytes")
+    if dense_work < vector_work:
+        route, work, peak = "dense_power", dense_work, dense_bytes + retained_bytes
+    else:
+        route, work, peak, products = "vector", vector_work, vector_bytes + retained_bytes, 0
+    if exceeds(work, max_work):
+        raise ResourceLimitError(f"selected Pauli action route {route} needs {work} work units, "
+                                 f"exceeding the {max_work} left of max_select_work")
+    _check_bytes(peak, max_bytes, f"selected Pauli action route {route}")
+    return route, work, peak, products
 
 
 def _route_requirements(dimension, steps, rotations, route):
@@ -129,15 +111,12 @@ def _rotation_sequence(terms, elapsed, steps, order):
     float(real(c))*elapsed/steps, followed by /2 for the order-two half
     occurrences, never real(c)*(elapsed/steps). The sequence is formed for
     the current application and node at application time from the saved
-    coefficient rows, and ``terms`` may be a repeatable view of them.
+    coefficient rows, and ``terms`` may be a repeatable view of them. The
+    node table admitted their imaginary residues once when it was built
+    (time_independent_terms._selected_node_table).
     """
     if not len(terms):
         return ()
-    # Same absolute imaginary-residue admission as the SELECT angle tables
-    # (_PAULI_COEFFICIENT_ATOL, registered in ENGINEERING_CONSTANTS). Pauli
-    # coefficients of the Hermitian L and H are real up to decomposition rounding.
-    if any(abs(complex(value).imag)>_PAULI_COEFFICIENT_ATOL for _,value in terms):
-        raise ValueError("Hamiltonian coefficients must be real for Pauli rotations")
     step = tuple((label, float(complex(value).real)*elapsed/steps) for label,value in terms)
     if order == 1:
         return step
@@ -210,24 +189,20 @@ def select_actions(data, *, elapsed, source_nodes, source_weights, has_initial):
     B_nodes = 24*sum_k p_k + 128*K, B_apps = 128*A + 128*A*N_grid + B_records,
     B_live,selected = 32*d**2 + q*u + B_nodes + B_apps, and the phase maximum
     of compact_pf_peak_bytes.
-    B_records = 8*sum_k d_k + 8*N_grid + A*N_grid*R_pos, where R_pos is
-    host_position_record_reserve's fixed metadata allowance plus the typed
-    integer fields of the node record, independent step selection and route
-    work. Fixed steps use their own integer width. Budgeted step counts use
-    the 8500-bit step-count bound of finite binary64 inputs. The cached
+    B_records = 8*sum_k d_k + 8*N_grid + 2048*A*N_grid, with 2048 bytes
+    (_POSITION_RECORD_BYTES) for the step record, route and work kept at
+    each quadrature position of each application. The cached
     rational bound coefficients belong to _node_cache_bytes. The census
-    arrays, including each node's restricted pair and triple tables, belong
-    to the byte bound that _lchs_census_choice checks, the shared
-    census_bytes formula plus 9*max(E, F) bytes for one node's row
-    selection, with E pair rows and F reserved triple rows. These are
-    allowances for the logical data and for the Python objects on the
-    qualified stack, not a process heap bound. The cached combined nodes
+    arrays, the shared pair rows, one tile of nested masks and the
+    magnitudes of the K nodes, belong to the census_bytes bound with nodes=K
+    that _node_bound_coefficients checks. These are coarse estimates of
+    the dominant data, not a process heap bound. The cached combined nodes
     (_node_cache_bytes) stay in memory through record selection and are
     held in every phase.
 
     Work, with d the padded dimension, ``q = log2(d)``, ``N = d**2``,
     K distinct node keys, M applications and N_grid quadrature positions:
-    ``W_coeff = W_dec + W_align + K*(2*m_L + 23*u + 8)``, where m_L is the
+    ``W_coeff = W_dec + W_align + K*(2*m_L + 18*u + 9)``, where m_L is the
     L support size and u the union size including identity. W_dec is the
     decomposition work (_pauli_decomposition_requirements), and W_align
     is the one-time alignment work of the L/H supports
@@ -237,7 +212,7 @@ def select_actions(data, *, elapsed, source_nodes, source_weights, has_initial):
     there are active nodes, the census ``p*q + G + K_n*V``. Here p counts
     shared nonidentity labels, G is the structural census work, K_n counts
     distinct active nodes, and V is the per-node contraction work
-    (_lchs_census_choice). With no active nodes the census work is zero.
+    (error_budget.census_work). With no active nodes the census work is zero.
     Every route adds ``M*N + 4*M*N_grid*d + 4*d`` and each chosen action
     route (_action_route). The L/H support is aligned once in lexical
     order, then combined and pruned once per distinct k node. Selection
@@ -245,13 +220,14 @@ def select_actions(data, *, elapsed, source_nodes, source_weights, has_initial):
     Application count affects step records and actions, not repeated
     coefficient preparation or table storage. With full support, K = 200
     and M = 9, W_coeff alone is 21,547,072, 86,790,720, 349,573,184 and
-    1,407,991,872 units at q = 6 to 9, so full-support q = 9 is refused on
-    W_coeff alone under the default max_select_work=1_000_000_000, while
-    sparse supports may fit. Decomposition and later action work are
-    additional. These units are proxies for the limit checks, not timings or
-    equal-cost CPU operations.
+    1,407,991,872 units at q = 6 to 9, so full-support q = 9 exceeds an
+    explicit max_select_work=1_000_000_000 on W_coeff alone, while sparse supports
+    may fit. These values include W_dec (87,570,944 units at q = 9), and the
+    budgeted selection and action work above are added to them. These units
+    are proxies for the limit checks, not timings or equal-cost CPU
+    operations.
     """
-    method, d = data.method, len(data.initial)
+    method, d = data.method, data.generator.encoded_dimension
     specifications = ([(0.,1.,False)] if has_initial else [])
     specifications += [(float(t),float(w),True) for t,w in zip(source_nodes,source_weights,strict=True)]
     k_nodes = data.quadrature.k_nodes
@@ -263,19 +239,20 @@ def select_actions(data, *, elapsed, source_nodes, source_weights, has_initial):
     # are admitted from the actual supports once they exist.
     selection_work = decomposition_work
     _check_bytes(decomposition_bytes, method.max_bytes, "LCHS Pauli selection arrays")
-    if selection_work > method.max_select_work:
-        raise ValueError(
+    if exceeds(selection_work, method.max_select_work):
+        raise ResourceLimitError(
             f"LCHS Pauli decomposition needs {selection_work} units of max_select_work; this "
             f"stage needs LCHS(max_select_work=...) to be at least {selection_work} "
             f"(now {method.max_select_work})")
-    decomposition = _trotter_pauli_decomposition(data.quadrature.l_part,data.quadrature.h_part)
+    dense = data.dense_inputs()
+    decomposition = _trotter_pauli_decomposition(dense.l_part,dense.h_part)
     q = decomposition.num_qubits
     m_l, m_h = len(decomposition.l_coefficients), len(decomposition.h_coefficients)
     union = len(set(decomposition.l_coefficients) | set(decomposition.h_coefficients))
     align_work, node_work = _coefficient_preparation_work(q, m_l, m_h, union, len(distinct))
     selection_work += align_work+node_work
-    if selection_work > method.max_select_work:
-        raise ValueError(
+    if exceeds(selection_work, method.max_select_work):
+        raise ResourceLimitError(
             f"LCHS PF coefficient preparation brings the charged max_select_work to {selection_work} "
             f"units, including the Pauli decomposition; this stage needs LCHS(max_select_work=...) "
             f"to be at least {selection_work} (now {method.max_select_work})")
@@ -284,18 +261,12 @@ def select_actions(data, *, elapsed, source_nodes, source_weights, has_initial):
     # node-table terms are admitted at their largest values (every union
     # row kept or dropped at every node).
     decomposition_output = 32*d*d+(q+16)*(m_l+m_h)
-    # The cached five-field rows and their construction temporaries use at
-    # most 256 + 128*u + 64*(m_L+m_H) bytes under the 64-bit CPython container
-    # allowance. With q >= 1 and m_L+m_H <= 2*u, 128*(u+1)*(q+1) bounds it.
+    # The aligned union rows (label, L and H coefficients, positions) and
+    # their construction temporaries, about 128 bytes per row and qubit.
     # Label strings and coefficient objects are borrowed from the decomposition.
     alignment = 128*(union+1)*(q+1)
     grid = len(k_nodes)
-    records_bytes = 8*grid + calls*host_position_record_reserve(
-        union,
-        budgeted=method.hamiltonian_evolution_backend == "trotter_error_budgeted",
-        fixed_steps=method.trotter_steps,
-        max_work=method.max_select_work,
-    )
+    records_bytes = 8*grid + calls*_POSITION_RECORD_BYTES
     envelope = compact_pf_peak_bytes(held_other=cache_bytes, decomposition_peak=decomposition_bytes,
         decomposition_output=decomposition_output, alignment=alignment,
         nodes=24*union*len(distinct)+128*len(distinct),
@@ -344,8 +315,9 @@ def select_actions(data, *, elapsed, source_nodes, source_weights, has_initial):
             else:
                 record = _LCHSTrotterNodeRecord(pf_bound_value=None,pruned_l1_mass=combined.pruned_l1_mass,
                     combined_bound_value=None,step_count=method.trotter_steps if terms else 0,selection=None)
-            if record.step_count > method.max_trotter_steps:
-                raise ValueError("selected product-formula steps exceed max_trotter_steps")
+            if method.max_trotter_steps is not None and record.step_count > method.max_trotter_steps:
+                raise ResourceLimitError(f"a product-formula node needs {record.step_count} steps, above "
+                                         f"LCHS.max_trotter_steps={method.max_trotter_steps}")
             positions.append(dict(record=record))
         applications.append(dict(start=start,weight=weight,source=source,positions=tuple(positions)))
     selection_work += scalar_work+ledger["work"]
@@ -358,7 +330,7 @@ def select_actions(data, *, elapsed, source_nodes, source_weights, has_initial):
         for index, position in zip(table.grid_to_node, application["positions"], strict=True):
             r,R = position["record"].step_count,rotations[index]
             route,work,peak,products = _action_route(d,r,R,
-                max_work=method.max_select_work-total,max_bytes=method.max_bytes,
+                max_work=None if method.max_select_work is None else method.max_select_work-total,max_bytes=method.max_bytes,
                 retained_bytes=cache_bytes+live_selected+16*max(rotations, default=0))
             position.update(route=route,work=work)
             total += work
@@ -372,13 +344,14 @@ def select_actions(data, *, elapsed, source_nodes, source_weights, has_initial):
         max_rotations=max(rotations, default=0), action_scratch=action_scratch,
         other_phase_peak=ledger.get("bytes", 0))
     _check_bytes(workspace,method.max_bytes,"LCHS selected action arrays and tables")
-    if total > method.max_select_work:
-        raise ValueError("selected classical LCHS work exceeds max_select_work")
+    if exceeds(total, method.max_select_work):
+        raise ResourceLimitError(f"selected classical LCHS work {total} exceeds max_select_work={method.max_select_work}")
     counts = dict(dimension=d,operator_applications=len(specifications),evolution_calls=calls,
         pauli_decompositions=2,matrix_power_products=dense_products,vector_rotations=vector_rotations,
         dense_step_rotations=dense_rotations,commutator_checks=commutators,
         combined_nodes=len(distinct),census_structures=ledger.get("structures",0),
-        census_contractions=ledger.get("contractions",0),
+        census_contractions=ledger.get("contractions",0),census_word_tests=ledger.get("word_tests",0),
+        census_selection_count=ledger.get("selection_count",0),
         selection_work=selection_work,size_units=total)
     return dict(nodes=table, applications=tuple(applications)),counts,workspace
 
@@ -400,6 +373,31 @@ def application_actions(table, application, *, elapsed, order):
         yield position, sequence, -duration*node["identity_coefficient"], steps, stored["route"]
 
 
+def _word_action(vector, x, z, y, indices, parity, out):
+    """Write P @ vector into out for the Pauli word with masks (x, z) and Y count y.
+
+    (P v)[k] = (-i)**y * (-1)**popcount(k & z) * v[k ^ x], the single-label
+    apply_terms formula. ``indices`` is arange(D) and ``parity`` the
+    popcount parity of each index. A gather, negation and quarter turn are
+    exact, and adding +0.0 turns every zero into +0.0 as apply_terms'
+    zero-filled output does, so for a finite vector out equals
+    apply_terms(((label, 1.),), ...) bit for bit. Scratch is two D-entry
+    index arrays and a D-byte mask.
+    """
+    if x:
+        np.take(vector, indices ^ x, out=out, mode="clip")
+    else:
+        out[...] = vector
+    if z:  # y = popcount(x & z) is zero when z is
+        negate = parity[indices & z]
+        if y & 2:
+            np.logical_not(negate, out=negate)
+        np.negative(out, out=out, where=negate)
+    if y & 1:
+        out *= -1j
+    out += 0.0
+
+
 def apply_node(sequence, phase, steps, route, vector):
     """Apply the node action exp(i*phase)*S**r to vector, with phase = -t*c_I.
 
@@ -409,17 +407,21 @@ def apply_node(sequence, phase, steps, route, vector):
     P**2 = I. The dense route builds S by multiplying the current matrix by
     P from the left with the bit masks from _pauli_masks. With Y = i*X*Z,
     P|j> = i**n_Y * (-1)**popcount(j & z) |j ^ x>, where x marks X or Y
-    positions, z marks Y or Z positions and n_Y counts Y. The route saved
-    at planning is used. Nothing is chosen again here.
+    positions, z marks Y or Z positions and n_Y counts Y. The vector route
+    applies each P with _word_action, whose index and parity tables and
+    temporaries fit the route's byte envelope. The route saved at planning
+    is used. Nothing is chosen again here.
     """
     d = len(vector)
     steps = max(1,steps)
     if route == "vector":
         result = np.array(vector,dtype=complex)
         scratch = np.empty_like(result)
+        indices = np.arange(d,dtype=np.intp)
+        parity = (np.bitwise_count(indices) & 1).astype(bool)
         for _ in range(steps):
             for label,angle in sequence:
-                apply_terms(((label,1.),),result,num_qubits=d.bit_length()-1,out=scratch)
+                _word_action(result,*_pauli_masks(label),indices,parity,scratch)
                 result *= cos(angle)
                 result += (-1j*sin(angle))*scratch
     else:

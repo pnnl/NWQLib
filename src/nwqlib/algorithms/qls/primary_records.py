@@ -1,7 +1,8 @@
 """QLS records of the chosen polynomial, the physical reconstruction on the original input, and the results."""
 
+from math import sqrt
 from typing import Annotated, Literal
-from pydantic import Field, model_validator
+from pydantic import Field
 from nwqlib.algorithms.protocol import AlgorithmDescriptor
 from nwqlib.artifacts import ArtifactManifest
 from nwqlib.core.analysis import Result
@@ -20,7 +21,7 @@ from nwqlib.core.records import (
 from nwqlib.execution import KernelApplication
 from nwqlib.operators.access import Count
 from nwqlib.problems.inputs import PhysicalScale
-from nwqlib._validation import NUMERICAL_RELATION_RTOL, validate_normalized_mass
+from nwqlib._validation import NUMERICAL_RELATION_RTOL
 from nwqlib._quantum_readout import ReadoutSetting
 
 
@@ -59,31 +60,44 @@ DESCRIPTOR = AlgorithmDescriptor(
 
 
 class InversePolynomial(Record):
-    """Chosen odd inverse polynomial and the evidence of its fit.
+    """Chosen odd inverse polynomial and the evidence of its relative residual.
 
     Attributes:
         kind: Discriminator, always ``"inverse"``.
-        coefficients: Chebyshev coefficients of ``P ~ 1/(polynomial_kappa x)``,
-            before division by ``rescale``, with zero even entries.
+        coefficients: Chebyshev coefficients of the relative minimax
+            approximation ``P ~ 1/(polynomial_kappa x)``, before division by
+            ``rescale``, with zero even entries.
         rescale: Positive divisor that puts ``P`` in the QSP amplitude
             domain. Physical recovery multiplies by it again.
-        candidate_degrees: Every odd degree fitted, in search order,
-            including the degrees that failed.
-        certificate: Norming bound on ``max |polynomial_kappa x P(x) - 1|``
-            over ``1/polynomial_kappa <= |x| <= 1``, evaluated in binary64.
-        certificate_basis: How ``certificate`` was obtained.
-        certificate_grid_points: Size of the affine Chebyshev certificate grid.
-        lsq_node_count: Least-squares node count of the accepted fit.
+        ideal_degree: Smallest odd degree whose minimax relative residual
+            meets ``epsilon_inv``, decided in binary64. The table's degree
+            is larger when its numerical check needed a refinement.
+        minimax_error: Relative residual ``sech(m beta)`` of the exact
+            minimax polynomial of the table's degree ``2m - 1``, with
+            ``beta = 2 atanh(1/polynomial_kappa)``.
+        residual_check_value: The value that planning compared with
+            ``epsilon_inv``, ``minimax_error + 2F + R``, computed in binary64
+            as ``(minimax_error + F) + (F + R)``. Planning uses the table
+            only when it is at most ``epsilon_inv``. ``F`` is the binary64
+            evaluation of a Chebyshev-zero bound on the largest difference
+            between ``polynomial_kappa x P(x)`` for these coefficients and
+            for the exact minimax polynomial, and ``R`` is the evaluation
+            resolution, four machine epsilons times the bit length of the
+            number of evaluation points. The second ``F`` and ``R`` allow
+            for the error of that evaluation. The value has no arithmetic
+            enclosure. In the cases checked it exceeds
+            ``max |polynomial_kappa x P(x) - 1|`` over
+            ``1/polynomial_kappa <= |x| <= 1``, but no proof shows that it
+            always does
+            ([Inverse polynomial accuracy](../../algorithms/qls.md#inverse-polynomial-accuracy)).
     """
 
     kind: Literal["inverse"] = "inverse"
     coefficients: tuple[Real, ...]
     rescale: Annotated[Real, Field(gt=0)]
-    candidate_degrees: tuple[PositiveInt, ...]
-    certificate: Nonnegative
-    certificate_basis: Literal["affine_chebyshev_residual_norming"]
-    certificate_grid_points: PositiveInt
-    lsq_node_count: PositiveInt
+    ideal_degree: PositiveInt
+    minimax_error: Annotated[Real, Field(ge=0, lt=1)]
+    residual_check_value: Annotated[Real, Field(ge=0, lt=1)]
 
     @property
     def degree(self):
@@ -102,7 +116,6 @@ class ReflectionPolynomial(Record):
             domain. The Eq. (17) mass window is divided by its square.
         ell: Half-degree from Dalzell Eq. (6). The degree is ``2 ell``.
         eta: Kernel-reflection parameter, ``epsilon_inv / sqrt(2)``.
-        fit_points: Chebyshev nodes used to recover the coefficients.
     """
 
     kind: Literal["reflection"] = "reflection"
@@ -110,7 +123,6 @@ class ReflectionPolynomial(Record):
     rescale: Annotated[Real, Field(gt=0)]
     ell: PositiveInt
     eta: Annotated[Real, Field(gt=0, le=1)]
-    fit_points: PositiveInt
 
     @property
     def degree(self):
@@ -228,10 +240,17 @@ class QLSReconstruction(Record):
             polynomial and the evidence of its fit.
         phase_solution: Complete vector of the chosen QSVT phases, not a
             request for a new fit.
-        phase_error: Norming bound on the phase-fit residual
-            ``sup |Re P_phases - polynomial/rescale|`` over ``[-1, 1]``.
-            None means unavailable.
-        phase_evaluations: Recorded phase-solver evaluations.
+        phase_error: Coefficient one-norm of the difference between the
+            polynomial rebuilt from the phases and ``polynomial/rescale``. In
+            exact arithmetic it bounds ``sup |Re P_phases - polynomial/rescale|``
+            over ``[-1, 1]``; its binary64 evaluation is a numerical
+            estimate without an enclosure. None means unavailable.
+        phase_tolerance: The limit that synthesis applied to ``phase_error``:
+            the Method's ``phase_residual_tolerance``, or its default rule
+            (``quantum._phase_tolerance``). None for classical execution,
+            which has no phase synthesis.
+        phase_fft_lengths: FFT lengths that the canonical phase synthesis
+            tried, in order; the last one gave ``phase_solution``.
         encoding_family: Family of the chosen encoding, if applicable.
         encoding_ancillas: Ancillas required by that encoding.
         encoding_error: Bound relative to the encoding's declared operator target.
@@ -294,7 +313,8 @@ class QLSReconstruction(Record):
     polynomial: Polynomial
     phase_solution: tuple[Real, ...] = ()
     phase_error: Nonnegative | None = None
-    phase_evaluations: Count = 0
+    phase_tolerance: Annotated[Real, Field(gt=0)] | None = None
+    phase_fft_lengths: tuple[PositiveInt, ...] = ()
     encoding_family: Text | None = None
     encoding_ancillas: Count = 0
     encoding_error: Nonnegative | None = None
@@ -320,62 +340,16 @@ class QLSReconstruction(Record):
     def degree(self):
         return self.polynomial.degree
 
-    @model_validator(mode="after")
-    def _relations(self):
-        """Require compatible original and padded dimensions, polynomial parity and physical readout projectors.
-        """
-        expected = self.padded_dimension * (2 if self.embedding == "hermitian_dilation" else 1)
-        if self.original_dimension > self.padded_dimension or self.system_dimension != expected:
-            raise ValueError(
-                "QLS reconstruction differs from its original padding/embedding dimensions"
-            )
-        if (self.sigma_min is None) != (self.sigma_max is None):
-            raise ValueError("original singular endpoints must be jointly available")
-        if self.sigma_min is not None and (
-            self.sigma_min > self.sigma_max
-            or self.condition_number != self.sigma_max / self.sigma_min
-        ):
-            raise ValueError("condition estimate must use the original singular endpoints")
-        if self.polynomial_kappa < self.kappa_be:
-            raise ValueError("polynomial domain does not cover the selected encoding condition")
-        p = self.polynomial
-        if len(p.coefficients) != p.degree + 1 or p.degree < 1:
-            raise ValueError("QLS polynomial degree differs from its coefficient table")
-        if p.kind == "inverse" and (p.degree % 2 != 1 or not p.candidate_degrees):
-            raise ValueError("inverse polynomial requires its actual odd-degree selection")
-        if any(c != 0 for c in p.coefficients[0 if p.kind == "inverse" else 1 :: 2]):
-            raise ValueError("QLS polynomial parity differs from its method")
-        if self.phase_solution and len(self.phase_solution) != p.degree + 1:
-            raise ValueError("QLS requires its complete selected phase vector")
-        if self.width:
-            bits = self.coordinates + tuple(bit for bit, _ in self.success + self.conditions)
-            if sorted(bits) != list(range(self.width)) or any(
-                value not in (0, 1) for _, value in self.success + self.conditions
-            ):
-                raise ValueError(
-                    "QLS selectors and coordinates must partition actual circuit width"
-                )
-            if self.original_dimension > 1 << len(self.coordinates):
-                raise ValueError("original QLS output does not fit its coordinate register")
-        if self.t is not None and self.t > self.polynomial_kappa:
-            raise ValueError("shortcut t exceeds its selected polynomial domain")
-        if len(self.groups) != sum(setting.name.startswith("group_") for setting in self.settings):
-            raise ValueError("QLS groups differ from their group readout settings")
-        coefficients = () if self.observable_coefficients is None else self.observable_coefficients.array
-        if len(self.observable_labels) != len(coefficients):
-            raise ValueError("QLS observable labels differ from their coefficients")
-        return self
-
 
 class QLSSamples(Record):
     """Sampled output of a QLS run: the observed original coordinates and their counts, as two int64 arrays.
 
-    `QLSAnalysis.samples` holds it for a `Samples` output. Analysis uses the
-    new C-contiguous int64 arrays that the sample reduction returns, without
-    copying them. For m indices, the two arrays occupy 16m data bytes, and
-    validating them needs at most 17m data bytes while one Boolean
-    comparison mask exists. These byte counts exclude input data held by the
-    caller, workspace of earlier reductions and Python object overhead.
+    `QLSAnalysis.samples` holds it for a `Samples` output. For m indices,
+    analysis copies the two int64 arrays that the sample reduction returns
+    into immutable storage one at a time, holding at most 24m data bytes
+    while it does. The two stored arrays occupy 16m data bytes. These byte
+    counts exclude input data held by the caller, workspace of earlier
+    reductions and Python object overhead.
     Building the record does not check these bytes against a memory limit.
 
     Attributes:
@@ -388,21 +362,10 @@ class QLSSamples(Record):
     indices: FrozenArray
     counts: FrozenArray
 
-    @model_validator(mode="after")
-    def _arrays(self):
-        import numpy as np
-
-        indices, counts = self.indices.array, self.counts.array
-        if (indices.dtype != np.int64 or counts.dtype != np.int64 or indices.ndim != 1
-                or indices.shape != counts.shape or np.any(counts <= 0) or np.any(indices < 0)
-                or np.any(indices[1:] <= indices[:-1])):
-            raise ValueError("QLS samples need increasing distinct int64 indices and positive int64 counts")
-        return self
-
     @property
     def total(self):
         """Sum of the counts as a Python integer."""
-        return sum(map(int, self.counts.array))
+        return int(self.counts.array.sum())
 
 
 class QLSProjectedMoments(Record):
@@ -597,8 +560,9 @@ class QLSAnalysis(Result):
         """Return the report summary lines of this result.
 
         They give the requested array, sample counts or scalar, the solver,
-        a warning when the spectral assumption was supplied rather than
-        checked during planning, and any reason a quantity is unavailable.
+        the polynomial and phase components (`_component_lines`), a warning
+        when the spectral assumption was supplied rather than checked during
+        planning, and any reason a quantity is unavailable.
         """
         kind = None if self._plan is None else self._plan.output.kind
         if self.artifact is not None:
@@ -620,6 +584,7 @@ class QLSAnalysis(Result):
         if self._plan is not None:
             lines.append(f"QLS solver: {self._plan.method.solver}; selected finite polynomial model")
             rec = self._plan.reconstruction
+            lines += _component_lines(rec, self._plan.method.epsilon_inv)
             if rec.sigma_min is None:
                 lines.append("At selection, the supplied spectral premise was not independently checked; "
                              "inverse accuracy is conditional on alpha and kappa covering the original spectrum.")
@@ -671,71 +636,6 @@ class QLSAnalysis(Result):
         known.
         """
         return self.plan.reconstruction.kappa_be
-
-    @model_validator(mode="after")
-    def _masses(self):
-        """Check the record-level mass and scale relations.
-
-        Mass validation uses the measurement or evaluation that produced the
-        masses and the chosen mass-reduction routine. The complete mass of
-        the simulated state is checked before projection. The success and
-        physical masses belong to nested subsets, and their subset relation
-        allows for the classical reduction error without assuming either
-        mass is one.
-
-        Without the record of the producing preparation, this record checks
-        only finiteness, nonnegativity and agreement with the saved
-        reduction statistics, because the masses of an exact reduction are
-        the binary64 values of its saved pairs, of nested sets of
-        amplitudes, from its one simulation. Sampled masses come from nested
-        integer counts. ``_quantum_readout.validate_saved_masses`` checks,
-        at reduction and at analysis, the subset relation with the classical
-        error and the bound on the complete mass from the producing
-        preparation record, using its state error bound when available and its
-        probability window otherwise. For amplitudes or a classical
-        evaluation, the physical mass may exceed the algorithm mass only
-        within ``NUMERICAL_RELATION_RTOL``. A physical scale and its reason
-        for unavailability exclude each other, and the measurement that
-        supplies the masses must be one of the result's contributions.
-        """
-        algorithm, physical = self.algorithm_success_mass, self.physical_slice_mass
-        for value in (algorithm, physical):
-            validate_normalized_mass(value)
-        if self.reduction is not None:
-            from nwqlib._quantum_readout import pair_float
-
-            reduction = self.reduction
-            complete, success, selected = reduction.populations
-            if (
-                not 0 <= selected <= success <= complete
-                or algorithm != pair_float(reduction.success_mass)
-                or physical != pair_float(reduction.physical_mass)
-                or self.mass_contribution_id != reduction.contribution_id
-            ):
-                raise ValueError("QLS masses differ from their saved reduction statistics")
-        elif self.returned_shots is not None and self.algorithm_selected_shots is not None:
-            if not (
-                (self.physical_selected_shots is None
-                 or self.physical_selected_shots <= self.algorithm_selected_shots)
-                and self.algorithm_selected_shots <= self.returned_shots
-            ):
-                raise ValueError("QLS physical counts exceed their algorithm subset")
-        elif (
-            algorithm is not None
-            and physical is not None
-            and physical - algorithm > NUMERICAL_RELATION_RTOL * max(1.0, algorithm)
-        ):
-            raise ValueError("QLS physical mass exceeds its algorithm subset")
-        if self.physical_scale is not None and self.physical_scale_unavailable is not None:
-            raise ValueError("physical scale cannot be both known and unavailable")
-        if (
-            self.mass_contribution_id is not None
-            and self.mass_contribution_id not in self.contribution_ids
-        ):
-            raise ValueError("QLS mass must identify its actual contributing acquisition")
-        if any(item.contribution_id not in self.contribution_ids for item in self.groups):
-            raise ValueError("QLS group statistics must identify their actual acquisitions")
-        return self
 
     def validate_plan(self, plan):
         """Check the output normalization, the physical mass and the frame of the saved array against the chosen QLS route.
@@ -790,6 +690,61 @@ class QLSAnalysis(Result):
                 raise ValueError(
                     "QLS artifact differs from its requested original-coordinate frame"
                 )
+
+
+def _component_lines(rec, epsilon_inv):
+    """Return the summary lines of the polynomial and phase components of ``rec``, from its stored values alone.
+
+    Each quantity keeps its own meaning, and nothing here decides whether the
+    result is accurate. Write k = ``polynomial_kappa``, s = ``rescale``, delta
+    = ``phase_error`` and e = ``residual_check_value``. The checks e and delta
+    have no arithmetic enclosure, so every combination is nominal.
+
+    For an inverse polynomial, Hermitian or dilated spectra in ``[1/k, 1]``
+    give ``y = (A/alpha)^-1 b_hat`` with ``1 <= ||y|| <= k``, and recovery by
+    ``k s`` turns a phase perturbation of operator norm delta into a relative
+    error ``k s delta/||y||`` (``verification._comparisons``). The actual
+    ``||y||`` needs a reference solve that a summary must not run, so the
+    line states the dependence and evaluates its worst case ``||y|| = 1``.
+    That value can exceed ``epsilon_inv`` for a valid computation: it is not
+    the error of this result.
+
+    A shortcut returns a unit direction, so its phase term is relative to the
+    ideal selected vector v of norm m: if ``delta < m``, the two normalized
+    vectors differ by at most ``2 delta/m``. Dalzell arXiv:2406.12086v2,
+    Appendix C, Theorem 1 gives ``m**2 s**2 >= L = sin^2(2 theta) ((1 - eta)/(1 + eta))**2``
+    with ``theta = arctan(||y||/t)``. Its ``sin^2(2 theta)`` is
+    ``4 t^2 n^2/(t^2 + n^2)^2`` at ``n = ||y||``, which rises and then falls
+    in n, so over ``[1, k]`` its minimum is at an endpoint. That gives the
+    term ``2 s delta/sqrt(L)``, which is conditional on the spectral premise
+    and covers only the phase synthesis relative to the selected polynomial.
+    """
+    polynomial, delta = rec.polynomial, rec.phase_error
+    s, k = polynomial.rescale, rec.polynomial_kappa
+    if polynomial.kind == "inverse":
+        lines = [f"Inverse polynomial: target epsilon_inv={epsilon_inv:.3g}; numerical check value "
+                 f"{polynomial.residual_check_value:.3g}"]
+    else:
+        lines = [f"Kernel-reflection polynomial: eta={polynomial.eta:.3g}; "
+                 f"t={rec.t_source if rec.t is None else format(rec.t, '.6g')}"]
+    if rec.phase_tolerance is None:
+        return lines + ["Phase synthesis: not applicable to the classical polynomial model"]
+    lines.append(f"Phase synthesis: residual {delta:.3g} (numerical estimate, no arithmetic enclosure) "
+                 f"against target {rec.phase_tolerance:.3g}; polynomial_kappa={k:.6g}, rescale={s:.6g}")
+    if polynomial.kind == "inverse":
+        lines.append(f"Relative inverse error relation, given the spectral assumption: at most "
+                     f"{polynomial.residual_check_value:.3g} + {k * s * delta:.3g}/||y||, ||y|| in [1, {k:.6g}], "
+                     f"so at most {polynomial.residual_check_value + k * s * delta:.3g} (nominal worst case, "
+                     "not the error of this result); encoding, execution and sampling errors are not included")
+    elif rec.t is not None:
+        from .norm_search import _success_center, _success_window
+
+        center = min(_success_center(1.0, rec.t), _success_center(k, rec.t))
+        lower = _success_window(center, polynomial.eta)[0]
+        lines.append(f"Unit-direction relation, given the spectral assumption: the phase synthesis adds at most "
+                     f"{2 * s * delta / sqrt(lower):.3g} relative to the selected polynomial, for ||y|| in "
+                     f"[1, {k:.6g}] and t={rec.t:.6g}; the polynomial's own direction error is not included")
+    return lines
 
 
 def validate_selection(plan):

@@ -208,15 +208,15 @@ show_card(result, predicted, aligned_direction, reference_direction, no_evolutio
 # - **Input.** A square invertible NumPy array $A$ and a vector $b$. The dense encoding loads any such matrix, at a gate count that grows steeply with its size (Section 4).
 # - **Output.** `result.value` is the unit direction $x/\|x\|$, defined up to a global phase. This run uses exact readout, in which the simulator computes every amplitude without shot sampling, subject to numerical rounding. Populations, densities and momenta also need the norm $\|x\|$, which the shortcut does not return.
 # - **Norm guess.** The shortcut needs a guess $t$ for the encoded solution norm. A guess far from that norm lowers the success probability (Section 9).
-# - **Refusal.** A system beyond a limit, such as a polynomial degree above `max_degree`, is refused by `plan` with an error that names the limit. The [QLS introduction](qls_linear_system_intro.ipynb) runs one refusal and its remedy.
+# - **Refusal.** A system beyond a limit, such as a dense matrix whose arrays exceed `max_bytes`, is refused by `plan` with an error that names the limit.
 
 # %%
 rec = selected.reconstruction
 limits = result.data.trace.limits
 show_table([
-    ("Simulated qubits", rec.width, f"{limits.max_simulation_qubits} (local simulator default)"),
-    ("Polynomial degree", rec.degree, f"{selected.method.max_degree} (max_degree)"),
-    ("Simulator memory", "Not predicted for this route", f"{limits.simulator_memory_mb:,} MiB (simulator_memory_mb)"),
+    ("Simulated qubits", rec.width, f"No cap of its own. Their complex128 state takes {format_bytes(16 << rec.width)}"),
+    ("Polynomial degree", rec.degree, "No cap. Set by epsilon_inv and κ"),
+    ("Simulator memory", "Not predicted for this route", "Physical memory (default)" if limits.simulator_memory_mb is None else f"{limits.simulator_memory_mb:,} MiB (simulator_memory_mb)"),
 ], headers=("Limit", "This history", "Default cap"))
 
 # %% [markdown]
@@ -234,7 +234,6 @@ from nwqlib import prepare
 prepared = prepare(selected, progress=False)
 with prepared.run:  # the prepared Run holds the circuit until the block ends
     compiled = prepared.inspect_resources(
-        max_operations=10_000_000,  # the circuit has more operations than the default cap of 100,000
         transpile_options={"basis_gates": ["cx", "u"], "optimization_level": 1, "seed_transpiler": 7})
 show_table([
     ("Qubits", predicted.quantity("logical_width", location="logical_device").fact.value.numerator,
@@ -290,7 +289,7 @@ show_table([
      "Measured from A and b alone (Appendix C). Zero when A times the direction is parallel to b"),
     ("Singular values outside the selected domain", spectral_facts["spectral_domain_deficit"],
      "Measured from the singular values plan computed. Zero means all are covered"),
-    ("Phase-fit bound", rec.phase_error, "Upper bound for implementing the rescaled polynomial, not for the direction"),
+    ("Phase residual", rec.phase_error, "Numerical estimate of the error in implementing the rescaled polynomial, not of the direction"),
     ("Roundoff of the simulated state", roundoff,
      "Upper bound" if roundoff is not None else "Unavailable: " + roundoff_reason),
     ("Total error of the direction from all sources", None, "Unavailable: " + selected.error_model.terms[0].formula),
@@ -501,7 +500,7 @@ show_table([
 #
 # A finite even polynomial approximates that reflection (Dalzell, App. B.3, Eq. (62)). Its behavior in the gap between zero and the selected positive singular domain is not an accuracy claim.
 #
-# The first panel plots the Plan's unrescaled reflection polynomial $K(s)$. The circuit implements a bounded version $K(s)/\mathrm{rescale}$ through its phase angles. The second panel shows those phases in radians. The phase-fit bound applies to that rescaled polynomial action, not directly to the final normalized solution error.
+# The first panel plots the Plan's unrescaled reflection polynomial $K(s)$. The circuit implements a bounded version $K(s)/\mathrm{rescale}$ through its phase angles. The second panel shows those phases in radians. The phase residual applies to that rescaled polynomial action, not directly to the final normalized solution error.
 
 # %%
 show_table([
@@ -509,8 +508,8 @@ show_table([
     ("Reflection degree / half-degree", (rec.degree, rec.polynomial.ell), "Even polynomial degree is twice ell"),
     ("Kernel parameter eta", rec.polynomial.eta, "Construction parameter derived from epsilon_inv"),
     ("Polynomial rescale", rec.polynomial.rescale, "Maps the polynomial into the QSP amplitude domain"),
-    ("Phase count / evaluations", (len(rec.phase_solution), rec.phase_evaluations), "Selected angles and phase-solver work"),
-    ("Phase-fit bound", rec.phase_error, "Available bound for implementing the rescaled polynomial"),
+    ("Phase count / transform lengths", (len(rec.phase_solution), rec.phase_fft_lengths), "Selected angles and the transform lengths of the phase synthesis"),
+    ("Phase residual", rec.phase_error, "Numerical estimate of the error in implementing the rescaled polynomial"),
     ("Encoding error", rec.encoding_error, "Bound in the quantity and metric that the selected encoding declares"),
 ], digits=6, details="Polynomial and phase parameters")
 singular_grid = np.linspace(0.0, 1.0, 201)
@@ -593,7 +592,7 @@ show_table([
 #
 # The Result keeps the method, the backend, the timing of the simulator call and the identifiers of the Plan, the Result and the run.
 #
-# Set `ARCHIVE_PATH` to a new directory to save the Result with its full report, the baseline comparison and the spectral check. The cell then reloads the Result and recomputes the direction error from the saved amplitudes without repeating the SVD, the phase fit or the circuit run.
+# Set `ARCHIVE_PATH` to a new directory to save the Result with its full report, the baseline comparison and the spectral check. The cell then reloads the Result and recomputes the direction error from the saved amplitudes without repeating the SVD, the phase synthesis or the circuit run.
 
 # %%
 import json

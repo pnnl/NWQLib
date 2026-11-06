@@ -22,6 +22,7 @@ import pytest
 from qiskit.quantum_info import Operator, SparsePauliOp
 from scipy.linalg import expm
 
+from nwqlib._limits import ResourceLimitError
 from nwqlib.subroutines.trotterization import (
     build_trotter_evolution_circuit,
     dense_trotter_bound_coefficient,
@@ -494,43 +495,143 @@ def _random_operator(count, width, seed):
     )
 
 
-def test_public_census_admits_its_triple_table_before_building_it(monkeypatch) -> None:
-    """A byte allowance below the 24F triple table refuses the requested exact_census before any triple.
+def test_census_choice_uses_counts_not_memory_and_refusals_state_the_need(monkeypatch) -> None:
+    """"auto" compares w*N(A) with the threshold, inclusively, and the limits only refuse.
 
-    For 400 random terms on 8 qubits the pair scan finds about 1.1e7 nested tests, reserved as triples
-    before the triple scan, and about 5.3e6 surviving triples, whose 24F bytes (about 128 MB) exceed
-    the 100 MB allowance. The pair stage fits it, so the refusal comes after the pair scan and names
-    the relaxed alternative; a sufficient allowance returns the unadmitted kernel's value.
+    The threshold is moved to this operator's own structural count, so the boundary is exercised without
+    a billion tests. A memory limit that admits the exact census leaves its value and expression unchanged.
+    A smaller one refuses the exact census, chosen or requested, and names the bytes of the relaxed one.
+    An explicit work limit is checked before the pair scan and names the relaxed work after it. The
+    120 distinct commuting Z strings on 7 qubits have no anticommuting pair, so no nested tile exists,
+    the estimate is 288 * 120 = 34,560 bytes, and W_up = 0 is computed under max_bytes=145,000.
     """
-    operator = _random_operator(400, 8, 20260929)
-    limit = 100_000_000
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("a triple table was built")
-
-    monkeypatch.setattr(error_budget, "triple_structure", forbidden)
-    with pytest.raises(ValueError) as caught:
-        trotter_bound_coefficient(operator, order=2, max_bytes=limit)
-    message = str(caught.value)
-    assert "Pauli census requested expression stage needs work=" in message
-    assert f"max_bytes={limit}" in message and "No checked block fits" in message
-    assert 'bound_variant="relaxed_prefix"' in message
-    for helper, arguments in (
-        (select_trotter_step_count, {"time": 1.0, "error_budget": 0.1}),
-        (evaluate_trotter_bound, {"time": 1.0, "steps": 3}),
-    ):
-        with pytest.raises(ValueError, match="requested expression stage needs work="):
-            helper(operator, order=2, max_bytes=limit, **arguments)
-    # The explicitly requested relaxation fits the same allowance with pair structure only.
-    assert trotter_bound_coefficient(operator, order=2, bound_variant="relaxed_prefix", max_bytes=limit) > 0
-    # The pair stage is admitted before the labels are converted.
-    monkeypatch.setattr(error_budget, "_validated_terms", forbidden)
-    with pytest.raises(ValueError, match="pair stage needs work=.*max_work=1000,"):
-        trotter_bound_coefficient(operator, order=2, max_work=1000)
-    with pytest.raises(ValueError, match="max_work"):
-        trotter_bound_coefficient(operator, order=2, max_work=0)
+    operator = _random_operator(60, 8, 20260929)
+    labels = [label for label, _ in error_budget._validated_terms(operator)]
+    census = error_budget.census_structure(labels, 8, 2)
+    words = census.word_tests
+    assert census.variant == "exact_census" and words == census.nested_tests > 0
+    assert words == sum(len(row) * (59 - i) for i, row in enumerate(census.rows))
+    for threshold, variant in ((words, "exact_census"), (words - 1, "relaxed_prefix")):
+        monkeypatch.setattr(error_budget, "EXACT_CENSUS_WORD_TESTS", threshold)
+        chosen = error_budget._bound_coefficient_evaluation(operator, order=2)
+        assert (chosen.bound_variant, chosen.nested_word_tests) == (variant, words)
+        assert chosen.nested_commutation_checks == (words if variant == "exact_census" else 0)
+        assert error_budget._bound_coefficient_evaluation(operator, order=1).bound_variant == "exact_census"
     monkeypatch.undo()
-    terms = tuple(error_budget._validated_terms(operator))
-    unadmitted = error_budget._upward_float(error_budget._pauli_bound_coefficient_from_terms(
-        terms, 2, choose=lambda E, N: ("exact_census", 65536)).coefficient)
-    assert trotter_bound_coefficient(operator, order=2) == unadmitted
+    tile = max(min(32, len(row)) * (59 - i) for i, row in enumerate(census.rows))
+    assert census.nested_tile == tile > 0
+    exact_bytes = error_budget.census_bytes(60, 8, census.pairs, order=2, variant="exact_census", tile=tile)
+    relaxed_bytes = error_budget.census_bytes(60, 8, census.pairs, order=2, variant="relaxed_prefix")
+    assert relaxed_bytes < exact_bytes
+    free = error_budget._bound_coefficient_evaluation(operator, order=2)
+    tight = error_budget._bound_coefficient_evaluation(operator, order=2, max_bytes=exact_bytes)
+    assert (tight.coefficient, tight.bound_variant) == (free.coefficient, "exact_census")
+    for requested in ("auto", "exact_census"):
+        with pytest.raises(ResourceLimitError, match=f"relaxed_prefix' needs about {relaxed_bytes} bytes"):
+            trotter_bound_coefficient(operator, order=2, bound_variant=requested, max_bytes=exact_bytes - 1)
+    relaxed = error_budget._bound_coefficient_evaluation(
+        operator, order=2, bound_variant="relaxed_prefix", max_bytes=exact_bytes - 1)
+    # Each outward value bounds its own exact expression, and the relaxed expression dominates the full
+    # one exactly. The two rounded values are not compared with each other.
+    exact_w, relaxed_w, _, _ = _exact_triangle(list(error_budget._validated_terms(operator)), 2)
+    assert relaxed.bound_variant == "relaxed_prefix" and relaxed.coefficient >= relaxed_w >= exact_w
+    assert free.coefficient >= exact_w
+    with pytest.raises(ValueError, match="pair scan needs work=.*above max_work=1000$"):
+        trotter_bound_coefficient(operator, order=2, max_work=1000)
+    pair_scan = 16 * 60 * 9 + 60 * 8 + 60 * 59 // 2
+    with pytest.raises(ValueError, match="exact_census. needs work=.*relaxed_prefix' needs work="):
+        trotter_bound_coefficient(operator, order=2, max_work=pair_scan + 1)
+    commuting = SparsePauliOp([format(i, "07b").translate(str.maketrans("01", "IZ")) for i in range(1, 121)],
+                              np.ones(120))
+    assert error_budget.census_bytes(120, 7, 0, order=2, variant="exact_census") == (288 + 3 * 7) * 120
+    assert trotter_bound_coefficient(commuting, order=2, max_bytes=145_000) == 0.0
+
+
+def test_auto_census_counts_each_weighting() -> None:
+    """"auto" compares N(A)*max(w, K) with the threshold, so K weightings cost K*N(A) beside w*N(A).
+
+    N(A) is counted from the labels: two Pauli strings anticommute when an odd number of positions hold
+    two distinct non-identity letters. One weighting keeps the w*N(A) choice. The largest cohort that
+    stays exact is the threshold divided by N(A), and one more weighting takes the relaxation while the
+    word tests stay w*N(A). An explicit request ignores the count. On the 1000-term table of the
+    threshold's calibration, N(A) = 80,918,050 gives 1,294,688,800 for 16 weightings and 1,375,606,850
+    for 17.
+    """
+    labels = ["XYZ", "ZZI", "YIX", "IXY", "XXX", "ZYI", "IZZ", "YXI"]
+    p = len(labels)
+
+    def anticommute(a, b):
+        return sum(x != "I" and y != "I" and x != y for x, y in zip(a, b, strict=True)) % 2 == 1
+
+    n = sum(p - i - 1 for i in range(p) for j in range(i + 1, p) if anticommute(labels[i], labels[j]))
+    assert n > 0
+    one = error_budget.census_structure(labels, 3, 2)
+    assert (one.nested_tests, one.word_tests, one.selection_count, one.variant) == (n, n, n, "exact_census")
+    k = error_budget.EXACT_CENSUS_WORD_TESTS // n
+    cohort = error_budget.census_structure(labels, 3, 2, weightings=k)
+    assert (cohort.selection_count, cohort.variant) == (n * k, "exact_census")
+    larger = error_budget.census_structure(labels, 3, 2, weightings=k + 1)
+    assert (larger.variant, larger.word_tests, larger.selection_count) == ("relaxed_prefix", n, n * (k + 1))
+    assert error_budget.census_structure(labels, 3, 2, "exact_census", weightings=k + 1).variant == "exact_census"
+    assert error_budget.census_structure(labels, 3, 1, weightings=k + 1).variant == "exact_census"
+    calibration = 80_918_050
+    assert [error_budget.choose_variant(2, "auto", calibration * k) for k in (16, 17)] == [
+        "exact_census", "relaxed_prefix"]
+
+
+def test_node_weightings_share_one_census_and_zero_magnitudes_remove_terms() -> None:
+    """Rows of magnitudes contract against one structure, and a zero removes its term exactly.
+
+    Each row's bound dominates the exact rational triangle of the terms it keeps, in their order, on a
+    width of 70 qubits (two mask words), and equals the single-row contraction.
+    """
+    rng = np.random.default_rng(7070)
+    labels = [label for label in _labels(rng, 70, 9) if set(label) != {"I"}]
+    magnitudes = np.abs(rng.uniform(-1.0, 1.0, size=(3, len(labels))))
+    magnitudes[1, 0] = magnitudes[2, -1] = magnitudes[2, 3] = 0.0
+    census = error_budget.census_structure(labels, 70, 2, "exact_census")
+    for variant in ("exact_census", "relaxed_prefix"):
+        shared = error_budget.coefficient_up(magnitudes, census.rows, order=2, variant=variant,
+                                             x=census.x, z=census.z)
+        for row, bound in zip(magnitudes, shared, strict=True):
+            kept = [(label, value) for label, value in zip(labels, row, strict=True) if value]
+            exact, relaxed, _, _ = _exact_triangle(kept, 2)
+            assert bound >= (exact if variant == "exact_census" else relaxed)
+            alone = error_budget.coefficient_up(row, census.rows, order=2, variant=variant,
+                                                x=census.x, z=census.z)
+            assert bound == alone
+
+
+@pytest.mark.parametrize("values", ([1.0, 2.0**-53, 2.0**-53], [2.0**-41, 2.0**-100], [2.0**-1074, 2.0**-1074, 0.0]))
+def test_nonnegative_sums_lie_within_two_steps_above_the_exact_sum(values):
+    # The exact rational sum S and its nearest binary64 value give the
+    # interval [S, next(next(RN(S)))], in every order of the addends, for the
+    # dropped Pauli mass and the imaginary-time coefficient sum alike.
+    from itertools import permutations
+    from nwqlib.subroutines.qsp.imaginary_time import _upward_sum
+    from nwqlib.subroutines.trotterization.error_budget import upper_dropped_mass
+
+    exact = sum(map(Fraction, values))
+    top = math.nextafter(math.nextafter(float(exact), math.inf), math.inf)
+    masses = {upper_dropped_mass(order) for order in permutations(values)}
+    sums = {_upward_sum(np.array(order)) for order in permutations(values)}
+    assert len(masses) == 1
+    assert all(exact <= Fraction(value) <= Fraction(top) for value in masses | sums)
+
+
+def test_nonnegative_sums_keep_one_term_exact_and_refuse_nonfinite_input():
+    from nwqlib.subroutines.qsp.imaginary_time import _upward_sum
+    from nwqlib.subroutines.trotterization.error_budget import upper_dropped_mass
+
+    for total in (upper_dropped_mass([5e-13]), _upward_sum(np.array([5e-13]))):
+        assert total == 5e-13
+    for total in (upper_dropped_mass([0.0, -0.0]), _upward_sum(np.array([0.0, -0.0]))):
+        assert total == 0.0 and math.copysign(1.0, total) == 1.0
+    largest = np.finfo(float).max
+    for values in ([largest, largest], [math.nan, 1.0], [math.inf, 1.0]):
+        with pytest.raises(ValueError):
+            upper_dropped_mass(values)
+        with pytest.raises(ValueError):
+            _upward_sum(np.array(values))
+    with pytest.raises(ValueError):
+        _upward_sum(np.array([1.0, -0.0, -2.0**-1074]))

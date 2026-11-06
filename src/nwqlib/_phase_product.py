@@ -5,9 +5,9 @@ at preparation) and ``PreparedArtifact.saved_state_error`` and
 ``PreparedArtifact.saved_state_probability_window`` in ``execution.py`` (the
 corrected budgets) share the scalar functions of this module.
 
-Aer supplies its stored Python factor. NWQ-Sim supplies the factor reported
-by its selected runner during preparation and transmitted in the execution
-request. The same finite envelope applies to either represented factor.
+Aer supplies its stored Python factor. NWQ-Sim forms its factor in Python
+during preparation and transmits it in the execution request. The same finite
+envelope applies to either represented factor.
 Multiplication by ``(1.0, ±0.0)`` has a zero envelope under the assumptions
 on classical arithmetic below. The simulator's first-order allowance remains
 part of the resulting saved-state estimate.

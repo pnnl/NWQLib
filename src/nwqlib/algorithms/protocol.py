@@ -1,8 +1,81 @@
 """The Method base class and its descriptor."""
 
+from dataclasses import dataclass
 from typing import ClassVar
 
+from nwqlib._limits import ResourceLimitError  # noqa: F401 - public as nwqlib.algorithms.ResourceLimitError
 from nwqlib.core.records import Record, Source, Text
+
+
+@dataclass(frozen=True)
+class RowTemplate:
+    """Points of a static Plan whose circuits differ only in rotation angles (`Method.row_templates`).
+
+    A point is an experiment, or one range-axis point of an experiment with
+    axes (`nwqlib.core.planning.StaticPoint`). The points of one template must also share one readout, their
+    `ObservationSpec` with its shots included, because they run circuits
+    compiled with the readout of the template's first prepared point.
+
+    Attributes:
+        key: Identifier of the shared gate sequence and readout, equal for
+            the same sequence and readout each time the Method is asked about
+            the same Plan. Points with different readouts need different
+            keys.
+        block_id: Content hash of the selected block whose gate the template
+            replaces in each point's circuit.
+        circuit: That block's circuit with one Qiskit parameter per
+            continuous angle, on the block's ports in signature order.
+        parameters: The circuit's parameters, in the order of each row's
+            values.
+        rows: ``(point key, values)`` per point, with the `StaticPoint.key`
+            the Method received. Binding the values to `parameters` gives the
+            point's own block circuit.
+    """
+
+    key: str
+    block_id: str
+    circuit: object
+    parameters: tuple
+    rows: tuple
+
+    # A class attribute, not a field: an ordinary template has no stated size.
+    _retained_bytes = None
+
+
+class _DeferredRowTemplate(RowTemplate):
+    """A `RowTemplate` that builds its circuit when ``circuit`` is read, and states the size to compare first.
+
+    `Method.row_templates` receives no Run and returns before the Run can compare
+    anything, so a Method that built every template there would allocate them all
+    before any comparison with what the Run holds. A deferred template carries
+    ``retained_bytes`` instead, a declared allowance for one built template, not a
+    measurement. ``prepare_template_rows`` compares it, reads ``circuit`` once for
+    each new template and releases the result after compiling. The ``circuit``
+    property does not cache, so that a template no longer in use keeps no circuit,
+    and each read builds again.
+
+    ``dataclasses.replace(template, circuit=...)`` gives an ordinary template with
+    that circuit, because a circuit given to the constructor is used as it is and
+    the stated size belongs only to a build. Replacing any other field reads
+    ``circuit``, so it builds. ``repr``, equality and hashing build nothing.
+    """
+
+    def __init__(self, *, key, block_id, parameters, rows, circuit=None, build=None, retained_bytes=None):
+        for name, value in (("key", key), ("block_id", block_id), ("parameters", parameters), ("rows", rows),
+                            ("_given", circuit), ("_build", build), ("_retained_bytes", retained_bytes)):
+            object.__setattr__(self, name, value)
+
+    @property
+    def circuit(self):
+        return self._build() if self._given is None else self._given
+
+    def __repr__(self):
+        return f"_DeferredRowTemplate(key={self.key!r}, rows={len(self.rows)}, retained_bytes={self._retained_bytes})"
+
+    def __eq__(self, other):
+        return self is other
+
+    __hash__ = object.__hash__
 
 
 class AlgorithmDescriptor(Record):
@@ -81,20 +154,25 @@ class Method(Record):
       that chooses later circuits from earlier results overrides them.
     - `prepare_all_refusal`: why `settings="all"` cannot be served, asked before
       a Run exists.
+    - `has_row_templates` and `row_templates`: groups of points of a static
+      Plan whose circuits differ only in rotation angles, built once per group.
     - `query_catalog_reason`: why the Plan's experiments are templates of
       queries whose parameter values the iteration chooses, asked by the
       resource estimate of a whole Plan.
     - `error_model`: the known and unavailable error sources of a Plan.
     - `verify` and `recover_analysis`: explicit extra operations, unavailable by
       default.
-    - `reduction_allowance(self, plan, point, *, observation, width, run) -> int`,
-      required when a Plan reduces data while it is collected. It receives
-      the Plan, the point's `Realization`, its resolved trajectory
-      `ObservationSpec`, the Program's logical width and the Run. It checks
-      the reduction's workspace, raises `ValueError` if the point exceeds
-      the limit, and returns the remaining nonnegative work allowance in
-      the registered reducers' work units. It reads the work already used
-      without changing it. The base Method supplies no implementation.
+    - `reduction_allowance(self, plan, point, *, observation, width, run) -> int | None`,
+      optional, for a Method whose reductions of data while it is collected
+      count against an explicit work limit of its own. It receives the
+      Plan, the point's `Realization`, its resolved trajectory
+      `ObservationSpec`, the Program's logical width and the Run. It may
+      check the reduction's workspace, raising `ValueError` if the point
+      exceeds the limit, and returns the remaining nonnegative work
+      allowance in the registered reducers' work units, or None when the
+      Method sets no work limit. It reads the work already used without
+      changing it. The base Method supplies no implementation, and without
+      it the reductions have no work limit.
     - `before_submit`: check data collection before its submission is recorded.
     - `validate_point`, `specialize_experiment` and `selected_kernels`: check and
       derive one resolved point without planning again.
@@ -166,6 +244,75 @@ class Method(Record):
 
         Returns:
             reason (str | None): The reason, or `None`.
+        """
+        return None
+
+    def has_row_templates(self, plan):
+        """Return whether `row_templates` can group points of `plan`.
+
+        A Run on a backend that binds parameterized circuits asks this
+        before it collects the remaining points of a static Plan for
+        `row_templates`. When it returns False, the Run generates, prepares
+        and runs the points one at a time, so a Plan with many range-axis
+        points starts without listing them all first. The default returns
+        whether the Method's class overrides `row_templates`. A Method
+        overrides this hook to return False for its Plans whose points are
+        never grouped.
+
+        Args:
+            plan (Plan): The Plan.
+
+        Returns:
+            groups (bool): Whether `row_templates` can return groups for `plan`.
+        """
+        return type(self).row_templates is not Method.row_templates
+
+    def row_templates(self, plan, points):
+        """Group static points whose circuits differ only in rotation angles, or return None.
+
+        A point is an experiment of the Plan, or one range-axis point of an
+        experiment whose batch has axes. The Run asks only on a backend
+        that binds parameterized circuits (`supports_template_pubs`: IBM
+        Runtime and Aer), when `has_row_templates` returns True, before it
+        prepares the `points` of a static Plan. Each group's circuit is
+        compiled once, and each point keeps its own values, preparation
+        record and attempt, on which its shots are counted. A Method
+        overrides it when its points share gates, and its groups must cover
+        `points`, each by its key. The points of a group must share one readout
+        (`ObservationSpec`, shots included), because they run circuits
+        compiled with the readout of the group's first prepared point.
+        Put points with different readouts in groups with different keys.
+
+        Both backends group counts readouts only. IBM Runtime sends every
+        grouped point that has not run yet in one Sampler job, which uses
+        one shot count, so on IBM Runtime all groups of a Plan need the same
+        shots. Aer asks only about the points with counts readouts and runs
+        each grouped point as its own attempt with its own seed, so the
+        groups' shots can differ. Aer prepares a point with any other
+        readout on its own, and so the points of a group whose
+        parameterized operations are not all Qiskit standard gates, such as
+        a `HamiltonianGate` whose time is a parameter, because translating
+        such an operation can need its value. On both backends a group
+        without parameters is prepared point by point. The default returns
+        None, and each point is prepared as its own bound circuit and run
+        as its own attempt. A Method whose points use different shot counts
+        keeps this default on IBM Runtime.
+
+        Preparation raises `ValueError`, before it prepares any point of
+        the group, when a point's readout differs from the group's,
+        including a group that an earlier preparation in the same Run
+        compiled. When the groups of one IBM Runtime job have different
+        shots, the Run raises `ValueError` after preparing their points and
+        before sending the job.
+
+        Args:
+            plan (Plan): The Plan.
+            points (tuple[StaticPoint, ...]): The points to prepare
+                (`nwqlib.core.planning.StaticPoint`), each with its key, its
+                Experiment and the bindings of its range axes.
+
+        Returns:
+            templates (tuple[RowTemplate, ...] | None): The groups, or `None`.
         """
         return None
 
@@ -361,5 +508,6 @@ class ApplicabilityError(ValueError):
     """Raised when a configured Method cannot solve the given problem or output.
 
     A Method's `plan` raises it, for example for an unsupported problem type,
-    input representation or output. It is a `ValueError`.
+    input representation or output. It is a `ValueError`. A refusal because a
+    memory or work limit stops the planning is `ResourceLimitError` instead.
     """

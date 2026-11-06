@@ -1,6 +1,6 @@
-"""The dense-dilation CX law and selected LCHS QSP resource samples.
+"""The dense-dilation CX law and the selected LCHS QSP resource breakdown.
 
-Selected LCHS product-formula and dense samples live in
+Selected LCHS product-formula and dense resource laws are tested in
 test_lchs_resource_structural_law.
 """
 
@@ -35,11 +35,22 @@ def test_dense_dilation_query_uses_complete_qsd_bound(system_qubits, expected):
 
 @pytest.mark.parametrize('system_qubits,diagonal,expected_encoding',[
     (1,True,'dense_dilation'),(2,False,'banded')])
-def test_selected_qsp_resource_structure_and_classification_admission(system_qubits,diagonal,expected_encoding,monkeypatch):
-    """Actual bounded inputs and read-only wide classification admission."""
+def test_selected_qsp_resource_structure_and_classification_admission(system_qubits,diagonal,expected_encoding):
+    """The formula breakdown reports the coherent body once with the selected CX law, which bounds the built body.
+
+    `resource_breakdown` reads the Program without building a circuit and
+    gives the coherent body one call with its record's CX law, the
+    attempt-CX law of the selected row, the no-ancilla upper bound of the
+    same constructions (coherent_selection module docstring). Transpiled at
+    fixed options, the built body has at most that many CX. A dense-dilation
+    child has no CX law, and the breakdown then reports none.
+    """
+    from types import SimpleNamespace
+    from qiskit import transpile
     from nwqlib import LinearDynamics,NormSquared,plan,estimate
     from nwqlib.algorithms.lchs import LCHS,ProviderConfig
-    from nwqlib.algorithms.lchs.quantum_resources import sample_resources
+    from nwqlib.algorithms.lchs.native import construct_coherent_lcu
+    from nwqlib.algorithms.lchs.quantum_resources import resource_breakdown
     matrix=np.diag([.1,.2]) if diagonal else _heat_matrix(system_qubits)
     initial=np.zeros(len(matrix))
     initial[0]=1.
@@ -56,20 +67,21 @@ def test_selected_qsp_resource_structure_and_classification_admission(system_qub
             k_quadrature=method.k_quadrature)
     problem=LinearDynamics(A=matrix,initial_state=initial,time=.1 if diagonal else .25)
     chosen=plan(problem,method=method,output=NormSquared())
-    selected=chosen._native['native_data'].qsp_plan
-    assert selected['part_plans'][0].implementation==expected_encoding
-    expansion=selected['expansion']
-    queries=3*(expansion.cos_degree+expansion.sin_degree)
-    law=selected['structural_law']
-    assert law['block_encoding_queries']==law['child_encoding_calls']==queries
-    assert law['projector_phase_count']==queries+6
+    data=chosen._native['native_data']
+    prepared=data.qsp_plan
+    children={child.implementation for name,child in prepared.generator.components.items()
+              if name in ('l_child','h_child') and child is not None}
+    assert children=={expected_encoding}
     width=sum(r.width for r in chosen.construction.program.registers)
     assert width<=13
     folded=estimate(chosen)
     assert folded.construction_id==chosen.construction.content_id
-    samples=sample_resources(chosen,max_qubits=13,transpile_options=TRANSPILE_OPTIONS)
-    assert all(row['inventory']['basis']=='transpiled:cx,u'
-        and row['inventory']['compiler']['options']['seed_transpiler']==7
-        for row in samples['representatives'])
-    assert set(samples['weighted_totals'])=={s.name for s in chosen.reconstruction.settings}
-    assert all(totals['operations'].get('cx',0)>0 for totals in samples['weighted_totals'].values())
+    (entry,)=resource_breakdown(chosen)
+    (body,)=[row for row in entry['blocks'] if row['block']=='lchs_coherent_lcu']
+    law=prepared.candidate.cost['attempt_cx']
+    assert body['calls']==1 and (law is None)==(expected_encoding=='dense_dilation')==(body['laws']==())
+    built=construct_coherent_lcu(SimpleNamespace(_payload=data),(),None)
+    cx=transpile(built,**TRANSPILE_OPTIONS).count_ops().get('cx',0)
+    assert cx>0
+    if law is not None:
+        assert body['laws'][0].value==law and cx<=law

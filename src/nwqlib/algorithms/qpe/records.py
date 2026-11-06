@@ -7,16 +7,16 @@ shot counts. QPESample and QPEAnalysis hold the reduced ancilla means and the
 estimate.
 """
 
-from nwqlib._limits import DEFAULT_MAX_BYTES
 
 from math import isfinite, pi
 from typing import Annotated, Literal
-from pydantic import Field, StrictBool, StrictInt, model_validator
+from pydantic import Field, StrictBool, model_validator
 from nwqlib._validation import NUMERICAL_RELATION_RTOL
 from nwqlib.algorithms.protocol import AlgorithmDescriptor
 from nwqlib.core.analysis import Result
 from nwqlib.core.planning import Plan
 from nwqlib.core.records import (
+    StrictInteger,
     ContentID,
     Float64,
     FrozenArray,
@@ -112,7 +112,7 @@ class QPEQuery(Record):
 
     schema_version: Literal[3] = 3
     experiment: Text
-    power: StrictInt | Real
+    power: StrictInteger | Real
     phase_shift: Real
     multiplicity: PositiveInt = 1
     acquisition: Text
@@ -166,8 +166,7 @@ class QPECommonStep(Record):
             cumulative ``QPEPower.steps``, and ``r_max`` the final ``step_count``.
             ``P_p``, ``T_p``, ``I_p`` and ``A_p`` are respectively the pruning,
             time-displacement, identity-phase and angle-formation bounds
-            (``trotterization.error_budget.emitted_subtotal`` and
-            ``trotterization.error_budget._emitted_parts``). The allowance is
+            (``trotterization.error_budget._emitted_parts``). The allowance is
             ``min_(p>0) (epsilon_p-P_p-T_p-I_p-A_p)*r_max/r_p``, rounded
             downward.
         bound_value: Upward product-formula bound
@@ -238,7 +237,7 @@ class QPEPower(Record):
             without nonidentity Pauli terms.
     """
 
-    power: StrictInt | Real
+    power: StrictInteger | Real
     backend: Literal["classical", "dense_exact", "trotter_error_budgeted"]
     evolution_time: Nonnegative | None
     steps: Count
@@ -287,8 +286,8 @@ class QPEReconstruction(Record):
         preparation: Preparation of the reference state used, after padding.
         target_kind: ``hamiltonian`` (U = exp(-i*tau*H)) or ``unitary``.
         tau: Time step of U, None for unitary input.
-        tau_selection: How tau was chosen: ``supplied``, ``scaled absolute
-            row-sum bound``, ``Pauli coefficient l1 bound``, ``zero
+        tau_selection: How tau was chosen: ``supplied``, ``absolute row-sum
+            bound``, ``Pauli coefficient l1 bound``, ``zero
             Hamiltonian`` or ``unitary input``.
         spectral_radius_bound: R with every |E| <= R, in operator units, or
             None when unavailable.
@@ -314,17 +313,21 @@ class QPEReconstruction(Record):
         nested_commutation_checks: Nested commutation tests performed for the
             one commutator count, zero for ``relaxed_prefix``.
         bound_variant: Pauli-triangle expression chosen by planning,
-            "exact_census" for the full pair/triple indicator structure or
-            "relaxed_prefix" for the second-order degree-capped suffix
-            relaxation. None without a commutator count.
+            "exact_census" for every indicator of the Pauli-triangle
+            expression or "relaxed_prefix" for the second-order
+            degree-capped suffix relaxation. None without a commutator count.
         bound_coefficient: Exact (numerator, denominator) of the upper
             coefficient W_up of the chosen bound_variant expression,
             evaluated with scaled binary64 products and sums rounded upward
             followed by exact rational rescaling. None without a commutator
             count.
-        census_block: Contraction block size passed to the coefficient
-            evaluation of the commutator count, None without a commutator
-            count.
+        nested_word_tests: The w*N(A) logical nested word tests of the exact
+            expression, with w = ceil(q/64), counted from the pair scan.
+            Planning chooses "exact_census" when this count is at most
+            ``error_budget.EXACT_CENSUS_WORD_TESTS`` (1,300,000,000) and
+            "relaxed_prefix" above it. It is a selection count. The tests
+            run only for "exact_census" (``nested_commutation_checks``).
+            None without a commutator count.
         common_step: The shared step of an exact static product-formula
             trajectory, or None for independent sampled/RWPE powers and
             when no positive common-grid power is present.
@@ -355,8 +358,8 @@ class QPEReconstruction(Record):
     pair_commutation_checks: Count = 0
     nested_commutation_checks: Count = 0
     bound_variant: Literal["exact_census", "relaxed_prefix"] | None = None
-    bound_coefficient: tuple[StrictInt, StrictInt] | None = None
-    census_block: PositiveInt | None = None
+    bound_coefficient: tuple[StrictInteger, StrictInteger] | None = None
+    nested_word_tests: Count | None = None
     common_step: QPECommonStep | None = None
     selected_base: InputRef | None = None
     convention: Literal["kernels use principal radians; public Eigenphase uses turns once"] = (
@@ -430,7 +433,7 @@ class QPEReconstruction(Record):
             raise ValueError(
                 "nonidentity Pauli terms must match width and keep identity separately"
             )
-        census = (self.bound_variant, self.bound_coefficient, self.census_block)
+        census = (self.bound_variant, self.bound_coefficient, self.nested_word_tests)
         if any(value is None for value in census) != all(value is None for value in census):
             raise ValueError("QPE census provenance fields are recorded together")
         if self.bound_coefficient is not None and (self.bound_coefficient[1] < 1
@@ -524,7 +527,7 @@ class QPESample(Record):
     """
 
     experiment: Text
-    power: StrictInt | Real
+    power: StrictInteger | Real
     phase_shift: Real | None
     mean: Annotated[Real, Field(ge=-1, le=1)]
     raw_mean: Real | None = None
@@ -830,7 +833,6 @@ class QPEAnalysis(Result):
             exists. For RWPE, every planned step has been processed.
         gaussian: RWPE posterior moments, None for the other estimators.
         processed_steps: RWPE updates applied.
-        controller_work: RWPE work units counted against `max_work`.
         stop_reason: Why the measurement stopped, why no estimate is
             identified, or, for QCELS, that the fit is aliased.
         analysis_settings: Reanalysis settings, such as a changed `grid_size`.
@@ -871,7 +873,6 @@ class QPEAnalysis(Result):
     complete: StrictBool
     gaussian: RWPEGaussian | None = None
     processed_steps: Count = 0
-    controller_work: Count = 0
     stop_reason: Text | None = None
     analysis_settings: tuple[Binding, ...] = ()
     fit: QCELSFit | None = None
@@ -1171,13 +1172,23 @@ class QPEVerification(Record):
             discrepancy in the requested output unit, which is the Problem's
             energy unit for an `Eigenvalue` output and turns of circular
             distance for an `Eigenphase` output.
-        group_atol: Default `1e-8`, nonnegative. Absolute tolerance for
+        group_atol: Default `None`, nonnegative. Absolute tolerance for
             numerical spectral clustering, in the unit of the compared
             eigenvalues. For a Hamiltonian target it is in the Problem's
-            energy unit and compares eigenvalues of H. For a unitary target it
-            is in radians and compares the principal differences of
-            eigenphase angles. It does not follow the output unit, so an
-            `Eigenphase` output of a Hamiltonian still groups by energy.
+            energy unit and compares eigenvalues of H, and `None` uses
+            `1e-8*(E_max - E_min)`, which scales with the units of H and does
+            not change under `H + cI`. A spectrum with a single value then
+            has tolerance 0 and forms one cluster. For a unitary target it is
+            in radians and compares the principal differences of eigenphase
+            angles, and `None` uses `1e-8`. It does not follow the output
+            unit, so an `Eigenphase` output of a Hamiltonian still groups by
+            energy. The record reports the tolerance used as the fact
+            `group_tolerance`. The fact `estimated_resolved` is 0 when that
+            tolerance is at or below the rounding scale `D*2**-53*max|E|` of
+            the D eigenvalues, where rounding may have split a degenerate
+            eigenspace. This scale is a heuristic and no LAPACK error bound,
+            so 0 does not prove a split and 1 does not prove the clusters
+            right. Pass `group_atol` to choose an absolute tolerance there.
         minimum_overlap: Default `None`, which uses SPE's declared eta, or
             0.9 for the other estimators. Required projector weight, in
             [0, 1].
@@ -1186,26 +1197,32 @@ class QPEVerification(Record):
         reuse_only: Default `False`. `True` requires spectral and reference
             data already computed for the same target and initial state,
             instead of computing them.
-        max_bytes: Default 10 GB (decimal, `10_000_000_000` bytes). Limit on
-            the bytes of the reference arrays whose sizes are known in
-            advance.
-        max_work: Default `1_000_000_000`. Limit on the work units declared
-            for the reference computation.
+        max_bytes: Default `None`, the physical memory of this computer.
+            Limit on the bytes that each step of the reference computation
+            adds to the arrays already in memory: the eigendecomposition
+            with a newly formed reference direction, then the QR of one
+            cluster at a time. The steps run one after another, so each
+            is compared on its own.
+        max_work: Default `None`, no limit. Optional limit on the work units
+            of each step: the eigendecomposition, counted only when it is
+            computed and not reused, and the QR and projection of all
+            clusters at their actual sizes. Each step is compared before it
+            runs. A refusal names the step and the limit it exceeds.
     """
 
     tolerance: Nonnegative
-    group_atol: Nonnegative = 1e-8
+    group_atol: Nonnegative | None = None
     minimum_overlap: Annotated[Real, Field(ge=0, le=1)] | None = None
     materialize_preparation: StrictBool = False
     reuse_only: StrictBool = False
-    max_bytes: PositiveInt = DEFAULT_MAX_BYTES
-    max_work: PositiveInt = 1_000_000_000
+    max_bytes: PositiveInt | None = None
+    max_work: PositiveInt | None = None
 
     @property
     def source(self):
         return Source(
             name="qpe.nominal_cluster_reference",
-            version="3",
+            version="4",
             domain="explicit nominal spectral cluster and QR projector",
             reference="numerical grouping/projector overlap; no exact degeneracy or ground-identity proof",
         )

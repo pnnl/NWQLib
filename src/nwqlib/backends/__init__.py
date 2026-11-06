@@ -42,7 +42,6 @@ _OPERATIONS = {
     "AttemptTiming": "telemetry",
     "AER_COUNTS_TARGET": "targets",
     "AER_STATEVECTOR_TARGET": "targets",
-    "SampledBlock": "resources",
     "BackendRunResult": "results",
 }
 

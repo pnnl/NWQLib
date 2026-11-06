@@ -14,7 +14,8 @@ concurrency:
 
 jobs:
   nexus:
-    runs-on: ubuntu-latest
+    # The selected tests load qiskit-aer with the Qiskit of the lock, see the checks job of full-ci.yml.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4

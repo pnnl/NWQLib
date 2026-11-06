@@ -12,8 +12,10 @@ from typing import Any
 
 import numpy as np
 from qiskit import QuantumCircuit, QuantumRegister
+from qiskit.circuit import Gate
 from qiskit.circuit.library.data_preparation import UniformSuperpositionGate
 
+from nwqlib._limits import ResourceLimitError, check_memory
 from nwqlib._numerics import normalize_state_vector
 from nwqlib.subroutines._multiplexors import (
     append_control_diagonal_phases,
@@ -177,6 +179,56 @@ def _build_normalized_state_preparation(
     )
 
 
+def direct_tree_bytes(qubits) -> int:
+    """Return a coarse memory estimate of the direct magnitude/phase tree on ``qubits`` qubits.
+
+    The tree holds one RY multiplexor per qubit and a phase diagonal of one
+    RZ multiplexor per qubit, and a multiplexor with ``k`` controls holds at
+    most ``2 * 2**k`` gates. With one wrapper instruction per multiplexor
+    and diagonal, the tree has fewer than ``4 * 2**q + 2 * q``
+    instructions, each counted at the 256 bytes of the lowering memory
+    check (ENGINEERING_CONSTANTS.md, "Selected block lowering limits").
+    """
+    return 256 * ((4 << qubits) + 2 * qubits)
+
+
+class DirectPreparationGate(Gate):
+    """The direct tree of one normalized state, built when its definition is first read.
+
+    ``state`` is the normalized direction, global phase included. The
+    definition is the circuit of ``_build_normalized_state_preparation``, so
+    a backend that decomposes the gate, and its controlled and inverse
+    forms, see the same tree. A noiseless Aer statevector execution whose
+    first instruction holds this gate sets ``state`` directly instead and
+    builds no tree (``backends.qiskit_aer._initial_state``). The tree is
+    built only here, so its memory check here covers every path to it: a
+    Run, a backend called directly, resource inspection and a circuit of
+    ``prepare_qiskit`` that the caller transpiles.
+    """
+
+    def __init__(self, state):
+        self.state = state
+        super().__init__("direct_state_preparation", int(state.shape[0]).bit_length() - 1, [])
+
+    def _define(self):
+        try:
+            check_memory(direct_tree_bytes(self.num_qubits), None,
+                         f"the direct state preparation tree on {self.num_qubits} qubits")
+        except ResourceLimitError as error:
+            raise ResourceLimitError(
+                f"{error}. Use a compact state preparation, such as a product state or a supplied "
+                "circuit, or on the noiseless Aer statevector target make it the first instruction of "
+                "the circuit, which Aer sets as the initial state without building the tree") from None
+        self.definition = _build_normalized_state_preparation(
+            self.state, input_norm=1.0, register_name="system").circuit
+
+
+def direct_preparation_circuit(normalized_state, *, register_name):
+    """A circuit of one ``DirectPreparationGate`` on all its qubits, the form in which circuit construction holds a direct preparation."""
+    gate = DirectPreparationGate(normalized_state)
+    circuit = QuantumCircuit(QuantumRegister(gate.num_qubits, register_name), name="state_preparation")
+    circuit.append(gate, circuit.qubits, copy=False)
+    return circuit
 
 
 __all__ = [

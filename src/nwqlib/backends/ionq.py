@@ -16,6 +16,7 @@ import json
 import os
 from typing import Annotated, ClassVar, Literal
 from urllib.parse import quote
+from uuid import UUID
 
 from pydantic import Field
 
@@ -43,44 +44,12 @@ class _PreparedIonQ:
     metadata: dict
 
 
-def ionq_decode_bytes(outcomes, qubits, width):
-    """Bound the NumPy array element bytes held while one nonempty IonQ histogram is decoded.
-
-    Args:
-        outcomes: Positive number m of provider histogram entries, including
-            zero-count entries and distinct spellings of the same state.
-        qubits: Declared native qubit count q, between zero and 64.
-        width: Classical measurement-map length c, between zero and 64.
-
-    At most K=min(m, 2**min(q, c)) distinct mapped indices reach unique.
-    Allow a separate gather buffer even for the 64-bit identity map.
-    NumPy 2.5.2 unique(return_inverse=True) simultaneously holds the provider
-    state array, gathered input, flattening copy, argsort permutation, sorted
-    values, cumulative mask and inverse indices, each using 8*m bytes,
-    plus the m-byte Boolean mask and 8*K bytes of unique values. The
-    cumulative-mask expression's two simultaneous intp buffers fit the
-    same bound. Its peak is at most 57*m + 8*K bytes.
-
-    Bit gathering needs at most 32*m bytes. Count scattering needs at most
-    24*m + 16*K, and filtering needs at most 16*m + 33*K, including both
-    returned arrays. Both are below the unique bound because K <= m.
-    intp, uint64 and int64 must each occupy eight bytes. Views count once.
-
-    This bounds one decode through its returned pair, not Python lists,
-    dictionaries, integer/string objects, ndarray headers, the workspace of
-    compiled libraries, transport, public count records, other decodes or
-    process RSS. Saved output has its own check. Re-derive the formula if gather_bits,
-    remap_counts, NumPy's unique implementation, dtype widths or lifetimes
-    change. The helper does constant work and allocates no arrays.
-    """
-    if outcomes <= 0:
-        raise ValueError("outcomes must be a positive integer")
-    if not 0 <= qubits <= 64:
-        raise ValueError("qubits must be an integer between 0 and 64")
-    if not 0 <= width <= 64:
-        raise ValueError("width must be an integer between 0 and 64")
-    distinct = min(outcomes, 1 << min(qubits, width))
-    return 57 * outcomes + 8 * distinct
+# Compact bytes of the fixed structure around the entries of a raw histogram,
+# the larger of the two formats that IonQBackend._decode reads: the v1 body is
+# the histogram object, and the v2 body nests it under the keys histogram,
+# registers and output_all. One byte less, because the last entry has no comma.
+_HISTOGRAM_FRAME = max(len(json.dumps(frame, separators=(",", ":"))) - 1
+                       for frame in ({}, {"histogram": {"registers": {"output_all": {}}}}))
 
 
 class IonQBackend(Record):
@@ -116,8 +85,11 @@ class IonQBackend(Record):
         max_input_bytes: Required. Positive. Limit in bytes on the serialized
             request and the optional QPY copy of each prepared circuit.
         max_response_bytes: Required. Positive. Limit in bytes on each HTTP
-            response body that NWQLib reads. It does not bound network buffers,
-            provider work, billing or process memory.
+            response body that NWQLib reads. Preparation refuses a circuit
+            whose raw histogram, written as compact JSON in the larger of the
+            two accepted formats, could exceed it. It
+            does not bound network buffers, provider work, billing or process
+            memory.
         request_timeout_seconds: Default `30.0`. Positive. Connect and read
             timeout of each request in seconds, not a deadline for the whole
             request.
@@ -140,7 +112,11 @@ class IonQBackend(Record):
             gateset has an `optimization_level` other than 0, or the circuit
             has unbound parameters, no measurements, a measurement followed by
             another operation on its qubit, or two measurements into one
-            classical bit.
+            classical bit. Also at preparation if a raw histogram of the
+            requested shots on the circuit's qubits, written as compact JSON
+            in the larger of the two accepted formats, could exceed
+            `max_response_bytes`. The message gives the smallest limit that
+            admits the circuit.
     """
 
     qualification_notice: ClassVar[str] = (
@@ -193,8 +169,19 @@ class IonQBackend(Record):
         metadata (docs/ENGINEERING_CONSTANTS.md, "Provider and compiler
         policies"). It does not bound the memory of requests or the SDK.
         """
-        from nwqlib._run_journal import encode
-        return encode(value, min(self.max_input_bytes, run.limits.max_data_bytes // 3)).encode("utf-8")
+        from nwqlib._run_journal import JSONBytesExceeded, encode
+        from nwqlib._limits import least
+        data = run.limits.max_data_bytes
+        limit = least(self.max_input_bytes, None if data is None else data // 3)
+        try:
+            return encode(value, limit).encode("utf-8")
+        except JSONBytesExceeded as error:
+            from nwqlib._prepared_execution import _limit_remedy
+            remedy = ("A new Run with a backend of larger max_input_bytes accepts it, which needs new preparations."
+                      if limit == self.max_input_bytes else _limit_remedy("max_data_bytes"))
+            raise ValueError(f"this IonQ request exceeds its limit of {limit} bytes, the smaller of "
+                             f"max_input_bytes={self.max_input_bytes} and a third of this Run's "
+                             f"max_data_bytes={data}. {remedy}") from error
 
     def _request(self, method, path, *, run, body=None):
         """Send one v0.4 HTTP request and return its parsed JSON body.
@@ -280,13 +267,25 @@ class IonQBackend(Record):
                 raise ValueError("IonQ flat circuits require final measurements")
         # Qiskit would lower a dense UnitaryGate with its inexact synthesis, so
         # levels 0 and 1 receive the exact synthesis. The Run makes it for each
-        # distinct matrix once per Run object and reserves each new one against
-        # its max_synthesis_work first. Levels 2 and 3 resynthesize two-qubit
+        # distinct matrix once per Run object and records the work of each new
+        # one first. Levels 2 and 3 resynthesize two-qubit
         # blocks with Qiskit's own synthesis, so they keep the logical circuit
         # as given (docs/dependency_issues.md).
         native = (transpile(run._exact_dense_unitaries(circuit) if self.optimization_level <= 1 else circuit,
                             basis_gates=["rx", "ry", "rz", "cx"], optimization_level=self.optimization_level,
                             seed_transpiler=runtime.seed) if self.gateset == "qis" else circuit)
+        # The largest raw histogram has min(shots, 2**q) entries. In compact
+        # JSON each is a quoted state key of at most q characters (the v2
+        # binary key, no shorter than the v1 decimal key), a colon, a count of
+        # at most len(str(shots)) digits and a comma, inside the larger fixed
+        # structure of the two formats (_HISTOGRAM_FRAME). Other response
+        # fields and any whitespace are checked when the body is read.
+        shots, qubits = observation.shots, native.num_qubits
+        histogram = min(shots, 1 << qubits) * (qubits + len(str(shots)) + 4) + _HISTOGRAM_FRAME
+        if histogram > self.max_response_bytes:
+            raise ValueError(f"IonQ raw histogram of {shots} shots on {qubits} qubits can take {histogram} bytes, "
+                             f"over max_response_bytes={self.max_response_bytes}. "
+                             f"Raise max_response_bytes to at least {histogram}.")
         ionq_input, mapping = self._convert(native)
         if not any(bit is not None for bit in mapping):
             raise ValueError("IonQ requires final classical measurements")
@@ -294,9 +293,6 @@ class IonQBackend(Record):
         options_json = self._json_bytes(options, run).decode("utf-8")
         payload = None
         if context.get("persist_prepared", False):
-            # The QPY buffer and the bytes copy from getvalue() each hold at
-            # most max_input_bytes.
-            run.check_data(2 * self.max_input_bytes)
             with QpyBuffer(self.max_input_bytes, message="IonQ QPY exceeds max_input_bytes") as buffer:
                 qpy.dump(native, buffer)
                 payload = buffer.getvalue()
@@ -338,6 +334,46 @@ class IonQBackend(Record):
         return _PreparedIonQ(circuit, ionq_input, record.observation.shots, mapping, record.classical_layout,
                             options["num_qubits"], dict(readout_population=record.population, observation=record.observation))
 
+    def admit_preparation(self, observation, *, classical_widths, run):
+        """Check the saved circuit's QPY buffer against the Run's data limit, before the preparation is charged.
+
+        The QPY buffer and the bytes copy from getvalue() each hold at most
+        max_input_bytes, and a Run without a folder saves neither.
+        """
+        if run._state["backend_context"].get("persist_prepared", False):
+            run.check_data(2 * self.max_input_bytes)
+
+    def admit_submission(self, natives, *, run):
+        """Check the whole job's request against its byte limits, before its submission is saved.
+
+        Only this batch's total is known here, and a POST would be its first use.
+        The nil UUID has the length of the submission's own, so the encoded body
+        has the size that ``launch`` sends. Untuned 128-byte allowance per circuit
+        for the item names and request entries.
+        """
+        if any(native.input is None for native in natives):
+            raise ValueError("new IonQ submission requires the prepared circuit payload")
+        run.check_data(128 * len(natives))
+        self._json_bytes(self._job_body(natives, str(UUID(int=0))), run)
+
+    def _job_body(self, natives, submission_id):
+        """The create-job request of one submission.
+
+        Batch circuits are named ``nwqlib:<submission_id>:<index>`` so that
+        ``refresh`` can join each returned child job to its original item by
+        name rather than by list position. Debiasing is sent as False.
+        """
+        if len(natives) == 1:
+            kind, ionq_input = "ionq.circuit.v1", natives[0].input
+        else:
+            kind = "ionq.multi-circuit.v1"
+            ionq_input = dict(gateset=self.gateset, qubits=max(native.num_qubits for native in natives),
+                circuits=[dict(native.input, name=f"nwqlib:{submission_id}:{index}")
+                          for index, native in enumerate(natives)])
+        return dict(type=kind, backend=self.device, shots=natives[0].shots, input=ionq_input,
+                    name="nwqlib:" + submission_id, metadata={"nwqlib_submission": submission_id},
+                    settings={"error_mitigation": {"debiasing": False}})
+
     def admit_batch(self, natives):
         """Accept one IonQ job with at most 5000 circuits, 150000 gates and one shared shot count.
 
@@ -361,29 +397,10 @@ class IonQBackend(Record):
             self.target_for(native.metadata["observation"])
 
     def launch(self, natives, *, submission_id, run):
-        """Create one IonQ job with a single POST and return its job locator.
-
-        Batch circuits are named ``nwqlib:<submission_id>:<index>`` so that
-        ``refresh`` can join each returned child job to its original item by
-        name rather than by list position. Debiasing is sent as False.
-        """
+        """Create one IonQ job with a single POST and return its job locator."""
         from nwqlib.execution import JobLocator
         self.admit_batch(natives)
-        if any(native.input is None for native in natives):
-            raise ValueError("new IonQ submission requires the prepared circuit payload")
-        # Untuned 128-byte allowance per circuit for the item names and request
-        # entries built below. The request body itself is admitted by _json_bytes.
-        run.check_data(128 * len(natives))
-        if len(natives) == 1:
-            kind, ionq_input = "ionq.circuit.v1", natives[0].input
-        else:
-            kind = "ionq.multi-circuit.v1"
-            ionq_input = dict(gateset=self.gateset, qubits=max(native.num_qubits for native in natives),
-                circuits=[dict(native.input, name=f"nwqlib:{submission_id}:{index}")
-                          for index, native in enumerate(natives)])
-        response = self._request("POST", "jobs", run=run, body=dict(type=kind, backend=self.device,
-            shots=natives[0].shots, input=ionq_input, name="nwqlib:" + submission_id,
-            metadata={"nwqlib_submission": submission_id}, settings={"error_mitigation": {"debiasing": False}}))
+        response = self._request("POST", "jobs", run=run, body=self._job_body(natives, submission_id))
         return JobLocator(provider=self.kind, job_id=response["id"], account=self.token_env, instance=self.device)
 
     def _path(self, locator):
@@ -404,13 +421,15 @@ class IonQBackend(Record):
         shot count.
 
         Up to 64 native qubits and 64 classical bits, return a uint64/int64
-        pair after checking ionq_decode_bytes against the limit. Wider inputs
-        use Python integers and bit-string keys. Both routes validate every
-        provider entry and omit outcomes whose summed count is zero. The
-        m*(c+16) check covers the count keys as JSON, not Python heap memory or
-        the public CountBin record.
-        The shared execution code separately sets aside bytes for the public
-        count records.
+        pair. Wider inputs use Python integers and bit-string keys. Both
+        routes validate every provider entry and omit outcomes whose summed
+        count is zero. Before decoding, ``m*(c+64)`` bytes for m entries and c
+        classical bits are checked against the data limit. It covers the
+        larger of the two decodes: about 57 bytes per entry for the arrays of
+        the NumPy route, among them the sort that merges equal outcomes, and
+        c+16 bytes per entry for the bit-string count keys of the wider route.
+        This coarse check covers neither Python object memory nor the public
+        CountBin records, for which the shared execution code sets aside bytes.
         """
         from nwqlib.backends.results import BackendRunResult, remap_counts
         from nwqlib.execution import ExecutionMode
@@ -429,12 +448,9 @@ class IonQBackend(Record):
         if type(histogram) is not dict or not histogram:
             raise ValueError("IonQ raw histogram must contain shot counts")
         outcomes, width = len(histogram), len(native.measurement_map)
-        # Represented bit-string count entries, with at most seven count digits.
-        # Public CountBin JSON and cumulative storage have separate reservations.
-        run.check_data(outcomes * (width + 16))
+        run.check_data(outcomes * (width + 64))
         paired = native.num_qubits <= 64 and width <= 64
         if paired:
-            run.check_data(ionq_decode_bytes(outcomes, native.num_qubits, width))
             import numpy as np
             states = np.empty(outcomes, dtype=np.uint64)
         else:
