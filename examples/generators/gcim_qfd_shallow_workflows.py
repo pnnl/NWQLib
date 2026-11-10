@@ -130,7 +130,7 @@ def show_card(result, exact, h2, names, cx_prefix, cx_controlled, sampled_settin
                  + "".join(f"<li>{step}</li>" for step in steps) + "</ol>"))
 
 # %%
-from nwqlib.algorithms import PencilAcquisition
+from nwqlib.algorithms.gcim import PencilAcquisition
 
 controlled_method = QFD(initial_state=reference, time_step=0.5, powers=(0, 1, 2), evolution="fermionic_blocks",
                         evolution_terms=terms, evolution_diagnostics=diagnostics,

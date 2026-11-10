@@ -61,7 +61,7 @@ from nwqlib.core.planning import (
     readout_shape,
 )
 from nwqlib.core.analysis import capture_analysis_origin
-from nwqlib.core.records import InputRef, Record, Source, PositiveInt, Real
+from nwqlib.core.records import InputRef, Record, Source, PositiveInt, Real, _ConstructorDisplay
 from nwqlib.ir import (
     Allocate,
     Binding,
@@ -91,7 +91,7 @@ from .readout import LanczosReadout
 
 METHOD = Source(
     name="chebyshev_lanczos",
-    version="5",
+    version="6",
     domain="signed Chebyshev projected eigenvalue",
     reference="Kirby, Motta and Mezzacapo, Quantum 7, 1018 (2023), arXiv:2208.00567v4, Eqs. 24-27",
 )
@@ -122,7 +122,7 @@ class ChebyshevSubspace(Record):
     access: InputRef
 
 
-class SensitivitySampling(Record):
+class SensitivitySampling(_ConstructorDisplay, Record):
     """Two-stage shot allocation for `Lanczos`, weighted by each moment's effect on the energy.
 
     Build it with keyword arguments, for example
@@ -668,8 +668,9 @@ class Lanczos(Method):
     Eqs. (1) and (4)). A projected Ritz value does not identify the ground
     state. Quantum execution obtains the moments through the
     qubitized walk, and classical execution evaluates the same moments with
-    the three-term recurrence. Both feed one projected solve. The four
-    `overlap_*` settings can be changed after the run with
+    the three-term recurrence. Both feed one projected solve. The settings
+    `overlap_cutoff`, `cutoff_policy`, `noise_multiplier` and
+    `overlap_fail_prob` can be changed after the run with
     `result.analyze(...)`, which reuses the same moments. The
     [Lanczos guide](../../algorithms/lanczos.md) describes the construction,
     the cutoff analysis and sensitivity sampling.
@@ -687,15 +688,15 @@ class Lanczos(Method):
         degrees: Default `None`, which requests every degree 1 to 2m-1.
             Distinct positive moment degrees below 2m.
         overlap_cutoff: Default `None`. Positive cutoff on the Gram (overlap)
-            eigenvalues. `None` uses `overlap_cutoff_policy`, or the
+            eigenvalues. `None` uses `cutoff_policy`, or the
             numerical floor `1e-12` for exact moments.
-        overlap_cutoff_policy: Default `"empirical"`, empirical noise
+        cutoff_policy: Default `"empirical"`, empirical noise
             filtering. `"confidence"` selects explicit confidence
             regularization. Neither establishes the accuracy of the Ritz
             energy.
-        overlap_noise_multiplier: Default `1.0`. Positive scale of the
+        noise_multiplier: Default `1.0`. Positive scale of the
             empirical Gram RMS noise, a tunable exploratory threshold.
-        overlap_failure_probability: Default `0.05`, strictly between 0 and
+        overlap_fail_prob: Default `0.05`, strictly between 0 and
             1. Tail probability of the reported Gram sampling bound under
             independent bounded shots.
         sampling: Default `None`. A two-stage
@@ -705,7 +706,7 @@ class Lanczos(Method):
         max_bytes: Default `None`, the physical memory of this computer.
             Limit on the bytes, known in advance, of the input, the moments
             and the projected numerical workspace.
-        max_classical_products: Default `None`, no limit. Optional limit on
+        max_products: Default `None`, no limit. Optional limit on
             the counted scalar work of the classical preparation of the
             reference state and of the Chebyshev recurrence, including the
             operator actions and the vector operations.
@@ -734,17 +735,17 @@ class Lanczos(Method):
         -1.4142135624
     """
 
-    schema_version: Literal[3] = 3
+    schema_version: Literal[4] = 4
     initial_state: StateData | None = None
     krylov_dimension: PositiveInt | None = None
     degrees: tuple[PositiveInt, ...] | None = None
     overlap_cutoff: Annotated[Real, Field(gt=0)] | None = None
-    overlap_cutoff_policy: Literal["empirical", "confidence"] = "empirical"
-    overlap_noise_multiplier: Annotated[Real, Field(gt=0)] = 1.0
-    overlap_failure_probability: Annotated[Real, Field(gt=0, lt=1)] = 0.05
+    cutoff_policy: Literal["empirical", "confidence"] = "empirical"
+    noise_multiplier: Annotated[Real, Field(gt=0)] = 1.0
+    overlap_fail_prob: Annotated[Real, Field(gt=0, lt=1)] = 0.05
     sampling: SensitivitySampling | None = None
     max_bytes: PositiveInt | None = None
-    max_classical_products: PositiveInt | None = None
+    max_products: PositiveInt | None = None
     input_conversion: Literal["auto", "dense_pauli"] = "auto"
     result_type: ClassVar[type] = LanczosResult
 
@@ -964,11 +965,11 @@ class Lanczos(Method):
             # and products are checked once here, before the Run starts.
             required_bytes, required_work = self._classical_requirements(operator, reference, reconstruction)
             _check_bytes(required_bytes, self.max_bytes, "classical Chebyshev preparation and recurrence")
-            if exceeds(required_work, self.max_classical_products):
+            if exceeds(required_work, self.max_products):
                 raise ResourceLimitError(
                     f"classical Chebyshev preparation and recurrence require {required_work} classical "
-                    f"products, above max_classical_products={self.max_classical_products}. Raise "
-                    f"max_classical_products to at least {required_work} or set it to None.")
+                    f"products, above max_products={self.max_products}. Raise "
+                    f"max_products to at least {required_work} or set it to None.")
             labels = tuple(f"moment_{degree}" for degree in reconstruction.moment_indices)
             construction, experiments = host_construction(
                 METHOD,
@@ -1026,7 +1027,7 @@ class Lanczos(Method):
                 center=rec.center if rec.enclosure_source != "pauli_l1" else 0.0,
                 alpha=rec.alpha if rec.enclosure_source != "pauli_l1" else 1.0,
                 max_bytes=self.max_bytes,
-                max_products=self.max_classical_products,
+                max_products=self.max_products,
             )
             return KernelOutput(
                 plan_id=plan.content_id,
@@ -1164,23 +1165,25 @@ class Lanczos(Method):
     def analyze(self, plan, data, *, settings):
         """Solve the Chebyshev projected problem from obtained moments and the chosen overlap cutoff.
 
-        settings may override overlap_cutoff, overlap_cutoff_policy,
-        overlap_noise_multiplier and overlap_failure_probability for this
-        analysis only. Under SensitivitySampling only main-stage (stage 1)
+        settings may override overlap_cutoff, cutoff_policy,
+        noise_multiplier and overlap_fail_prob for this
+        analysis only, and any other name is refused. Under SensitivitySampling only main-stage (stage 1)
         moments enter the estimate. Returns a LanczosResult attached to the
         Plan and data.
         """
         from .numerical import reconstruct
 
-        from nwqlib._validation import finite_real
+        from nwqlib._validation import finite_real, reanalysis_settings
         from nwqlib.evidence.error_model import exact_readout_sampling
 
+        reanalysis_settings(settings, ("overlap_cutoff", "cutoff_policy", "noise_multiplier", "overlap_fail_prob"),
+                            "Lanczos")
         cutoff = settings.get("overlap_cutoff", self.overlap_cutoff)
-        policy = settings.get("overlap_cutoff_policy", self.overlap_cutoff_policy)
-        multiplier = finite_real(settings.get("overlap_noise_multiplier", self.overlap_noise_multiplier),
-                                 "overlap_noise_multiplier")
-        delta = finite_real(settings.get("overlap_failure_probability", self.overlap_failure_probability),
-                            "overlap_failure_probability")
+        policy = settings.get("cutoff_policy", self.cutoff_policy)
+        multiplier = finite_real(settings.get("noise_multiplier", self.noise_multiplier),
+                                 "noise_multiplier")
+        delta = finite_real(settings.get("overlap_fail_prob", self.overlap_fail_prob),
+                            "overlap_fail_prob")
         if (not isinstance(policy, str) or policy not in {"empirical", "confidence"}
                 or multiplier <= 0 or not 0 < delta < 1):
             raise ValueError("invalid Lanczos overlap cutoff policy, multiplier or failure probability")
@@ -1202,9 +1205,9 @@ class Lanczos(Method):
             cutoff=cutoff,
             sampled=plan.shots is not None,
             max_bytes=self.max_bytes,
-            overlap_failure_probability=delta,
-            overlap_cutoff_policy=policy,
-            overlap_noise_multiplier=multiplier,
+            overlap_fail_prob=delta,
+            cutoff_policy=policy,
+            noise_multiplier=multiplier,
         )
         return LanczosResult(
             plan_id=plan.content_id,

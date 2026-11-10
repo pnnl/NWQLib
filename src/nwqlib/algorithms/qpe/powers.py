@@ -465,7 +465,7 @@ def select_powers(*, target, base, tau, labels, coefficients, identity, pruned_m
     kept-generator time-displacement bound and applicable identity-phase and
     rotation-angle formation bounds. The counts are sufficient for the
     shared trajectory and need not minimize each prefix independently. Every
-    power's allowance is ``controlled_power_error_budget``. A failed
+    power's allowance is ``ctrl_power_budget``. A failed
     subtotal gets a bounded correction of the shared subdivision m, never of
     one power's count (``error_budget._common_envelope_count``), because a
     separate count would leave the common grid. If that confirms no count,
@@ -537,7 +537,7 @@ def select_powers(*, target, base, tau, labels, coefficients, identity, pruned_m
         return PowerSelection(powers=tuple(records), blocks=())
     terms = tuple(zip(labels, coefficients, strict=True))
     evaluation = None
-    allowances = ({power: config.controlled_power_error_budget for power in powers}
+    allowances = ({power: config.ctrl_power_budget for power in powers}
                   if common_grid else {})
     if terms:
         evaluation = _census(labels, coefficients, width, config)
@@ -610,7 +610,7 @@ def _admit_step_count(power, steps, config):
         raise ResourceLimitError(
             f"QPE power {power!r} needs {steps} product-formula steps, above "
             f"max_trotter_steps={config.max_trotter_steps!r}. Raise max_trotter_steps to at least {steps}, or raise "
-            f"controlled_power_error_budget={config.controlled_power_error_budget!r} to need fewer steps")
+            f"ctrl_power_budget={config.ctrl_power_budget!r} to need fewer steps")
 
 
 def _parts_text(parts):
@@ -649,9 +649,9 @@ def _corrected_steps(power, time, target_time, steps, step_time, parts, *, W, ma
     two failed candidates show only that this rule confirmed no count, not
     that the budget is too small or that no count exists.
     """
-    epsilon = config.controlled_power_error_budget
-    failed = f"QPE power {power!r}: emitted subtotal exceeds controlled_power_error_budget={epsilon!r}"
-    raised = "Raise controlled_power_error_budget"
+    epsilon = config.ctrl_power_budget
+    failed = f"QPE power {power!r}: emitted subtotal exceeds ctrl_power_budget={epsilon!r}"
+    raised = "Raise ctrl_power_budget"
     if not steps:
         raise ValueError(f"{failed} with no product-formula step to change: {_parts_text(parts)}. {raised}")
 
@@ -695,7 +695,7 @@ def _independent_powers(target, tau, terms, identity, pruned_mass, powers, confi
 
     Choose one trial count at the displayed positive time using the
     outward pruning subtotal. With t_p=p*val(tau), d_up the dropped
-    coefficient mass and epsilon_p=controlled_power_error_budget, the ideal
+    coefficient mass and epsilon_p=ctrl_power_budget, the ideal
     remaining allowance is epsilon_p-|t_p|*d_up. At order two the formula
     term is W_up*|t_p|**3/r_p**2, so for a positive remaining allowance the
     smallest sufficient integer count is
@@ -734,7 +734,7 @@ def _independent_powers(target, tau, terms, identity, pruned_mass, powers, confi
     unit, tiny = Fraction(1, 2**53), Fraction(1, 2**1074)
     floor = tiny * (len(coefficients) + mass)
     W = Fraction(0) if evaluation is None else evaluation.coefficient
-    dropped, budget = Fraction(pruned_mass), Fraction(config.controlled_power_error_budget)
+    dropped, budget = Fraction(pruned_mass), Fraction(config.ctrl_power_budget)
 
     def emitted(power, time, phase, target_time, steps):
         """Return the signed step, the exact subtotal and parts of B(r), and the angle allowance of ``steps`` steps."""
@@ -757,7 +757,7 @@ def _independent_powers(target, tau, terms, identity, pruned_mass, powers, confi
         pruning = _finite_upper(pruning_exact, "pruning error")
         try:
             remaining = _remaining_budget_after_pruning(
-                total_budget=config.controlled_power_error_budget, pruning_error=pruning
+                total_budget=config.ctrl_power_budget, pruning_error=pruning
             )
             selection = None
             if power and current is not None:

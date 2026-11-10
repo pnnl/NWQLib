@@ -435,7 +435,7 @@ def test_bound_absorption_moves_a_one_variable_constraint_into_the_box():
     problem = ConstrainedOptimization(objective=(z - 1) ** 2, variables=(z,), bounds=((-1.0, 1.0),),
                                       inequalities=(z - sp.Rational(1, 2),))
     # The endpoint grid of the tightened box [-1, 1/2] contains the constrained optimum 1/2.
-    boundary = _solve(problem, qhd=_qhd(num_grid_points=4, include_boundary_points=True), absorb_bounds=True)
+    boundary = _solve(problem, qhd=_qhd(num_grid_points=4, boundary_points=True), absorb_bounds=True)
     preprocessing = boundary.record.preprocessing
     assert preprocessing.bounds == ((-1.0, 0.5),) and preprocessing.inequalities == ()
     assert preprocessing.absorbed == (AbsorbedBound(inequality=0, variable=0, side="upper", value=0.5),)
@@ -664,12 +664,12 @@ def _grid_axes(plan):
 
     qhd = plan.method
     grid = OneHotGrid(plan.problem.variable_names, plan.problem.bounds, qhd.num_grid_points,
-                      qhd.include_boundary_points, qhd.boundary)
+                      qhd.boundary_points, qhd.boundary)
     return [[sp.Rational(grid.grid_value(j, i)) for i in range(qhd.num_grid_points)]
             for j in range(grid.num_variables)]
 
 
-@pytest.mark.parametrize("grid", [dict(), dict(include_boundary_points=True), dict(boundary="periodic")])
+@pytest.mark.parametrize("grid", [dict(), dict(boundary_points=True), dict(boundary="periodic")])
 def test_minimizing_the_slack_grid_reproduces_the_phr_term_within_the_recorded_error_bound(grid):
     # f = (x - 1/3)**2 and g = x - 1/4 <= 0 on [0, 1] with mu = 1/8 and rho = 2, so mu/rho = 1/16 and the
     # PHR term is active on part of the grid and zero on the rest, with r = [mu + rho g]_+ > 0 there. With
@@ -686,7 +686,7 @@ def test_minimizing_the_slack_grid_reproduces_the_phr_term_within_the_recorded_e
     assert axis.cap == -pre.inequality_lower[0] and form.error_bound == axis.error_bound
     xs, ss = _grid_axes(plan)
     assert ss[0] == 0 or grid == {}
-    assert (ss[-1] == sp.Rational(axis.upper)) == bool(grid.get("include_boundary_points"))
+    assert (ss[-1] == sp.Rational(axis.upper)) == bool(grid.get("boundary_points"))
     mu, rho = sp.Rational(1, 8), sp.Integer(2)
     excesses = []
     for value in xs:
@@ -710,7 +710,7 @@ def test_support_table_caps_are_exact_for_separable_constraints_and_bound_overla
     # (x - y)**2 = x**2 + y**2 - 2 x y on {0, 1}**2 has minimum 0, while its three table minima sum to -2,
     # so its cap 2 exceeds the exact cap 0. g = x**2 + 1 >= 1 has the cap 0, adds no slack variable and
     # takes the exact quadratic form of its PHR term.
-    endpoints = _qhd(num_grid_points=2, include_boundary_points=True)
+    endpoints = _qhd(num_grid_points=2, boundary_points=True)
     separable = x**2 + y - sp.Rational(1, 2)
     problem = ConstrainedOptimization(objective=F, variables=(x, y), bounds=((0.0, 1.0), (0.0, 1.0)),
                                       inequalities=(separable, (x - y) ** 2, x**2 + 1))
@@ -793,7 +793,7 @@ def test_the_three_inequality_forms_and_automatic_selection_by_execution_route()
     g = sum(u**a + v**a for a in range(1, 5)) - 4
     law_free = ConstrainedOptimization(objective=-g**2 / 2, variables=(u, v), bounds=((0.0, 1.0),) * 2,
                                        inequalities=(g,))
-    tight = BINARY.revise(initial_state_preparation="qiskit_state_preparation", max_work=3866)
+    tight = BINARY.revise(init_prep="qiskit_state_preparation", max_work=3866)
     forced = plan_augmented_lagrangian(law_free, qhd=tight, options=AugmentedLagrangian(inequality_form="slack"),
                                        execution="quantum", seed=7)[2]
     assert [law for selection in forced.construction.selections for law in selection.resource_laws] == []
@@ -1038,7 +1038,7 @@ def test_the_summand_scans_follow_numerical_piecewise_selection_and_evaluation_f
     is refused. A power written with the integer-valued binary64 exponent 2.0 is evaluated like its integer power
     and is admitted.
     """
-    qhd = QHD(num_grid_points=3, include_boundary_points=True, num_steps=1, total_time=0.001, keep_state=True)
+    qhd = QHD(num_grid_points=3, boundary_points=True, num_steps=1, total_time=0.001, keep_state=True)
     options = AugmentedLagrangian(inner_point="best_observed", max_iterations=1)
 
     def problem(objective, box=(-1.0, 1.0)):
@@ -1113,7 +1113,7 @@ def _contents(path):
 
 
 def _reopened_run(problem, directory):
-    return solve_augmented_lagrangian(problem, qhd=QHD(num_grid_points=5, include_boundary_points=True),
+    return solve_augmented_lagrangian(problem, qhd=QHD(num_grid_points=5, boundary_points=True),
                                       options=AugmentedLagrangian(feasibility_tolerance=1e-9, max_iterations=1),
                                       execution="classical", seed=1, directory=directory, progress=False)
 

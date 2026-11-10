@@ -42,7 +42,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, StrictBool, model_validator
 
-from nwqlib.core.records import ContentID, Nonnegative, Rational, Real, Record, Source, Text, storable_integer
+from nwqlib.core.records import ContentID, Nonnegative, Rational, Real, Record, Source, Text, storable_integer, _ConstructorDisplay
 from nwqlib.operators.access import Count
 from ._work import exact
 
@@ -60,7 +60,7 @@ BINARY_SOURCE = Source(name="binary_inference", version="1",
     reference="Hoeffding doi:10.1080/01621459.1963.10500830 for [-1,1]; alpha_n=alpha/(n*(n+1)); Beta(alpha+n0,beta+n1)")
 
 
-class BinaryInferenceOptions(Record):
+class BinaryInferenceOptions(_ConstructorDisplay, Record):
     """Statistical model that turns measured binary counts into estimates and intervals.
 
     Build it with keyword arguments, for example
@@ -148,7 +148,7 @@ class BinaryInferenceOptions(Record):
         return self
 
 
-class BinaryReadoutMitigation(Record):
+class BinaryReadoutMitigation(_ConstructorDisplay, Record):
     """Readout calibration that corrects each measured parity with a fitted single-bit channel.
 
     Build it with keyword arguments, for example

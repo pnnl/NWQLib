@@ -3,7 +3,7 @@
 import pytest
 
 from nwqlib import LinearDynamics, plan, solve
-from nwqlib.algorithms.lchs import LCHS, LCHSRefinement
+from nwqlib.algorithms.lchs import LCHS, LCHSRefinement, Trotter, TrotterErrorBudgeted
 from nwqlib.algorithms.lchs.provider_config import ProviderConfig
 from nwqlib.subroutines.trotterization import error_budget
 
@@ -16,13 +16,12 @@ def selected(*, execution="classical"):
             time=0.2,
         ),
         method=LCHS(
-            approximation_tolerance=0.7,
+            approx_tol=0.7,
             lchs_kernel=ProviderConfig(implementation="near_optimal_eq7", parameters={"beta": 0.8}),
             k_quadrature=ProviderConfig(
                 implementation="composite_gauss", parameters={"truncation_multiplier": 1.0}
             ),
-            hamiltonian_evolution_backend="trotter",
-            trotter_steps=2,
+            ham_evo=Trotter(steps=2),
         ),
         execution=execution,
         seed=7,
@@ -57,12 +56,12 @@ def test_plan_and_refinement_choose_the_census_expression_from_the_same_nodes(mo
 
     def budgeted():
         return plan(LinearDynamics(A=[[0.45, 0.08j], [0.03j, 0.7]], initial_state=[1.0, 0.2], time=0.2),
-                    method=LCHS(approximation_tolerance=0.7,
+                    method=LCHS(approx_tol=0.7,
                                 lchs_kernel=ProviderConfig(implementation="near_optimal_eq7",
                                                            parameters={"beta": 0.8}),
                                 k_quadrature=ProviderConfig(implementation="composite_gauss",
                                                             parameters={"truncation_multiplier": 1.0}),
-                                hamiltonian_evolution_backend="trotter_error_budgeted", trotter_order=2),
+                                ham_evo=TrotterErrorBudgeted(order=2)),
                     execution=execution, seed=7)
 
     monkeypatch.setattr(error_budget, "census_structure", spy)

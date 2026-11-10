@@ -8,6 +8,7 @@ import pytest
 import nwqlib
 from nwqlib.algorithms.lchs.method import LCHS
 from nwqlib.algorithms.lchs.provider_config import ProviderConfig
+from nwqlib.algorithms.lchs.route_options import Trotter
 from nwqlib.algorithms.lchs.verification import LCHSVerification
 from nwqlib.algorithms.lchs.refinement import LCHSRefinement
 from nwqlib.core.records import Float64
@@ -205,7 +206,7 @@ def test_selected_grid_preserves_padded_source_phase_and_archive_without_selecti
 
 
 def test_selected_grid_applies_the_source_slots_that_planning_kept(tmp_path):
-    """Initial 2**220 and source 2**-1000 under source_drop_allowance: at T = 2**-990 planning omits the source
+    """Initial 2**220 and source 2**-1000 under source_drop: at T = 2**-990 planning omits the source
     application, and at T = 2**-928 three of its four nonzero slots, whose PREP amplitudes underflow."""
     from math import ldexp
     initial, source = np.array([ldexp(1., 220), 0.]), np.array([0., ldexp(1., -1000)])
@@ -225,8 +226,9 @@ def test_selected_grid_applies_the_source_slots_that_planning_kept(tmp_path):
     for backend, time, kept, omitted, evaluations in (("dense_exact", ldexp(1., -990), 1, 0, 4),
             ("dense_exact", ldexp(1., -928), 2, 3, 5), ("trotter", ldexp(1., -928), 2, 3, 5)):
         problem = nwqlib.LinearDynamics(A=np.diag([.25, .5]), initial_state=initial, source=source, time=time)
-        chosen = nwqlib.plan(problem, method=method(hamiltonian_evolution_backend=backend, trotter_steps=2,
-            duhamel_nodes=1, source_drop_allowance=1e-200), execution="quantum")
+        chosen = nwqlib.plan(problem, method=method(
+            ham_evo=Trotter(steps=2) if backend == "trotter" else backend,
+            duhamel_nodes=1, source_drop=1e-200), execution="quantum")
         assert chosen._native["native_data"].source_layout.dropped_bound.mantissa > 0
         result = nwqlib.solve(chosen)
         restored = nwqlib.load_result(result.save(tmp_path/f"{backend}-{kept}"))
@@ -239,6 +241,9 @@ def test_selected_grid_applies_the_source_slots_that_planning_kept(tmp_path):
         if backend == "dense_exact":
             assert facts[0].fact.value.value == pytest.approx(np.linalg.norm(result.solution-kept_sum(chosen)),
                                                               rel=1e-12)
+            # The fixed product-formula refinement needs the product-formula branches that a dense Plan lacks.
+            with pytest.raises(ValueError, match="product-formula realization"):
+                restored.verify(checks=LCHSRefinement(components=("fixed_pf",)))
         else:
             assert facts[0].fact.value.value < 1e-14*np.linalg.norm(initial)
             _, refined = restored.verify(checks=LCHSRefinement(components=("fixed_pf",)))
@@ -249,7 +254,7 @@ def test_fixed_pf_selected_grid_never_reselects_steps_and_keeps_identity_phase(m
     from nwqlib.algorithms.lchs import time_independent_terms as terms
     matrix = np.array([[.5,.25j],[.25j,.2]])
     result = nwqlib.solve(nwqlib.LinearDynamics(A=matrix, initial_state=[0,0], source=[1,1j], time=.3),
-        method=method(hamiltonian_evolution_backend="trotter", duhamel_nodes=2, trotter_steps=2), execution="quantum")
+        method=method(ham_evo=Trotter(steps=2), duhamel_nodes=2), execution="quantum")
     assert sum(register.width for register in result.plan.construction.program.registers) <= 13
     monkeypatch.setattr(terms, "generate_lchs_product_formula_select_plan", lambda *a, **k: pytest.fail("PF steps reselected"))
     monkeypatch.setattr(terms, "_budgeted_trotter_node_record", lambda *a, **k: pytest.fail("budgeted PF selection replayed"))
@@ -416,7 +421,7 @@ def test_fixed_pf_structural_and_dense_bounds_follow_independent_pauli_commutato
     decomposition = terms._TrotterPauliDecomposition(num_qubits=1, identity_label="I",
         l_coefficients={"Z":1.}, h_coefficients={"X":1.})
     nodes = terms._selected_node_table(decomposition, terms._distinct_combined_nodes(decomposition, [1.]), [1.])
-    fields = dict(nodes=nodes, applications=((.5, (2,)),), method=LCHS(hamiltonian_evolution_backend="trotter"))
+    fields = dict(nodes=nodes, applications=((.5, (2,)),), method=LCHS(ham_evo="trotter"))
     (records,) = terms._fixed_trotter_certificate_records(**fields, dense_validation=True)
     # ||[Z,[Z,X]]||=||[X,[X,Z]]||=4, so coefficient=4/12+4/24=1/2.
     # Two steps give (1/2)*(.5)^3/(2)^2 = 1/64.
@@ -447,7 +452,7 @@ def test_fixed_pf_dense_commutators_admit_the_singular_values_of_their_norms(mon
         l_coefficients={"Z"+"I"*(q-1):1.}, h_coefficients={"X"+"I"*(q-1):1.})
     nodes = terms._selected_node_table(decomposition, terms._distinct_combined_nodes(decomposition, [1.]), [1.])
     fields = dict(nodes=nodes, applications=((.5, (2,)),),
-                  method=LCHS(hamiltonian_evolution_backend="trotter"), dense_validation=True)
+                  method=LCHS(ham_evo="trotter"), dense_validation=True)
     # Second order, for each of the p = 2 terms: 6 products (d**3 each), two
     # spectral norms by the SVD without vectors (ceil(4 d**3/3) +
     # 32 d (d + 1) = 482,646 units each) and 24 d**2 entrywise, 5,272,920

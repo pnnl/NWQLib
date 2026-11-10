@@ -81,13 +81,36 @@ def test_console_script_and_module_list_every_registered_method():
 def test_options_and_card_match_each_registered_method_constructor(capsys):
     import pydantic
 
+    import nwqlib.algorithms as algorithms
     from nwqlib import methods
-    from nwqlib.algorithms import AlgorithmRegistry
+    from nwqlib.algorithms.registry import AlgorithmRegistry
     from nwqlib.cli import main
     from nwqlib.operators import ingest_pauli
     from nwqlib.problems import ingest_product
 
     registrations = methods()
+    # `nwqlib.algorithms` exports the listed Methods, as the same classes, and the two exceptions a caller catches.
+    assert sorted(algorithms.__all__) == sorted(
+        [row.method_type.__name__ for row in registrations] + ["ApplicabilityError", "ResourceLimitError"]
+    )
+    assert all(getattr(algorithms, row.method_type.__name__) is row.method_type for row in registrations)
+    # The built-in Methods whose descriptors declare each built-in Problem type.
+    import sympy
+    from nwqlib import problems as p
+    x = sympy.Symbol("x", real=True)
+    box = dict(objective=x**2, variables=(x,), bounds=((-1.0, 1.0),))
+    declared = (
+        (p.Eigenproblem(A=[[1, 0], [0, -1]]), {
+            "adapt_gcim", "chebyshev_lanczos", "fixed_gcim", "qcels", "qfd", "rfe", "rwpe", "spe"}),
+        (p.SpectralEstimation(hamiltonian=[[1, 0], [0, -1]], initial_state=[1, 0]), {"qcels", "rfe", "rwpe", "spe"}),
+        (p.LinearDynamics(A=[[1, 0], [0, 1]], initial_state=[1, 0], time=0.1), {"lchs"}),
+        (p.LinearSystem(A=[[1, 0], [0, 1]], b=[1, 0]), {"qls"}),
+        (p.Expectation(state=[1, 0], observable=[[1, 0], [0, -1]]), {"finite_pauli_expectation"}),
+        (p.Optimization(**box), {"qhd"}),
+        (p.ConstrainedOptimization(**box, equalities=(x,)), set()),
+    )
+    for problem, names in declared:
+        assert {row.source.name for row in methods(problem)} == names, type(problem).__name__
     registry = AlgorithmRegistry(registrations)
     assert main(["algorithms", "--json"]) == 0
     cards = json.loads(capsys.readouterr().out)
@@ -103,8 +126,9 @@ def test_options_and_card_match_each_registered_method_constructor(capsys):
     }
     for row in registrations:
         name, version = row.source.name, row.source.version
-        assert main(["options", name, "--version", version]) == 0
+        assert main(["options", name, "--version", version, "--json"]) == 0
         schema = json.loads(capsys.readouterr().out)
+        assert schema == row.method_type.model_json_schema()
         # The required fields `options` reports are the ones a Method constructed without configuration lacks.
         try:
             registry.resolve(row.source)
@@ -116,6 +140,19 @@ def test_options_and_card_match_each_registered_method_constructor(capsys):
         assert main(["card", name, "--version", version]) == 0
         card = json.loads(capsys.readouterr().out)
         assert tuple(card["descriptor"]["output_families"]) == tuple(method.descriptor.output_families)
+    # Without --json, options prints one line per option: its name, then its default as Python source or
+    # `required`. Under an option that takes route records, each record's options follow.
+    assert main(["options", "qls"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    for field, info in algorithms.QLS.model_fields.items():
+        if field not in ("schema_version", "parent_id"):
+            assert any(line.split()[:2] == [field, repr(info.default)] for line in lines), field
+    assert main(["options", "lchs"]) == 0
+    words = {line.split()[0] for line in capsys.readouterr().out.splitlines()[1:] if line.strip()}
+    from nwqlib.algorithms.lchs import PTSC, SampledPairs, Trotter
+    assert {"Trotter(...):", "SampledPairs(...):", "PTSC(...):"} <= words
+    assert {*Trotter.model_fields, *SampledPairs.model_fields, *PTSC.model_fields} - words == {
+        "schema_version", "parent_id", "kind"}
 
 
 def test_third_party_listing_reads_entry_points_without_importing_the_extension(tmp_path):

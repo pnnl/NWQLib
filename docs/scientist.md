@@ -79,7 +79,7 @@ Two choices fix how a Plan runs. Pass them to `plan` or `compare`, or to `solve`
 - `execution="quantum"`, the default, runs the Method's circuit. `execution="classical"` evaluates the Method's numerical model on the classical computer, without circuits.
 - `shots=None`, the default, selects exact readout, with no finite sampling. `shots=N` requests N shots per readout setting. For a grouped Pauli readout, one setting is one qubit-wise commuting group.
 
-A provider estimate, such as the result of a provider's Estimator primitive, has its own precision, and the number of raw shots behind it is unknown.
+A provider estimate, such as the result of a provider's Estimator primitive, has its own precision, and NWQLib does not count the raw shots behind it against its shot limit.
 
 With `shots=None`, a single exact simulation evaluates all requested observables that share one coherent circuit prefix. The Plan declares where each observation is taken, its labels or marginals, and any readout views, which are basis changes for an intermediate readout that are undone afterward. Several non-destructive observations can belong to one experiment. After each intermediate readout view, the simulator restores the ideal state before the evolution continues. With finite shots, every shot of a setting starts from a fresh state preparation.
 
@@ -109,6 +109,6 @@ print(restored.eigenvalue)  # -1.414213562373095
 | Evaluate a device profile and Allocation | `nwqlib.estimate(plan, profile=..., allocation=...)` | [Check device fit and run time](profiles.md) |
 | Rank a finite set of existing `Plan` objects, or the rows of a Comparison | `nwqlib.scan(...)` | [Rank candidate plans](search.md) |
 | Check a named scientific relation using the data the Result holds | `result.verify(...)` | [Check accuracy and verify a result](verification.md) |
-| List the built-in Methods | `nwqlib.methods()` | [Use the command line](cli.md#python-discovery), [Add a method](algorithm_protocol.md) |
+| List the built-in Methods, or those that declare a Problem's type | `nwqlib.methods()`, `nwqlib.methods(problem)` | [Use the command line](cli.md#python-discovery), [Add a method](algorithm_protocol.md) |
 
 A bound or check that no operation has computed stays unavailable. A resource ranking establishes no claim about scientific accuracy.

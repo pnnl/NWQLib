@@ -530,8 +530,10 @@ def plan_quantum(method, problem, data, *, output, shots, rng):
     definitions, calls = [], []
     if data.source_state is None:
         if data.dense is not None:
-            initial = select_vector_preparation("initial_prep",data.dense.initial_direction,method=method,
-                decomposition=data.initial_mps,layers=method.initial_state_mps_num_layers)
+            # A direct PREP takes the default layer count of select_vector_preparation, which its identity hashes.
+            mps = {} if data.initial_mps is None else dict(decomposition=data.initial_mps,
+                                                           layers=method.init_prep.num_layers)
+            initial = select_vector_preparation("initial_prep",data.dense.initial_direction,method=method,**mps)
         else:
             # A compact generator uses the state's own construction (product,
             # occupation, vector or supplied circuit) and its cost law, as the
@@ -549,8 +551,9 @@ def plan_quantum(method, problem, data, *, output, shots, rng):
     # PREP and inverse PREP surround SELECT on the coefficient address only.
     address = tuple(range(a))
     if a:
-        prep = select_vector_preparation("coefficient_prep",extra["amplitudes"],method=method,
-            decomposition=data.coefficient_mps,layers=method.mps_num_layers)
+        mps = {} if data.coefficient_mps is None else dict(decomposition=data.coefficient_mps,
+                                                           layers=method.lcu_prep.num_layers)
+        prep = select_vector_preparation("coefficient_prep",extra["amplitudes"],method=method,**mps)
         inverse = transform_block("coefficient_inverse",prep,adjoint=True)
         blocks.extend((prep,inverse))
         for name in ("coefficient_prep","coefficient_inverse"):

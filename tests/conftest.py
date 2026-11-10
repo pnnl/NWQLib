@@ -33,10 +33,11 @@ def lchs_quadrature_options() -> dict[str, object]:
 def lchs_dense_quadrature(matrix, final_time, method):
     """Return the selected quadrature and padded (L, H) of a dense A, as LCHS planning selects them."""
     from nwqlib import LinearDynamics
+    from nwqlib.algorithms.lchs.route_options import route_name
     from nwqlib.algorithms.lchs.selection import select_dense
 
     problem = LinearDynamics(A=matrix, initial_state=np.eye(len(matrix))[0], time=final_time)
-    data = select_dense(method, problem, backend=method.hamiltonian_evolution_backend)
+    data = select_dense(method, problem, backend=route_name(method.ham_evo))
     return data.quadrature, data.dense.l_part, data.dense.h_part
 
 
@@ -142,29 +143,118 @@ def prepared_stubs(monkeypatch):
     return state
 
 
+def offline_ibm_service(api, instance):
+    """A real IBM SDK service and device whose API client is ``api``, on the offline FakeManilaV2 target.
+
+    ``api`` stands in for the SDK's HTTP client, so only the network is
+    replaced. Returns ``(service, backend)``. The device is named
+    ``ibm_supplied``.
+    """
+    from qiskit_ibm_runtime import IBMBackend, IBMQuantumComputeService
+    from qiskit_ibm_runtime.fake_provider import FakeManilaV2
+
+    fake = FakeManilaV2()
+    configuration = fake.configuration()
+    configuration.backend_name = "ibm_supplied"
+    service = object.__new__(IBMQuantumComputeService)
+    service._channel = "ibm_quantum_platform"
+    service._api_clients = {instance: api}
+    service._active_api_client = api
+    # IBMQuantumComputeService.__init__ starts with this value. From qiskit-ibm-runtime 0.51
+    # on, decoding a job looks its backend up here, and an empty list gives is_mock=False.
+    service._backend_instance_groups = []
+    service._check_instance_usage = lambda: None
+    backend = IBMBackend(configuration, service=service, api_client=api, instance=instance)
+    backend._target, backend._properties = (fake.target, fake.properties())
+    service.backend = lambda name, **kwargs: backend
+    service._create_backend_obj = lambda name, **kwargs: backend
+    return service, backend
+
+
+def executor_program(params):
+    """The program of one request to IBM's ``executor``, decoded from its JSON ``params`` by the SDK's own converter."""
+    from ibm_quantum_schemas.executor.version_2_0 import ParamsModel
+    from qiskit_ibm_runtime.quantum_program.converters.converters_2_0 import quantum_program_from_2_0
+
+    return quantum_program_from_2_0(ParamsModel.model_validate(params))[0]
+
+
+def executor_items(program, outcomes, seed=0):
+    """Synthetic result arrays of each item of ``program``, in the form that IBM's ``executor`` returns them.
+
+    ``outcomes(index, item, register_index, register, shape, shots)`` gives the
+    integer outcome of every shot of one classical register of item ``index``,
+    an array that broadcasts to ``shape + (shots,)``, where ``shots`` is the
+    program's shots of each row. ``shape`` is the item's shape: () for
+    a circuit without parameter values, one entry per row of values otherwise,
+    and for a twirled item (a samplex item) the randomizations first. Bit j of
+    an outcome is bit j of the register, as in the executor's little-endian
+    boolean arrays. A samplex item also returns the outputs of its samplex
+    other than the parameter values, sampled with ``seed``, and its bits are
+    flipped by its measurement flips, so the SDK's decoder, which flips them
+    back, recovers the outcomes.
+    """
+    from qiskit_ibm_runtime.fake_provider.executor.broadcast_sample import broadcast_sample
+    from samplomatic.quantum_program import SamplexItem
+
+    rng, data = np.random.default_rng(seed), []
+    for index, item in enumerate(program.items):
+        if isinstance(item, SamplexItem):
+            shape = tuple(item.shape)
+            item.samplex.finalize()
+            arrays = broadcast_sample(item.samplex, item.samplex_arguments, shape, rng)
+            arrays.pop("parameter_values", None)
+        else:
+            arrays, values = {}, item.circuit_arguments
+            shape = () if values is None or values.ndim < 2 else values.shape[:-1]
+        for register_index, register in enumerate(item.circuit.cregs):
+            outcome = np.broadcast_to(np.asarray(outcomes(index, item, register_index, register, shape, program.shots),
+                                                 dtype=np.uint64), (*shape, program.shots))
+            bits = ((outcome[..., None] >> np.arange(register.size, dtype=np.uint64)) & np.uint64(1)).astype(bool)
+            flips = arrays.get("measurement_flips." + register.name)
+            arrays[register.name] = bits if flips is None else bits ^ flips
+        data.append(arrays)
+    return data
+
+
+def executor_result_json(program, data, *, passthrough=None, item_metadata=None, chunk_timing=()):
+    """The JSON of an ``executor`` result (schema v2.0) with the item arrays ``data`` of ``program``.
+
+    ``passthrough`` replaces the program's passthrough data, which carries the
+    circuit metadata of each PUB. ``item_metadata`` gives the metadata fields
+    of each item, and ``chunk_timing`` the job's timing spans.
+    """
+    from ibm_quantum_schemas.common import CompressedTensorModel
+    from ibm_quantum_schemas.executor.version_2_0.models import (
+        ItemMetadataModel, MetadataModel, QuantumProgramResultItemModel, QuantumProgramResultModel)
+    from qiskit_ibm_runtime.quantum_program.converters.converters_2_0 import passthrough_data_to_2_0
+
+    item_metadata = item_metadata or [{}] * len(data)
+    return QuantumProgramResultModel(
+        data=[QuantumProgramResultItemModel(
+            results={name: CompressedTensorModel.from_numpy(np.asarray(array)) for name, array in arrays.items()},
+            metadata=ItemMetadataModel(**fields)) for arrays, fields in zip(data, item_metadata, strict=True)],
+        metadata=MetadataModel(chunk_timing=list(chunk_timing)),
+        passthrough_data=passthrough_data_to_2_0(program.passthrough_data if passthrough is None else passthrough),
+        semantic_role=program._semantic_role).model_dump_json()
+
+
 @pytest.fixture
 def ibm_runtime_spy(monkeypatch):
     """An IBMRuntimeBackend on the real SDK and the offline FakeManilaV2 target, with only the network replaced.
 
-    Compilation, ISA preparation, the native-depth record, PUB encoding and
-    result decoding are the SDK's and NWQLib's own. The replaced API client
-    gives each job its own identifier, reports every job completed and
-    returns, for each PUB, its requested shots with every classical bit 0.
-    These counts are synthetic, so a test reads acquisition and exposure
-    facts from them, not energies. ``spy.api.requests`` holds every job
-    request.
+    Compilation, ISA preparation, the native-depth record, the client-side
+    primitives' job programs and result decoding are the SDK's and NWQLib's
+    own. The replaced API client gives each job its own identifier, reports
+    every job completed and returns, for each item, the program's shots with
+    every classical bit 0. These counts are synthetic, so a test reads
+    acquisition and exposure facts from them, not energies.
+    ``spy.api.requests`` holds every job request.
     """
-    import json
     from types import SimpleNamespace
-    from qiskit.primitives.containers import BitArray, DataBin, PrimitiveResult, SamplerPubResult
-    from qiskit_ibm_runtime import IBMBackend, IBMQuantumComputeService, RuntimeEncoder
-    from qiskit_ibm_runtime.fake_provider import FakeManilaV2
     from nwqlib.backends import IBMRuntimeBackend
 
     instance = "crn:supplied-instance"
-    fake = FakeManilaV2()
-    configuration = fake.configuration()
-    configuration.backend_name = "ibm_supplied"
 
     class API:
         _instance = instance
@@ -179,36 +269,20 @@ def ibm_runtime_spy(monkeypatch):
         def program_run(self, **kwargs):
             self.requests.append(kwargs)
             job = f"job-{len(self.requests)}"
-            self.jobs[job] = (kwargs["program_id"], kwargs["params"]["pubs"], kwargs["job_tags"])
+            self.jobs[job] = (kwargs["program_id"], kwargs["params"], kwargs["job_tags"])
             return {"id": job, "backend": "ibm_supplied"}
 
         def job_get(self, job_id, **kwargs):
-            primitive, _, tags = self.jobs[job_id]
-            return dict(id=job_id, backend="ibm_supplied", program={"id": primitive},
+            program, _, tags = self.jobs[job_id]
+            return dict(id=job_id, backend="ibm_supplied", program={"id": program},
                         state={"status": "COMPLETED"}, tags=tags)
 
         def job_results(self, job_id):
-            _, pubs, _ = self.jobs[job_id]
-            results = [SamplerPubResult(
-                DataBin(**{register.name: BitArray.from_samples(["0" * register.size] * pub.shots,
-                                                                num_bits=register.size)
-                           for register in pub.circuit.cregs}),
-                metadata={"circuit_metadata": pub.circuit.metadata, "shots": pub.shots}) for pub in pubs]
-            return json.dumps(PrimitiveResult(results, metadata={}), cls=RuntimeEncoder)
+            program = executor_program(self.jobs[job_id][1])
+            return executor_result_json(program, executor_items(program, lambda *args: 0))
 
     api = API()
-    service = object.__new__(IBMQuantumComputeService)
-    service._channel = "ibm_quantum_platform"
-    service._api_clients = {instance: api}
-    service._active_api_client = api
-    # IBMQuantumComputeService.__init__ starts with this value. From qiskit-ibm-runtime 0.51
-    # on, decoding a job looks its backend up here, and an empty list gives is_mock=False.
-    service._backend_instance_groups = []
-    service._check_instance_usage = lambda: None
-    backend = IBMBackend(configuration, service=service, api_client=api, instance=instance)
-    backend._target, backend._properties = (fake.target, fake.properties())
-    service.backend = lambda name, **kwargs: backend
-    service._create_backend_obj = lambda name, **kwargs: backend
+    service, backend = offline_ibm_service(api, instance)
     monkeypatch.setattr(IBMRuntimeBackend, "_new_service", lambda self: service)
     connection = IBMRuntimeBackend(device=backend.name, instance=instance)
     return SimpleNamespace(connection=connection, api=api)

@@ -128,7 +128,7 @@ class QPECommonStep(Record):
     recheck of the emitted parameters passed at every prefix. Each requested
     power keeps its cumulative count in ``QPEPower.steps`` and its complete
     bound in ``QPEPower.total_error``, and every power's allowance is the
-    Method's ``controlled_power_error_budget``
+    Method's ``ctrl_power_budget``
     (``trotterization.error_budget.select_common_step``). The choice is
     recorded here rather than as a ``TrotterStepSelection`` because the
     content hash of the Plan needs a Record, and the per-power counts and
@@ -162,7 +162,7 @@ class QPECommonStep(Record):
         error_budget: Effective product-formula allowance for the full common
             trajectory after the other structural contributions are set aside
             at every queried power. For each positive queried power p,
-            ``epsilon_p`` is its ``controlled_power_error_budget``, ``r_p`` its
+            ``epsilon_p`` is its ``ctrl_power_budget``, ``r_p`` its
             cumulative ``QPEPower.steps``, and ``r_max`` the final ``step_count``.
             ``P_p``, ``T_p``, ``I_p`` and ``A_p`` are respectively the pruning,
             time-displacement, identity-phase and angle-formation bounds
@@ -737,7 +737,7 @@ def validate_selection(plan):
     if tuple(e.name for e in plan.experiments) != expected:
         raise ValueError("QPE experiments differ from selected query schedule")
     if any(
-        p.backend == "trotter_error_budgeted" and p.total_error > m.controlled_power_error_budget
+        p.backend == "trotter_error_budgeted" and p.total_error > m.ctrl_power_budget
         for p in r.powers
     ):
         raise ValueError("controlled-power error exceeds selected allowance")

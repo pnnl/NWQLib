@@ -1,5 +1,175 @@
 # Release notes
 
+## v1.0.4.post1 (unreleased)
+
+Relative to v1.0.4, this release changes how you write and read a configuration. The renamed and regrouped options are meant to compute what v1.0.4 computed. In the cross-version checks, the configurations tested reproduced the scientific values obtained with v1.0.4, apart from the no-evolution sampling-radius change described under [Other changes](#other-changes-in-v104post1). Twenty-five options of the built-in Methods have shorter names, and LCHS takes the options of each route inside a record of that route, as in `LCHS(ham_evo=Trotter(steps=4))`. `nwqlib.algorithms` exports only the 12 Methods and two exceptions, and the other 68 names are imported from the module of their family. Methods, option records, Problems, Plans and comparisons print as short summaries, Methods and option records in constructor syntax. `result.analyze(...)` of a built-in Method refuses every setting name that the Method does not accept. The descriptor version of each built-in Method goes up by one. IBM jobs go through the client-side primitives of qiskit-ibm-runtime, and the `ibm` extra requires version 0.52.0 or later ([IBM Runtime](#ibm-runtime-in-v104post1)). This version cannot load the Results, Runs, constrained QHD and box-refinement archives or QHD run directories written by v1.0.4. Open those with v1.0.4, or plan and run the problem again.
+
+### Imports from `nwqlib.algorithms` {#imports-in-v104post1}
+
+`nwqlib.algorithms` exports the Methods `ADAPT`, `ExpectationMethod`, `FixedGCIM`, `LCHS`, `Lanczos`, `QCELS`, `QFD`, `QHD`, `QLS`, `RFE`, `RWPE` and `SPE`, and the exceptions `ApplicabilityError` and `ResourceLimitError`. The names below are no longer available from `nwqlib.algorithms`. Import each from the module on its left, for example `from nwqlib.algorithms.qhd import QuadraticSchedule`. The objects themselves are unchanged.
+
+| Module | Names |
+| --- | --- |
+| `nwqlib.algorithms.qhd` | `QHDAnalysis`, `QHDVerification`, `QuadraticSchedule`, `CubicSchedule`, `ShiftedCubicSchedule`, `UniformState`, `KineticGroundState`, `GaussianState`, `solve_augmented_lagrangian`, `plan_augmented_lagrangian`, `resume_augmented_lagrangian`, `load_augmented_lagrangian`, `constrained_grid_minimum`, `ConstrainedQHDResult`, `AugmentedLagrangian`, `MultiplierBounds`, `ConstraintPreprocessing`, `AbsorbedBound`, `ALIteration`, `ALEvaluation`, `ALResources`, `AugmentedLagrangianRecord`, `InnerRepresentation`, `SlackAxis`, `FormTrial`, `ConstrainedGridMinimum`, `refine_box`, `resume_box_refinement`, `load_box_refinement`, `BoxRefinement`, `RefinementLevel`, `RefinementResources`, `BoxRefinementResult`, `StallSplit`, `BinarySynthesis`, `circuit_resources`, `run_resources`, `QHDCircuitResources`, `QHDSynthesisProjection`, `QHDErrorSource`, `QHDRunResources`, `QHDRunEntry`, `evolution_bound`, `QHDEvolutionBound` |
+| `nwqlib.algorithms.gcim` | `ADAPTResult`, `AdaptVerificationOptions`, `BoundedRitzGrowth`, `FixedGCIMBasis`, `FixedGCIMResult`, `PencilAcquisition`, `PencilSampling`, `ProjectedPencil` |
+| `nwqlib.algorithms.lanczos` | `LanczosResult`, `SensitivitySampling` |
+| `nwqlib.algorithms.qfd` | `QFDResult` |
+| `nwqlib.algorithms.qpe` | `QPEAnalysis`, `QPEVerification` |
+| `nwqlib.algorithms.lchs` | `LCHSAnalysis` |
+| `nwqlib.algorithms.expectation` | `ExpectationAnalysis` |
+| `nwqlib.algorithms.protocol` | `Method`, `AlgorithmDescriptor` |
+| `nwqlib.algorithms.registry` | `Registration`, `AlgorithmRegistry`, `third_party_registrations`, `builtin_registrations`, `algorithm_card`, `options_schema`, `direct_method` |
+
+To write your own Method, import `Method` and `AlgorithmDescriptor` from `nwqlib.algorithms.protocol`. `write_blocks` and `read_blocks`, which v1.0.4 documented in `nwqlib.blocks._archive`, are exported from `nwqlib.blocks`.
+
+### Renamed options {#renamed-options-in-v104post1}
+
+Each option below has a new name with the same meaning and default, and it accepts the values it accepted in v1.0.4. The four LCHS route fields also accept the records described under [LCHS route options](#lchs-route-options-in-v104post1). The constructor refuses an old name with the message "Extra inputs are not permitted". Messages that name an option use the new name.
+
+| Method or record | v1.0.4 name | New name |
+| --- | --- | --- |
+| LCHS | `hamiltonian_evolution_backend` | `ham_evo` |
+| LCHS | `lcu_select_implementation` | `lcu_select` |
+| LCHS, QHD | `initial_state_preparation` | `init_prep` |
+| LCHS | `lcu_state_preparation` | `lcu_prep` |
+| LCHS | `observable_estimator` | `estimator` |
+| LCHS | `approximation_tolerance` | `approx_tol` |
+| LCHS | `source_drop_allowance` | `source_drop` |
+| LCHS | `psd_tolerance` | `psd_tol` |
+| QCELS, SPE, RFE, RWPE | `controlled_power_backend` | `ctrl_power` |
+| QCELS, SPE, RFE, RWPE | `controlled_power_error_budget` | `ctrl_power_budget` |
+| QLS | `block_encoding_implementation` | `block_encoding` |
+| QLS | `encoded_solution_norm_estimate` | `norm_estimate` |
+| QLS | `phase_residual_tolerance` | `phase_tol` |
+| Lanczos | `overlap_failure_probability` | `overlap_fail_prob` |
+| Lanczos | `overlap_noise_multiplier` | `noise_multiplier` |
+| Lanczos | `overlap_cutoff_policy` | `cutoff_policy` |
+| ADAPT, FixedGCIM, QFD | `max_native_two_qubit_depth` | `max_2q_depth` |
+| FixedGCIM, QFD, Lanczos, ExpectationMethod | `max_classical_products` | `max_products` |
+| ADAPT | `input_symmetry_tolerance` | `symmetry_tol` |
+| ADAPT | `optimize_max_evaluations` | `max_evals` |
+| ADAPT | `pauli_coefficient_cutoff` | `pauli_cutoff` |
+| ADAPT | `energy_change_tolerance` | `energy_tol` |
+| ADAPT | `residual_norm_tolerance` | `residual_tol` |
+| QHD | `include_boundary_points` | `boundary_points` |
+| ExpectationMethod | `preparation_choice` | `prep_choice` |
+
+The same names change where they reach other public code:
+
+- The keywords `resolve_lchs_coefficient_plan(approx_tol=...)` and `cartesian_decomposition(psd_tol=...)`, which were `approximation_tolerance` and `psd_tolerance`.
+- The keys `"ham_evo"` and `"psd_tol"` of the dict that `lchs_quadrature_summary` returns, which were `"hamiltonian_evolution_backend"` and `"psd_tolerance"`.
+- The fields `AdaptSymmetry.symmetry_tol`, `AdaptReconstruction.pauli_cutoff` and `AdaptReconstruction.energy_tol` of an ADAPT Plan, which were `input_symmetry_tolerance`, `pauli_coefficient_cutoff` and `energy_change_tolerance`.
+- The Lanczos reanalysis settings, `result.analyze(overlap_cutoff=..., cutoff_policy=..., noise_multiplier=..., overlap_fail_prob=...)`.
+
+The LCHS error component `initial_state_preparation` in `result.facts` keeps its name, and so do the `LanczosResult` fields `analysis_cutoff_policy`, `analysis_noise_multiplier` and `analysis_failure_probability`.
+
+### LCHS route options {#lchs-route-options-in-v104post1}
+
+Four fields of `LCHS` choose a route, `ham_evo`, `init_prep`, `lcu_prep` and `estimator`, and each takes the route's name or a record with the route's options ([Route options](algorithms/lchs.md#route-options)). A name stands for the record with its defaults, so `LCHS(ham_evo="trotter")` and `LCHS(ham_evo=Trotter())` are the same Method with the same content id. Import the records from `nwqlib.algorithms.lchs`. The routes `"auto"`, `"direct"`, `"analytic"`, `"plain"` and `"mpf"` have no options and stay names. Change one option of an existing Method by replacing the whole record, as in `method.revise(estimator=method.estimator.revise(fail_prob=.2))`.
+
+The 25 LCHS options that only one route reads moved into the records, with the same defaults:
+
+| v1.0.4 `LCHS` option | New place |
+| --- | --- |
+| `trotter_steps` | `Trotter.steps` |
+| `trotter_synthesis_tolerance` | `Trotter.synthesis_tol` |
+| `trotter_order` | `Trotter.order` or `TrotterErrorBudgeted.order` |
+| `max_trotter_steps` | `Trotter.max_steps` or `TrotterErrorBudgeted.max_steps` |
+| `dense_control_route` | `DenseExact.control_route` |
+| `max_dense_select_slots` | `DenseExact.max_select_slots` |
+| `qsp_route` | `QSPBlockEncoding.route` |
+| `initial_state_mps_max_bond_dim`, `initial_state_mps_threshold`, `initial_state_mps_num_layers` | `init_prep=MPSCircuit(max_bond_dim=..., threshold=..., num_layers=...)` |
+| `lcu_mps_max_bond_dim`, `lcu_mps_threshold`, `mps_num_layers` | `lcu_prep=MPSCircuit(max_bond_dim=..., threshold=..., num_layers=...)` |
+| `moment_failure_probability` | `Coherent.fail_prob` |
+| `pair_repeats` | `SampledPairs.repeats` |
+| `pair_failure_probability` | `SampledPairs.fail_prob` |
+| `pair_kernel` | `SampledPairs.kernel` |
+| `pair_source_time` | `SampledPairs.source_time` |
+| `pair_control_copies` | `SampledPairs.control_copies` |
+| `pair_step_buckets` | `SampledPairs.step_buckets` |
+| `pair_product_formula` | `SampledPairs.product_formula` |
+| `pair_pf_allowance` | `Richardson.pf_allowance` or `PTSC.pf_allowance` |
+| `pair_mu_cap` | `PTSC.mu_cap` |
+| `pair_taylor_cutoff` | `PTSC.taylor_cutoff` |
+| `pair_qsp_bank` | `SampledPairs.qsp_bank` |
+
+For example, `LCHS(hamiltonian_evolution_backend="trotter", trotter_steps=2, trotter_order=1)` becomes `LCHS(ham_evo=Trotter(steps=2, order=1))`, and `LCHS(observable_estimator="sampled_pairs", pair_repeats=4, hamiltonian_evolution_backend="trotter", trotter_steps=2, pair_product_formula="richardson")` becomes `LCHS(ham_evo=Trotter(steps=2), estimator=SampledPairs(repeats=4, product_formula="richardson"))`.
+
+- The default `ham_evo="auto"` carries no options. With a dense $A$, v1.0.4 accepted `"auto"` with a non-default `dense_control_route` or `max_dense_select_slots`. Write the backend out instead, as in `LCHS(ham_evo=DenseExact(max_select_slots=8192))`. The computed values are those of v1.0.4.
+- An option can be written only inside the record of the route that reads it. The nine options that v1.0.4 accepted without effect, such as `lcu_mps_threshold` with the direct coefficient preparation, and combinations such as `trotter_order=1` with `dense_exact`, therefore have no spelling. Combinations across fields, such as `SampledPairs` with `dense_exact`, are still refused when the Method is built. The `UserWarning` that `plan` gave when it set `trotter_steps` to 1 for a backend without steps is gone with them.
+- `Trotter(synthesis_tol=eps)` alone selects the step count from the tolerance and equals `Trotter(steps=None, synthesis_tol=eps)`. Setting both a step count and the tolerance is still refused.
+- `duhamel_nodes` and `source_drop` stay on `LCHS` and have no effect without a source.
+
+### Displays, completion and discovery {#displays-in-v104post1}
+
+- `print`, `repr` and IPython show a Method or an option record in constructor syntax, with the options that differ from their defaults, as in `LCHS(ham_evo=Trotter(steps=4))`. The display leaves out revision ancestry, so copying its configuration can give a different content id. An input such as an initial state, an operator or a pool appears as a summary in angle brackets, such as `<vector, dimension 2>`, which must be replaced with the actual input before using the display as a constructor call. Inside such a call a `ProviderConfig` appears as its name or as a dict, and on its own as `ProviderConfig(implementation=...)`. `model_dump()` returns every field in full.
+- A Problem prints as its type followed by one line per field, such as `A: dense 2x2` and `initial_state: vector, dimension 2`. `repr` of a Problem, a Plan, a `WorkloadEstimate`, a `Comparison` and a `Registration` equals its `print` output, which shows no content hashes. A Problem, a Plan, a comparison and a registration print in a few lines without input values.
+- The printed `WorkloadEstimate` lists unavailable quantities that differ only in their metric, and share one reason, on one line that names all of them. Its `quantities` are unchanged.
+- `dir()` of a record, and the Tab completion that reads it, lists the fields, including those that are None, and NWQLib's own methods, such as `revise`, `model_dump` and `model_dump_json`, without the rest of pydantic's model API. On a Method instance it also leaves out the protocol hooks of `Method`, such as `plan` and `analyze`, which the class and `help()` still show.
+- `nwqlib.methods(problem)` lists the built-in Methods that declare the type of `problem`. `solve(problem)` without `method=` names those Methods in its error, and for a `ConstrainedOptimization` it names `nwqlib.algorithms.qhd.solve_augmented_lagrangian`, as the refusal of `QHD` on that Problem now does.
+- `python -m nwqlib options NAME` prints a table of the Method's options with their defaults, the names and records each accepts and the opening of its description. `python -m nwqlib options NAME --json` prints the JSON schema, which `options` printed in v1.0.4.
+
+### Reanalysis settings {#reanalysis-in-v104post1}
+
+`result.analyze(...)` refuses a setting name that the Method does not accept, and the message states which names it accepts. In v1.0.4 an unknown name was ignored without notice by Lanczos, FixedGCIM, QFD, ADAPT, ExpectationMethod and QHD, so a misspelled name gave the unchanged analysis. The accepted names are:
+
+| Method | Reanalysis settings |
+| --- | --- |
+| ExpectationMethod | `inference` |
+| FixedGCIM, QFD, ADAPT | `overlap_cutoff` |
+| Lanczos | `overlap_cutoff`, `cutoff_policy`, `noise_multiplier`, `overlap_fail_prob` |
+| QCELS, SPE | `grid_size` |
+| LCHS, QLS, QHD, RFE, RWPE | none |
+
+In particular `QHD` results refuse settings such as `result.analyze(total_time=0.9)`, which v1.0.4 accepted while it analyzed the same observations with the planned value. For QCELS, SPE, RFE and RWPE, a configuration field of the Method, or the `output`, `execution`, `shots` or `seed` argument of `plan`, is refused with a message that it is fixed in the Plan and needs a new Plan, and any other name with the list of accepted names. A Method you write lists the settings it accepts and refuses the others ([What every Method provides](algorithm_protocol.md#required-hooks)), because NWQLib passes the settings to it unchecked.
+
+### Descriptor versions {#descriptor-versions-in-v104post1}
+
+The descriptor version of a Method identifies the implementation that a registration resolves to, including the configuration fields its factory accepts. Each built-in Method's version goes up by one for the renamed and regrouped options above, so `python -m nwqlib algorithms` lists the new numbers and `--version` selects a Method by them.
+
+| Method | Name | v1.0.4 | This version |
+| --- | --- | --- | --- |
+| ADAPT | `adapt_gcim` | 5 | 6 |
+| Lanczos | `chebyshev_lanczos` | 5 | 6 |
+| ExpectationMethod | `finite_pauli_expectation` | 2 | 3 |
+| FixedGCIM | `fixed_gcim` | 5 | 6 |
+| LCHS | `lchs` | 3 | 4 |
+| QCELS | `qcels` | 1 | 2 |
+| QFD | `qfd` | 1 | 2 |
+| QHD | `qhd` | 2 | 3 |
+| QLS | `qls` | 2 | 3 |
+| RFE | `rfe` | 2 | 3 |
+| RWPE | `rwpe` | 2 | 3 |
+| SPE | `spe` | 2 | 3 |
+
+The new version does not make a configuration of v1.0.4 loadable, and it does not mark a change of the scientific method.
+
+### IBM Runtime {#ibm-runtime-in-v104post1}
+
+With qiskit-ibm-runtime 0.52.0, every IBM submission of v1.0.4 raises `TypeError: Expected SamplerOptions or dict, ...`, or the same message with `EstimatorOptions`, before the job is sent ([Dependency issues](dependency_issues.md#nwqlib-104-with-runtime-052)). If you stay with v1.0.4, install `qiskit-ibm-runtime<0.52` and start a new Run in place of each Run that raised this error, because such a Run does not submit the job again. This version requires qiskit-ibm-runtime 0.52.0 or later in the `ibm` extra.
+
+- IBM jobs go through the client-side `SamplerV2` and `EstimatorV2`, which build each job on your computer and send it to IBM's `executor` program. The Estimator's values and `stds` are computed on your computer by qiskit-mitigation when the Run reads the job. [Client-side primitives](dependency_issues.md#client-side-primitives) lists the steps of these primitives that change reported values, such as the removal of observable terms whose coefficients are at most 1e-8 in absolute value. NWQLib's error budget excludes this processing and hardware error.
+- Preparation refuses `environment.private=true`, because IBM returns the result of a private job only once.
+- Preparation refuses twirled counts unless `options_json` sets `twirling.num_randomizations` and `twirling.shots_per_randomization` to integers whose product is the requested shots, so that the Sampler returns that number of shots ([IBM Runtime](ibm.md#ibm-runtime-prepared-execution)).
+- A request that the SDK refuses while it builds the job leaves the submission uncertain, and the experiment needs a new Run. The SDK's message describes the refusal.
+- The native two-qubit depth of IBM counts with dynamical decoupling and twirling off is qualified with every supported qiskit-ibm-runtime version, and it describes the compiled circuit that NWQLib submits. v1.0.4 qualified it only with qiskit-ibm-runtime 0.49.0, so with another version a depth limit refused every IBM circuit ([Native two-qubit depth](ibm.md#native-two-qubit-depth)).
+- `EstimateValue.standard_error` holds the reported `stds` when the request turns zero-noise extrapolation off, with `resilience.zne_mitigation` set to `false` or at resilience level 0 without that option, and is otherwise `None` with the reason in `uncertainty_unavailable`. To have it at resilience level 1, set `resilience.zne_mitigation` to `false`. The `uncertainty_source` of an estimate records the versions of qiskit-ibm-runtime and qiskit-mitigation, and its description states that the value is the provider-reported `stds`, whose statistical interpretation NWQLib does not verify.
+### Other changes {#other-changes-in-v104post1}
+
+- With `estimator=SampledPairs(...)`, an LCHS readout at zero elapsed time or of zero inputs draws no pair rows. When this path acquires counts and no `accuracy` request is given, its sampling radius uses `SampledPairs.fail_prob` as the total failure probability, whereas v1.0.4 used 0.05. With an `accuracy` request, both versions use `1 - confidence`. Outputs known from the input acquire no counts and have zero sampling error.
+- `LCHS` instances, including `LCHS()`, `ProviderConfig` records and the `ResolvedProviderConfig` records in the result of `resolve_lchs_coefficient_plan` can be pickled and copied with `copy.deepcopy`, and each copy equals its original. v1.0.4 refused all three. This covers these records, not the coefficient plan that holds them or every Problem, Plan or Run.
+- The documentation of several LCHS fields now states more exactly what the code computes. The code did not change. `PTSC.mu_cap` gives the sufficient row count with W a bound on the physical importance weight of a single branch, and the factor of the observable for the quadratic form. `Richardson` states that the evolution remainder is 0 when at most one distinct nonidentity Pauli label of H and L together occurs or when `T_e(lambda_H + K lambda_L)` is 0. The `"mpf"` choice of `SampledPairs.product_formula` states that the evolution remainder is 0 with at most one distinct nonidentity Pauli label of H and L together. `SampledPairs.step_buckets` states that with more than one bucket each bucket receives its selected step count and a row uses the larger of its two branches' counts. `Coherent.fail_prob` is an upper bound under independent, stationary shots, split over the measurement settings that acquire counts. `LCHS.sampling_shots` writes its counts as `max(1, ceil(...))` and requires that each measurement setting return at least the selected number of independent shots.
+- `MPSCircuit` options of `init_prep` and `lcu_prep` act only in quantum execution. Classical execution evaluates the finite sum of branches and gives the same result for every such option. It refuses `lcu_prep="analytic"`, except that with `ham_evo="auto"` zero elapsed time or zero inputs take the exact no-evolution path, which does not use `lcu_prep`. This was already the behavior, and the [LCHS guide](algorithms/lchs.md#route-options) now states it.
+- The LCHS guide and its API page describe the route records, and the stored outputs of every example notebook come from this version.
+
+### Formats {#formats-in-v104post1}
+
+The shared archive formats are `nwqlib.run/25` and `nwqlib.result/18`, the constrained QHD and box-refinement archives `qhd.constrained/5` and `qhd.refinement/5`, and their run directories `qhd.constrained_run/6` and `qhd.refinement_run/7`. This version cannot load the `nwqlib.run/24`, `nwqlib.result/17`, `qhd.constrained/4` and `qhd.refinement/4` archives or resume the `qhd.constrained_run/5` and `qhd.refinement_run/6` directories written by v1.0.4, and the refusal names the format and how to proceed. Keep v1.0.4 available to read them or finish their pending runs, or plan and run the problem again with this version. The method archives embedded in these files keep their formats.
+
+The schema versions of these records change, because their fields were renamed or regrouped: `LCHS` 6 to 7, `QHD` 3 to 4, `QCELS` 1 to 2, `SPE` 2 to 3, `RFE` 1 to 2, `RWPE` 2 to 3, `QLS` 1 to 2, `Lanczos` 3 to 4, `ADAPT` 1 to 2, `FixedGCIM` 3 to 4, `QFD` 1 to 2, `ExpectationMethod` 2 to 3, `AdaptSymmetry` 1 to 2 and `AdaptReconstruction` 6 to 7. Compare values across versions, not content ids.
+
+Package and citation source versions are `1.0.4.post1`.
+
 ## v1.0.4 (2026-11-05)
 
 Relative to v1.0.3.post2, LCHS gains compact inputs evolved by quantum signal processing (QSP), sampled branch pairs, accuracy requests and an optional automatic choice of its kernel and grid, and its `qsp_block_encoding` backend builds different circuits. QLS builds its inverse and kernel-reflection polynomials in closed form and computes their phases by canonical synthesis to a separate target, so its degrees, phases and success probabilities change. A Run compares an estimate of the memory of its circuits with the Method's `max_bytes` before building them, and the default limits on QPE powers and steps are gone. IBM Runtime compiles one template circuit for the circuits of a Plan that differ only in rotation angles and can run IBM's fractional gates. QPE, LCHS and the Trotter helpers choose the expression of their commutator bound from a count of nested tests instead of from their work and memory limits. ADAPT's default energy thresholds follow the energy unit of the Hamiltonian, `compare` keeps a row for a Method stopped at a memory or work limit, and QHD regroups products of exponentials before evaluating them. The block encoding of a Hermitian band operator and the shared Run and Result archive formats change. This version cannot load Run or Result archives written by v1.0.3.post2.

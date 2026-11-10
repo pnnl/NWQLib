@@ -208,7 +208,7 @@ def _bank_failure(message, *, cause, **context):
 # A first transform refused at a limit also starts under a larger byte or FFT
 # limit. After a failed fit the cause states what those limits do, so its
 # refusal names the allowance alone.
-_PHASE_ALLOWANCE = "the mean-amplitude allowance, which LCHS sets from approximation_tolerance"
+_PHASE_ALLOWANCE = "the mean-amplitude allowance, which LCHS sets from approx_tol"
 _PHASE_DIRECTION = f"raise max_bytes (or an explicit max_fft) or {_PHASE_ALLOWANCE}"
 
 

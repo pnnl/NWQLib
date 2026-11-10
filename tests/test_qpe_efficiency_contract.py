@@ -32,8 +32,8 @@ def test_rwpe_estimate_counts_the_experiments_that_a_run_emits():
     from nwqlib.algorithms import RWPE
 
     problem = Eigenproblem(A=ingest_pauli((("XI", .7), ("ZX", .4), ("YZ", .3), ("ZZ", .2)), num_qubits=2))
-    method = RWPE(initial_state=[1, 0, 0, 0], max_steps=14, controlled_power_backend="trotter_error_budgeted",
-                  controlled_power_error_budget=.01)
+    method = RWPE(initial_state=[1, 0, 0, 0], max_steps=14, ctrl_power="trotter_error_budgeted",
+                  ctrl_power_budget=.01)
     selected = plan(problem, method=method, seed=7)
     context = ResourceContext(basis="cx", batch_schedule="serial")
     folded = estimate(selected.construction, context=context)
@@ -84,7 +84,7 @@ def test_pruning_and_signed_power_time_owned_once(monkeypatch, removed):
         target=target,
         execution="quantum",
         pauli_pruning_rtol=1e-3,
-        controlled_power_error_budget=0.002,
+        ctrl_power_budget=0.002,
     )
     r = selected.reconstruction
     assert r.identity_coefficient == 0.2 and r.pruned_mass == removed
@@ -133,8 +133,8 @@ def test_dense_product_formula_input_keeps_the_record_of_its_pauli_terms(monkeyp
     for target in (pauli, ingest_dense(matrix)):
         monkeypatch.setattr(PauliTerms, "labels", labels)
         record = make_plan(estimator="rfe", target=target, execution="quantum", initial=[1, 0, 0, 0],
-                           controlled_power_backend="trotter_error_budgeted", pauli_pruning_rtol=1e-3,
-                           controlled_power_error_budget=0.002).reconstruction
+                           ctrl_power="trotter_error_budgeted", pauli_pruning_rtol=1e-3,
+                           ctrl_power_budget=0.002).reconstruction
         monkeypatch.undo()
     assert decoded == [2, 2]
     assert record.pauli_labels == tuple(label for label, _ in kept) == ("XY", "ZI")
@@ -150,7 +150,7 @@ def test_qpe_compact_repeat_and_shot_multiplicity():
         estimator="rfe",
         target=target,
         execution="quantum",
-        controlled_power_error_budget=1e-4,
+        ctrl_power_budget=1e-4,
         shots=37,
     )
     folded = estimate(selected.construction, context=ResourceContext(batch_schedule="serial"))
@@ -181,7 +181,7 @@ def test_qpe_compact_repeat_and_shot_multiplicity():
     # each positive power its identity phase increment and r(p)-r(p_prev)
     # repetitions of the one common step, r(p_max) in total.
     trajectory = make_plan(estimator="rfe", target=target, execution="quantum",
-                           controlled_power_error_budget=1e-4)
+                           ctrl_power_budget=1e-4)
     positive = [p for p in trajectory.reconstruction.powers if p.power]
     assert trajectory.reconstruction.common_step is not None and positive[-1].steps > len(positive)
     folded = estimate(trajectory.construction, context=ResourceContext(batch_schedule="serial"))
@@ -345,7 +345,7 @@ def _check_planned_common_step(selected, *, first_count=True):
     from fractions import Fraction
     from types import SimpleNamespace
 
-    rec, budget = selected.reconstruction, selected.method.controlled_power_error_budget
+    rec, budget = selected.reconstruction, selected.method.ctrl_power_budget
     common = rec.common_step
     step = next(b for b in selected.blocks if b.record.signature.name == "common_step")
     labels_and_coefficients, step_time = step._payload
@@ -403,7 +403,7 @@ def test_common_grid_powers_record_the_checked_emitted_prefix_bounds():
     tiny = ingest_pauli((("I", .1), ("Z", .3)), num_qubits=1)
     with pytest.raises(ValueError, match=r"at power 1\b"):
         plan(Eigenproblem(A=tiny), method=QCELS(initial_state=[1, 0], tau=0.3, num_times=3,
-                                                controlled_power_error_budget=1e-300), seed=7)
+                                                ctrl_power_budget=1e-300), seed=7)
 
 
 def _rounding_bound_counts(rec, budget):
@@ -447,7 +447,7 @@ def _two_qubit_plan(budget, **options):
 
     target = ingest_pauli((("ZI", .34), ("IZ", -.11), ("ZZ", .57), ("XX", .09), ("YY", .09)), num_qubits=2)
     return plan(Eigenproblem(A=target), seed=1, method=QCELS(
-        initial_state=ingest_occupation("10", num_qubits=2), controlled_power_error_budget=budget, **options))
+        initial_state=ingest_occupation("10", num_qubits=2), ctrl_power_budget=budget, **options))
 
 
 def _gap_two_plan(budget):
@@ -457,7 +457,7 @@ def _gap_two_plan(budget):
 
     target = ingest_pauli((("II", .1), ("ZI", .3), ("XX", .2), ("IY", -.25)), num_qubits=2)
     return plan(Eigenproblem(A=target), seed=2, method=RFE(
-        initial_state=[1, 0, 0, 0], num_frequencies=9, num_samples=3, tau=0.3, controlled_power_error_budget=budget))
+        initial_state=[1, 0, 0, 0], num_frequencies=9, num_samples=3, tau=0.3, ctrl_power_budget=budget))
 
 
 @pytest.mark.parametrize("make, budget, count, bound_count", [
@@ -524,7 +524,7 @@ def test_a_budget_below_the_step_independent_rounding_bound_refuses_and_names_th
     power. Planning at 1e-3 only supplies the same schedule, W and tau.
     """
     assert _rounding_bound_counts(_two_qubit_plan(1e-3).reconstruction, 1e-15) is None
-    with pytest.raises(ValueError, match="controlled_power_error_budget"):
+    with pytest.raises(ValueError, match="ctrl_power_budget"):
         _two_qubit_plan(1e-15)
 
 

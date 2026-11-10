@@ -8,15 +8,17 @@ from __future__ import annotations
 from nwqlib.blocks.selection import _no_arguments
 from typing import Any
 
+from .route_options import dense_options
+
 # Algorithmic allowance of the coherent evolution, as a fraction of
-# approximation_tolerance, in the recovered evolution frame: the truncation
+# approx_tol, in the recovered evolution frame: the truncation
 # tail and the phase synthesis together (parameters._select_coherent splits
 # it). It is a component target, not a guarantee that the returned physical
-# solution meets approximation_tolerance. Available component bounds keep
+# solution meets approx_tol. Available component bounds keep
 # their own premises and scale through the actual LCU.
 LCHS_QSP_EPSILON_FRACTION = 0.1
 
-# Additional per-node product-formula allowance as a fraction of approximation_tolerance,
+# Additional per-node product-formula allowance as a fraction of approx_tol,
 # with the same scope as above. Both fractions are registered in
 # ENGINEERING_CONSTANTS.
 LCHS_TROTTER_EPSILON_FRACTION = 0.1
@@ -52,33 +54,33 @@ def resolve_lcu_select_implementation(method, *, backend: str, select_plan: Any 
         The resolved implementation name.
     """
 
-    requested = method.lcu_select_implementation
+    requested = method.lcu_select
     he_backend = backend
     # Eligibility is a construction property. Dense, QSP and variable-step
     # product formulas expose different SELECT implementations.
     if he_backend == "qsp_block_encoding":
         if requested != "auto":
             raise ValueError(
-                "hamiltonian_evolution_backend='qsp_block_encoding' uses its "
-                "internal coherent LCU; lcu_select_implementation must be 'auto'"
+                "ham_evo='qsp_block_encoding' uses its "
+                "internal coherent LCU; lcu_select must be 'auto'"
             )
         return "coherent_lcu"
     if he_backend == "dense_exact":
         if requested == "multiplexor":
             raise ValueError(
-                "lcu_select_implementation='multiplexor' requires an elementary "
+                "lcu_select='multiplexor' requires an elementary "
                 "product-formula plan, which dense_exact does not provide"
             )
         if requested == "structured":
             raise ValueError(
-                "lcu_select_implementation='structured' requires a structure "
+                "lcu_select='structured' requires a structure "
                 "certificate, which dense_exact does not provide"
             )
         return "branch_controlled"
     if he_backend == "trotter_error_budgeted":
         if requested == "structured":
             raise ValueError(
-                "lcu_select_implementation='structured' failed eligibility condition: "
+                "lcu_select='structured' failed eligibility condition: "
                 "fixed-step product formula is required; trotter_error_budgeted is ineligible"
             )
         return "multiplexor" if requested == "auto" else requested
@@ -91,7 +93,7 @@ def resolve_lcu_select_implementation(method, *, backend: str, select_plan: Any 
     if certificate is None:
         if requested == "structured" and select_plan is not None:
             raise ValueError(
-                "lcu_select_implementation='structured' failed eligibility condition: "
+                "lcu_select='structured' failed eligibility condition: "
                 "no structure certificate is available"
             )
         return "multiplexor" if requested == "auto" else requested
@@ -101,7 +103,7 @@ def resolve_lcu_select_implementation(method, *, backend: str, select_plan: Any 
         if not eligible:
             details = "; ".join(rejection_reasons) or "certificate is not eligible"
             raise ValueError(
-                "lcu_select_implementation='structured' failed eligibility "
+                "lcu_select='structured' failed eligibility "
                 f"condition(s): {details}"
             )
         return "structured"
@@ -251,7 +253,7 @@ def construct_select(block, arguments, method_context):
         # branches stream: each is formed, controlled and appended before
         # the next is formed.
         return build_branch_select(lcu, _dense_branches(data, ((float(k), elapsed, None)
-            for k in data.quadrature.k_nodes)), route=data.method.dense_control_route)
+            for k in data.quadrature.k_nodes)), route=dense_options(data.method).control_route)
     preparations = {} if data.source_layout is None else _source_preparations(data)
     if backend != "dense_exact" and data.selected_select != "branch_controlled":
         select = build_product_formula_select(data.select_data.plan, num_system_qubits=dimension.bit_length()-1,
@@ -263,10 +265,10 @@ def construct_select(block, arguments, method_context):
         return prefix
     lcu = lcu_intake()
     count = len(coefficients)
-    route = data.method.dense_control_route
     q = dimension.bit_length()-1
     a = (count-1).bit_length()
     if backend == "dense_exact":
+        route = dense_options(data.method).control_route
         # On the whole-matrix route a dense source branch is one unitary, its
         # evolution times the matrix of its input preparation, so the address
         # controls act on one whole-matrix synthesis. Each preparation's
@@ -320,7 +322,9 @@ def construct_select(block, arguments, method_context):
                 circuit = _compose_branch_circuit(preparation=preparations[data.source_layout.branch_kinds[node]],
                     evolution=circuit, dense_unitary=None, label=f"source_{branch}")
             yield circuit
-    return build_branch_select(lcu, product_formula_branches(), route=route, phases=phases)
+    # Product-formula branches hold no dense unitary on two or more qubits, which every dense control route
+    # controls gate-wise (qiskit_compat.controlled), so they take the default route.
+    return build_branch_select(lcu, product_formula_branches(), phases=phases)
 
 
 def _dense_branches(data, specifications, finish=None, *, cache=False):
@@ -580,7 +584,8 @@ def coherent_coefficient_factors(data):
     method, preparation = data.method, data.qsp_plan.preparation
     return tuple(None if decomposition is None else build_mps_circuit_state_preparation(
         np.asarray(amplitudes, dtype=np.complex128), max_bond_dim=decomposition.max_bond_dim,
-        threshold=decomposition.threshold, num_layers=method.mps_num_layers, _selected_decomposition=decomposition,
+        threshold=decomposition.threshold, num_layers=method.lcu_prep.num_layers,
+        _selected_decomposition=decomposition,
         max_bytes=method.max_bytes, max_svd_work=method.max_svd_work).circuit
         for decomposition, amplitudes in zip(data.coefficient_mps,
                                              (preparation.kernel_amplitudes, preparation.application_amplitudes),
@@ -600,7 +605,7 @@ def coherent_input_preparations(data):
         method = data.method
         preparations["initial"] = build_mps_circuit_state_preparation(data.dense.initial_direction,
             max_bond_dim=data.initial_mps.max_bond_dim, threshold=data.initial_mps.threshold,
-            num_layers=method.initial_state_mps_num_layers, _selected_decomposition=data.initial_mps,
+            num_layers=method.init_prep.num_layers, _selected_decomposition=data.initial_mps,
             max_bytes=method.max_bytes, max_svd_work=method.max_svd_work).circuit
     return preparations
 

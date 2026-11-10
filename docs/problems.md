@@ -26,7 +26,7 @@ Import each Problem from `nwqlib`. [Supply inputs](inputs.md) lists the matrix, 
 
 | Problem | Scientific question | Default output | Methods |
 | --- | --- | --- | --- |
-| `Eigenproblem(A=...)` | Smallest eigenvalue of a Hermitian operator, optionally in an explicit subspace or sector | Eigenvalue | [Lanczos](algorithms/lanczos.md), [FixedGCIM and ADAPT](algorithms/gcim.md), [QCELS, SPE, RFE and RWPE](algorithms/qpe.md) |
+| `Eigenproblem(A=...)` | Smallest eigenvalue of a Hermitian operator, optionally in an explicit subspace or sector | Eigenvalue | [Lanczos](algorithms/lanczos.md), [FixedGCIM and ADAPT](algorithms/gcim.md), [QFD](algorithms/qfd.md), [QCELS, SPE, RFE and RWPE](algorithms/qpe.md) |
 | `LinearDynamics(A=..., initial_state=..., time=...)` | Time-independent `du/dt = -A u + source` from the given initial time and state | Solution | [LCHS](algorithms/lchs.md) |
 | `LinearSystem(A=..., b=...)` | Physical solution of `A x = b` | Solution | [QLS](algorithms/qls.md) |
 | `Expectation(state=..., observable=...)` | Normalized expectation of the given Hermitian observable in the given state | NormalizedExpectation | [ExpectationMethod](algorithms/expectation.md) |

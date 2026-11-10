@@ -256,11 +256,11 @@ def _resolve_overlap_cutoff(requested, m, *, sampled, variances=None,
         data. record is the _overlap_regularization_record dict.
     """
     if not 0 < failure_probability < 1:
-        raise ValueError("overlap_failure_probability must lie strictly between zero and one")
+        raise ValueError("overlap_fail_prob must lie strictly between zero and one")
     if policy not in {"empirical", "confidence"}:
-        raise ValueError("overlap_cutoff_policy must be empirical or confidence")
+        raise ValueError("cutoff_policy must be empirical or confidence")
     if not math.isfinite(noise_multiplier) or noise_multiplier <= 0:
-        raise ValueError("overlap_noise_multiplier must be finite and positive")
+        raise ValueError("noise_multiplier must be finite and positive")
     radius = None
     gram_variances = None if variances is None else variances[:2*m-1]
     if (gram_variances is not None and np.all(np.isfinite(gram_variances))
@@ -380,9 +380,9 @@ def _sensitivity_weights(reconstruction, statistics, options):
         sampled=True,
         variances=moment_variances,
         moment_shots=[populations.get(k) for k in range(2*reconstruction.krylov_dimension)],
-        failure_probability=options.overlap_failure_probability,
-        policy=options.overlap_cutoff_policy,
-        noise_multiplier=options.overlap_noise_multiplier,
+        failure_probability=options.overlap_fail_prob,
+        policy=options.cutoff_policy,
+        noise_multiplier=options.noise_multiplier,
     )
     evidence["overlap_regularization"] = regularization
     if cutoff is None:
@@ -613,9 +613,9 @@ def reconstruct(
     cutoff,
     sampled,
     max_bytes=None,
-    overlap_failure_probability=0.05,
-    overlap_cutoff_policy="empirical",
-    overlap_noise_multiplier=1.0,
+    overlap_fail_prob=0.05,
+    cutoff_policy="empirical",
+    noise_multiplier=1.0,
 ):
     """Turn moment data into the lowest physical Ritz value and its diagnostics.
 
@@ -639,9 +639,9 @@ def reconstruct(
         sampled: Whether the moments are finite-shot estimates.
         max_bytes: Byte limit for the projected arrays, None for the physical
             memory of this computer.
-        overlap_failure_probability: delta of the Hoeffding Gram bound.
-        overlap_cutoff_policy: ``empirical`` or ``confidence``.
-        overlap_noise_multiplier: Scale of the empirical Gram RMS cutoff.
+        overlap_fail_prob: delta of the Hoeffding Gram bound.
+        cutoff_policy: ``empirical`` or ``confidence``.
+        noise_multiplier: Scale of the empirical Gram RMS cutoff.
 
     Returns:
         Dict of the LanczosResult analysis fields, with Ritz values in the
@@ -691,8 +691,8 @@ def reconstruct(
     moment_shots = [0 if k in known else
                     statistics[k].shots if k in statistics else None for k in range(2*m)]
     cutoff, regularization = _resolve_overlap_cutoff(cutoff, m, sampled=sampled, variances=variance,
-        moment_shots=moment_shots, failure_probability=overlap_failure_probability,
-        policy=overlap_cutoff_policy, noise_multiplier=overlap_noise_multiplier)
+        moment_shots=moment_shots, failure_probability=overlap_fail_prob,
+        policy=cutoff_policy, noise_multiplier=noise_multiplier)
     fields.update(cutoff=cutoff, cutoff_source=regularization["source"],
         gram_sampling_bound=regularization["gram_sampling_bound"],
         empirical_gram_noise_frobenius_rms=regularization["empirical_gram_noise_frobenius_rms"])

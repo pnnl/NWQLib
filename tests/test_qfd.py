@@ -7,7 +7,8 @@ import pytest
 
 import nwqlib
 from nwqlib import Eigenproblem, solve
-from nwqlib.algorithms import QFD, PencilAcquisition
+from nwqlib.algorithms import QFD
+from nwqlib.algorithms.gcim import PencilAcquisition
 from nwqlib.algorithms.protocol import ApplicabilityError
 from nwqlib.operators import ingest_pauli
 from nwqlib.problems import ingest_occupation, ingest_product
@@ -418,6 +419,8 @@ def test_requested_power_order_keeps_the_reference_energy_through_save_load_and_
     assert reanalyzed.pencil.hamiltonian == result.pencil.hamiltonian
     assert reanalyzed.pencil.overlap == result.pencil.overlap
     assert reanalyzed.reference_energy == result.reference_energy and reanalyzed.analysis_cutoff == 1e-6
+    with pytest.raises(ValueError, match="QFD reanalysis accepts overlap_cutoff, not cutoff"):
+        loaded.analyze(cutoff=1e-6)
 
 
 def test_complete_sampled_pencil_has_its_settings_and_a_resumed_run_repeats_none(tmp_path, monkeypatch):
@@ -480,7 +483,7 @@ def test_pencil_sampling_takes_the_estimate_and_reference_energy_from_the_main_s
     loaded and reanalyzed at another cutoff, the Result keeps the decision
     without solving the pilot or allocating again.
     """
-    from nwqlib.algorithms import PencilSampling
+    from nwqlib.algorithms.gcim import PencilSampling
     from nwqlib.algorithms.gcim import pencil_workflow
 
     method = QFD(initial_state=ingest_product([[2**-.5, 2**-.5]]), time_step=.5, powers=(0, 1),
@@ -740,18 +743,15 @@ def test_native_depth_limit_refuses_a_controlled_pair_deeper_than_every_basis_st
     any job, keeping the earlier counts. The depths are those of an
     unlimited run that the same seed compiles identically.
     """
-    import importlib.metadata
     from nwqlib.backends.inspection import NativeDepthCapRefusal
 
-    if importlib.metadata.version("qiskit-ibm-runtime") != "0.49.0":
-        pytest.skip("IBM native depths are qualified only with qiskit-ibm-runtime 0.49.0")
     spy, shots = ibm_runtime_spy, 8
     problem = Eigenproblem(A=ingest_pauli((("ZZ", 1.0), ("XI", .5)), num_qubits=2))
     reference = ingest_product(np.array([[.6, .8], [1.0, 0.0]]))
 
     def start(limit, directory):
         selected = nwqlib.plan(problem, method=QFD(initial_state=reference, time_step=.5, powers=(0, 1),
-                                                   max_native_two_qubit_depth=limit),
+                                                   max_2q_depth=limit),
                                execution="quantum", shots=shots, seed=7)
         return selected, nwqlib.prepare(selected, backend=spy.connection, directory=directory, progress=False)
 

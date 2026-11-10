@@ -41,7 +41,7 @@ stored = LogicalCompilation.load("compiled.json")
 
 ```text
 NWQEC 0.1.2: clifford_t, final_artifact
-source=sha256:5e090080db5555983c30daa0def55546c4f0dfd274367f54c28a619ab42a65cb; requested RZ epsilon=0.001
+source=sha256:689ccba539ec608cea3458e700c4be3ef8bf51c0d8454bef3fc282e99c9d0cff; requested RZ epsilon=0.001
 operations: 71 count [exact]
   basis=nwqec:clifford_t; lifecycle=prepared; population=one static compiler body; final_artifact
 logical_width: 1 count [exact]
@@ -58,7 +58,7 @@ Original terminal readout is source metadata; no observations were acquired.
 Operation/transport caps and timeout do not bound native internal RSS or synthesis work.
 ```
 
-The compiled circuit has 26 T gates on 1 logical qubit, with 71 operations and depth 71 (NWQEC 0.1.2, Qiskit 2.5.2, macOS arm64). The counts are exact for this compiled circuit and describe one execution of it, not the plan's eight shots. The `source` content hash identifies this preparation and differs from run to run. Repeated compiles of one circuit can give different Clifford counts, and hence different operation counts and depths. In the repeated compiles recorded under [NWQEC 0.1.2](dependency_issues.md#nwqec-012), the T count stayed the same. Saving writes a new file and refuses to overwrite an existing one. Displaying, saving and loading a saved record compile nothing.
+The compiled circuit has 26 T gates on 1 logical qubit, with 71 operations and depth 71 (NWQEC 0.1.2, Qiskit 2.6.0, macOS arm64). The counts are exact for this compiled circuit and describe one execution of it, not the plan's eight shots. The `source` content hash identifies this preparation and differs from run to run. Repeated compiles of one circuit can give different Clifford counts, and hence different operation counts and depths. In the repeated compiles recorded under [NWQEC 0.1.2](dependency_issues.md#nwqec-012), the T count stayed the same. Saving writes a new file and refuses to overwrite an existing one. Displaying, saving and loading a saved record compile nothing.
 
 The input of `compile_logical` is a prepared circuit of an open Run (`Prepared`), or a `LogicalCircuit` returned by `nwqlib.blocks.lower_qiskit`, which compiles blocks without an Aer Run and needs `index=0`. The index of a prepared circuit follows `prepared.circuits` and `prepared.setting_names`. A circuit released with `run.release_native()` is reloaded from its saved QPY copy (Qiskit's binary circuit format), as for `prepared.inspect_resources`, without building or transpiling it again. The record keeps the source content hash, how the circuit was built, the qubit layout, the gate basis, the mapping of terminal measurements, the original readout and phase, the digest of the input QASM, the NWQEC version, the requested and effective options, the counts, the output circuit and the elapsed seconds.
 

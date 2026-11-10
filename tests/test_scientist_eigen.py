@@ -70,12 +70,18 @@ def test_sensitivity_actual_population_and_no_reacquisition(monkeypatch):
     assert result.eigenvalue is not None
     assert again.eigenvalue == result.eigenvalue
     assert result.cutoff_source == "empirical_gram_rms"
-    strict = result.analyze(overlap_cutoff_policy="confidence", overlap_failure_probability=.1)
+    strict = result.analyze(cutoff_policy="confidence", overlap_fail_prob=.1)
     rec = result.plan.reconstruction
     counts = [stat.shots for degree, stat in strict.statistics if degree < 2*rec.krylov_dimension-1]
     expected = 2*rec.krylov_dimension*np.sqrt(2*np.log(2*len(counts)/.1)/min(counts))
     assert strict.cutoff == pytest.approx(expected, rel=2e-15)
     assert strict.analysis_failure_probability == .1 and strict.cutoff_source == "hoeffding_gram_bound"
+    # The guide's default regularization max(1e-12, noise_multiplier*RMS) at a changed multiplier.
+    looser = result.analyze(noise_multiplier=3.)
+    assert looser.analysis_noise_multiplier == 3. and looser.cutoff_source == "empirical_gram_rms"
+    assert looser.cutoff == max(1e-12, 3.*result.empirical_gram_noise_frobenius_rms)
+    with pytest.raises(ValueError, match="accepts overlap_cutoff, cutoff_policy, noise_multiplier and overlap_fail_prob"):
+        result.analyze(overlap_cutoff_policy="confidence")
     assert run.rng.snapshot() == old_state and len(run.trace.events) == 4
     from nwqlib.algorithms.lanczos import numerical
     monkeypatch.setattr(numerical, "_projected_matrices",
@@ -102,12 +108,12 @@ def test_saved_sampled_lanczos_result_reanalyzes_with_its_shot_counts(tmp_path):
     counts = [stat.shots for degree, stat in loaded.statistics if degree < 3]
     assert counts == [4096, 4096]
     delta = 0.05
-    for criterion in (dict(overlap_cutoff_policy="confidence", overlap_failure_probability=delta),
+    for criterion in (dict(cutoff_policy="confidence", overlap_fail_prob=delta),
                       dict(overlap_cutoff=1e-9), dict()):
         original, reopened = result.analyze(**criterion), loaded.analyze(**criterion)
         assert (reopened.eigenvalue, reopened.kept_rank, reopened.cutoff) == (
             original.eigenvalue, original.kept_rank, original.cutoff)
-    strict = loaded.analyze(overlap_cutoff_policy="confidence", overlap_failure_probability=delta)
+    strict = loaded.analyze(cutoff_policy="confidence", overlap_fail_prob=delta)
     # Machine precision: the same closed form evaluated in binary64.
     assert strict.cutoff == pytest.approx(2*2*np.sqrt(2*np.log(2*2/delta)/4096), rel=2e-15)
 
@@ -172,10 +178,10 @@ def test_classical_recurrence_is_checked_once_at_planning():
     with pytest.raises(ValueError, match=f"classical Chebyshev preparation and recurrence needs about {need_bytes}"):
         plan(max_bytes=need_bytes // 2)
     with pytest.raises(ValueError, match=rf"require {need_work} classical products, above "
-                                         rf"max_classical_products={need_work // 2}\. Raise max_classical_products "
+                                         rf"max_products={need_work // 2}\. Raise max_products "
                                          rf"to at least {need_work} or set it to None\."):
-        plan(max_classical_products=need_work // 2)
-    for limits in ({"max_bytes": need_bytes}, {"max_classical_products": need_work}):
+        plan(max_products=need_work // 2)
+    for limits in ({"max_bytes": need_bytes}, {"max_products": need_work}):
         result = Run(plan(**limits)).wait(timeout=30, poll_interval=0)
         assert result.eigenvalue == pytest.approx(1 - np.sqrt(0.3125), abs=1e-12, rel=0)
 
@@ -391,7 +397,7 @@ def test_dense_custom_adapt_generator_keeps_the_record_of_its_projected_labels(m
     hermitian = rng.normal(size=(4, 4))
     generator = ingest_dense((a - a.conj().T) + 1e-13 * (hermitian + hermitian.T))
     method = ADAPT(initial_state=[1, 0, 0, 0], pool=(generator,), input_conversion="dense_pauli",
-                   max_iterations=1, input_symmetry_tolerance=1e-10)
+                   max_iterations=1, symmetry_tol=1e-10)
     monkeypatch.setattr(inputs, "_coalesced_input", lambda table: pytest.fail("distinct words summed again"))
     plan = nwqlib.plan(Eigenproblem(A=ingest_dense(np.diag([1.0, -1.0, 0.5, 2.0]))), method=method,
                        execution="classical", seed=3)
@@ -498,9 +504,9 @@ def test_supplied_preparation_products_and_declared_alias_preservation(monkeypat
         guard.setattr(
             lanczos_method, "state_direction", lambda *a, **k: pytest.fail("early simulation")
         )
-        with pytest.raises(ValueError, match="max_classical_products"):
-            execute(problem, method.revise(max_classical_products=work - 1), "classical")
-    result, run = execute(problem, method.revise(max_classical_products=work), "classical")
+        with pytest.raises(ValueError, match="max_products"):
+            execute(problem, method.revise(max_products=work - 1), "classical")
+    result, run = execute(problem, method.revise(max_products=work), "classical")
     assert result.eigenvalue == pytest.approx(-1.0, rel=0, abs=2e-12)
     run.close()
     # The same declared InputRef does not establish two distinct circuits equal.
@@ -692,7 +698,7 @@ def test_packed_hamiltonian_conversion_charges_its_arrays_not_records_of_dropped
     def build(cap):
         return nwqlib.plan(problem, method=ADAPT(
             initial_state=ingest_occupation("0" * q, num_qubits=q), pool=(generator,), input_conversion="dense_pauli",
-            max_iterations=1, max_bytes=cap, pauli_coefficient_cutoff=1e-5), execution="quantum", seed=2)
+            max_iterations=1, max_bytes=cap, pauli_cutoff=1e-5), execution="quantum", seed=2)
 
     inputs = build(300_000)._native["inputs"]
     assert len(inputs.nonidentity) == 1 and inputs.dropped_l1 > 0

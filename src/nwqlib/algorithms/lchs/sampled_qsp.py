@@ -1,7 +1,7 @@
 """Sampled LCHS pairs whose branches evolve by a finite bank of QSP polynomials.
 
-``LCHS(observable_estimator="sampled_pairs",
-hamiltonian_evolution_backend="qsp_block_encoding")`` keeps the pair rows of
+``LCHS(estimator="sampled_pairs",
+ham_evo="qsp_block_encoding")`` keeps the pair rows of
 `sampled_rows` and replaces the product formula of each branch by a
 qubitized Laurent polynomial from a finite phase bank (`sampled_qsp_bank`).
 The labels B1–B18 below name the finite-bank relations of the sampled pairs,
@@ -147,10 +147,10 @@ class LCHSPairQSP(Record):
     row of `LCHSSampledRows`.
 
     Attributes:
-        policy: ``"deterministic"`` or ``"stochastic"`` (`LCHS.pair_qsp_bank`).
+        policy: ``"deterministic"`` or ``"stochastic"`` (`SampledPairs.qsp_bank`).
         branch_policy: ``"independent"``: separate x and y member draws.
         allowance_frame: ``"algorithmic"``; the allowance is
-            ``LCHS_QSP_EPSILON_FRACTION * approximation_tolerance``.
+            ``LCHS_QSP_EPSILON_FRACTION * approx_tol``.
         mean_amplitude_allowance: Recovered amplitude allowance of every
             bucket: the mean of a stochastic bank, the individual
             polynomial of a deterministic one.
@@ -248,25 +248,24 @@ class QSPForecast:
     query_unresolved: str | None = None
 
 
-def bank_options(method):
-    """Return the validated ``(policy, buckets, margin, cutoff)`` of ``LCHS.pair_qsp_bank``."""
+def bank_options(config):
+    """Return the validated ``(policy, buckets, margin, cutoff)`` of the bank request ``SampledPairs.qsp_bank``."""
     from nwqlib._validation import finite_real, integer
-    config = method.pair_qsp_bank
     policy, parameters = config.implementation, dict(config.parameters)
     if policy not in BANK_POLICIES:
-        raise ValueError(f"pair_qsp_bank implementation must be 'deterministic' or 'stochastic', not {policy!r}")
+        raise ValueError(f"qsp_bank implementation must be 'deterministic' or 'stochastic', not {policy!r}")
     unknown = sorted(set(parameters) - set(BANK_PARAMETERS[policy]))
     if unknown:
-        raise ValueError(f"pair_qsp_bank {policy!r} takes the parameters {', '.join(BANK_PARAMETERS[policy])}, "
+        raise ValueError(f"qsp_bank {policy!r} takes the parameters {', '.join(BANK_PARAMETERS[policy])}, "
                          f"not {unknown}")
-    buckets = integer(parameters.get("buckets", 1), "pair_qsp_bank buckets", 1)
+    buckets = integer(parameters.get("buckets", 1), "qsp_bank buckets", 1)
     if buckets > 64:
-        raise ValueError("pair_qsp_bank buckets above 64 would place edges below the binary64 range of b_max")
-    margin = finite_real(parameters.get("margin", 1 / 16), "pair_qsp_bank margin")
+        raise ValueError("qsp_bank buckets above 64 would place edges below the binary64 range of b_max")
+    margin = finite_real(parameters.get("margin", 1 / 16), "qsp_bank margin")
     if not 0 < margin < 1:
-        raise ValueError("pair_qsp_bank margin must lie strictly between 0 and 1")
+        raise ValueError("qsp_bank margin must lie strictly between 0 and 1")
     cutoff = parameters.get("cutoff")
-    cutoff = None if cutoff is None else integer(cutoff, "pair_qsp_bank cutoff", 0)
+    cutoff = None if cutoff is None else integer(cutoff, "qsp_bank cutoff", 0)
     return policy, buckets, margin, cutoff
 
 
@@ -362,7 +361,7 @@ def forecast_qsp(method, common, kernel, facts):
     end = _kernel_support(kernel)[0] if l_child is not None else 0.0
     active = float(facts.active_time)
     coverage = _coverage(alpha_l, alpha_h, end, active)
-    policy, buckets, margin, cutoff = bank_options(method)
+    policy, buckets, margin, cutoff = bank_options(method.estimator.qsp_bank)
     bank, factor, flags, query_work, query_unresolved = None, Fraction(1), 0, 0, None
     if coverage > 0:
         # The Plan-wide workspace is the largest branch sequence of the support: every present part (the L part
@@ -390,10 +389,10 @@ def forecast_qsp(method, common, kernel, facts):
                                      f"above LCHS.max_select_work={method.max_select_work}")
         edges = tuple(coverage * 2.0 ** (index - buckets + 1) for index in range(buckets))
         if edges[0] < np.finfo(float).tiny:
-            raise ApplicabilityError(f"pair_qsp_bank buckets={buckets} put the first bank time below the normal "
+            raise ApplicabilityError(f"SampledPairs.qsp_bank buckets={buckets} put the first bank time below the normal "
                                      f"binary64 range of b_max={coverage!r}; use fewer buckets")
         bank = plan_sampled_qsp_bank(
-            edges, mean_amplitude_allowances=LCHS_QSP_EPSILON_FRACTION * float(method.approximation_tolerance),
+            edges, mean_amplitude_allowances=LCHS_QSP_EPSILON_FRACTION * float(method.approx_tol),
             policy=policy, cutoffs=None if cutoff is None else (cutoff,) * buckets, margin=margin,
             max_bytes=method.max_bytes)
         factor = max(Fraction(1), max(Fraction(bucket.recovery) ** 2 for bucket in bank.buckets))
@@ -664,7 +663,7 @@ def qsp_pair_bias(method, problem, common, data, kernel, facts, frame, terms, fo
         step_rule=None, inner_relation="qsp_bank", product_formula_operator=None, mean_weight_bound=mean,
         model_vector_bound=vector, inner_bias=inner, model_bias=model, observable_bound=_observable_bound(terms),
         kernel_allowances=None if isinstance(kernel, DiscreteKernel) else
-        (0.5 * float(method.approximation_tolerance),) * 2, reasons=tuple(reasons + model_reasons))
+        (0.5 * float(method.approx_tol),) * 2, reasons=tuple(reasons + model_reasons))
 
 
 def qsp_record(method, forecast, prepared, binding, generator, expected):
@@ -672,7 +671,7 @@ def qsp_record(method, forecast, prepared, binding, generator, expected):
     from nwqlib.subroutines.block_encoding.joint import access_summary
     from nwqlib.subroutines.trotterization.error_budget import _upward_float
     from .native import LCHS_QSP_EPSILON_FRACTION
-    policy, _, margin, cutoff = bank_options(method)
+    policy, _, margin, cutoff = bank_options(method.estimator.qsp_bank)
     bucket, member_x, member_y, state = binding
     plans = () if prepared is None else prepared.plan.buckets
     prepared_buckets = () if prepared is None else prepared.buckets
@@ -687,7 +686,7 @@ def qsp_record(method, forecast, prepared, binding, generator, expected):
     def summary_error(child):
         return 0.0 if child is None else access_summary(child).error_bound
     return LCHSPairQSP(
-        policy=policy, mean_amplitude_allowance=LCHS_QSP_EPSILON_FRACTION * float(method.approximation_tolerance),
+        policy=policy, mean_amplitude_allowance=LCHS_QSP_EPSILON_FRACTION * float(method.approx_tol),
         margin=margin,
         cutoffs=tuple(plan.cutoff for plan in plans) if policy == "stochastic" else (),
         coverage=forecast.coverage, node_bound=forecast.node_bound, active_time=forecast.active_time,

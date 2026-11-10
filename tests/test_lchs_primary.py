@@ -4,7 +4,8 @@ import weakref
 import numpy as np
 import pytest
 from nwqlib import LinearDynamics,NormSquared,QuadraticForm,plan,solve
-from nwqlib.algorithms.lchs import LCHS,ProviderConfig
+from nwqlib.algorithms.lchs import LCHS,PTSC,ProviderConfig,Richardson,SampledPairs,Trotter,TrotterErrorBudgeted
+from nwqlib.algorithms.lchs.route_options import route_name
 
 
 @pytest.mark.parametrize("execution", ("classical", "quantum"))
@@ -22,6 +23,106 @@ def test_lchs_archive_preserves_selected_numerical_data(tmp_path, execution):
     assert restored.content_id == chosen.content_id
     assert selected_identity(restored._native["native_data"], restored.problem, method) == selected_identity(
         chosen._native["native_data"], chosen.problem, method)
+
+
+_ROUTE_FIELDS = ("ham_evo", "init_prep", "lcu_prep",
+                 "estimator")
+
+
+def _record_methods(name):
+    """A Plan input and a Method that sets every option of its route records away from the default."""
+    from nwqlib.algorithms.lchs import Coherent, DenseExact, MPSCircuit, QSPBlockEncoding
+    from nwqlib.operators import ingest_pauli
+    grid = ProviderConfig(implementation="signed_binary_uniform", parameters={"num_qubits": 2, "lsb_position": -1})
+    pairs = LinearDynamics(A=ingest_pauli([("I", .3+.1j), ("X", .25), ("Z", .2j), ("Y", -.15j)], num_qubits=1),
+                           initial_state=[.6, .8j], source=[.3, -.4j], time=.7)
+    readout = dict(output=QuadraticForm(observable=ingest_pauli([("X", .7)], num_qubits=1)), shots=64, seed=3)
+    return {
+        "dense": (LinearDynamics(A=[[.4, .15], [.05, .25]], initial_state=[.6, .8], time=.5), LCHS(
+            ham_evo=DenseExact(control_route="gatewise", max_select_slots=8),
+            estimator=Coherent(fail_prob=.1), k_quadrature=grid,
+            init_prep=MPSCircuit(max_bond_dim=1, threshold=1e-12, num_layers=1),
+            lcu_prep=MPSCircuit(max_bond_dim=2, threshold=1e-10, num_layers=1)),
+                  dict(output=NormSquared(), shots=8, seed=7)),
+        "fixed_steps": (pairs, LCHS(ham_evo=Trotter(steps=2, max_steps=10),
+                                    estimator=SampledPairs(
+                                        repeats=4, fail_prob=.1, source_time="continuous", control_copies=2,
+                                        product_formula="mpf")), readout),
+        "richardson": (pairs, LCHS(ham_evo=TrotterErrorBudgeted(max_steps=10**6),
+                                   estimator=SampledPairs(
+                                       repeats=4, product_formula=Richardson(pf_allowance=.16))), readout),
+        "ptsc": (pairs, LCHS(ham_evo=TrotterErrorBudgeted(order=1, max_steps=10**6),
+                             estimator=SampledPairs(repeats=4, product_formula=PTSC(
+                                 pf_allowance=1e-2, mu_cap=1.5, taylor_cutoff=8))), readout),
+        "qsp": (LinearDynamics(A=ingest_pauli([("I", .4 + .2j), ("X", .2), ("Z", .1 + .3j)], num_qubits=1),
+                               initial_state=[.6, .8j], time=.5),
+                LCHS(ham_evo=QSPBlockEncoding(
+                    route={"implementation": "auto", "parameters": {"joint": "separate_parts"}})),
+                dict(output=NormSquared(), shots=8, seed=7)),
+    }[name]
+
+
+@pytest.mark.parametrize("name", ("dense", "fixed_steps", "richardson", "ptsc", "qsp"))
+def test_lchs_archive_restores_non_default_route_records(tmp_path, name):
+    """A saved and reopened Plan keeps each route record as its own type with its non-default options.
+
+    Together the Methods give every route record options away from their defaults: DenseExact, Coherent and both
+    MPSCircuit fields, Trotter and SampledPairs, TrotterErrorBudgeted with Richardson and with PTSC, and
+    QSPBlockEncoding with a route dict. The reopened Plan must hold an equal Method with the same content id, and
+    each route field, and the recipe of SampledPairs, must come back as the same record type.
+    """
+    from nwqlib._choice_archive import ArchiveFiles, load_plan, save_plan
+    problem, method, options = _record_methods(name)
+    chosen = plan(problem, method=method, **options)
+    restored = load_plan(save_plan(chosen, ArchiveFiles(tmp_path, 10**8)), ArchiveFiles(tmp_path, 10**8))
+    assert restored.method == method and restored.method.content_id == method.content_id
+    assert restored.content_id == chosen.content_id
+    for field in _ROUTE_FIELDS:
+        assert type(getattr(restored.method, field)) is type(getattr(method, field))
+    if type(method.estimator) is SampledPairs:
+        assert (type(restored.method.estimator.product_formula)
+                is type(method.estimator.product_formula))
+
+
+_ROUTE_NAMES = (
+    ("ham_evo", "dense_exact", "DenseExact"),
+    ("ham_evo", "trotter", "Trotter"),
+    ("ham_evo", "trotter_error_budgeted", "TrotterErrorBudgeted"),
+    ("ham_evo", "qsp_block_encoding", "QSPBlockEncoding"),
+    ("init_prep", "mps_circuit", "MPSCircuit"),
+    ("lcu_prep", "mps_circuit", "MPSCircuit"),
+    ("estimator", "coherent", "Coherent"),
+    ("estimator", "sampled_pairs", "SampledPairs"),
+    ("product_formula", "richardson", "Richardson"),
+    ("product_formula", "ptsc", None),
+)
+
+
+@pytest.mark.parametrize("field, name, record", _ROUTE_NAMES, ids=[f"{field}-{name}" for field, name, _ in _ROUTE_NAMES])
+def test_a_route_name_is_its_record_with_default_options(field, name, record):
+    """A route name and its record with default options give one Method, one content id and one saved form.
+
+    `product_formula` is the recipe field of SampledPairs, set here beside the fixed-step Trotter backend that the
+    sampled-pair route needs. PTSC has no default options, so its name is refused with the record to pass instead.
+    """
+    import nwqlib.algorithms.lchs as lchs
+    if record is None:
+        with pytest.raises(ValueError, match=r"PTSC\(pf_allowance"):
+            SampledPairs(product_formula=name)
+        return
+    default = getattr(lchs, record)()
+    if field == "product_formula":
+        methods = [LCHS(ham_evo=Trotter(steps=2),
+                        estimator=SampledPairs(product_formula=value)) for value in (name, default)]
+        held = methods[0].estimator.product_formula
+    else:
+        backend = dict(ham_evo="trotter") if name == "sampled_pairs" else {}
+        methods = [LCHS(**backend, **{field: value}) for value in (name, default)]
+        held = getattr(methods[0], field)
+    by_name, by_record = methods
+    assert type(held) is type(default) and held == default
+    assert by_name == by_record and by_name.content_id == by_record.content_id
+    assert by_name.model_dump(mode="json") == by_record.model_dump(mode="json")
 
 
 def test_selected_identity_encoding_distinguishes_mapping_nesting():
@@ -59,8 +160,7 @@ def test_sampled_pair_rows_are_one_range_axis_counted_without_enumeration(monkey
     from nwqlib.operators import ingest_pauli
 
     linear = LinearDynamics(A=ingest_pauli([("Z", .4j), ("X", .1)], num_qubits=1), initial_state=[.6, .8], time=1.)
-    method = LCHS(observable_estimator="sampled_pairs", hamiltonian_evolution_backend="trotter", trotter_steps=1,
-                  pair_repeats=2)
+    method = LCHS(estimator=SampledPairs(repeats=2), ham_evo=Trotter(steps=1))
     chosen = plan(linear, method=method, output=NormSquared(), shots=80_000, seed=3)
     (batch,) = [item.node for item in chosen.construction.program.definitions if item.id == "pairs"]
     assert len(chosen.experiments) == len(batch.settings) == 1
@@ -93,8 +193,8 @@ def test_sampled_pair_row_points_resolve_and_forecast_one_by_one(monkeypatch):
     from nwqlib.operators import ingest_pauli
 
     linear = LinearDynamics(A=ingest_pauli([("Z", .4j), ("X", .1)], num_qubits=1), initial_state=[.6, .8], time=1.)
-    chosen = plan(linear, method=LCHS(observable_estimator="sampled_pairs", hamiltonian_evolution_backend="trotter",
-                                      trotter_steps=1, pair_repeats=2), output=NormSquared(), shots=8, seed=3)
+    chosen = plan(linear, method=LCHS(estimator=SampledPairs(repeats=2),
+                                      ham_evo=Trotter(steps=1)), output=NormSquared(), shots=8, seed=3)
     points = tuple(chosen._static_points())
     assert [point.key for point in points] == [f"pairs[row={row}]" for row in range(4)]
     assert [point.bindings for point in points] == [(Binding(parameter="row", value=row),) for row in range(4)]
@@ -123,8 +223,8 @@ def test_sampled_input_preparations_are_shared_and_rebuilt_after_archive(tmp_pat
     problem = LinearDynamics(
         A=ingest_pauli([("I", .3+.1j), ("X", .25), ("Z", .2j), ("Y", -.15j)], num_qubits=1),
         initial_state=[.6, .8j], source=[.3, -.4j], time=.7)
-    method = LCHS(observable_estimator="sampled_pairs", pair_repeats=4,
-                  hamiltonian_evolution_backend="trotter", trotter_steps=2, pair_source_time="continuous")
+    method = LCHS(estimator=SampledPairs(repeats=4, source_time="continuous"),
+                  ham_evo=Trotter(steps=2))
     chosen = plan(problem, method=method, output=QuadraticForm(observable=ingest_pauli([("X", 1.)], num_qubits=1)),
                   shots=64, seed=3)
     preparations, controls = [], []
@@ -221,7 +321,7 @@ def test_selected_pauli_vector_action_preserves_order_phase_source_and_replay(or
     initial=np.array([1j,.3])
     source=np.array([.2,.1j]) if with_source else None
     matrix=np.diag([-.2,.3])+1j*(.4*x+.17*np.eye(2))
-    method=LCHS(hamiltonian_evolution_backend='trotter',trotter_steps=3,trotter_order=order,duhamel_nodes=2,
+    method=LCHS(ham_evo=Trotter(steps=3,order=order),duhamel_nodes=2,
         k_quadrature=ProviderConfig(implementation='signed_binary_uniform',parameters={'num_qubits':2,'lsb_position':-1}))
     chosen=plan(LinearDynamics(A=matrix,initial_state=initial,source=source,time=.2),method=method,execution='classical')
     data=chosen._native['native_data']
@@ -309,7 +409,7 @@ def test_host_action_route_follows_registered_work_and_the_byte_limit_only_admit
 
     def planned(memory, **limit):
         monkeypatch.setattr(limits, "physical_memory_bytes", lambda: memory)
-        return plan(problem, method=LCHS(hamiltonian_evolution_backend='trotter', trotter_steps=1024,
+        return plan(problem, method=LCHS(ham_evo=Trotter(steps=1024),
                                          k_quadrature=grid, **limit), execution='classical', seed=5)
 
     chosen = planned(2**40)
@@ -368,7 +468,7 @@ def test_classical_plan_publishes_the_component_facts_its_result_reports():
     from math import exp, fsum
     initial = [1]+[0]*(len(_SHIFTED)-1)
     problem = LinearDynamics(A=_SHIFTED,initial_state=initial,time=.2)
-    chosen = plan(problem,method=LCHS(hamiltonian_evolution_backend='trotter_error_budgeted'),execution='classical')
+    chosen = plan(problem,method=LCHS(ham_evo='trotter_error_budgeted'),execution='classical')
     planned = {item.fact.quantity:item for item in chosen.facts}
     assert planned == {term.name:term.fact for term in chosen.error_model.terms if term.role=='listed_only'}
     result = solve(chosen)
@@ -389,7 +489,7 @@ def test_classical_plan_publishes_the_component_facts_its_result_reports():
     assert stored > 0
 
 
-@pytest.mark.parametrize('options',[dict(hamiltonian_evolution_backend='trotter_error_budgeted')])
+@pytest.mark.parametrize('options',[dict(ham_evo='trotter_error_budgeted')])
 def test_durable_classical_source_run_reopens_from_a_small_manifest(options,tmp_path):
     """Plan-size data lives in its own archive files, so run.json stays a small manifest.
 
@@ -460,7 +560,7 @@ def _aer_run_counter(monkeypatch):
 
 
 def _trotter_method(bits=2):
-    return LCHS(hamiltonian_evolution_backend="trotter", k_quadrature=ProviderConfig(
+    return LCHS(ham_evo="trotter", k_quadrature=ProviderConfig(
         implementation="signed_binary_uniform", parameters={"num_qubits": bits, "lsb_position": -1}))
 
 
@@ -505,7 +605,7 @@ def test_coherent_norm_squared_publishes_requested_returned_and_selected_shots(t
         assert (item.submitted_shots, item.returned_shots, item.selected_shots) == (8, 5, 3)
         assert item.value == pytest.approx(gamma_squared*3/5, rel=1e-14, abs=0)
         radius = next(entry.fact.value.value for entry in item.facts if entry.fact.quantity == "sampling")
-        assert radius == pytest.approx(gamma_squared*sqrt(log(2/chosen.method.moment_failure_probability)/10), rel=1e-14, abs=0)
+        assert radius == pytest.approx(gamma_squared*sqrt(log(2/chosen.method.estimator.fail_prob)/10), rel=1e-14, abs=0)
     assert reloaded.content_id == result.content_id
     samples = solve(plan(problem, method=_trotter_method(), output=Samples(), shots=8, seed=7))
     assert (samples.submitted_shots, samples.returned_shots, samples.selected_shots) == (8, 5, 3)
@@ -777,7 +877,7 @@ def test_compact_degenerate_inputs_reduce_to_closed_forms(terms, tolerance):
     from nwqlib.operators import ingest_pauli
 
     initial, time = np.array([.6, .8j]), .5
-    method = LCHS(hamiltonian_evolution_backend='qsp_block_encoding', duhamel_nodes=2,
+    method = LCHS(ham_evo='qsp_block_encoding', duhamel_nodes=2,
                   lchs_kernel=ProviderConfig(implementation='cauchy_density'),
                   k_quadrature=ProviderConfig(implementation='signed_binary_uniform',
                                               parameters={'num_qubits': 2, 'lsb_position': -1}))
@@ -803,7 +903,7 @@ def test_compact_band_dissipative_part_matches_independent_finite_lchs_sum():
     from nwqlib.operators import ingest_band, ingest_cartesian, ingest_pauli
 
     beta, time = -.5+.1j, .4
-    method = LCHS(hamiltonian_evolution_backend='qsp_block_encoding', duhamel_nodes=2,
+    method = LCHS(ham_evo='qsp_block_encoding', duhamel_nodes=2,
                   lchs_kernel=ProviderConfig(implementation='cauchy_density'),
                   k_quadrature=ProviderConfig(implementation='signed_binary_uniform',
                                               parameters={'num_qubits': 2, 'lsb_position': -1}))
@@ -838,23 +938,27 @@ def _sampled_suzuki(time, node, steps):
 
 
 @pytest.mark.parametrize("source, options, norm", (
-    (None, dict(hamiltonian_evolution_backend="trotter", trotter_steps=2), 1.),
-    (None, dict(hamiltonian_evolution_backend="trotter_error_budgeted", pair_step_buckets=3), 1.),
-    ("mixed", dict(hamiltonian_evolution_backend="trotter_error_budgeted", pair_step_buckets=3), 1.),
-    ("only", dict(hamiltonian_evolution_backend="trotter", trotter_steps=2), 1.),
-    ("weak", dict(hamiltonian_evolution_backend="trotter", trotter_steps=2), 1.),
-    ("mixed", dict(hamiltonian_evolution_backend="trotter", trotter_steps=2, pair_source_time="continuous"), 1.),
-    (None, dict(hamiltonian_evolution_backend="trotter", trotter_steps=2,
+    (None, dict(ham_evo=Trotter(steps=2), estimator=SampledPairs(repeats=4)), 1.),
+    (None, dict(ham_evo="trotter_error_budgeted",
+                estimator=SampledPairs(repeats=4, step_buckets=3)), 1.),
+    ("mixed", dict(ham_evo="trotter_error_budgeted",
+                   estimator=SampledPairs(repeats=4, step_buckets=3)), 1.),
+    ("only", dict(ham_evo=Trotter(steps=2), estimator=SampledPairs(repeats=4)), 1.),
+    ("weak", dict(ham_evo=Trotter(steps=2), estimator=SampledPairs(repeats=4)), 1.),
+    ("mixed", dict(ham_evo=Trotter(steps=2),
+                   estimator=SampledPairs(repeats=4, source_time="continuous")), 1.),
+    (None, dict(ham_evo=Trotter(steps=2), estimator=SampledPairs(repeats=4),
                 lchs_kernel=ProviderConfig(implementation="cauchy_density"),
                 k_quadrature=ProviderConfig(implementation="signed_binary_uniform",
                                             parameters={"num_qubits": 2, "lsb_position": -1072})), 1e300),
-    (None, dict(hamiltonian_evolution_backend="trotter", trotter_steps=2,
+    (None, dict(ham_evo=Trotter(steps=2), estimator=SampledPairs(repeats=4),
                 lchs_kernel=ProviderConfig(implementation="apel_berntson"),
                 k_quadrature=ProviderConfig(implementation="tanh_sinh")), 1.),
-    (None, dict(hamiltonian_evolution_backend="trotter_error_budgeted", pair_product_formula="richardson",
-                pair_pf_allowance=.16), 4.),
-    (None, dict(hamiltonian_evolution_backend="trotter_error_budgeted", trotter_order=1, pair_product_formula="ptsc",
-                pair_pf_allowance=.16, pair_mu_cap=1.5, pair_taylor_cutoff=8), 4.),
+    (None, dict(ham_evo="trotter_error_budgeted",
+                estimator=SampledPairs(repeats=4, product_formula=Richardson(pf_allowance=.16))), 4.),
+    (None, dict(ham_evo=TrotterErrorBudgeted(order=1),
+                estimator=SampledPairs(repeats=4, product_formula=PTSC(pf_allowance=.16, mu_cap=1.5,
+                                                                                    taylor_cutoff=8))), 4.),
 ))
 def test_sampled_pair_rows_and_bias_bounds_match_dense_branches(source, options, norm):
     """Sampled-pair rows weigh each branch by a/p and the published bias bounds hold for dense branches.
@@ -907,7 +1011,7 @@ def test_sampled_pair_rows_and_bias_bounds_match_dense_branches(source, options,
     the branch weights and both bias comparisons above apply to it.
 
     The two source-free norm-4 rows select a Richardson or PTSC recipe for
-    pair_pf_allowance = .16 and check its published bias at planning only;
+    pf_allowance = .16 and check its published bias at planning only;
     no row circuit is built and no branch is evolved at the selected levels.
     These rows have no plain bucket steps, so the exact pair-mean
     containment above runs for the plain rows only. With S the sum of the
@@ -949,7 +1053,7 @@ def test_sampled_pair_rows_and_bias_bounds_match_dense_branches(source, options,
     b = None if source is None else strength * norm * np.array([.3, -.4j])
     problem = LinearDynamics(A=ingest_pauli([("I", .3+.1j), ("X", .25), ("Z", .2j), ("Y", -.15j)], num_qubits=1),
                              initial_state=u0, source=b, time=time)
-    method = LCHS(observable_estimator="sampled_pairs", pair_repeats=4, **options)
+    method = LCHS(**options)
     output = QuadraticForm(observable=ingest_pauli([("X", .7), ("Z", -.45), ("I", .2)], num_qubits=1))
     built = []
     original = qiskit.QuantumCircuit.__init__
@@ -974,7 +1078,7 @@ def test_sampled_pair_rows_and_bias_bounds_match_dense_branches(source, options,
     nub *= strength
     directions = {0: None if source == "only" else u0 / nu0,
                   1: None if b is None else b / nub}
-    continuous = options.get("pair_source_time") == "continuous"
+    continuous = method.estimator.source_time == "continuous"
     applications = [] if source == "only" else [(nu0 * np.exp(shift * time), time, 0)]
     # The plan forms its Duhamel rule independently of NumPy's leggauss, so
     # the two tables agree only up to node and weight formation roundoff, a
@@ -1022,7 +1126,7 @@ def test_sampled_pair_rows_and_bias_bounds_match_dense_branches(source, options,
             assert magnitude * g * pi[category] * p[j] == pytest.approx(abs(a), rel=1e-12, abs=0)
             assert abs(np.exp(1j * angle) - a / abs(a)) < 1e-12
     g2, c_o = g * g, bias.observable_bound
-    recipe = options.get("pair_product_formula", "plain")
+    recipe = route_name(method.estimator.product_formula)
     if recipe == "plain":
         steps = np.asarray(bias.bucket_steps)
         if continuous:
@@ -1047,7 +1151,7 @@ def test_sampled_pair_rows_and_bias_bounds_match_dense_branches(source, options,
         assert abs(mean_q - np.vdot(v, O @ v).real) <= c_o * bias.inner_bias * g2
     else:
         from fractions import Fraction
-        epsilon, choice = options["pair_pf_allowance"], rec.pair_recipe
+        epsilon, choice = method.estimator.product_formula.pf_allowance, rec.pair_recipe
         kept = p > 0
         mean_bound = masses.sum() * np.abs(c[kept]).sum()
         physical = bias.inner_bias * g2
@@ -1155,16 +1259,18 @@ def test_sampled_source_times_follow_the_tilted_quantile(decay, start, stop, uni
             assert abs(mpmath.mpf(t) - exact) <= scale
 
 
+# The backend and SampledPairs.product_formula of each recipe.
 _RECIPE_OPTIONS = {
-    "richardson": dict(hamiltonian_evolution_backend="trotter", trotter_steps=2, pair_product_formula="richardson"),
-    "mpf": dict(hamiltonian_evolution_backend="trotter", trotter_steps=2, pair_product_formula="mpf"),
-    "ptsc": dict(hamiltonian_evolution_backend="trotter_error_budgeted", trotter_order=1, pair_product_formula="ptsc",
-                 pair_pf_allowance=1e-2, pair_mu_cap=1.5, pair_taylor_cutoff=8),
+    "richardson": (Trotter(steps=2), "richardson"),
+    "mpf": (Trotter(steps=2), "mpf"),
+    "ptsc": (TrotterErrorBudgeted(order=1), PTSC(pf_allowance=1e-2, mu_cap=1.5, taylor_cutoff=8)),
 }
 
 
-@pytest.mark.parametrize("options", (dict(hamiltonian_evolution_backend="trotter", trotter_steps=2),
-                                     *_RECIPE_OPTIONS.values()), ids=("plain", *_RECIPE_OPTIONS))
+@pytest.mark.parametrize("options", ((Trotter(steps=2), "plain", {}),
+                                     *((backend, formula, {}) for backend, formula in _RECIPE_OPTIONS.values()),
+                                     (Trotter(steps=2), "plain", {"fail_prob": .1})),
+                         ids=("plain", *_RECIPE_OPTIONS, "plain_fail_prob"))
 def test_sampled_pair_run_reports_raw_partial_sums_and_continues_only_missing_rows(tmp_path, monkeypatch, options):
     """A sampled-pair Run stopped after 7 of its 16 rows gives raw sums without confidence and continues to the one-pass result.
 
@@ -1177,7 +1283,7 @@ def test_sampled_pair_run_reports_raw_partial_sums_and_continues_only_missing_ro
     rows were drawn once at planning. That solved Result, saved and reloaded
     with `load_result`, keeps its moments, estimate and value, and analyzing
     the reloaded Result again gives the same estimate. With a
-    `pair_product_formula` recipe the reloaded Plan keeps the recipe
+    `SampledPairs.product_formula` recipe the reloaded Plan keeps the recipe
     choices drawn at planning (member per row or PTSC corrections), which
     the continued rows and the reanalysis use.
     """
@@ -1188,10 +1294,16 @@ def test_sampled_pair_run_reports_raw_partial_sums_and_continues_only_missing_ro
     from nwqlib.operators import ingest_pauli
 
     A = ingest_pauli([("I", .3+.1j), ("X", .25), ("Z", .2j), ("Y", -.15j)], num_qubits=1)
-    method = LCHS(observable_estimator="sampled_pairs", pair_repeats=4, **options)
+    backend, formula, estimator_options = options
+    method = LCHS(estimator=SampledPairs(repeats=4, product_formula=formula, **estimator_options),
+                  ham_evo=backend)
     chosen = plan(LinearDynamics(A=A, initial_state=[.6, .8j], source=[.3, -.4j], time=.7), method=method,
                   output=QuadraticForm(observable=ingest_pauli([("X", .7)], num_qubits=1)), shots=64, seed=13)
     single = solve(chosen)
+    # SampledPairs.fail_prob (default .05) is split equally over the quantities the output needs; a
+    # QuadraticForm needs the quadratic form alone, so its covering radius gets the whole probability.
+    assert (single.pair_estimate.failure_q, single.pair_estimate.failure_n) == (
+        estimator_options.get("fail_prob", .05), None)
     loaded = nwqlib.load_result(single.save(tmp_path / "single"))
     assert loaded.plan.reconstruction.pair_recipe == chosen.reconstruction.pair_recipe
     assert (loaded.pair_moments, loaded.pair_estimate, loaded.value) == (
@@ -1302,9 +1414,10 @@ def test_sampled_pair_recipe_rows_act_as_independent_branch_evolutions(recipe):
     directions = {0: u0 / np.linalg.norm(u0), 1: b / np.linalg.norm(b)}
     problem = LinearDynamics(A=ingest_pauli([("I", .3+.1j), ("X", .25), ("Z", .2j), ("Y", -.15j)], num_qubits=1),
                              initial_state=u0, source=b, time=.7)
-    options = dict(_RECIPE_OPTIONS[recipe], **({"trotter_steps": 3} if recipe == "richardson" else
-                                               {"trotter_steps": 4} if recipe == "mpf" else {}))
-    chosen = plan(problem, method=LCHS(observable_estimator="sampled_pairs", **options),
+    backend, formula = _RECIPE_OPTIONS[recipe]
+    backend = {"richardson": Trotter(steps=3), "mpf": Trotter(steps=4)}.get(recipe, backend)
+    chosen = plan(problem, method=LCHS(estimator=SampledPairs(product_formula=formula),
+                                       ham_evo=backend),
                   output=QuadraticForm(observable=ingest_pauli([("X", .7), ("Z", -.45), ("I", .2)], num_qubits=1)),
                   shots=12, seed=7)
     rec, payload = chosen.reconstruction, chosen._native["native_data"]
@@ -1408,7 +1521,7 @@ def test_sampled_ptsc_segment_law_is_the_taylor_truncation(k):
     In both k cases, `draw_compensation` maps a fixed transcript of the
     primitive integers it draws to the descriptors expected from the
     Pauli products by hand. One row at t = .8 with real `select_ptsc` fields
-    (r = 4, s_c = 5 at pair_mu_cap = 1.2, pair_pf_allowance = 6e-4 and
+    (r = 4, s_c = 5 at PTSC.mu_cap = 1.2, PTSC.pf_allowance = 6e-4 and
     K_* = 1.3) has branch x draw the orders 2, 3, 4, 5 with prescribed bits
     and labels and branch y the same paths in reverse. Each categorical
     integer lies inside its count interval of the law `draw_compensation`
@@ -1496,9 +1609,9 @@ def test_sampled_ptsc_segment_law_is_the_taylor_truncation(k):
             assert np.allclose(matrix, expected, rtol=0, atol=1e-13)
             assert cx == correction_cx([descriptor]) == 2
 
-    method = LCHS(observable_estimator="sampled_pairs", hamiltonian_evolution_backend="trotter_error_budgeted",
-                  trotter_order=1, pair_product_formula="ptsc", pair_pf_allowance=6e-4, pair_mu_cap=1.2,
-                  pair_taylor_cutoff=5)
+    method = LCHS(estimator=SampledPairs(product_formula=PTSC(pf_allowance=6e-4, mu_cap=1.2,
+                                                                         taylor_cutoff=5)),
+                  ham_evo=TrotterErrorBudgeted(order=1))
     support = Support(active_time=.8, node_bound=1.3, h_norm=sum((Fraction(abs(v)) for _, v in h_list), Fraction(0)),
                       l_norm=sum((Fraction(abs(v)) for _, v in l_list), Fraction(0)), labels=3,
                       mean_weight=PhysicalScale(mantissa=.5, exponent=1), num_qubits=1)
@@ -1583,11 +1696,10 @@ def test_sampled_mpf_word_cancels_every_cubic_defect():
     assert all(sympy.expand(value - sympy.Rational(8, 6)) == 0 for value in total.values())
 
 
-@pytest.mark.parametrize("recipe, select", (*((recipe, {}) for recipe in _RECIPE_OPTIONS),
-                                            ("ptsc", dict(lcu_select_implementation="structured",
-                                                          pair_control_copies=2))),
+@pytest.mark.parametrize("recipe, select, copies", (*((recipe, {}, 1) for recipe in _RECIPE_OPTIONS),
+                                                    ("ptsc", dict(lcu_select="structured"), 2)),
                          ids=(*_RECIPE_OPTIONS, "ptsc-structured-copies"))
-def test_sampled_pair_recipe_resources_count_the_emitted_rows(recipe, select, monkeypatch):
+def test_sampled_pair_recipe_resources_count_the_emitted_rows(recipe, select, copies, monkeypatch):
     """`sampled_pair_resources` equals the CX-basis gates of every constructed row circuit and builds or draws nothing.
 
     The expected counts are read from the actual row circuits
@@ -1615,8 +1727,10 @@ def test_sampled_pair_recipe_resources_count_the_emitted_rows(recipe, select, mo
     from nwqlib.algorithms.lchs.sampled_plan import construct_pair, point_row
     problem = LinearDynamics(A=ingest_pauli([("I", .3+.1j), ("X", .25), ("Z", .2j), ("Y", -.15j)], num_qubits=1),
                              initial_state=[.6, .8j], source=[.3, -.4j], time=.7)
-    chosen = plan(problem, method=LCHS(observable_estimator="sampled_pairs", pair_repeats=2, **_RECIPE_OPTIONS[recipe],
-                                       **select),
+    backend, formula = _RECIPE_OPTIONS[recipe]
+    chosen = plan(problem, method=LCHS(estimator=SampledPairs(repeats=2, product_formula=formula,
+                                                                         control_copies=copies),
+                                       ham_evo=backend, **select),
                   output=QuadraticForm(observable=ingest_pauli([("X", .7), ("Z", -.45)], num_qubits=1)), shots=24,
                   seed=11)
     rows, choice = chosen.reconstruction.pair_rows, chosen.reconstruction.pair_recipe
@@ -1712,12 +1826,11 @@ def test_dense_observable_stages_are_checked_before_they_allocate(monkeypatch):
 
 
 @pytest.mark.parametrize(("options", "limited"), (
-    (dict(pair_product_formula="richardson", pair_pf_allowance=.16), lambda recipe: recipe.member_steps[1]),
-    (dict(trotter_order=1, pair_product_formula="ptsc", pair_pf_allowance=.16, pair_mu_cap=1.5, pair_taylor_cutoff=8),
-     lambda recipe: recipe.steps),
+    ((2, Richardson(pf_allowance=.16)), lambda recipe: recipe.member_steps[1]),
+    ((1, PTSC(pf_allowance=.16, mu_cap=1.5, taylor_cutoff=8)), lambda recipe: recipe.steps),
 ))
 def test_sampled_recipes_find_their_least_step_count_without_a_step_limit(options, limited):
-    """Without max_trotter_steps the Richardson and PTSC searches double to a sufficient step count.
+    """Without TrotterErrorBudgeted.max_steps the Richardson and PTSC searches double to a sufficient step count.
 
     Both choose the least count that a limit of 10**9 bisects to. A limit one
     below the largest count the recipe runs, 2s for Richardson levels (s, 2s)
@@ -1729,15 +1842,17 @@ def test_sampled_recipes_find_their_least_step_count_without_a_step_limit(option
                              initial_state=[2.4, 3.2j], time=.7)
     output = QuadraticForm(observable=ingest_pauli([("X", .7), ("Z", -.45), ("I", .2)], num_qubits=1))
 
+    order, formula = options
+
     def recipe(**limit):
-        method = LCHS(observable_estimator="sampled_pairs", pair_repeats=4,
-                      hamiltonian_evolution_backend="trotter_error_budgeted", **options, **limit)
+        method = LCHS(estimator=SampledPairs(repeats=4, product_formula=formula),
+                      ham_evo=TrotterErrorBudgeted(order=order, **limit))
         return plan(problem, method=method, output=output, shots=64, seed=3).reconstruction.pair_recipe
 
     unlimited = recipe()
-    assert unlimited == recipe(max_trotter_steps=10**9)
-    with pytest.raises(ResourceLimitError, match="max_trotter_steps"):
-        recipe(max_trotter_steps=limited(unlimited) - 1)
+    assert unlimited == recipe(max_steps=10**9)
+    with pytest.raises(ResourceLimitError, match="TrotterErrorBudgeted.max_steps"):
+        recipe(max_steps=limited(unlimited) - 1)
 
 
 def test_budgeted_product_formula_nodes_need_no_step_limit():
@@ -1755,11 +1870,17 @@ def test_budgeted_product_formula_nodes_need_no_step_limit():
     h_part = (y + y.conj().T) / 2
     a = l_part / np.linalg.norm(l_part, 2) + 1j * h_part / np.linalg.norm(h_part, 2)
     problem = LinearDynamics(A=a, initial_state=[1., 0., 0., 0.], time=30.)
-    options = dict(hamiltonian_evolution_backend="trotter_error_budgeted", approximation_tolerance=1e-2)
-    steps = max(plan(problem, method=LCHS(**options)).reconstruction.step_counts)
+    steps = max(plan(problem, method=LCHS(ham_evo="trotter_error_budgeted",
+                                          approx_tol=1e-2)).reconstruction.step_counts)
     assert steps > 100_000
     with pytest.raises(ValueError, match=f"needs {steps} steps, above the step limit 100000"):
-        plan(problem, method=LCHS(**options, max_trotter_steps=100_000))
+        plan(problem, method=LCHS(ham_evo=TrotterErrorBudgeted(max_steps=100_000),
+                                  approx_tol=1e-2))
+    # The classical host route selects its node steps separately and applies the same limit.
+    from nwqlib._limits import ResourceLimitError
+    with pytest.raises(ResourceLimitError, match="above TrotterErrorBudgeted.max_steps=100000"):
+        plan(problem, method=LCHS(ham_evo=TrotterErrorBudgeted(max_steps=100_000),
+                                  approx_tol=1e-2), execution="classical")
 
 
 def _sampled_row_positions(chosen):
@@ -1775,10 +1896,10 @@ def _sampled_row_positions(chosen):
 
 @pytest.mark.parametrize("name,options,inputs", (
     ("multiplexor", {}, None),
-    ("structured", dict(lcu_select_implementation="structured"), None),
-    ("control copies", dict(pair_control_copies=2), None),
-    ("Richardson members", dict(pair_product_formula="richardson"), None),
-    ("MPF members", dict(pair_product_formula="mpf"), None),
+    ("structured", dict(lcu_select="structured"), None),
+    ("control copies", dict(estimator=SampledPairs(control_copies=2)), None),
+    ("Richardson members", dict(estimator=SampledPairs(product_formula="richardson")), None),
+    ("MPF members", dict(estimator=SampledPairs(product_formula="mpf")), None),
     ("vectors inside", dict(duhamel_nodes=2), "vector"),
     ("occupations inside", dict(duhamel_nodes=2), "occupation"),
 ), ids=lambda value: value if isinstance(value, str) else "")
@@ -1804,7 +1925,8 @@ def test_sampled_pair_memory_law_is_the_mean_of_its_rows(name, options, inputs, 
         dict(source=[.1, .2, .3, .4], initial_state=[.6, .8, 0., 0.]) if inputs == "vector" else
         dict(source=ingest_occupation("11", num_qubits=2), initial_state=ingest_occupation("00", num_qubits=2)))
     chosen = plan(LinearDynamics(A=A, time=.5, **({"initial_state": [.6, .8, 0., 0.]} | state)),
-                  method=LCHS(observable_estimator="sampled_pairs", hamiltonian_evolution_backend="trotter", trotter_steps=4, **options),
+                  method=LCHS(**(dict(estimator="sampled_pairs") | options),
+                              ham_evo=Trotter(steps=4)),
                   output=NormSquared(), shots=16, seed=7)
     block, built = _sampled_row_positions(chosen)
     positions = (block._native_bytes-_ROW_HANDLE_BYTES)/NATIVE_POSITION_BYTES
@@ -1830,14 +1952,16 @@ def test_sampled_pair_preparation_compares_a_row_and_the_whole_request_before_bu
     from nwqlib.operators import ingest_pauli
     A = ingest_pauli([("ZI", .4j), ("XX", .1), ("ZZ", .2j), ("YI", .3)], num_qubits=2)
     problem = LinearDynamics(A=A, initial_state=[.6, .8, 0., 0.], time=.5)
-    method = dict(observable_estimator="sampled_pairs", hamiltonian_evolution_backend="trotter")
-    huge = plan(problem, method=LCHS(**method, trotter_steps=10**11, max_trotter_steps=10**12, max_bytes=2*10**9),
+    huge = plan(problem, method=LCHS(estimator="sampled_pairs",
+                                     ham_evo=Trotter(steps=10**11, max_steps=10**12),
+                                     max_bytes=2*10**9),
                 output=NormSquared(), shots=8, seed=7)
     with monkeypatch.context() as patched:
         patched.setattr(sampled_native, "_walk_select", lambda *a, **k: pytest.fail("the word was walked"))
         with pytest.raises(ValueError, match="preparing the rows of these templates needs about .* exceeding max_bytes"):
             prepare(huge, progress=False)
-    rows = plan(problem, method=LCHS(**method, trotter_steps=4, max_bytes=10**7), output=NormSquared(), shots=1024, seed=7)
+    rows = plan(problem, method=LCHS(estimator="sampled_pairs", ham_evo=Trotter(steps=4),
+                                     max_bytes=10**7), output=NormSquared(), shots=1024, seed=7)
     assert rows.reconstruction.pair_rows.clusters*(32 << 10) > 10**7
     assert prepare(rows, progress=False).circuits
     with pytest.raises(ValueError, match="exceeding max_bytes"):
@@ -1868,10 +1992,11 @@ def test_sampled_pair_templates_are_compared_together_before_any_is_built(tmp_pa
     from nwqlib.blocks import lowering
     from test_ibm_backend import sampled_lchs_plan
 
-    base = sampled_lchs_plan(lcu_select_implementation="structured", pair_control_copies=2)
+    base = sampled_lchs_plan(lcu_select="structured", control_copies=2)
 
     def limited(limit):
-        return plan(base.problem, method=base.method.revise(trotter_steps=64, max_bytes=limit), output=base.output,
+        return plan(base.problem, method=base.method.revise(ham_evo=Trotter(steps=64),
+                                                            max_bytes=limit), output=base.output,
                     shots=base.shots, seed=11)
 
     chosen = limited(None)
@@ -1927,32 +2052,202 @@ def test_lchs_refusals_name_a_remedy_that_plans():
     A = ingest_pauli([("I", .3), ("Z", .4j)], num_qubits=1)
     compact = LinearDynamics(A=A, initial_state=[.6, .8j], time=.5)
     dense = LinearDynamics(A=np.diag([.3+.4j, .3-.4j]), initial_state=[.6, .8j], time=.5)
-    qsp = dict(hamiltonian_evolution_backend="qsp_block_encoding")
+    qsp = dict(ham_evo="qsp_block_encoding")
 
-    with pytest.raises(ApplicabilityError, match="lcu_state_preparation='direct'") as refused:
-        plan(compact, method=LCHS(**qsp, lcu_state_preparation="analytic", lchs_kernel="low_somma_f2",
+    with pytest.raises(ApplicabilityError, match="lcu_prep='direct'") as refused:
+        plan(compact, method=LCHS(**qsp, lcu_prep="analytic", lchs_kernel="low_somma_f2",
                                   k_quadrature="symmetric_uniform_trapezoid"), execution="quantum")
     assert "use lchs_kernel" not in str(refused.value)
-    plan(compact, method=LCHS(**qsp, lcu_state_preparation="direct"), execution="quantum")
+    plan(compact, method=LCHS(**qsp, lcu_prep="direct"), execution="quantum")
 
-    with pytest.raises(ApplicabilityError, match="observable_estimator='sampled_pairs'") as refused:
-        plan(compact, method=LCHS(lcu_select_implementation="multiplexor"), execution="quantum")
+    with pytest.raises(ApplicabilityError, match="estimator='sampled_pairs'") as refused:
+        plan(compact, method=LCHS(lcu_select="multiplexor"), execution="quantum")
     assert "name the backend" not in str(refused.value)
     plan(compact, method=LCHS(), execution="quantum")
-    plan(compact, method=LCHS(observable_estimator="sampled_pairs", hamiltonian_evolution_backend="trotter",
-                              lcu_select_implementation="multiplexor"), output=NormSquared(), shots=8, seed=3)
+    plan(compact, method=LCHS(estimator="sampled_pairs", ham_evo="trotter",
+                              lcu_select="multiplexor"), output=NormSquared(), shots=8, seed=3)
     with pytest.raises(ApplicabilityError, match="dense A") as refused:
-        plan(compact, method=LCHS(lcu_select_implementation="branch_controlled"), execution="quantum")
+        plan(compact, method=LCHS(lcu_select="branch_controlled"), execution="quantum")
     assert "sampled_pairs" not in str(refused.value)
     with pytest.raises(ApplicabilityError, match="name the backend"):
-        plan(dense, method=LCHS(lcu_select_implementation="multiplexor"), execution="classical")
-    plan(dense, method=LCHS(lcu_select_implementation="multiplexor", hamiltonian_evolution_backend="trotter"),
+        plan(dense, method=LCHS(lcu_select="multiplexor"), execution="classical")
+    plan(dense, method=LCHS(lcu_select="multiplexor", ham_evo="trotter"),
          execution="quantum", output=NormSquared())
 
-    tolerance = dict(hamiltonian_evolution_backend="trotter", trotter_steps=None, trotter_synthesis_tolerance=.01)
+    tolerance = dict(ham_evo=Trotter(steps=None, synthesis_tol=.01))
     with pytest.raises(ApplicabilityError, match="'qsp_block_encoding'") as refused:
         plan(compact, method=LCHS(**tolerance), execution="quantum")
     assert "trotter_error_budgeted" not in str(refused.value)
     with pytest.raises(ApplicabilityError, match="trotter_error_budgeted"):
         plan(dense, method=LCHS(**tolerance), execution="classical")
-    plan(dense, method=LCHS(hamiltonian_evolution_backend="trotter_error_budgeted"), execution="classical")
+    plan(dense, method=LCHS(ham_evo="trotter_error_budgeted"), execution="classical")
+
+
+def _conflict_problem(name):
+    """The small inputs of the route-conflict refusals: the guide's dense A, the sampled keeper and compact A."""
+    from nwqlib.operators import ingest_pauli
+    from nwqlib.operators.inputs import PeriodicStencil
+    from nwqlib.problems.inputs import ingest_occupation
+    dense = dict(A=[[.4, .15], [.05, .25]], initial_state=[1., 0.], time=.1)
+    return LinearDynamics(**dict(
+        dense=dense,
+        dense_source=dict(dense, source=[.2, -.1]),
+        pauli=dict(A=ingest_pauli([("I", .3+.1j), ("X", .25), ("Z", .2j), ("Y", -.15j)], num_qubits=1),
+                   initial_state=[.6, .8j], source=[.3, -.4j], time=.7),
+        unitary=dict(A=ingest_pauli([("Z", .4j)], num_qubits=1), initial_state=[.6, .8], time=1.),
+        compact=dict(A=ingest_pauli([("Z", .4j), ("X", .1)], num_qubits=1), initial_state=[.6, .8], time=1.),
+        periodic=dict(A=PeriodicStencil(num_qubits=2, mass=1., diffusion=.25, potential=.3),
+                      initial_state=ingest_occupation((0, 0), num_qubits=2), time=.5),
+    )[name])
+
+
+def _conflict_options(name):
+    """The LCHS options of a conflict, built when the test runs because a record can refuse its own fields."""
+    from nwqlib.algorithms.lchs import Coherent, DenseExact, MPSCircuit, QSPBlockEncoding
+    qsp, pairs, budgeted = "qsp_block_encoding", SampledPairs(), "trotter_error_budgeted"
+    ptsc = PTSC(pf_allowance=.1, mu_cap=1.5, taylor_cutoff=8)
+    return {
+        "trotter_steps_above_max_steps": lambda: dict(ham_evo=Trotter(steps=5, max_steps=4)),
+        "sampled_qsp_product_formula": lambda: dict(ham_evo=qsp,
+                                                    estimator=SampledPairs(product_formula="mpf")),
+        "sampled_qsp_step_buckets": lambda: dict(ham_evo=qsp,
+                                                 estimator=SampledPairs(step_buckets=2)),
+        "sampled_qsp_control_copies": lambda: dict(ham_evo=qsp,
+                                                   estimator=SampledPairs(control_copies=2)),
+        "sampled_qsp_select": lambda: dict(ham_evo=qsp, estimator=pairs,
+                                           lcu_select="multiplexor"),
+        "sampled_qsp_route": lambda: dict(ham_evo=QSPBlockEncoding(route="laurent"),
+                                          estimator=pairs),
+        "continuous_kernel_product_formula": lambda: dict(ham_evo="trotter",
+                                                          estimator=SampledPairs(kernel="continuous")),
+        "continuous_kernel_qsp": lambda: dict(ham_evo=qsp,
+                                              estimator=SampledPairs(kernel="continuous")),
+        "sampled_pairs_auto_backend": lambda: dict(estimator=pairs),
+        "qsp_bank_on_product_formula": lambda: dict(ham_evo="trotter",
+                                                    estimator=SampledPairs(qsp_bank="stochastic")),
+        "sampled_branch_controlled_select": lambda: dict(ham_evo="trotter",
+                                                         estimator=pairs,
+                                                         lcu_select="branch_controlled"),
+        "step_buckets_on_fixed_steps": lambda: dict(ham_evo="trotter",
+                                                    estimator=SampledPairs(step_buckets=3)),
+        "richardson_allowance_on_fixed_steps": lambda: dict(
+            ham_evo=Trotter(steps=2),
+            estimator=SampledPairs(product_formula=Richardson(pf_allowance=.1))),
+        "richardson_budgeted_without_allowance": lambda: dict(
+            ham_evo=budgeted, estimator=SampledPairs(product_formula="richardson")),
+        "recipe_with_step_buckets": lambda: dict(ham_evo=budgeted, estimator=SampledPairs(
+            product_formula=Richardson(pf_allowance=.1), step_buckets=2)),
+        "ptsc_on_order_2": lambda: dict(ham_evo=budgeted,
+                                        estimator=SampledPairs(product_formula=ptsc)),
+        "richardson_on_order_1": lambda: dict(ham_evo=Trotter(steps=2, order=1),
+                                              estimator=SampledPairs(product_formula="richardson")),
+        "ptsc_on_fixed_steps": lambda: dict(ham_evo=Trotter(steps=2, order=1),
+                                            estimator=SampledPairs(product_formula=ptsc)),
+        "mpf_on_synthesis_tolerance": lambda: dict(
+            ham_evo=Trotter(steps=None, synthesis_tol=.1),
+            estimator=SampledPairs(product_formula="mpf")),
+        "mpf_odd_steps": lambda: dict(ham_evo=Trotter(steps=3),
+                                      estimator=SampledPairs(product_formula="mpf")),
+        "mpf_budgeted": lambda: dict(ham_evo=budgeted,
+                                     estimator=SampledPairs(product_formula="mpf")),
+        "richardson_twice_steps_above_max": lambda: dict(
+            ham_evo=Trotter(steps=3, max_steps=5),
+            estimator=SampledPairs(product_formula="richardson")),
+        "coherent_failure_probability_vs_confidence": lambda: dict(
+            estimator=Coherent(fail_prob=.2)),
+        "qsp_classical": lambda: dict(ham_evo=QSPBlockEncoding()),
+        "periodic_auto": lambda: {},
+        "periodic_order_1": lambda: dict(ham_evo=Trotter(steps=2, order=1)),
+        "periodic_dense_exact": lambda: dict(ham_evo=DenseExact()),
+        "periodic_mps_initial_state": lambda: dict(ham_evo=Trotter(steps=2),
+                                                   init_prep=MPSCircuit()),
+        "sampling_accuracy_dense_exact": lambda: dict(ham_evo=DenseExact(control_route="gatewise")),
+        "source_mps_initial_state": lambda: dict(init_prep=MPSCircuit()),
+        "compact_dense_exact": lambda: dict(ham_evo=DenseExact()),
+        "compact_mps_initial_state": lambda: dict(init_prep=MPSCircuit()),
+        "mps_svd_work": lambda: dict(lcu_prep=MPSCircuit(), max_svd_work=10),
+        "analytic_prep_scalar_l": lambda: dict(ham_evo=QSPBlockEncoding(),
+                                               lcu_prep="analytic", lchs_kernel="low_somma_f2",
+                                               k_quadrature="symmetric_uniform_trapezoid"),
+        "shots_not_divisible_by_repeats": lambda: dict(ham_evo="trotter",
+                                                       estimator=SampledPairs(repeats=4)),
+        "dense_exact_multiplexor": lambda: dict(ham_evo=DenseExact(control_route="gatewise"),
+                                                lcu_select="multiplexor"),
+    }[name]()
+
+
+def _sampling_accuracy():
+    from nwqlib import Accuracy
+    return dict(output=NormSquared(), accuracy=Accuracy(absolute_tolerance=.5, component="sampling", confidence=.9))
+
+
+def _norm():
+    return dict(output=NormSquared())
+
+
+# Name, input (None: refused when LCHS is built), plan options, refused type at planning, and words of the message.
+_CONFLICTS = (
+    ("trotter_steps_above_max_steps", None, None, None, "max_steps=4"),
+    ("sampled_qsp_product_formula", None, None, None, "SampledPairs.product_formula"),
+    ("sampled_qsp_step_buckets", None, None, None, "SampledPairs.step_buckets"),
+    ("sampled_qsp_control_copies", None, None, None, "SampledPairs.control_copies"),
+    ("sampled_qsp_select", None, None, None, "lcu_select"),
+    ("sampled_qsp_route", None, None, None, "QSPBlockEncoding.route"),
+    ("continuous_kernel_product_formula", None, None, None, "importance weights"),
+    ("continuous_kernel_qsp", None, None, None, "importance weights"),
+    ("sampled_pairs_auto_backend", None, None, None, "Pauli product formula or a finite QSP bank"),
+    ("qsp_bank_on_product_formula", None, None, None, "SampledPairs.qsp_bank"),
+    ("sampled_branch_controlled_select", None, None, None, "pair SELECT"),
+    ("step_buckets_on_fixed_steps", None, None, None, "step_buckets > 1"),
+    ("richardson_allowance_on_fixed_steps", None, None, None, "Richardson.pf_allowance"),
+    ("richardson_budgeted_without_allowance", None, None, None, r"Richardson\(pf_allowance"),
+    ("recipe_with_step_buckets", None, None, None, "step_buckets=1"),
+    ("ptsc_on_order_2", None, None, None, "order-1"),
+    ("richardson_on_order_1", None, None, None, "order-2"),
+    ("ptsc_on_fixed_steps", None, None, None, "trotter_error_budgeted"),
+    ("mpf_on_synthesis_tolerance", None, None, None, "needs Trotter.steps"),
+    ("mpf_odd_steps", None, None, None, "even r"),
+    ("mpf_budgeted", None, None, None, "even r"),
+    ("richardson_twice_steps_above_max", None, None, None, "Trotter.max_steps=5"),
+    ("coherent_failure_probability_vs_confidence", "unitary", _sampling_accuracy, "applicability",
+     "Coherent.fail_prob"),
+    ("qsp_classical", "compact", lambda: dict(execution="classical"), "applicability", "use quantum execution"),
+    ("periodic_auto", "periodic", _norm, "applicability", r"Trotter\(steps="),
+    ("periodic_order_1", "periodic", _norm, "applicability", "second-order trotter"),
+    ("periodic_dense_exact", "periodic", _norm, "applicability", "second-order trotter"),
+    ("periodic_mps_initial_state", "periodic", _norm, "applicability", "coefficient PREP"),
+    ("sampling_accuracy_dense_exact", "dense", _sampling_accuracy, "applicability", "backend is 'dense_exact'"),
+    ("source_mps_initial_state", "dense_source", dict, "applicability", "direct PREP only"),
+    ("compact_dense_exact", "compact", dict, "applicability", "supplied dense A"),
+    ("compact_mps_initial_state", "compact", dict, "applicability", "dense initial vector"),
+    ("mps_svd_work", "dense", dict, "resource", "max_svd_work=10"),
+    ("analytic_prep_scalar_l", "unitary", dict, "applicability", "no kernel state"),
+    ("shots_not_divisible_by_repeats", "pauli", lambda: dict(output=NormSquared(), shots=9), "applicability",
+     "SampledPairs.repeats=4"),
+    ("dense_exact_multiplexor", "dense", dict, "value", "multiplexor"),
+)
+
+
+@pytest.mark.parametrize("name, problem, planning, kind, words", _CONFLICTS, ids=[item[0] for item in _CONFLICTS])
+def test_lchs_refuses_conflicting_route_options_at_their_stage(name, problem, planning, kind, words):
+    """Route options that cannot hold together are refused when LCHS is built, and the others by `plan`.
+
+    Options of different route fields that no route reads together, or that break a premise of the recipe they
+    select, are refused when the Method is built, as ValueError. Options that no construction supports for the
+    given input are refused by `plan` with ApplicabilityError, or with ResourceLimitError for a declared work
+    limit; the explicit dense SELECT with the multiplexor is a ValueError of the SELECT owner. The stage and type
+    of each are those of the flat options before the route records, for the same request. Each Method is
+    otherwise valid, and the matched words name the violated option or route, so a different check firing first
+    does not pass.
+    """
+    from nwqlib._limits import ResourceLimitError
+    from nwqlib.algorithms.protocol import ApplicabilityError
+    if problem is None:
+        with pytest.raises(ValueError, match=words):
+            LCHS(**_conflict_options(name))
+        return
+    method = LCHS(**_conflict_options(name))
+    error = dict(applicability=ApplicabilityError, resource=ResourceLimitError, value=ValueError)[kind]
+    with pytest.raises(error, match=words) as refused:
+        plan(_conflict_problem(problem), method=method, **planning())
+    assert kind != "value" or not isinstance(refused.value, (ApplicabilityError, ResourceLimitError))

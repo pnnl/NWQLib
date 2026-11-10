@@ -254,7 +254,7 @@ def rotation_population(reconstruction, preparation, blocks):
       state the last link has ``theta = 2 atan2(r, r) = pi/2``, so its two
       rotations are exact T gates, and a zero amplitude before a positive
       tail gives ``theta = pi``, two Cliffords. ``preparation`` is
-      ``QHD.initial_state_preparation``. ``"none"`` prepares nothing, and
+      ``QHD.init_prep``. ``"none"`` prepares nothing, and
       ``"qiskit_state_preparation"`` has no rotation count, so the caller
       does not pass it.
 
@@ -750,7 +750,7 @@ def _onehot_census_bytes(method, reconstruction):
     schedule = r.onehot
     providers = {p.support_size: p.provider for p in schedule.providers}
     d, k = len(r.initial_amplitudes), method.num_grid_points
-    preparation = method.initial_state_preparation == "structured"
+    preparation = method.init_prep == "structured"
     unique = 1 + (d * (k - 1) if preparation else 0) + schedule.hopping_blocks
     count = (2 * d * (k - 1) if preparation else 0) + 2 * schedule.hopping_blocks
     for s, blocks in schedule.projector_blocks:
@@ -793,7 +793,7 @@ def _admitted_onehot_population(plan, held_bytes=0):
     method._admit(0, int(held_bytes) + source + local, stage="one-hot rotation census")
     schedule = OneHotSchedule.of(r, method, _grid(plan))
     blocks = (block for step in range(len(r.step_weights)) for block in schedule.blocks(step))
-    return rotation_population(r, method.initial_state_preparation, blocks)
+    return rotation_population(r, method.init_prep, blocks)
 
 
 def _plan_population(plan, held_bytes=0):
@@ -1197,7 +1197,7 @@ def _native_plan(plan):
     laws = [law for selection in plan.construction.selections for law in selection.resource_laws
             if law.metric == "arbitrary_rotations"]
     if len(laws) != 1:
-        raise ValueError("the selected state preparation has no rotation law; initial_state_preparation="
+        raise ValueError("the selected state preparation has no rotation law; init_prep="
                          "'qiskit_state_preparation' synthesizes an arbitrary amplitude vector per variable")
     return laws[0]
 
@@ -1233,8 +1233,8 @@ def _one_hot_sources(entry, r, method, grid):
               + (", plus the exact charge of chain links omitted below the normal binary64 range "
                  f"({sum(a - b for a, b, _ in omitted.chains)} links)" if any(c for _, _, c in omitted.chains)
                  else ""))
-        if method.initial_state_preparation == "structured" else
-        entry("state_preparation", "not_applicable", None, "initial_state_preparation='none' prepares no state"),
+        if method.init_prep == "structured" else
+        entry("state_preparation", "not_applicable", None, "init_prep='none' prepares no state"),
     ]
 
 
@@ -1284,8 +1284,8 @@ def _binary_sources(entry, r, method, grid, model):
                  f"{identities})" if omitted.identity_events or omitted.identity_phases or identities else "")),
         entry("state_preparation", "bound", 0, "the H layer prepares the uniform state exactly, the only state "
               "that the structured binary preparation admits")
-        if method.initial_state_preparation == "structured" else
-        entry("state_preparation", "not_applicable", None, "initial_state_preparation='none' prepares no state"),
+        if method.init_prep == "structured" else
+        entry("state_preparation", "not_applicable", None, "init_prep='none' prepares no state"),
     ]
 
 
@@ -1402,7 +1402,7 @@ def circuit_resources(plan, *, synthesis_epsilon=None):
 
     Args:
         plan (Plan): A QHD Plan from `nwqlib.plan(problem, method=QHD(...))` with
-            `execution="quantum"`, the default, and `initial_state_preparation`
+            `execution="quantum"`, the default, and `init_prep`
             `"structured"` or `"none"`.
         synthesis_epsilon (float | None): Total operator-norm allowance E of one circuit
             execution for Clifford replacement plus rotation synthesis, positive and

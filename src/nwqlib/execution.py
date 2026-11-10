@@ -133,8 +133,7 @@ class NativeDepth(Record):
     whose product is the same CX but whose depth is 3, and twirling and
     dynamical decoupling change gates. IBM Runtime qualifies the depth of counts
     (SamplerV2) only when dynamical decoupling, gate twirling and measurement
-    twirling are off and qiskit-ibm-runtime 0.49.0, the version checked for
-    this, is installed, and never that of a provider estimate (EstimatorV2),
+    twirling are off, and never that of a provider estimate (EstimatorV2),
     whose observable is measured with circuits that the provider builds. A
     qualified depth describes only that one prepared circuit, not other
     settings of the same Plan, and only the operations inside it. The
@@ -405,8 +404,8 @@ class PreparedArtifact(Record):
             and kept unchanged after the Run is reopened. `None` means the
             backend did not compute it. IBM Runtime records it for its compiled
             circuit, qualified only for counts that keep the provider's dynamical
-            decoupling and twirling off (`IBMRuntimeBackend.options_json`)
-            under qiskit-ibm-runtime 0.49.0. The other backends record `None`.
+            decoupling and twirling off (`IBMRuntimeBackend.options_json`).
+            The other backends record `None`.
             A requested native-depth limit refuses a circuit before submission
             when its depth is not qualified, or when a package version in
             `environment` differs from the installed one
@@ -623,11 +622,12 @@ class EstimateValue(Record):
     """The expectation value a provider estimated for one weighted Pauli observable, with the provider's reported uncertainty.
 
     It answers an `ObservableEstimateSpec`, and `ExpectationAnalysis.estimates`
-    holds the estimates of an Expectation run. The reported
-    `standard_error` is statistical uncertainty with the provider's stated
-    meaning. It is not total physical error or a certified bound. Settings
-    that the provider applied without reporting them, extra shots and
-    billing remain unknown.
+    holds the estimates of an Expectation run. The `standard_error` is the
+    uncertainty value that the provider reported. NWQLib does not verify its
+    statistical interpretation, and NWQLib's error budget excludes provider
+    processing and hardware error, so it is not total physical error or a
+    certified bound. Settings that the provider applied without reporting
+    them, extra shots and billing remain unknown.
 
     Attributes:
         kind: Fixed `"estimate"`.
@@ -635,13 +635,14 @@ class EstimateValue(Record):
             the original coefficients and the requested precision.
         value: Finite estimate, of either sign, in the original units of the
             observable's coefficients.
-        standard_error: Nonnegative standard error that the provider
-            reported, or `None` when `uncertainty_unavailable` gives the
-            reason.
+        standard_error: Nonnegative uncertainty that the provider reported
+            for the estimate, or `None` when `uncertainty_unavailable` gives
+            the reason.
         uncertainty_unavailable: Reason the standard error is unavailable, or
             `None`.
-        uncertainty_source: `Source` naming where the uncertainty comes from
-            and what it means.
+        uncertainty_source: `Source` naming where the uncertainty comes from,
+            the versions of the software that computed it and what NWQLib
+            states about it.
         requested_options_json: JSON text of the options passed to the
             provider's estimator.
         provider_metadata_json: JSON text of the settings and usage that the

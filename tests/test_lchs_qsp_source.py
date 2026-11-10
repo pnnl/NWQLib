@@ -7,7 +7,7 @@ import pytest
 from scipy.linalg import expm
 
 from nwqlib import LinearDynamics, plan, solve
-from nwqlib.algorithms.lchs import LCHS, ProviderConfig
+from nwqlib.algorithms.lchs import LCHS, ProviderConfig, QSPBlockEncoding, Trotter
 
 
 def test_actual_qsp_source_binds_elapsed_diagonals_recovery_and_physical_phase(monkeypatch):
@@ -24,7 +24,7 @@ def test_actual_qsp_source_binds_elapsed_diagonals_recovery_and_physical_phase(m
     matrix = np.array([[-.2, .15+.1j], [.04-.06j, .3]])
     initial, source = np.array([.8, .6j]), np.array([.3, -.2j])
     elapsed = .5
-    method = LCHS(hamiltonian_evolution_backend='qsp_block_encoding', duhamel_nodes=2,
+    method = LCHS(ham_evo='qsp_block_encoding', duhamel_nodes=2,
         lchs_kernel=ProviderConfig(implementation='cauchy_density'),
         k_quadrature=ProviderConfig(implementation='signed_binary_uniform',
             parameters={'num_qubits':2, 'lsb_position':-1}))
@@ -40,7 +40,7 @@ def test_actual_qsp_source_binds_elapsed_diagonals_recovery_and_physical_phase(m
     radius = np.sqrt(((l_part[0,0].real-l_part[1,1].real)/2)**2+abs(l_part[0,1])**2)
     minimum = (l_part[0,0].real+l_part[1,1].real)/2 - radius
     maximum = (l_part[0,0].real+l_part[1,1].real)/2 + radius
-    shift = -minimum + method.psd_tolerance*max(abs(minimum), abs(maximum))
+    shift = -minimum + method.psd_tol*max(abs(minimum), abs(maximum))
     assert minimum<0
     assert chosen.reconstruction.psd_shift==pytest.approx(shift, abs=2e-16)
     np.testing.assert_allclose(chosen.reconstruction.source_nodes, source_times, rtol=0, atol=1e-16)
@@ -101,7 +101,7 @@ def test_actual_qsp_source_binds_elapsed_diagonals_recovery_and_physical_phase(m
     assert np.linalg.norm(actual.solution-expected) <= synthesis+1e-12
 
 
-GRID = dict(hamiltonian_evolution_backend='qsp_block_encoding', duhamel_nodes=2,
+GRID = dict(ham_evo='qsp_block_encoding', duhamel_nodes=2,
             lchs_kernel=ProviderConfig(implementation='cauchy_density'),
             k_quadrature=ProviderConfig(implementation='signed_binary_uniform',
                                         parameters={'num_qubits': 2, 'lsb_position': -1}))
@@ -214,7 +214,7 @@ def test_zero_evolution_scales_outside_binary64_keep_amplitudes_phase_and_positi
             dimension=2, ordering=ordering), norm=PhysicalScale(mantissa=.5, exponent=exponent+1), phase=phase)
 
     result = solve(LinearDynamics(A=scalar(.5), initial_state=supplied("u", .7, .9), source=supplied("b", 2.1, -.4),
-                                  time=1.), method=LCHS(hamiltonian_evolution_backend='qsp_block_encoding',
+                                  time=1.), method=LCHS(ham_evo='qsp_block_encoding',
                                                         duhamel_nodes=2), output=unit)
     points, weights = np.polynomial.legendre.leggauss(2)
     relative = (np.exp(-.5+.9j)*np.array([np.cos(.35), np.sin(.35)])
@@ -229,7 +229,7 @@ def test_zero_evolution_scales_outside_binary64_keep_amplitudes_phase_and_positi
     # Two inputs of norm 1e308 with A = 0: their coefficient mass exceeds
     # binary64, but the PREP amplitudes are (1, 1)/sqrt(2) and u(T) = u0 + T*b
     # has representable coordinates.
-    method = LCHS(hamiltonian_evolution_backend='qsp_block_encoding', duhamel_nodes=1)
+    method = LCHS(ham_evo='qsp_block_encoding', duhamel_nodes=1)
     result = solve(LinearDynamics(A=scalar(0.), initial_state=[1e308, 0.], source=[0., 1e308], time=1.),
                    method=method, output=unit)
     np.testing.assert_allclose(result.state_vector, [2**-.5, 2**-.5], rtol=0, atol=1e-15)
@@ -261,11 +261,11 @@ def test_zero_evolution_scales_outside_binary64_keep_amplitudes_phase_and_positi
     # A = 3000 I: the initial amplitude exp(-750) underflows, so it is omitted
     # only under an explicit allowance that covers its bound exp(-3000),
     # reported as the binary64 upper bound 2**-1074.
-    with pytest.raises(ApplicabilityError, match="source_drop_allowance"):
+    with pytest.raises(ApplicabilityError, match="source_drop"):
         plan(LinearDynamics(A=scalar(3000.), **problem), method=method)
     allowed = plan(LinearDynamics(A=scalar(3000.), **problem),
-                   method=LCHS(hamiltonian_evolution_backend='qsp_block_encoding', duhamel_nodes=1,
-                               source_drop_allowance=1e-300))
+                   method=LCHS(ham_evo='qsp_block_encoding', duhamel_nodes=1,
+                               source_drop=1e-300))
     assert facts(allowed)["source_range_omission"].value.value == 5e-324
     preparation = allowed._native["native_data"].qsp_plan.preparation
     assert preparation.omitted_applications == (0,)
@@ -281,13 +281,13 @@ def test_zero_evolution_scales_outside_binary64_keep_amplitudes_phase_and_positi
                 final_time=1., shift=0., duhamel_nodes=1)
     edge = select_source_branches(source_scale=PhysicalScale(mantissa=.99, exponent=-2150), **kept)
     assert edge.dropped_bound is None and edge.amplitudes[edge.application_slots[1][0]] == 5e-324
-    with pytest.raises(ApplicabilityError, match="source_drop_allowance"):
+    with pytest.raises(ApplicabilityError, match="source_drop"):
         select_source_branches(source_scale=PhysicalScale(mantissa=.99, exponent=-2152), **kept)
     edge = select_source_branches(source_scale=PhysicalScale(mantissa=.99, exponent=-2152), drop_allowance=1e-300,
                                   **kept)
     assert len(edge.applications) == 1 and (edge.dropped_bound.mantissa, edge.dropped_bound.exponent) == (.99, -2152)
     with pytest.raises(ApplicabilityError, match=r"2\*\*7213475205 to omit them"):
-        plan(LinearDynamics(A=-1e10*np.eye(2), **problem), method=LCHS(duhamel_nodes=1, source_drop_allowance=1e300),
+        plan(LinearDynamics(A=-1e10*np.eye(2), **problem), method=LCHS(duhamel_nodes=1, source_drop=1e300),
              execution="quantum")
 
     # The registered grid signed_binary_uniform(2, lsb -1072) with the Cauchy
@@ -300,7 +300,7 @@ def test_zero_evolution_scales_outside_binary64_keep_amplitudes_phase_and_positi
     # phase taken from a rotated subnormal coefficient is -pi/4 or 0 instead.
     # A few roundings of binary64 magnitudes and phases bound each error.
     from nwqlib.algorithms.lchs.selection import select_compact
-    tiny = LCHS(hamiltonian_evolution_backend='qsp_block_encoding', duhamel_nodes=1,
+    tiny = LCHS(ham_evo='qsp_block_encoding', duhamel_nodes=1,
                 lchs_kernel=ProviderConfig(implementation='cauchy_density'),
                 k_quadrature=ProviderConfig(implementation='signed_binary_uniform',
                                             parameters={'num_qubits': 2, 'lsb_position': -1072}))
@@ -390,8 +390,8 @@ def test_strong_known_decay_moves_into_the_recovery_and_keeps_every_coefficient(
     A = ingest_pauli([("I", 708.1), ("X", .1)], num_qubits=1)
     initial = np.array([.6, .8j])
     for kernel, lsb in (("near_optimal_eq7", 8), ("cauchy_density", -100)):
-        method = LCHS(hamiltonian_evolution_backend='qsp_block_encoding',
-                      qsp_route={"implementation": "auto", "parameters": {"joint": "separate_parts"}},
+        method = LCHS(ham_evo=QSPBlockEncoding(
+                          route={"implementation": "auto", "parameters": {"joint": "separate_parts"}}),
                       lchs_kernel=ProviderConfig(implementation=kernel),
                       k_quadrature=ProviderConfig(implementation='signed_binary_uniform',
                                                   parameters={'num_qubits': 2, 'lsb_position': lsb}))
@@ -433,9 +433,9 @@ def test_imaginary_time_filter_route_matches_the_source_sum_and_keeps_a_failed_f
     matrix = SparsePauliOp.from_list(A.pauli_terms().labels()).to_matrix()
     initial, source, elapsed = np.array([.6, .8j]), np.array([.3j, -.2]), 2.5
     problem = LinearDynamics(A=A, initial_state=initial, source=source, time=elapsed)
-    filtered = dict(hamiltonian_evolution_backend='qsp_block_encoding', duhamel_nodes=2)
-    chosen = plan(problem, method=LCHS(**filtered, qsp_route={"implementation": "imaginary_gqet",
-                                                               "parameters": {"level": 1/16}}))
+    filtered = dict(duhamel_nodes=2)
+    chosen = plan(problem, method=LCHS(**filtered, ham_evo=QSPBlockEncoding(route={"implementation": "imaginary_gqet",
+                                                               "parameters": {"level": 1/16}})))
     prepared = chosen._native["native_data"].qsp_plan
     assert prepared.candidate.label == "filter:convex_contraction:imaginary_gqet[0.0625]"
     assert sum(register.width for register in chosen.construction.program.registers) <= 8
@@ -462,8 +462,8 @@ def test_imaginary_time_filter_route_matches_the_source_sum_and_keeps_a_failed_f
     monkeypatch.setattr(coherent_selection, "prepare_selected_coherent_route", counted("route", route))
     monkeypatch.setattr(coherent_selection, "prepare_imaginary_time_filter", counted("filter", fit))
     with pytest.raises(coherent_selection.CoherentPreparationError) as failure:
-        plan(problem, method=LCHS(**filtered, qsp_route={"implementation": "imaginary_gqet",
-                                                         "parameters": {"level": 1e-3}}))
+        plan(problem, method=LCHS(**filtered, ham_evo=QSPBlockEncoding(route={"implementation": "imaginary_gqet",
+                                                         "parameters": {"level": 1e-3}})))
     assert failure.value.candidate == "filter:convex_contraction:imaginary_gqet[0.001]"
     assert isinstance(failure.value.__cause__, _QSPPhaseConvergenceError)
     assert not isinstance(failure.value, ResourceLimitError)
@@ -475,15 +475,15 @@ def test_imaginary_time_filter_route_matches_the_source_sum_and_keeps_a_failed_f
         raise stop
     monkeypatch.setattr(coherent_selection, "prepare_imaginary_time_filter", fit_limited)
     with pytest.raises(ResourceLimitError) as limited:
-        plan(problem, method=LCHS(**filtered, qsp_route={"implementation": "imaginary_gqet",
-                                                         "parameters": {"level": 1e-3}}))
+        plan(problem, method=LCHS(**filtered, ham_evo=QSPBlockEncoding(route={"implementation": "imaginary_gqet",
+                                                         "parameters": {"level": 1e-3}})))
     assert isinstance(limited.value, coherent_selection.CoherentPreparationError)
     assert limited.value.candidate == failure.value.candidate and limited.value.__cause__ is stop
     assert limited.value.evidence == "the attempts"
 
 
 def test_explicit_mps_coefficient_prep_prepares_each_selected_factor():
-    """lcu_state_preparation="mps_circuit" prepares the kernel and application factors as two MPS circuits.
+    """lcu_prep="mps_circuit" prepares the kernel and application factors as two MPS circuits.
 
     The problem and its independent finite sum are those of
     test_compact_source_applies_decay_and_scalar_phase_at_each_elapsed_time. The coefficient state is the tensor
@@ -501,7 +501,7 @@ def test_explicit_mps_coefficient_prep_prepares_each_selected_factor():
     l_part, h_part = (matrix+matrix.conj().T)/2, (matrix-matrix.conj().T)/(2j)
     initial, source, elapsed = np.array([.6, .8j]), np.array([.3j, -.2]), .7
     chosen = plan(LinearDynamics(A=A, initial_state=initial, source=source, time=elapsed),
-                  method=LCHS(**GRID, lcu_state_preparation="mps_circuit"))
+                  method=LCHS(**GRID, lcu_prep="mps_circuit"))
     data = chosen._native["native_data"]
     kernel, application = data.coefficient_mps
     assert (kernel.num_qubits, application.num_qubits) == (2, 2)
@@ -538,8 +538,8 @@ def test_commuting_product_of_periodic_bands_recovers_the_exponential():
     matrix = .7*np.eye(4) - .3*(shift+shift.T) + 1j*(.2j*(shift-shift.T))
     initial = np.array([1., .5, 0., .2])
     problem = LinearDynamics(A=ingest_cartesian(dissipative=L, hamiltonian=H), initial_state=initial, time=1.)
-    chosen = plan(problem, method=LCHS(hamiltonian_evolution_backend='qsp_block_encoding', qsp_route={
-        "implementation": "commuting_product"}))
+    chosen = plan(problem, method=LCHS(ham_evo=QSPBlockEncoding(route={
+        "implementation": "commuting_product"})))
     data = chosen._native["native_data"]
     assert data.generator.parts_commute == "periodic_bands"
     assert data.qsp_plan.candidate.route == "commuting_product"
@@ -576,7 +576,7 @@ def test_coherent_routes_are_compared_within_the_byte_limit_on_every_computer(tm
     def planned(memory, **limit):
         monkeypatch.setattr(limits, "physical_memory_bytes", lambda: memory)
         targets.clear()
-        return plan(problem, method=LCHS(hamiltonian_evolution_backend="qsp_block_encoding", **limit), seed=7)
+        return plan(problem, method=LCHS(ham_evo="qsp_block_encoding", **limit), seed=7)
 
     def chosen_row(chosen):
         selection = chosen._native["native_data"].qsp_plan.selection
@@ -619,7 +619,7 @@ def test_compact_access_above_max_bytes_is_a_memory_refusal_not_an_inapplicable_
     from nwqlib.operators import ingest_pauli
     problem = LinearDynamics(A=ingest_pauli([("I", .4+.2j), ("X", .2), ("Z", .1+.3j)], num_qubits=1),
                              initial_state=[.6, .8j], time=.5)
-    method = LCHS(hamiltonian_evolution_backend="qsp_block_encoding", max_bytes=3755)
+    method = LCHS(ham_evo="qsp_block_encoding", max_bytes=3755)
     (row,) = compare(problem, methods=[method]).rows
     assert row.plan is None and row.resource_limited
     for call in (lambda: plan(problem, method=method), lambda: solve(row)):
@@ -664,7 +664,7 @@ def test_single_a_access_evolves_a_supplied_nonhermitian_encoding(tmp_path):
         hermitian=False)
     initial, elapsed = np.array([.6, .8j]), .5
     chosen = plan(LinearDynamics(A=supplied, initial_state=initial, time=elapsed), method=LCHS(
-        hamiltonian_evolution_backend='qsp_block_encoding', lchs_kernel=ProviderConfig(implementation='cauchy_density'),
+        ham_evo='qsp_block_encoding', lchs_kernel=ProviderConfig(implementation='cauchy_density'),
         k_quadrature=ProviderConfig(implementation='signed_binary_uniform',
                                     parameters={'num_qubits': 2, 'lsb_position': -1})))
     prepared = chosen._native["native_data"].qsp_plan
@@ -714,8 +714,8 @@ def test_sampling_accuracy_plans_the_counts_whose_radius_meets_the_request(tmp_p
     problem = LinearDynamics(A=A, initial_state=np.array([.6, .8j]), time=.7)
     output = QuadraticForm(observable=ingest_pauli([("Z", 1.), ("X", .5), ("I", .3)], num_qubits=1))
     accuracy, epsilon = Accuracy(absolute_tolerance=.05, confidence=.9, component="sampling"), .05
-    comparison = compare(problem, methods=(LCHS(**kernel), LCHS(hamiltonian_evolution_backend='qsp_block_encoding',
-                                                                 qsp_route="shared_raw", **kernel)),
+    comparison = compare(problem, methods=(LCHS(**kernel), LCHS(ham_evo=QSPBlockEncoding(route="shared_raw"),
+                                                                 **kernel)),
                          output=output, accuracy=accuracy, seed=3)
     for row in comparison.rows:
         chosen = row.plan
@@ -740,7 +740,7 @@ def test_sampling_accuracy_plans_the_counts_whose_radius_meets_the_request(tmp_p
 
 
 def test_analytic_kernel_prep_is_refused_outside_the_coherent_low_somma_route(monkeypatch):
-    """lcu_state_preparation="analytic" prepares only the Low-Somma kernel factor of the coherent LCU.
+    """lcu_prep="analytic" prepares only the Low-Somma kernel factor of the coherent LCU.
 
     The closed form it evaluates, exp(-k**2/(8 gamma**2))/sqrt(1 + k**2), is the kernel factor
     sqrt(|c_j|/beta_k) only for low_somma_f2 on its equal-weight symmetric_uniform_trapezoid grid, and only
@@ -758,22 +758,22 @@ def test_analytic_kernel_prep_is_refused_outside_the_coherent_low_somma_route(mo
     from nwqlib.algorithms.protocol import ApplicabilityError
     from nwqlib.operators import ingest_pauli
     analytic = dict(lchs_kernel="low_somma_f2", k_quadrature="symmetric_uniform_trapezoid",
-                    lcu_state_preparation="analytic")
+                    lcu_prep="analytic")
     with pytest.raises(ValueError, match="'auto' or 'qsp_block_encoding'"):
-        LCHS(**analytic, hamiltonian_evolution_backend="dense_exact")
+        LCHS(**analytic, ham_evo="dense_exact")
     with pytest.raises(ValueError, match="not 'near_optimal_eq7' with 'composite_gauss'"):
-        LCHS(lcu_state_preparation="analytic")
+        LCHS(lcu_prep="analytic")
     problem = LinearDynamics(A=np.array([[1., .2], [.1, .5]]), initial_state=[1., 0.], time=.3)
     with pytest.raises(ApplicabilityError, match="chose 'dense_exact'"):
         plan(problem, method=LCHS(**analytic))
-    sampled = dict(observable_estimator="sampled_pairs", hamiltonian_evolution_backend="qsp_block_encoding")
+    sampled = dict(estimator="sampled_pairs", ham_evo="qsp_block_encoding")
     compact = LinearDynamics(A=ingest_pauli([("Z", .4j)], num_qubits=1), initial_state=[.6, .8], time=1.)
     monkeypatch.setattr(selection, "compact_common", lambda *a, **k: pytest.fail("common-stage work before refusal"))
     methods = [LCHS(**analytic, **sampled), LCHS(lchs_kernel="auto", k_quadrature="auto", **sampled),
-               LCHS(initial_state_preparation="mps_circuit", **sampled),
-               LCHS(observable_estimator="sampled_pairs", hamiltonian_evolution_backend="trotter", trotter_steps=2,
-                    initial_state_preparation="mps_circuit")]
-    reasons = ("prepares the coefficient state", "compares the providers") + ("initial_state_preparation",) * 2
+               LCHS(init_prep="mps_circuit", **sampled),
+               LCHS(estimator="sampled_pairs", ham_evo=Trotter(steps=2),
+                    init_prep="mps_circuit")]
+    reasons = ("prepares the coefficient state", "compares the providers") + ("init_prep",) * 2
     for method, reason in zip(methods, reasons):
         with pytest.raises(ApplicabilityError, match=reason):
             plan(compact, method=method, output=NormSquared(), shots=4)
@@ -804,7 +804,7 @@ def test_provider_enumeration_prepares_only_the_chosen_grid(monkeypatch, tmp_pat
     from nwqlib.operators import ingest_pauli
     auto = dict(lchs_kernel="auto", k_quadrature="auto")
     with pytest.raises(ValueError, match="'auto' or 'qsp_block_encoding'"):
-        LCHS(**auto, hamiltonian_evolution_backend="trotter")
+        LCHS(**auto, ham_evo="trotter")
     with pytest.raises(ValueError, match="together"):
         LCHS(lchs_kernel="auto")
     with pytest.raises(ApplicabilityError, match="backend 'dense_exact'"):
@@ -895,7 +895,7 @@ def test_route_selection_fits_no_phase_and_never_replaces_a_refused_request(monk
     """Coherent selection fits no phase and builds no circuit, and a refused requested route is never replaced.
 
     A = (.4+.2i)I + .2X + (.1+.3i)Z on the four-node Cauchy grid has a Hermitian joint generator target with a full
-    involution, so the free choice has admitted rows of several families. An explicit qsp_route="berry", a route
+    involution, so the free choice has admitted rows of several families. An explicit QSPBlockEncoding(route="berry"), a route
     listed as not admitted, raises ApplicabilityError rather than selecting an admitted route of another family.
     """
     from qiskit import QuantumCircuit
@@ -914,7 +914,7 @@ def test_route_selection_fits_no_phase_and_never_replaces_a_refused_request(monk
         monkeypatch.setattr(owner, name, forbidden)
     problem = LinearDynamics(A=ingest_pauli([("I", .4+.2j), ("X", .2), ("Z", .1+.3j)], num_qubits=1),
                              initial_state=np.array([1., 0.]), time=.8)
-    base = dict(hamiltonian_evolution_backend='qsp_block_encoding', lchs_kernel='cauchy_density',
+    base = dict(ham_evo='qsp_block_encoding', lchs_kernel='cauchy_density',
                 k_quadrature=GRID['k_quadrature'], max_bytes=32*2**20)
 
     def select(method):
@@ -927,7 +927,7 @@ def test_route_selection_fits_no_phase_and_never_replaces_a_refused_request(monk
     assert generator.target_operator_is_hermitian and generator.full_unitary_involution
     assert len({row.route for row in rows}) > 1
     with pytest.raises(ApplicabilityError):
-        select(LCHS(**base, qsp_route='berry'))
+        select(LCHS(**(base | dict(ham_evo=QSPBlockEncoding(route='berry')))))
 
 
 def _ring_laplacian(q):
@@ -944,8 +944,8 @@ def _ring_laplacian(q):
     return ingest_pauli(tuple(zip(terms.paulis.to_labels(), terms.coeffs, strict=True)), num_qubits=q), matrix
 
 
-_KERNEL_ROUTE = dict(hamiltonian_evolution_backend="qsp_block_encoding", approximation_tolerance=.1,
-                     qsp_route={"implementation": "shared_oaa", "parameters": {"level": .999}})
+_KERNEL_ROUTE = dict(approx_tol=.1, ham_evo=QSPBlockEncoding(
+                     route={"implementation": "shared_oaa", "parameters": {"level": .999}}))
 
 
 def _component_sum(chosen):
@@ -1028,8 +1028,8 @@ def test_declared_lower_bound_recovers_each_source_duration_and_real_growth(term
     initial, source, elapsed = np.array([.6, .8j]), np.array([.3j, -.2]), 1.
     problem = LinearDynamics(A=ingest_cartesian(L, H, dissipative_lower_bound=declared), initial_state=initial,
                              source=source, time=elapsed)
-    coarse = plan(problem, method=LCHS(hamiltonian_evolution_backend="qsp_block_encoding", duhamel_nodes=2,
-                                       approximation_tolerance=.05, qsp_route="shared_raw"))
+    coarse = plan(problem, method=LCHS(ham_evo=QSPBlockEncoding(route="shared_raw"), duhamel_nodes=2,
+                                       approx_tol=.05))
     rec = coarse.reconstruction
     assert (rec.psd_shift, rec.scalar_decay, rec.psd_premise) == (shift, decay, "user_assertion")
     propagator = expm(-elapsed*matrix)
@@ -1095,7 +1095,7 @@ def test_declaration_that_does_not_improve_keeps_the_structural_selection_and_ev
     def stated(part, value):
         return plan(LinearDynamics(A=ingest_cartesian(part, dissipative_lower_bound=value),
                                    initial_state=np.eye(part.basis.dimension)[0], time=1.),
-                    method=LCHS(hamiltonian_evolution_backend="qsp_block_encoding")).reconstruction
+                    method=LCHS(ham_evo="qsp_block_encoding")).reconstruction
     # compact_common converts the ValueError of cartesian_access. A plain ValueError from later planning is not this refusal.
     for value in (.5, .79, .8-1e-9):
         with pytest.raises(ApplicabilityError):
@@ -1111,7 +1111,7 @@ def test_declaration_that_does_not_improve_keeps_the_structural_selection_and_ev
             planned(A, make_l_psd=False)
     decay = plan(LinearDynamics(A=ingest_cartesian(ingest_pauli([("I", .9), ("X", .25), ("Z", .25)], num_qubits=1),
                                                    dissipative_lower_bound=.5), initial_state=[.6, .8], time=1.),
-                 method=LCHS(hamiltonian_evolution_backend="qsp_block_encoding", make_l_psd=False)).reconstruction
+                 method=LCHS(ham_evo="qsp_block_encoding", make_l_psd=False)).reconstruction
     assert (decay.psd_shift, decay.scalar_decay, decay.psd_premise) == (0., .5, "user_assertion")
     supplied = ingest_block_encoding(
         BlockEncoding(circuit=QuantumCircuit(1), alpha=.5, num_ancillas=0, system_qubits=1, error_bound=0.,
@@ -1155,7 +1155,7 @@ def test_fixed_shots_report_the_precision_of_the_route_chosen_by_cx(tmp_path):
     from nwqlib.problems.inputs import bind_preparation_circuit
     L, _ = _ring_laplacian(3)
     initial = np.eye(8)[0]
-    method = LCHS(approximation_tolerance=.1)
+    method = LCHS(approx_tol=.1)
     settings = dict(method=method, output=NormSquared(), shots=256, seed=1)
     plain = plan(LinearDynamics(A=L, initial_state=initial, time=5.), **settings)
     assert plain.reconstruction.fixed_shot_precision is None
@@ -1177,14 +1177,14 @@ def test_fixed_shots_report_the_precision_of_the_route_chosen_by_cx(tmp_path):
     assert plan(problem, **settings) == chosen
     automatic = dict(lchs_kernel="auto", k_quadrature="auto")
     fixed_shots = dict(output=NormSquared(), shots=256, seed=1)
-    compared = plan(problem, method=LCHS(**automatic, approximation_tolerance=.1), **fixed_shots).reconstruction.fixed_shot_precision
+    compared = plan(problem, method=LCHS(**automatic, approx_tol=.1), **fixed_shots).reconstruction.fixed_shot_precision
     # The default pair is the first grid that "auto" compares and acl_beta_0.7 a later one, so each must enter the record.
     on_beta = plan(problem, method=LCHS(**_KERNEL_ROUTE, lchs_kernel=ProviderConfig(
         implementation="near_optimal_eq7", parameters={"beta": .7})), seed=1).reconstruction.recovery
     assert compared.smallest_recovery.as_float() <= min(route.as_float(), on_beta.as_float())
     # This node encoding needs a uniform grid, so it leaves the Low-Somma pairs and their free grids, which have no
     # entry in the frontier list because a Method cannot name them. A free grid here can have the smaller recovery.
-    uniform = {**_KERNEL_ROUTE, "qsp_route": {"implementation": "shared_oaa", "parameters": {"level": .999, "node": "rotation_table"}}}
+    uniform = {**_KERNEL_ROUTE, "ham_evo": QSPBlockEncoding(route={"implementation": "shared_oaa", "parameters": {"level": .999, "node": "rotation_table"}})}
     named_node = plan(problem, method=LCHS(**automatic, **uniform), **fixed_shots).reconstruction.fixed_shot_precision
     for record, named_route in ((compared, _KERNEL_ROUTE), (named_node, uniform)):
         entry = next(item for item in PROVIDER_FRONTIER if item.label == record.smallest_row.partition(" on grid ")[2])
@@ -1202,7 +1202,7 @@ def test_fixed_shots_report_the_precision_of_the_route_chosen_by_cx(tmp_path):
     state = bind_preparation_circuit(circuit, reference=InputRef(identity="user:state", representation="circuit", source=Source(
         name="user", version="1", domain="test", reference="declared")), basis=ingest_pauli([("Z", 1.)], num_qubits=1).basis, norm=1.)
     tilted = ingest_pauli([("I", .5), ("X", .3), ("Z", .3)], num_qubits=1)
-    unknown = plan(LinearDynamics(A=tilted, initial_state=state, time=.5), method=LCHS(approximation_tolerance=.2), **fixed_shots)
+    unknown = plan(LinearDynamics(A=tilted, initial_state=state, time=.5), method=LCHS(approx_tol=.2), **fixed_shots)
     selected = unknown._native["native_data"].qsp_plan
     assert selected.candidate.cost.get("objective") is None and selected.candidate.cost["original_u_calls"] > min(
         row.cost["original_u_calls"] for row in selected.selection.candidates if row.status == "admitted" and row.requested)
@@ -1210,7 +1210,7 @@ def test_fixed_shots_report_the_precision_of_the_route_chosen_by_cx(tmp_path):
     assert FIXED_SHOT_RULES["original_u_calls_and_order"] in str(unknown)
     # With H the kernel sum is the one alternative, so here only the grids of "auto" make the fixed order decide.
     grids = plan(LinearDynamics(A=ingest_cartesian(tilted, ingest_pauli([("Z", .1)], num_qubits=1)), initial_state=state, time=1.),
-                 method=LCHS(**automatic, approximation_tolerance=.1), **fixed_shots).reconstruction.fixed_shot_precision
+                 method=LCHS(**automatic, approx_tol=.1), **fixed_shots).reconstruction.fixed_shot_precision
     assert grids.ranking == "original_u_calls_and_order"
 
     conditional_plan = plan(problem, method=method, output=NormalizedExpectation(observable=ingest_pauli(
@@ -1249,9 +1249,9 @@ def test_sampled_pairs_keep_the_declared_shift_and_cover_the_exact_norm():
     structural = LinearDynamics(A=L, initial_state=initial, time=1.)
 
     def sampled(problem, **options):
-        return plan(problem, method=LCHS(observable_estimator="sampled_pairs", **options), output=NormSquared(),
+        return plan(problem, method=LCHS(estimator="sampled_pairs", **options), output=NormSquared(),
                     shots=32, seed=3)
-    chosen = sampled(declared, hamiltonian_evolution_backend="qsp_block_encoding", approximation_tolerance=.3)
+    chosen = sampled(declared, ham_evo="qsp_block_encoding", approx_tol=.3)
     assert (chosen.reconstruction.psd_shift, chosen.reconstruction.psd_premise) == (0., "user_assertion")
     assert ASSERTED_L_BOUNDS in chosen.assumptions
     result = solve(chosen)
@@ -1260,6 +1260,6 @@ def test_sampled_pairs_keep_the_declared_shift_and_cover_the_exact_norm():
     estimate = result.pair_estimate
     assert ASSERTED_L_BOUNDS in estimate.qualification
     assert abs(estimate.norm_squared-np.linalg.norm(expm(-matrix)@initial)**2) <= estimate.radius_n
-    grid = {key: GRID[key] for key in ("hamiltonian_evolution_backend", "lchs_kernel", "k_quadrature")}
+    grid = {key: GRID[key] for key in ("ham_evo", "lchs_kernel", "k_quadrature")}
     radii = [solve(sampled(problem, **grid)).pair_estimate.sampling_radius_n for problem in (structural, declared)]
     assert radii[0]/radii[1] == pytest.approx(math.exp(.2), rel=1e-12)

@@ -216,8 +216,10 @@ def test_changed_grid_reanalyzes_without_reacquisition(monkeypatch):
     revised = result.analyze(**settings)
     assert revised.data is result.data and revised.plan is result.plan
     assert revised.analysis_settings[0].parameter == "grid_size"
-    with pytest.raises(ValueError, match="acquisition"):
-        result.analyze(num_samples=16)
+    with pytest.raises(ValueError, match="QCELS fixes num_times in its Plan, so a changed value needs a new Plan"):
+        result.analyze(num_times=16)
+    with pytest.raises(ValueError, match="QCELS fixes execution in its Plan, so a changed value needs a new Plan"):
+        result.analyze(execution="classical")
 
 
 @pytest.mark.parametrize("phase", [True])

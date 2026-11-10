@@ -605,6 +605,134 @@ class Record(BaseModel):
             return self.revise(**update)
         return type(self).model_validate({name: getattr(self, name) for name in type(self).model_fields})
 
+    def __dir__(self):
+        # Tab completion reads dir(): it lists the fields and NWQLib's own
+        # methods, not the rest of pydantic's BaseModel API (_PYDANTIC_NAMES).
+        return [name for name in object.__dir__(self)
+                if name not in _PYDANTIC_NAMES or name in type(self).model_fields]
+
+
+# Names of pydantic's BaseModel API, which tab completion on a record leaves
+# out so that the scientific fields stay visible. The Record docstring points
+# users to model_dump and model_dump_json, so those two stay.
+_PYDANTIC_NAMES = frozenset(name for name in dir(BaseModel) if not name.startswith("__")) - {
+    "model_dump", "model_dump_json"}
+
+
+class _ConstructorDisplay:
+    """Display a configuration record as the constructor call that a user writes for it.
+
+    Methods and the option records that their fields take inherit it. The
+    display names the type and the fields whose values differ from their
+    defaults, such as `LCHS(ham_evo=Trotter(steps=4))`. It omits revision
+    ancestry (`parent_id`) from every displayed record. State and operator
+    inputs can appear as summaries in angle brackets. A display can be
+    evaluated directly only when all its arguments are complete Python
+    expressions. Reconstruction from the display need not preserve revision
+    ancestry or content identity. `repr`, `str` and IPython show the same
+    text, which `_constructor_text` describes. `model_dump()` returns every
+    field in full.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self):
+        return _constructor_text(self)
+
+    def __str__(self):
+        return repr(self)
+
+    def _repr_pretty_(self, printer, cycle):
+        printer.text(f"{type(self).__name__}(...)" if cycle else repr(self))
+
+    def _argument(self):
+        """Return the text of this value as an argument inside another record's constructor display."""
+        return repr(self)
+
+
+# The record's format version and revision link, which a user does not write.
+_NOT_DISPLAYED = frozenset({"schema_version", "parent_id"})
+
+
+@functools.cache
+def _display_defaults(cls):
+    """Return each optional field's default as a built record stores it.
+
+    A default given as a name that validation replaces by its record, such as
+    LCHS's `"coherent"` by `Coherent()`, is compared in the stored form. A type
+    with required fields, or whose construction from its defaults raises any
+    exception, has no default record, and its declared defaults are compared
+    as written. A Method written outside the library can raise a TypeError
+    there, and repr and print must still work.
+    """
+    try:
+        built = cls()
+    except Exception:
+        return {name: info.get_default(call_default_factory=True)
+                for name, info in cls.model_fields.items() if not info.is_required()}
+    return {name: getattr(built, name) for name in cls.model_fields}
+
+
+def _constructor_text(record):
+    """Return ``Type(name=value, ...)`` with the fields of ``record`` that differ from their defaults.
+
+    Required fields always appear, `schema_version` and `parent_id` never, and
+    a fixed `kind` equals its default. Each value appears as `_argument_text`
+    gives it.
+    """
+    defaults = _display_defaults(type(record))
+    arguments = []
+    for name in type(record).model_fields:
+        value = getattr(record, name)
+        if name in _NOT_DISPLAYED or (
+                name in defaults and type(value) is type(defaults[name]) and value == defaults[name]):
+            continue
+        arguments.append(f"{name}={_argument_text(value)}")
+    return f"{type(record).__name__}({', '.join(arguments)})"
+
+
+def _argument_text(value):
+    """Return the text of ``value`` as a constructor argument, as a user would write it.
+
+    Scalars, strings and tuples of them appear as Python expressions.
+    Configuration records use their own displays, which can contain data
+    summaries and omit revision ancestry. A record may shorten its argument
+    form (`_ConstructorDisplay._argument`), as `ProviderConfig` does to its
+    name. Any other value, such as an operator, a state or a sequence of
+    them, appears as a summary in angle brackets (`_data_summary`), without
+    its numbers.
+    """
+    if isinstance(value, _ConstructorDisplay):
+        return value._argument()
+    return repr(value) if _expression(value) else f"<{_data_summary(value)}>"
+
+
+def _expression(value):
+    """Whether ``value`` uses ``repr`` instead of a data summary in a constructor display."""
+    return (value is None or type(value) in (str, int, float, bool) or isinstance(value, _ConstructorDisplay)
+            or (type(value) is tuple and all(_expression(item) for item in value)))
+
+
+def _data_summary(value):
+    """Return the short text of a data value in a constructor display, reading only its metadata.
+
+    An operator or state input appears as in a Problem's display, such as
+    `dense 2x2`, an array by its shape, a tuple by its length and its first
+    three entries, and any other object by its type name.
+    """
+    from nwqlib.operators.inputs import OperatorInput
+    from nwqlib.problems.inputs import StateInput
+    from nwqlib.problems.records import _field_summary
+    if isinstance(value, (OperatorInput, StateInput)):
+        return _field_summary(value)
+    if isinstance(value, FrozenArray):
+        return f"array of shape {value.array.shape}"
+    if type(value) is tuple:
+        shown = [repr(item) if _expression(item) else _data_summary(item) for item in value[:3]]
+        return (f"{len(value)} {'entry' if len(value) == 1 else 'entries'}: {'; '.join(shown)}"
+                f"{'; ...' if len(value) > 3 else ''}")
+    return type(value).__name__
+
 
 @functools.cache
 def _type_name(cls):

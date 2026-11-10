@@ -42,7 +42,7 @@ def selected(*, solver="qsvt_inverse", A=MATRIX, b=RHS, output=None, t=1.5, **fi
         LinearSystem(A=A, b=b),
         method=QLS(
             solver=solver,
-            encoded_solution_norm_estimate=None if solver == "qsvt_inverse" else t,
+            norm_estimate=None if solver == "qsvt_inverse" else t,
             **fields,
         ),
         output=output,
@@ -145,7 +145,7 @@ def test_supplied_premise_needs_no_planning_spectrum_and_is_refused_where_factor
         with pytest.raises(ApplicabilityError, match="invertible"):
             nwqlib.solve(LinearSystem(A=np.diag([1., 0.]), b=[1, 1]),
                          method=QLS(solver="shortcut_native_svp", alpha=1., kappa=2.,
-                                    encoded_solution_norm_estimate=model),
+                                    norm_estimate=model),
                          output=unit, execution="classical", seed=7)
 
 
@@ -246,7 +246,7 @@ def test_classical_model_admits_its_decompositions_with_vectors(monkeypatch, sol
     noise = .3*rng.standard_normal((d, d))/np.sqrt(d)
     problem = LinearSystem(A=4*np.eye(d) + (noise + noise.T if hermitian else noise), b=rng.standard_normal(d))
     assert (problem.A.structure == "hermitian") == hermitian
-    fields = dict(solver=solver) if t is None else dict(solver=solver, encoded_solution_norm_estimate=t)
+    fields = dict(solver=solver) if t is None else dict(solver=solver, norm_estimate=t)
     output = None if t is None else StateVector(normalization="unit", global_phase="modulo_global_phase")
     counts = {}
     for name in ("svd", "eigh", "eigvalsh"):

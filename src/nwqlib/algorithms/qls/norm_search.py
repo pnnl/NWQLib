@@ -16,7 +16,7 @@ from math import ceil, exp, frexp, log
 from typing import Any
 import numpy as np
 
-_ENCODED_NORM_ERROR = "encoded_solution_norm_estimate must lie in [1, kappa_be]"
+_ENCODED_NORM_ERROR = "norm_estimate must lie in [1, kappa_be]"
 
 
 def _success_center(encoded_norm: float, t_value: float) -> float:
@@ -335,12 +335,12 @@ def _resolve_shortcut_norm(
 
     if requested is None:
         raise ValueError(
-            "shortcut execution requires a supplied numeric encoded_solution_norm_estimate t"
+            "shortcut execution requires a supplied numeric norm_estimate t"
         )
     if requested == "noisy_binary_search":
         if encoded_norm is None:
             raise ValueError(
-                "encoded_solution_norm_estimate='noisy_binary_search' needs the encoded "
+                "norm_estimate='noisy_binary_search' needs the encoded "
                 "reference norm from its selected classical solve; quantum shortcut "
                 "execution requires a numeric t in [1, kappa_be]"
             )
@@ -348,7 +348,7 @@ def _resolve_shortcut_norm(
     if requested == "linear_kappa_sequence":
         if factors is None or alpha is None or rhs is None:
             raise ValueError(
-                "encoded_solution_norm_estimate='linear_kappa_sequence' needs the original "
+                "norm_estimate='linear_kappa_sequence' needs the original "
                 "factors, alpha and RHS of classical execution; quantum shortcut "
                 "execution requires a numeric t in [1, kappa_be]"
             )
@@ -362,7 +362,7 @@ def _resolve_shortcut_norm(
 
     if encoded_norm is None:
         raise ValueError(
-            "encoded_solution_norm_estimate='grid' needs the encoded reference "
+            "norm_estimate='grid' needs the encoded reference "
             "norm from its selected classical solve; quantum shortcut execution "
             "requires a numeric t in [1, kappa_be]"
         )

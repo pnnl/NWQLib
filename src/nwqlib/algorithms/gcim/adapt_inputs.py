@@ -175,7 +175,7 @@ def _symmetry_evidence(
         relative = math.ldexp(relative_mantissa, relative_exponent)
     # Exact mode checks components: an actual nonzero ratio may underflow.
     if (tolerance == 0.0 and not exact_symmetry) or exceeds_tolerance:
-        raise ValueError(f"input must be {target} within input_symmetry_tolerance")
+        raise ValueError(f"input must be {target} within symmetry_tol")
     correction_norm = stable_vector_norm(correction) if nonzero else 0.0
     try:
         correction_norm = math.ldexp(correction_norm, pauli_qubits // 2)
@@ -186,7 +186,7 @@ def _symmetry_evidence(
     return {
         "target": target,
         "projection": "(H + H.adjoint)/2" if target == "Hermitian" else "(A - A.adjoint)/2",
-        "input_symmetry_tolerance": tolerance,
+        "symmetry_tol": tolerance,
         "correction_applied": nonzero,
         "correction_component_max": correction_scale,
         "correction_frobenius_norm": correction_norm if math.isfinite(correction_norm) else None,
@@ -558,10 +558,10 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots, or
 
     A named pool is enumerated only after its candidate count passes the byte
     and product limits. Every generator is projected onto its anti-Hermitian
-    part within ``input_symmetry_tolerance`` and must agree with its stored
+    part within ``symmetry_tol`` and must agree with its stored
     fermion terms. A Hamiltonian with Pauli access, which every quantum plan
     has, must have exactly real Pauli coefficients. ``cutoff`` is the
-    effective ``pauli_coefficient_cutoff``, resolved once by ``ADAPT.plan``
+    effective ``pauli_cutoff``, resolved once by ``ADAPT.plan``
     from the original Problem. Nonidentity coefficients at or below it are
     removed, and the sum of their absolute values is recorded. The identity
     coefficient stays whole, because removing it when it crosses the cutoff
@@ -650,7 +650,7 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots, or
             # the kept rows without coalescing. Labels are decoded once, for
             # the kept words that the member and generator records store.
             values, evidence = _project_coefficients(
-                values, antihermitian=True, tolerance=method.input_symmetry_tolerance, qubits=q)
+                values, antihermitian=True, tolerance=method.symmetry_tol, qubits=q)
             kept = values != 0
             x, z, values = x[kept], z[kept], values[kept]
             # The kept rows, their zero-signed copy and the operator's copy.
@@ -681,7 +681,7 @@ def prepare_adapt_inputs(hamiltonian, reference, method, *, execution, shots, or
             )
             original = _generator_reference(generator)
             rows, evidence = _project_terms(
-                rows, antihermitian=True, tolerance=method.input_symmetry_tolerance, qubits=q
+                rows, antihermitian=True, tolerance=method.symmetry_tol, qubits=q
             )
             processed = ingest_pauli(rows, num_qubits=q, max_bytes=method.max_bytes)
         else:

@@ -248,7 +248,7 @@ def test_native_exact_lchs_completes_at_a_non_default_optimization_level(runner,
 
     terms = (("ZI", .5), ("IZ", .3), ("XX", .2), ("YY", -.1))
     chosen = plan(LinearDynamics(A=np.diag([.1, .2, .3, .4]), initial_state=[1., 2., 3., 4.], time=.1),
-                  method=LCHS(hamiltonian_evolution_backend="trotter", k_quadrature=ProviderConfig(
+                  method=LCHS(ham_evo="trotter", k_quadrature=ProviderConfig(
                       implementation="signed_binary_uniform", parameters={"num_qubits": 2, "lsb_position": -1})),
                   output=NormalizedExpectation(observable=ingest_pauli(terms, num_qubits=2)),
                   execution="quantum", seed=7)

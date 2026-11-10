@@ -216,7 +216,7 @@ def test_adapt_admits_a_growth_query_only_while_the_final_stage_shots_still_fit(
     import re
     pytest.importorskip("pyscf")
     pytest.importorskip("openfermion")
-    from nwqlib.algorithms import PencilAcquisition
+    from nwqlib.algorithms.gcim import PencilAcquisition
     from nwqlib.algorithms.gcim import PencilSampling, build_gcim_chemistry_problem
     from nwqlib.execution import ExecutionLimits
 

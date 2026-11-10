@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Mapping, TypeAlias
 
+from nwqlib.core.records import _ConstructorDisplay
 from nwqlib.serialization import FieldSerializedRecord
 
 ProviderParameter: TypeAlias = str | int | float | bool | None
@@ -18,8 +19,18 @@ def _immutable_parameter_map(
     return MappingProxyType(dict(sorted(parameters.items())))
 
 
+def _rebuild(cls, implementation, parameters):
+    # pickle and deepcopy cannot copy the read-only parameter view, so both
+    # provider records reduce to this keyword construction from a plain dict.
+    return cls(implementation=implementation, parameters=parameters)
+
+
+def _reduce(self):
+    return _rebuild, (type(self), self.implementation, dict(self.parameters))
+
+
 @dataclass(frozen=True, kw_only=True)
-class ProviderConfig(FieldSerializedRecord):
+class ProviderConfig(_ConstructorDisplay, FieldSerializedRecord):
     """Choice of an LCHS kernel or k-quadrature rule, with its explicit parameters.
 
     Build it with keyword arguments and pass it as `lchs_kernel=` or
@@ -30,6 +41,11 @@ class ProviderConfig(FieldSerializedRecord):
     `implementation` is the only required argument. `LCHS` also accepts the
     name alone or a dict with these two keys. The `lchs_kernel` and
     `k_quadrature` entries of `LCHS` list the names and their parameters.
+    It displays as `ProviderConfig(implementation=...)`, with `parameters`
+    when it has any. Inside the display of a Method or an option record it
+    appears in the shorter form a user writes there: the name alone when it
+    has no parameters, such as `'composite_gauss'`, and otherwise the dict.
+    `to_dict()` returns both fields.
 
     Attributes:
         implementation: Required. Kernel or quadrature name. Building this
@@ -51,6 +67,17 @@ class ProviderConfig(FieldSerializedRecord):
             "parameters",
             _immutable_parameter_map(self.parameters),
         )
+
+    __reduce__ = _reduce
+
+    def __repr__(self):
+        parameters = f", parameters={dict(self.parameters)!r}" if self.parameters else ""
+        return f"ProviderConfig(implementation={self.implementation!r}{parameters})"
+
+    def _argument(self):
+        if not self.parameters:
+            return repr(self.implementation)
+        return repr({"implementation": self.implementation, "parameters": dict(self.parameters)})
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -82,3 +109,5 @@ class ResolvedProviderConfig(FieldSerializedRecord):
             "parameters",
             _immutable_parameter_map(self.parameters),
         )
+
+    __reduce__ = _reduce

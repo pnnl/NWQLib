@@ -415,7 +415,7 @@ def grid_convention(qhd):
     """Return the name of a QHD Method's grid convention (``InnerRepresentation.grid``)."""
     if qhd.boundary == "periodic":
         return "periodic"
-    return "dirichlet_endpoints" if qhd.include_boundary_points else "dirichlet_interior"
+    return "dirichlet_endpoints" if qhd.boundary_points else "dirichlet_interior"
 
 
 class SlackAxis(Record):
@@ -529,7 +529,7 @@ class InnerRepresentation(Record):
         variables: Names of the inner problem's variables, the problem's variables
             followed by the slack variables.
         grid: The slack grid's convention, from the QHD configuration's `boundary` and
-            `include_boundary_points`: `dirichlet_interior`, `dirichlet_endpoints` or
+            `boundary_points`: `dirichlet_interior`, `dirichlet_endpoints` or
             `periodic`.
         grid_points: Points of each slack grid, the QHD configuration's `num_grid_points`.
         cap_scope: `grid`. The caps and branch tests hold on the grid of the

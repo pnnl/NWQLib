@@ -466,8 +466,8 @@ def test_qls_shortcut_admits_the_supplied_rhs_syntheses_it_controls(monkeypatch,
     need = 2 * query + specializations * (_dense_synthesis_work(2) + _gatewise_control_work(2, controls))
 
     def planned(max_work):
-        method = QLS(solver=solver, encoded_solution_norm_estimate=1.5, epsilon_inv=0.5,
-                     block_encoding_implementation="dense_dilation", max_work=max_work,
+        method = QLS(solver=solver, norm_estimate=1.5, epsilon_inv=0.5,
+                     block_encoding="dense_dilation", max_work=max_work,
                      dense_control_route=route)
         return nwqlib.plan(problem, method=method, output=output, seed=7)
 
@@ -497,7 +497,7 @@ def test_adapt_admits_the_controlled_synthesis_of_a_supplied_reference(monkeypat
     # reference again and charges it to its own max_products before the
     # synthesis starts.
     from nwqlib._prepared_execution import Run
-    from nwqlib.algorithms import PencilAcquisition
+    from nwqlib.algorithms.gcim import PencilAcquisition
     from nwqlib.algorithms.gcim import AdaptVerificationOptions
     from nwqlib.operators import ingest_pauli
     from test_adapt_primary import plan_for
@@ -550,7 +550,7 @@ def test_planning_leaves_the_controlled_synthesis_of_an_unbuilt_definition_unkno
     from qiskit.circuit.library import StatePreparation
     from nwqlib import LinearSystem, NormalizedExpectation
     from nwqlib._prepared_execution import Run
-    from nwqlib.algorithms import PencilAcquisition
+    from nwqlib.algorithms.gcim import PencilAcquisition
     from nwqlib.algorithms.gcim import FixedGCIM
     from nwqlib.algorithms.qls import QLS
     from nwqlib.operators import ingest_pauli
@@ -595,8 +595,8 @@ def test_planning_leaves_the_controlled_synthesis_of_an_unbuilt_definition_unkno
 
     def qls(**options):
         problem = LinearSystem(A=np.diag([1.0, 0.8, 0.6, 0.5]) + 0.05, b=state_input(supplied(49)))
-        method = QLS(solver="shortcut_native_svp", encoded_solution_norm_estimate=1.5, epsilon_inv=0.5,
-                     block_encoding_implementation="dense_dilation", **options)
+        method = QLS(solver="shortcut_native_svp", norm_estimate=1.5, epsilon_inv=0.5,
+                     block_encoding="dense_dilation", **options)
         return nwqlib.plan(problem, method=method, output=NormalizedExpectation(observable=np.diag([1.0, -1.0, 0.5, 0.0])),
                            seed=7)
     defined.clear()

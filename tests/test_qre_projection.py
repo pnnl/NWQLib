@@ -154,8 +154,8 @@ def test_a_compiled_query_with_sx_gates_projects_with_counts_read_from_its_own_o
 
     target = ingest_pauli((("XI", .7), ("ZX", .4), ("YZ", .3), ("ZZ", .2)), num_qubits=2)
     selected = nwqlib.plan(nwqlib.Eigenproblem(A=target), seed=7,
-                           method=RWPE(initial_state=[1, 0, 0, 0], max_steps=6, controlled_power_backend="trotter_error_budgeted",
-                                       controlled_power_error_budget=.01))
+                           method=RWPE(initial_state=[1, 0, 0, 0], max_steps=6, ctrl_power="trotter_error_budgeted",
+                                       ctrl_power_budget=.01))
     prepared = nwqlib.prepare(selected, settings="first", progress=False)
     with prepared.run:
         source = prepared.circuits[0]
@@ -265,8 +265,8 @@ def test_a_resource_estimate_of_one_execution_is_projected_with_a_t_count_indepe
     # RWPE takes one shot per step and refuses any other, so only compiling its circuits one at a time can help.
     target = ingest_pauli((("XI", .7), ("ZX", .4), ("YZ", .3), ("ZZ", .2)), num_qubits=2)
     steps = nwqlib.plan(nwqlib.Eigenproblem(A=target), seed=7,
-                        method=RWPE(initial_state=[1, 0, 0, 0], max_steps=6, controlled_power_backend="trotter_error_budgeted",
-                                    controlled_power_error_budget=.01))
+                        method=RWPE(initial_state=[1, 0, 0, 0], max_steps=6, ctrl_power="trotter_error_budgeted",
+                                    ctrl_power_budget=.01))
     with pytest.raises(ValueError, match="one circuit execution") as six_settings:
         estimate_physical(nwqlib.estimate(steps, context=ResourceContext(basis="clifford_t")))
     assert "settings=6" in str(six_settings.value) and "compile_logical" in str(six_settings.value)

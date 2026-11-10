@@ -20,7 +20,7 @@ Add an extra for each further capability you need, for example `python -m pip in
 | `chemistry` | Building molecular Hamiltonians | Qiskit, PySCF, OpenFermion |
 | `tensor` | Matrix-product-state (MPS) circuit state preparation | Qiskit, plus `scikit_tt` installed as shown below |
 | `qasm` | Reading an exported OpenQASM 3 file back into a Qiskit circuit ([Export OpenQASM](qasm-streaming.md)) | Qiskit, the OpenQASM 3 parser, the Qiskit QASM3 importer |
-| `ibm` | [IBM Runtime](ibm.md) | Qiskit, qiskit-ibm-runtime ≥ 0.49.0 |
+| `ibm` | [IBM Runtime](ibm.md) | Qiskit, qiskit-ibm-runtime ≥ 0.52.0 |
 | `ionq` | [IonQ](ionq.md) | Qiskit, qiskit-ionq ≥ 1.1.1, requests ≥ 2.34.2, urllib3 ≥ 2.8.0 |
 | `nexus` | [Quantinuum Nexus](nexus.md) H2 | Qiskit, qnexus ≥ 0.49.0, pytket ≥ 2.18.1, pytket-qiskit ≥ 0.78.0, selene-core ≥ 0.3.2 |
 | `nwqec` | Logical Clifford+T compilation of small circuits ([Estimate fault-tolerant resources](fault-tolerant-resources.md)) | Qiskit, nwqec 0.1.2 |
@@ -82,16 +82,16 @@ print(np.linalg.norm(result.solution - reference))
 0.0008214720329520691
 ```
 
-The printed absolute L2 discrepancy, about `.000821472`, is that of the default finite LCHS approximation in this example. LCHS assigns half of `LCHS.approximation_tolerance`, 0.01 by default, to the tail of the k integral that the cutoff drops and half to the k quadrature. Here the tail bound is `.005` and the quadrature bound is about `.00431140`. For this unit input without a shift, they equal the bounds recorded as `kernel_approximation` and `k_quadrature` in `result.plan.facts` ([LCHS frames](conventions.md#lchs-frames)). These two bounds cover only the cutoff and the quadrature. They do not bound the total error of the physical output, which also depends on the preparation, evolution and numerical approximations. The [LCHS guide](algorithms/lchs.md#selection-and-accuracy) describes these bounds, and [Check accuracy and verify a result](verification.md) describes NWQLib's own checks.
+The printed absolute L2 discrepancy, about `.000821472`, is that of the default finite LCHS approximation in this example. LCHS assigns half of `LCHS.approx_tol`, 0.01 by default, to the tail of the k integral that the cutoff drops and half to the k quadrature. Here the tail bound is `.005` and the quadrature bound is about `.00431140`. For this unit input without a shift, they equal the bounds recorded as `kernel_approximation` and `k_quadrature` in `result.plan.facts` ([LCHS frames](conventions.md#lchs-frames)). These two bounds cover only the cutoff and the quadrature. They do not bound the total error of the physical output, which also depends on the preparation, evolution and numerical approximations. The [LCHS guide](algorithms/lchs.md#selection-and-accuracy) describes these bounds, and [Check accuracy and verify a result](verification.md) describes NWQLib's own checks.
 
 ## Change the approximation
 
-With a smaller `approximation_tolerance`, LCHS uses more quadrature nodes. Evaluate the finer finite sum classically:
+With a smaller `approx_tol`, LCHS uses more quadrature nodes. Evaluate the finer finite sum classically:
 
 ```python
 refined = solve(
     problem,
-    method=LCHS(approximation_tolerance=0.001),
+    method=LCHS(approx_tol=0.001),
     execution="classical",
 )
 print(refined.solution)
@@ -103,7 +103,7 @@ print(np.linalg.norm(refined.solution - reference))
 5.3260455987124986e-05
 ```
 
-For this input, the finer construction uses 396 nodes and has absolute L2 discrepancy about `.0000532605`, with its finite sum evaluated classically. As a circuit, the same dense construction needs 512 address slots and ten qubits in total, within the default limit `max_dense_select_slots=4096`. These two observations do not establish monotonic convergence for every input. Each branch of the dense SELECT is a classically computed matrix exponential. Larger systems need a supported structured construction with its own limit check.
+For this input, the finer construction uses 396 nodes and has absolute L2 discrepancy about `.0000532605`, with its finite sum evaluated classically. As a circuit, the same dense construction needs 512 address slots and ten qubits in total, within the default limit of 4096 address slots (`DenseExact.max_select_slots`). These two observations do not establish monotonic convergence for every input. Each branch of the dense SELECT is a classically computed matrix exponential. Larger systems need a supported structured construction with its own limit check.
 
 ## See the cost before running {#inspect-or-select-work-before-running-it}
 
@@ -111,8 +111,11 @@ For this input, the finer construction uses 396 nodes and has absolute L2 discre
 
 ```python
 from nwqlib import estimate, plan
+from nwqlib.resources import ResourceContext
 
 lchs_plan = plan(problem, method=LCHS())
+cx = estimate(lchs_plan, context=ResourceContext(basis="cx")).quantity("cx")
+print(cx.fact.value.numerator, cx.interpretation)
 resources = estimate(lchs_plan)
 print(resources.quantity("logical_width", location="logical_device"))
 operations = resources.quantity("operations")
@@ -120,12 +123,15 @@ print(operations.interpretation)
 ```
 
 ```text
+133516 estimate
 logical_width at logical_device: 9 count [exact]
   basis=selected_logical; lifecycle=planned; population=simultaneous live footprint
 unavailable
 ```
 
-Each quantity prints its value, its unit and a label (`exact`, `upper_bound`, `estimate`, `conditional` or `unavailable`). The second line gives the gate basis (`basis`), the workflow stage (`lifecycle`, which is `planned` before any circuit exists) and what is counted (`population`). Here the circuit holds 9 qubits at the same time, an exact count. The operation count is unavailable because the [blocks](glossary.md#block) (subroutines) of this construction have no gate-count formula. An unavailable count carries its reason and is never treated as zero.
+Estimated in the CX basis, this construction needs 133,516 CX gates. Most of them come from the controlled time evolution in each branch of the dense SELECT, so a 2×2 input does not mean a small circuit. Here the label `estimate` means that the count describes the chosen construction before routing and circuit optimization. Some of its parts are upper bounds under particular synthesis assumptions, but the total is neither an unconditional upper bound nor a gate count measured on hardware.
+
+Each quantity prints its value, its unit and a label (`exact`, `upper_bound`, `estimate`, `conditional` or `unavailable`). The second line gives the gate basis (`basis`), the workflow stage (`lifecycle`, which is `planned` before any circuit exists) and what is counted (`population`). Here the circuit holds 9 qubits at the same time, an exact count. The total operation count is unavailable in the CX basis and in the default basis, because the [blocks](glossary.md#block) (subroutines) of this construction have no formula for it. An unavailable count carries its reason and is never treated as zero.
 
 Planning computes the numerical data the Method needs and takes no measurements. Run the Plan with `solve(lchs_plan)`, or pass it to `prepare` and `submit` to control preparation and submission yourself ([Run on a backend](prepared_execution.md)). A Result keeps its Plan as `result.plan`. [Estimate resources](resources.md) explains how counts from formulas differ from counts of a built circuit and from device predictions.
 

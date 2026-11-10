@@ -9,18 +9,18 @@ python -m nwqlib algorithms
 ```
 
 ```text
-adapt_gcim@5: eigenvalue
-chebyshev_lanczos@5: eigenvalue
-finite_pauli_expectation@2: normalized_expectation, quadratic_form
-fixed_gcim@5: eigenvalue
-lchs@3: solution, state_vector, norm_squared, quadratic_form, normalized_expectation, samples
-qcels@1: eigenphase, eigenvalue
-qfd@1: eigenvalue
-qhd@2: optimization_candidate
-qls@2: solution, state_vector, norm_squared, quadratic_form, normalized_expectation, samples
-rfe@2: eigenphase, eigenvalue
-rwpe@2: eigenphase, eigenvalue
-spe@2: eigenphase, eigenvalue
+adapt_gcim@6: eigenvalue
+chebyshev_lanczos@6: eigenvalue
+finite_pauli_expectation@3: normalized_expectation, quadratic_form
+fixed_gcim@6: eigenvalue
+lchs@4: solution, state_vector, norm_squared, quadratic_form, normalized_expectation, samples
+qcels@2: eigenphase, eigenvalue
+qfd@2: eigenvalue
+qhd@3: optimization_candidate
+qls@3: solution, state_vector, norm_squared, quadratic_form, normalized_expectation, samples
+rfe@3: eigenphase, eigenvalue
+rwpe@3: eigenphase, eigenvalue
+spe@3: eigenphase, eigenvalue
 Declared scope only; discovery does not establish scientific or backend qualification.
 ```
 
@@ -57,11 +57,12 @@ python -m nwqlib card qls
         ...
 ```
 
-`algorithms --json` prints every card as JSON. `options` prints the JSON schema of a Method's configuration, including required scientific fields and current defaults:
+`algorithms --json` prints every card as JSON. `options` prints a table of a Method's options, one row per option, with its default (`required` for a required scientific field), the names and option records it accepts, and the opening of its description. A field that accepts option records, such as the route fields of LCHS, is followed by the options of each record, indented. `options --json` prints the JSON schema of the Method's configuration instead:
 
 ```sh
 python -m nwqlib algorithms --json
 python -m nwqlib options adapt_gcim
+python -m nwqlib options adapt_gcim --json
 ```
 
 These commands show what each Method declares. They do not show that a Method applies to your problem, runs on a given backend or reaches a given accuracy. `options` creates no Method and plans no workload.
@@ -86,17 +87,20 @@ The [reference Hadamard Method](https://github.com/pnnl/NWQLib/blob/main/tests/_
 
 ## Python discovery
 
-In Python, `methods()` returns the registration record of each built-in Method:
+In Python, `methods()` returns the registration record of each built-in Method, and `methods(problem)` returns the records of the Methods that declare the Problem's type:
 
 ```python
-from nwqlib import methods
+from nwqlib import LinearSystem, methods
 
 registrations = methods()
 for registration in registrations:
     print(registration.source.name, registration.source.version)
+
+problem = LinearSystem(A=[[2.0, 1.0], [1.0, 3.0]], b=[1.0, 0.0])
+print([registration.source.name for registration in methods(problem)])  # ['qls']
 ```
 
-For formatted declarations and configuration schemas, use the `algorithms`, `card` and `options` commands. Listing Methods neither runs nor tests them.
+A registration states the Problem types and outputs a Method declares. It does not establish that the Method or a backend suits a particular problem. No built-in Method declares `ConstrainedOptimization`, so `methods(problem)` returns an empty tuple for it, and `nwqlib.algorithms.qhd.solve_augmented_lagrangian` solves it. For formatted declarations and options, use the `algorithms`, `card` and `options` commands. Listing Methods neither runs nor tests them.
 
 ## Read a saved report
 

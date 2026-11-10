@@ -11,7 +11,7 @@ import pytest
 import scipy.linalg
 
 from nwqlib import LinearDynamics, plan, solve
-from nwqlib.algorithms.lchs import LCHS, ProviderConfig
+from nwqlib.algorithms.lchs import LCHS, ProviderConfig, Trotter
 
 
 def test_low_somma_coefficient_rounding_is_refused_at_planning():
@@ -31,9 +31,9 @@ def test_low_somma_coefficient_rounding_is_refused_at_planning():
         return LCHS(lchs_kernel=ProviderConfig(implementation="low_somma_f2", parameters={"c": c}),
                     k_quadrature=ProviderConfig(implementation="symmetric_uniform_trapezoid"))
 
-    with pytest.raises(ValueError, match=r"u\*alpha = 1\.\d+ .* above 0\.1\*approximation_tolerance = 0\.001"):
+    with pytest.raises(ValueError, match=r"u\*alpha = 1\.\d+ .* above 0\.1\*approx_tol = 0\.001"):
         plan(target, method=shifted(50.), execution="classical")
-    with pytest.raises(ValueError, match=r"u\*alpha = 0\.003\d* .* above 0\.1\*approximation_tolerance"):
+    with pytest.raises(ValueError, match=r"u\*alpha = 0\.003\d* .* above 0\.1\*approx_tol"):
         plan(target, method=shifted(42.), execution="classical")
     edge = plan(target, method=shifted(40.), execution="classical").reconstruction.coefficient_l1_norm
     assert 5e-4 < 2.0**-53*edge <= 1e-3
@@ -71,7 +71,7 @@ def test_low_somma_dense_routes_report_the_same_ideal_total(execution):
     default split, `providers._resolve_low_somma_pair_profile`). The classical sum and the exact-readout circuit each lie
     within it of expm. Native floating-point error stays a separate unknown term.
     """
-    chosen = plan(LinearDynamics(**_TARGET), method=LCHS(**_LS, hamiltonian_evolution_backend="dense_exact"), execution=execution)
+    chosen = plan(LinearDynamics(**_TARGET), method=LCHS(**_LS, ham_evo="dense_exact"), execution=execution)
     assert chosen.reconstruction.psd_shift == 0
     if execution == "quantum":
         assert _facts(chosen)["lcu_coefficient_preparation"] == _facts(chosen)["initial_state_preparation"] == 0.
@@ -88,7 +88,7 @@ def test_low_somma_budgeted_product_formula_reports_its_synthesis_bound():
 
     `method.py` gives each node the allowance 0.1*epsilon. The independent check of the finite sum is expm.
     """
-    method = LCHS(**_LS, hamiltonian_evolution_backend="trotter_error_budgeted")
+    method = LCHS(**_LS, ham_evo="trotter_error_budgeted")
     chosen = plan(LinearDynamics(**_TARGET), method=method, execution="classical")
     synthesis = _facts(chosen)["trotter_synthesis"]
     assert 0 < synthesis <= .1*_TOLERANCE*chosen.reconstruction.coefficient_l1_norm
@@ -106,7 +106,7 @@ def test_low_somma_compact_qsp_reports_its_stages_and_its_scalar_total():
     from nwqlib import NormSquared
     from nwqlib.operators import ingest_pauli
     problem = LinearDynamics(A=ingest_pauli([("Z", .4j), ("X", .1)], num_qubits=1), initial_state=[.6, .8], time=1.)
-    chosen = plan(problem, method=LCHS(**_LS, hamiltonian_evolution_backend="qsp_block_encoding", approximation_tolerance=.2),
+    chosen = plan(problem, method=LCHS(**_LS, ham_evo="qsp_block_encoding", approx_tol=.2),
                   output=NormSquared(), execution="quantum")
     facts = _facts(chosen)
     assert facts["lcu_coefficient_preparation"] == facts["initial_state_preparation"] == 0.
@@ -124,7 +124,7 @@ def test_low_somma_keeps_a_stage_unknown_where_its_route_has_no_bound():
     from nwqlib.algorithms.lchs.refinement import LCHSRefinement
     from nwqlib.operators import ingest_pauli
     problem = LinearDynamics(**_TARGET)
-    fixed = plan(problem, method=LCHS(**_LS, hamiltonian_evolution_backend="trotter", trotter_steps=2), execution="classical")
+    fixed = plan(problem, method=LCHS(**_LS, ham_evo=Trotter(steps=2)), execution="classical")
     assert _facts(fixed)["trotter_synthesis"] == "missing_stage:trotter_synthesis"
     assert _facts(fixed)["trotter_pruning"] == 0.
     unknown = solve(fixed)
@@ -133,13 +133,13 @@ def test_low_somma_keeps_a_stage_unknown_where_its_route_has_no_bound():
     _, refined = unknown.verify(checks=LCHSRefinement(components=("fixed_pf",)))
     bound = next(item.fact.value.value for item in refined if item.fact.quantity == "trotter_synthesis")
     assert np.linalg.norm(np.asarray(unknown.solution)-_EXACT) <= 2*_TOLERANCE/3+bound
-    mps = plan(problem, method=LCHS(**_LS, hamiltonian_evolution_backend="dense_exact", lcu_state_preparation="mps_circuit"),
+    mps = plan(problem, method=LCHS(**_LS, ham_evo="dense_exact", lcu_prep="mps_circuit"),
                execution="quantum")
     assert _facts(mps)["lcu_coefficient_preparation"] == "missing_stage:lcu_coefficient_preparation"
     assert _facts(mps)["initial_state_preparation"] == 0.
     compact = LinearDynamics(A=ingest_pauli([("Z", .4j), ("X", .1)], num_qubits=1), initial_state=[.6, .8], time=1.)
-    analytic = plan(compact, method=LCHS(**_LS, hamiltonian_evolution_backend="qsp_block_encoding", approximation_tolerance=.2,
-                                         lcu_state_preparation="analytic"), execution="quantum")
+    analytic = plan(compact, method=LCHS(**_LS, ham_evo="qsp_block_encoding", approx_tol=.2,
+                                         lcu_prep="analytic"), execution="quantum")
     assert _facts(analytic)["lcu_coefficient_preparation"].startswith("analytic kernel PREP: known part 2 gamma delta_k")
     assert _facts(analytic)["initial_state_preparation"] == 0.
 
@@ -150,7 +150,7 @@ def test_low_somma_periodic_route_reports_its_strang_bound():
     from nwqlib.problems.inputs import ingest_occupation
     problem = LinearDynamics(A=PeriodicStencil(num_qubits=2, mass=1., diffusion=.25, potential=.3),
                              initial_state=ingest_occupation((0, 0), num_qubits=2), time=.5)
-    method = LCHS(**_LS, hamiltonian_evolution_backend="trotter", trotter_steps=None, trotter_synthesis_tolerance=1e-3)
+    method = LCHS(**_LS, ham_evo=Trotter(steps=None, synthesis_tol=1e-3))
     facts = _facts(plan(problem, method=method, execution="quantum"))
     assert 0 < facts["trotter_synthesis"] <= 1e-3
     assert facts["lcu_coefficient_preparation"] == facts["initial_state_preparation"] == 0.

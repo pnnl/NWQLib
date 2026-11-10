@@ -55,7 +55,7 @@ def select_periodic_encoding(operator, method):
         )
     if m == 0:
         raise ApplicabilityError("periodic QLS requires a positive original mass and encoded gap")
-    if method.block_encoding_implementation not in ("auto", "banded"):
+    if method.block_encoding not in ("auto", "banded"):
         raise ApplicabilityError("compact periodic QLS requires its banded encoding")
     # This function holds at most three bands and a few Fractions of binary64
     # values, whose size does not depend on q. The work that grows with q (the

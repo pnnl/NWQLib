@@ -34,7 +34,7 @@ def choose(*, A=MATRIX, b=RHS, solver="qsvt_inverse", output=None, shots=None, *
         LinearSystem(A=A, b=b),
         method=QLS(
             solver=solver,
-            encoded_solution_norm_estimate=None if solver == "qsvt_inverse" else 1.5,
+            norm_estimate=None if solver == "qsvt_inverse" else 1.5,
             **fields,
         ),
         output=output,
@@ -204,11 +204,11 @@ def test_planned_encoding_archive_keeps_constructor_phases_and_frames(
         from nwqlib.operators import ingest_pauli
 
         selected = choose(A=ingest_pauli((("I", 2.0), ("X", -1.0)), num_qubits=1), b=[1.0, 1j], kappa=3.0,
-                          phase_residual_tolerance=1e-6)
+                          phase_tol=1e-6)
     else:
         # I, X, Y and Z terms, so the saved packed table exercises every label letter.
         A = np.array([[2.0, -1.0 + 0.5j], [-1.0 - 0.5j, 1.5]])
-        selected = choose(A=A, b=[1.0, 1j], block_encoding_implementation=family, phase_residual_tolerance=1e-6)
+        selected = choose(A=A, b=[1.0, 1j], block_encoding=family, phase_tol=1e-6)
     saved = save_plan(selected, ArchiveFiles(tmp_path, 4_000_000))
     decomposition = saved["selected"]["encoding"].get("decomposition")
     assert (decomposition is not None and decomposition.get("reference") == "problem.A") == (
@@ -220,7 +220,7 @@ def test_planned_encoding_archive_keeps_constructor_phases_and_frames(
     monkeypatch.setattr(np.linalg, "svd", forbidden)
     loaded = load_plan(saved, ArchiveFiles(tmp_path, 4_000_000))
     assert loaded.content_id == selected.content_id
-    assert loaded.method.phase_residual_tolerance == 1e-6 and loaded.reconstruction.phase_tolerance == 1e-6
+    assert loaded.method.phase_tol == 1e-6 and loaded.reconstruction.phase_tolerance == 1e-6
     assert loaded._native["encoding"].record == selected._native["encoding"].record
     # The saved Pauli table decodes to the selected labels and coefficients.
     assert loaded._native["encoding"]._payload.decomposition == selected._native["encoding"]._payload.decomposition
@@ -249,19 +249,19 @@ def test_phase_target_keeps_the_polynomial_and_an_explicit_value_stands():
     assert default.phase_tolerance == pytest.approx(.1 * .01 / (k * s), rel=1e-15, abs=0)
     assert 1e-12 < default.phase_error <= default.phase_tolerance
     for explicit in (1e-3, 1e-13):
-        rec = choose(A=A, b=b, phase_residual_tolerance=explicit, **fields).reconstruction
+        rec = choose(A=A, b=b, phase_tol=explicit, **fields).reconstruction
         assert rec.polynomial == default.polynomial
         assert rec.phase_tolerance == explicit and rec.phase_error <= explicit
     strict = choose(A=A, b=b, epsilon_inv=1e-12, **fields).reconstruction
     assert strict.phase_tolerance == 1e-12
     preset = solve_wx_qsp_phases(tuple(c / strict.polynomial.rescale for c in strict.polynomial.coefficients))
     assert strict.phase_solution == preset.phases and strict.phase_fft_lengths == preset.evidence.fft_lengths
-    with pytest.raises(ValueError, match="phase_residual_tolerance") as refusal:
-        choose(A=A, b=b, phase_residual_tolerance=1e-30, **fields)
+    with pytest.raises(ValueError, match="phase_tol") as refusal:
+        choose(A=A, b=b, phase_tol=1e-30, **fields)
     assert refusal.value.evidence.coefficient_residual > 1e-30
     shortcut = dict(A=A, b=b, solver="shortcut_native_svp", output=StateVector(normalization="unit", global_phase="modulo_global_phase"))
     assert choose(**shortcut, **fields).reconstruction.phase_tolerance == 1e-12
-    assert choose(**shortcut, phase_residual_tolerance=1e-6, **fields).reconstruction.phase_tolerance == 1e-6
+    assert choose(**shortcut, phase_tol=1e-6, **fields).reconstruction.phase_tolerance == 1e-6
 
 
 @pytest.mark.parametrize("q", [1, 2, 3])
@@ -625,7 +625,7 @@ def test_actual_query_projector_and_phase_populations_match_independent_counts(
         b=[1.0, 1j],
         solver=solver,
         epsilon_inv=0.1,
-        block_encoding_implementation="dense_dilation",
+        block_encoding="dense_dilation",
     )
     r = selected.reconstruction
     program = selected.construction.program
@@ -813,7 +813,7 @@ def test_controlled_dense_query_synthesis_is_admitted_at_planning(solver, hermit
 
     def planned(max_work):
         return choose(A=A, b=np.ones(16), solver=solver, epsilon_inv=0.1,
-                      block_encoding_implementation="dense_dilation", max_work=max_work,
+                      block_encoding="dense_dilation", max_work=max_work,
                       dense_control_route=route)
 
     if hermitian:
@@ -840,7 +840,7 @@ def test_dense_query_syntheses_of_a_run_match_the_planning_charge(monkeypatch, g
     from test_synthesis_admission import _counted_dense_controls
 
     selected = choose(A=np.array([[1.0, 0.1], [0.0, 0.5]]) if general else np.diag([1.0, 0.5]), b=[1.0, 1j],
-                      epsilon_inv=0.1, block_encoding_implementation="dense_dilation", dense_control_route=route)
+                      epsilon_inv=0.1, block_encoding="dense_dilation", dense_control_route=route)
     calls = _counted_syntheses(monkeypatch)
     controls = _counted_dense_controls(monkeypatch)
     nwqlib.solve(selected, progress=False)
@@ -996,7 +996,7 @@ def test_classical_shortcut_admits_the_lapack_workspace_of_its_factorization(sol
     hermitian = rng.normal(size=(n, n))
     matrix = ((hermitian+hermitian.T)/np.linalg.norm(hermitian+hermitian.T, 2)+3*np.eye(n))/4
     problem = nwqlib.LinearSystem(A=matrix, b=np.eye(n)[0])
-    options = dict(solver=solver, kappa=3., alpha=1., epsilon_inv=1e-6, encoded_solution_norm_estimate=1.5)
+    options = dict(solver=solver, kappa=3., alpha=1., epsilon_inv=1e-6, norm_estimate=1.5)
     output = nwqlib.StateVector(normalization="unit", global_phase="modulo_global_phase")
     with pytest.raises(ValueError, match="max_bytes"):
         nwqlib.plan(problem, method=QLS(**options, max_bytes=factor_bytes(2*n)), output=output, execution="classical")

@@ -9,7 +9,7 @@ import pytest
 from _hadamard_method import HadamardPauliExpectation
 from _hadamard_method_metadata import DESCRIPTOR, REGISTRATION
 from nwqlib import Expectation, plan, prepare, submit
-from nwqlib.algorithms import (
+from nwqlib.algorithms.registry import (
     AlgorithmRegistry,
     Registration,
     direct_method,
@@ -92,9 +92,9 @@ def test_registry_loads_only_exact_selected_factory_and_never_source_paths(monke
     assert AlgorithmRegistry().discover() == () and registry.discover() == (REGISTRATION,)
     assert not calls
     actual = registry.resolve(
-        REGISTRATION.source, expected_type=HadamardPauliExpectation, preparation_choice="hzh"
+        REGISTRATION.source, expected_type=HadamardPauliExpectation, prep_choice="hzh"
     )
-    assert actual.preparation_choice == "hzh" and calls == [{"preparation_choice": "hzh"}]
+    assert actual.prep_choice == "hzh" and calls == [{"prep_choice": "hzh"}]
     assert direct_method(actual) is actual
     for source, error in (
         (REGISTRATION.source.revise(version="missing"), LookupError),

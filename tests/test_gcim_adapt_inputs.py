@@ -30,7 +30,7 @@ def test_absolute_pruning_preserves_combination_identity_shift_and_dropped_bound
             initial_state=[1, 0, 0, 0],
             pool_rows=((("IY", 1j),),),
             max_iterations=1,
-            pauli_coefficient_cutoff=cutoff,
+            pauli_cutoff=cutoff,
         )
         rec = plan.reconstruction
         assert {t.label: t.coefficient for t in rec.terms if t.label != "II"} == {
@@ -41,7 +41,7 @@ def test_absolute_pruning_preserves_combination_identity_shift_and_dropped_bound
     # An identity coefficient at or below the cutoff stays whole, so H -> H + bI moves every energy by b
     # whichever side of the cutoff the sum falls on, and it adds nothing to the removed mass.
     rec = plan_for(A=ingest_pauli((("II", cutoff / 2), ("ZI", 1.0)), num_qubits=2), initial_state=[1, 0, 0, 0],
-                   pool_rows=((("IY", 1j),),), max_iterations=1, pauli_coefficient_cutoff=cutoff).reconstruction
+                   pool_rows=((("IY", 1j),),), max_iterations=1, pauli_cutoff=cutoff).reconstruction
     assert rec.identity_shift == cutoff / 2 and rec.hamiltonian_dropped_l1 == 0.0
 
 

@@ -19,7 +19,7 @@ from nwqlib.algorithms.gcim.fixed_basis import (
 )
 from nwqlib.core.analysis import Result
 from nwqlib.core.planning import Plan
-from nwqlib.core.records import ContentID, FrozenArray, Nonnegative, Real, Record, Text
+from nwqlib.core.records import ContentID, FrozenArray, Nonnegative, Real, Record, Text, _ConstructorDisplay
 from nwqlib.operators.access import Count
 
 
@@ -104,7 +104,7 @@ class QFDReconstruction(Record):
         return self
 
 
-class QFDEvolutionDiagnostics(Record):
+class QFDEvolutionDiagnostics(_ConstructorDisplay, Record):
     """How `chemistry_evolution_terms` derived a fermionic evolution generator B from the integrals of chemistry data.
 
     [`chemistry_evolution_terms`][nwqlib.algorithms.qfd.chemistry.chemistry_evolution_terms]

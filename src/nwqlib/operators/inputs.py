@@ -983,7 +983,7 @@ def ingest_cartesian(dissipative=None, hamiltonian=None, *, dissipative_lower_bo
     parts and builds no evolution under a supplied-encoding part, so for a
     positive elapsed time and a nonzero initial state or source its
     planning raises `ApplicabilityError` for such a part. The sampled
-    estimator, `LCHS(observable_estimator="sampled_pairs")` on the
+    estimator, `LCHS(estimator="sampled_pairs")` on the
     `"qsp_block_encoding"` backend, evolves all three forms.
 
     `dissipative_lower_bound` states a lower bound `ell_u` on the smallest
@@ -1097,14 +1097,14 @@ def ingest_block_encoding(encoding, *, reference: InputRef, hermitian: bool, low
     bound, and an algorithm that needs one refuses the input.
 
     LCHS evolves a supplied encoding on its `"qsp_block_encoding"` backend,
-    which `hamiltonian_evolution_backend="auto"` chooses for this input. Its
+    which `ham_evo="auto"` chooses for this input. Its
     default coherent estimator evolves a general A (`hermitian=False`) from
     this one circuit and builds no evolution under an encoding asserted
     Hermitian, given as A or as a part of
     [`ingest_cartesian`][nwqlib.operators.inputs.ingest_cartesian]. For a
     positive elapsed time and a nonzero initial state or source, its
     planning raises `ApplicabilityError` for such an encoding. The sampled
-    estimator (`LCHS(observable_estimator="sampled_pairs")`) evolves both
+    estimator (`LCHS(estimator="sampled_pairs")`) evolves both
     forms. Both estimators refuse a general A, or a Hermitian part used as
     L, whose delta is unknown, because the shift that makes L, the Hermitian
     part of A, positive semidefinite and the kernel grid use the eigenvalue

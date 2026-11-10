@@ -51,9 +51,9 @@ method = LCHS(
     lchs_kernel={"implementation": "near_optimal_eq7", "parameters": {"beta": 0.9}},  # near-optimal kernel of An, Childs and Lin, arXiv:2312.03916v2 (notebook Section 9)
     k_quadrature={"implementation": "signed_binary_uniform",   # 2**K_QUBITS uniform k nodes of spacing 1/2
                   "parameters": {"num_qubits": K_QUBITS, "lsb_position": -1}},
-    approximation_tolerance=0.01,                   # does not refine this explicit k grid (Section 9)
-    hamiltonian_evolution_backend="dense_exact",    # each branch is an exact 4 × 4 matrix exponential
-    lcu_select_implementation="branch_controlled",  # each branch evolution is controlled on its address
+    approx_tol=0.01,                                # does not refine this explicit k grid (Section 9)
+    ham_evo="dense_exact",                          # each branch is an exact 4 × 4 matrix exponential
+    lcu_select="branch_controlled",                 # each branch evolution is controlled on its address
     duhamel_nodes=DUHAMEL_NODES,
     make_l_psd=False,                               # L is already positive semidefinite, so no shift is added
 )
@@ -371,7 +371,7 @@ show_table([
 #
 # - **Cost at sizes no simulator holds.** `plan` and `estimate` run without building the circuit ([Planning at scale](resource_estimation_at_scale.ipynb)).
 # - **A formula behind each predicted count.** `estimate` sums a gate-count formula per block ([Mathematics](../docs/mathematics.md)), and Section 2 compares the sum with the compiled circuit.
-# - **One argument changes the branch evolution.** `hamiltonian_evolution_backend` selects exact (`"dense_exact"`) or product-formula (`"trotter"`) evolution of each branch, or one QSP evolution of the joint generator of all branches (`"qsp_block_encoding"`), and `lchs_kernel` selects the kernel. The [LCHS introduction](lchs_linear_dynamics_intro.ipynb) compares kernels and quadratures.
+# - **One argument changes the branch evolution.** `ham_evo` selects exact (`"dense_exact"`) or product-formula (`"trotter"`) evolution of each branch, or one QSP evolution of the joint generator of all branches (`"qsp_block_encoding"`), and `lchs_kernel` selects the kernel. The [LCHS introduction](lchs_linear_dynamics_intro.ipynb) compares kernels and quadratures.
 #
 # [Why NWQLib](../docs/why_nwqlib.md) compares this workflow with other packages.
 #
@@ -479,7 +479,7 @@ plt.show()
 #
 # $$v(T)=e^{-AT}v(0)+\int_0^T e^{-A(T-s)}f\,ds.$$
 #
-# **The explicit quadrature of the first code cell fixes this approximation.** `approximation_tolerance=0.01` does not refine that grid and does not certify a 1% error in the final temperature. The signed-binary grid carries no kernel-approximation or k-quadrature bound, so Section 3 reports both as unavailable.
+# **The explicit quadrature of the first code cell fixes this approximation.** `approx_tol=0.01` does not refine that grid and does not certify a 1% error in the final temperature. The signed-binary grid carries no kernel-approximation or k-quadrature bound, so Section 3 reports both as unavailable.
 #
 # The kernel exponent $\beta=0.9$ lies above the range [0.7, 0.8] that An, Childs and Lin report as numerically best for truncation (arXiv:2312.03916v2, Sec. 2.2). Section 3 measures how accurately this particular construction solves its penalized equation.
 #
@@ -544,7 +544,7 @@ base_coefficients = resolve_lchs_coefficient_plan(
     LinearDynamics(A=A, initial_state=initial, time=FINAL_TIME),
     lchs_kernel=method.lchs_kernel,
     k_quadrature=method.k_quadrature,
-    approximation_tolerance=method.approximation_tolerance,
+    approx_tol=method.approx_tol,
 )
 k_nodes = np.asarray(base_coefficients.nodes)
 k_coefficients = np.asarray(base_coefficients.coefficients)

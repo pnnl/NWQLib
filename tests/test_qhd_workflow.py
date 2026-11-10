@@ -67,7 +67,7 @@ def _independent_state(binding, options):
     assert len(binding.variables) == 1
     k = options.num_grid_points
     lo, hi = binding.bounds[0]
-    if options.include_boundary_points:
+    if options.boundary_points:
         # k equally spaced points including both box endpoints.
         x, h = np.linspace(lo, hi, k), (hi - lo) / (k - 1)
     else:
@@ -142,7 +142,7 @@ def test_qhd_statevector_matches_ir_product_theory_distribution(execution, flavo
             schedule=QuadraticSchedule(gamma=0.3),
             theory_flavor=flavor,
             keep_state=True,
-            include_boundary_points=boundary,
+            boundary_points=boundary,
             initial_state=initial,
         ),
         execution=execution,
@@ -274,7 +274,7 @@ def test_native_preparation_equals_the_classical_initial_vector(initial, recipe)
     k = 4
     selected = make_plan(problem, QHD(
         num_grid_points=k, num_steps=1, total_time=1.0, schedule=QuadraticSchedule(gamma=0.0),
-        rotation_threshold=1e6, keep_state=True, initial_state=initial, initial_state_preparation=recipe,
+        rotation_threshold=1e6, keep_state=True, initial_state=initial, init_prep=recipe,
     ))
     assert step_blocks(selected, 0) == ()
     result = solve(selected)
@@ -335,6 +335,8 @@ def test_planning_stores_the_initial_state_and_its_error_bound(execution, flavor
             stored.initial_state_error)
     result = solve(selected)
     assert result.analyze().candidate == result.candidate
+    with pytest.raises(ValueError, match="QHD reanalysis accepts no settings, not total_time"):
+        result.analyze(total_time=0.9)
 
 
 @pytest.mark.parametrize(
@@ -383,7 +385,7 @@ def test_initial_state_planning_stage_fits_its_measured_allowance(d, k, state):
 
 
 def test_resource_only_initial_state_counts_the_evolution_blocks_alone():
-    """initial_state_preparation='none' keeps the evolution cost and drops the preparation.
+    """init_prep='none' keeps the evolution cost and drops the preparation.
 
     The hand count uses two variables, K = 3, one first-order step and a zero
     objective. The step has two XX+YY hopping blocks per variable and no
@@ -407,10 +409,10 @@ def test_resource_only_initial_state_counts_the_evolution_blocks_alone():
     tail = GaussianState(center=(1.0, 2.0), widths=(0.02, 10.0))
     selections = {}
     for name, method in (
-        ("none", options.revise(initial_state_preparation="none")),
+        ("none", options.revise(init_prep="none")),
         ("structured", options),
         ("tail", options.revise(initial_state=tail)),
-        ("qiskit_state_preparation", options.revise(initial_state_preparation="qiskit_state_preparation")),
+        ("qiskit_state_preparation", options.revise(init_prep="qiskit_state_preparation")),
     ):
         selected = make_plan(problem, method)
         selections[name] = (selected, selected.construction.selections[0])
@@ -421,14 +423,14 @@ def test_resource_only_initial_state_counts_the_evolution_blocks_alone():
     assert record.construction_work == 28
     # Two CX and two Ry(-angle) rotations per fused hopping block (resources.rotation_population).
     assert [(law.metric, law.value) for law in record.resource_laws] == [("cx", 8), ("arbitrary_rotations", 8)]
-    assert record.blocker == "initial_state_preparation='none' is resource-only"
+    assert record.blocker == "init_prep='none' is resource-only"
     assert resource_only.experiments == ()
     with pytest.raises(ValueError, match="resource-only"):
         solve(resource_only)
     with pytest.raises(ValueError, match="resource-only"):
         construct_qhd(resource_only.blocks[0], (), None)
     with pytest.raises(ValueError, match="resource-only"):
-        make_plan(problem, options.revise(initial_state_preparation="none"), execution="classical")
+        make_plan(problem, options.revise(init_prep="none"), execution="classical")
 
     for name, emitted, cx in (("structured", 10, 12), ("tail", 6, 6)):
         selected, chain_record = selections[name]
@@ -1062,7 +1064,7 @@ def test_onehot_step_blocks_match_an_independent_scalar_derivation(order, thresh
                            bounds=((0.0, 1.0), (0.0, 1.0)))
     selected = make_plan(problem, QHD(num_grid_points=k, num_steps=steps, total_time=total, trotter_order=order,
                                       rotation_threshold=threshold, schedule=QuadraticSchedule(gamma=0.3),
-                                      initial_state_preparation="none"))
+                                      init_prep="none"))
     r, grid = selected.reconstruction, owner._grid(selected)
     dt, tiny = total / steps, 2.0**-1022
     links = grid.links()
@@ -1651,7 +1653,7 @@ def test_symbolic_work_is_admitted_before_expansion_and_table_evaluation(monkeyp
 
     monkeypatch.setattr(compiler, "_lambdify_objective", spy)
     p = Optimization(objective=(x + y) ** sp.Rational(7, 2), variables=(x, y), bounds=unit)
-    method = QHD(num_grid_points=2, num_steps=1, initial_state_preparation="none")
+    method = QHD(num_grid_points=2, num_steps=1, init_prep="none")
     make_plan(p, method)
     # The admission opens with the initial state's d K = 4 units and the step
     # rows, 2 point values for the one midpoint step (QHD._admit_symbolic_work).

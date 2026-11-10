@@ -88,10 +88,11 @@ def controlled(gate: Any, num_ctrl_qubits: int, *, ctrl_state: int | str | None 
     both routes. :func:`dense_control_charges`
     lists the syntheses that either route makes, and it chooses the route by
     the same test (``_whole_matrix_definition``), so the counted syntheses
-    are the ones this function makes. The LCHS ``dense_exact`` SELECT, the
+    are the ones this function makes. The LCHS ``dense_exact`` SELECT
+    chooses the route from its ``DenseExact.control_route`` option, and the
     controlled QLS query of a dense dilation and the joint generator of
-    ``build_control_diagonal_generator_encoding`` choose the route from
-    their ``dense_control_route`` option, and a supplied circuit, whose
+    ``build_control_diagonal_generator_encoding`` from their
+    ``dense_control_route`` option. A supplied circuit, whose
     matrix is not known and which may hold operations without one, always
     takes the gate-wise route. This function checks no limit itself.
 

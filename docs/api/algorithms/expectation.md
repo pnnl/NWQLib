@@ -4,7 +4,8 @@
 
 ```python
 from nwqlib import Expectation, NormalizedExpectation, QuadraticForm, solve
-from nwqlib.algorithms import ExpectationAnalysis, ExpectationMethod
+from nwqlib.algorithms import ExpectationMethod
+from nwqlib.algorithms.expectation import ExpectationAnalysis
 from nwqlib.algorithms.expectation import ExpectationStatistics
 from nwqlib.evidence.binary import (
     BinaryInferenceOptions,
@@ -26,10 +27,12 @@ The shot count for an absolute sampling tolerance follows Hoeffding (1963), doi:
 ::: nwqlib.evidence.binary.BinaryInferenceOptions
     options:
       heading_level: 3
+      show_bases: false
 
 ::: nwqlib.evidence.binary.BinaryReadoutMitigation
     options:
       heading_level: 3
+      show_bases: false
 
 ## Read the result
 

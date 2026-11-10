@@ -425,8 +425,8 @@ PROBES = (
         name="qhd_resource_only_charges_chain_cx",
         module="nwqlib.algorithms.qhd.method",
         qualname="QHD._select_native",
-        old='        if self.initial_state_preparation == "structured":\n',
-        new='        if self.initial_state_preparation != "qiskit_state_preparation":\n',
+        old='        if self.init_prep == "structured":\n',
+        new='        if self.init_prep != "qiskit_state_preparation":\n',
         pytest_args=(
             "tests/test_qhd_workflow.py::"
             "test_resource_only_initial_state_counts_the_evolution_blocks_alone",
@@ -3250,7 +3250,7 @@ PROBES = (
         name="lchs_select_route_drop",
         module="nwqlib.algorithms.lchs.native",
         qualname="construct_select",
-        old="            for k in data.quadrature.k_nodes)), route=data.method.dense_control_route)\n",
+        old="            for k in data.quadrature.k_nodes)), route=dense_options(data.method).control_route)\n",
         new="            for k in data.quadrature.k_nodes)))\n",
         pytest_args=(
             "tests/test_dense_control_route.py::test_lchs_dense_select_applies_each_branch_under_its_address_on_both_routes",

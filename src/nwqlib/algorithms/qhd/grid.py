@@ -32,7 +32,7 @@ class OneHotGrid:
       ``upper``, so they need no register coordinates. The three-point
       stencil approximates -1/2 times the second derivative with O(h**2)
       local error for smooth data.
-    - Dirichlet endpoint grid, ``include_boundary_points=True``:
+    - Dirichlet endpoint grid, ``boundary_points=True``:
       ``x_i = lower + i h`` with ``h = (upper-lower)/(K-1)``, so
       ``x_0 = lower`` and ``x_(K-1) = upper``. The endpoint amplitudes are
       dynamical, with missing neighbors treated as zero outside that grid.
@@ -68,7 +68,7 @@ class OneHotGrid:
         variables: The Problem's variables, in coordinate order.
         bounds: ``(lower, upper)`` of each variable, in the same order.
         num_grid_points: K, the grid points of each variable.
-        include_boundary_points: Place the Dirichlet grid on both box
+        boundary_points: Place the Dirichlet grid on both box
             endpoints instead of the interior.
         boundary: ``"dirichlet"`` or ``"periodic"``, the boundary condition
             of the finite-difference kinetic term.
@@ -77,7 +77,7 @@ class OneHotGrid:
     variables: tuple[Any, ...]
     bounds: tuple[tuple[float, float], ...]
     num_grid_points: int
-    include_boundary_points: bool = False
+    boundary_points: bool = False
     boundary: Literal["dirichlet", "periodic"] = "dirichlet"
 
     def __post_init__(self) -> None:
@@ -142,7 +142,7 @@ class OneHotGrid:
 
         import numpy as np
 
-        interior = self.boundary == "dirichlet" and not self.include_boundary_points
+        interior = self.boundary == "dirichlet" and not self.boundary_points
         for j, (lower, upper) in enumerate(self.bounds):
             name = self.variables[j]
             h = self.spacing(j)
@@ -249,7 +249,7 @@ class OneHotGrid:
         k = self.num_grid_points
         if self.boundary == "periodic":
             intervals = k
-        elif self.include_boundary_points:
+        elif self.boundary_points:
             intervals = k - 1
         else:
             intervals = k + 1
@@ -272,7 +272,7 @@ class OneHotGrid:
         """
         import numpy as np
 
-        interior = int(self.boundary == "dirichlet" and not self.include_boundary_points)
+        interior = int(self.boundary == "dirichlet" and not self.boundary_points)
         numbers = np.arange(self.num_grid_points, dtype=np.int64)
         numbers += interior
         x = numbers.astype(np.float64)
@@ -284,5 +284,5 @@ class OneHotGrid:
         """Return ``x_i = lower + (i + 1) h`` on the interior grid and ``lower + i h`` on the others."""
 
         lower, _ = self.bounds[var_index]
-        interior = self.boundary == "dirichlet" and not self.include_boundary_points
+        interior = self.boundary == "dirichlet" and not self.boundary_points
         return lower + (grid_index + int(interior)) * self.spacing(var_index)

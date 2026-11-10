@@ -37,9 +37,11 @@ The Hadamard Method returns `NormalizedExpectation` through a small Result subcl
 
 ## Configure the Method {#configuration-and-selected-science}
 
-Subclass `nwqlib.algorithms.Method`, an immutable Record. Declare the constant `descriptor: ClassVar[AlgorithmDescriptor]` and the Method's scientific configuration fields on that class. Required inputs stay required, and schema inspection does not invent values for them. A descriptor states scope and references, and it neither proves scientific applicability nor establishes that a backend supports the Method.
+Subclass `nwqlib.algorithms.protocol.Method`, an immutable Record. Declare the constant `descriptor: ClassVar[AlgorithmDescriptor]` and the Method's scientific configuration fields on that class. Required inputs stay required, and schema inspection does not invent values for them. A descriptor states scope and references, and it neither proves scientific applicability nor establishes that a backend supports the Method. Its `method` and `version` identify the implementation that a registration resolves, including the configuration fields that its factory accepts. Give the descriptor a new `version` when a change renames, removes or reinterprets a configuration field. Registry resolution and the `--version` option of the [command line](cli.md) match the exact pair and never fall back to another version, so a configuration written for one version does not reach the factory of another.
 
 The Method's content hash is part of every Plan it makes, so changing a configuration field gives a new Plan instead of altering an existing one. Execution, analysis and saved archives then use that one Plan without running `plan` again, which keeps each Result and observation tied to the construction it came from.
+
+Tab completion on a Method instance, which reads `dir(method)`, lists the configuration fields, the Record operations such as `revise` and the methods that the Method's own class adds. It leaves out the hooks that the `Method` base class declares, including your overrides of them, so that a user sees the options first. The hooks stay on the class and in `help(MyMethod)`, and the tables below list them.
 
 ### What every Method provides {#required-hooks}
 
@@ -47,7 +49,7 @@ The Method's content hash is part of every Plan it makes, so changing a configur
 | --- | --- |
 | Planning: `plan(problem, *, output, execution, shots, rng, accuracy=None)` | Return the common Plan, keeping the original Problem, the configured Method, the output and the state of the random-number generator after planning. For a false premise of the Method on this input, raise `ApplicabilityError`. For a step over a memory or work limit, raise `ResourceLimitError`. Both come from `nwqlib.algorithms`, and `compare` records each as a row with no Plan, while any other exception, such as a `ValueError` for an invalid option, raises from `compare`. |
 | Construction | Put the Program and its block records in the Plan's `construction`, and attach the in-memory `SelectedBlock` objects and any named in-memory inputs with `Plan._bind`. Resource estimates and circuit building read the same blocks. |
-| Analysis: `analyze(plan, data, *, settings)` | Return the scientific Result computed from that Plan and the data it uses. It does not collect observations. NWQLib attaches the Result to the Plan and the data with `Result._attach`, which calls `validate_plan`, and also accepts a Result already attached to the same Plan and data. |
+| Analysis: `analyze(plan, data, *, settings)` | Return the scientific Result computed from that Plan and the data it uses. It does not collect observations. `settings` holds the names a caller passes to `result.analyze(...)`. Document the settings that your Method can change after measurement and raise `ValueError` for any other name, so a Method without such settings refuses every non-empty `settings`. NWQLib does not check these names for you. NWQLib attaches the Result to the Plan and the data with `Result._attach`, which calls `validate_plan`, and also accepts a Result already attached to the same Plan and data. |
 
 ### Optional hooks {#optional-hooks}
 
@@ -107,13 +109,13 @@ An external Method needs no change to NWQLib's shared code, and it uses NWQLib's
 A `Registration` contains an exact Source, a trusted `module:attribute` factory (the function or class that constructs the Method), and optionally an already known descriptor and Method type. Listing registrations does not run a factory. Declare the registration in a module that does not import the Method implementation, as `tests/_hadamard_method_metadata.py` does. For example, with a module `my_methods_metadata` whose factory is `my_methods:HadamardPauliExpectation`:
 
 ```python
-from nwqlib.algorithms import AlgorithmRegistry
+from nwqlib.algorithms.registry import AlgorithmRegistry
 from my_methods_metadata import REGISTRATION
 
 registry = AlgorithmRegistry((REGISTRATION,))
 print(registry.discover())  # my_methods remains unloaded
 
-method = registry.resolve(REGISTRATION.source, preparation_choice="native")
+method = registry.resolve(REGISTRATION.source, prep_choice="native")
 ```
 
 `resolve` calls only that factory, with the supplied configuration. `expected_type=MyMethod` optionally checks that the Method is an instance of the caller's type and returns it with that type. `direct_method(instance)` checks a Method you already constructed, without a factory. No cache reuses an earlier configuration.
@@ -156,8 +158,6 @@ These names start with an underscore but are supported for Method and Result imp
 | `Result._validate_common_plan(self, plan, plan_type)` | Call it from a concrete `validate_plan` to check the exact Plan type, the Plan's content hash and the recorded Method, then check the Method-specific scientific relation. |
 | `Result._summary_lines(self)` | Return a finite sequence of readable lines from existing scalar fields. It must not collect data, solve a reference problem, write arrays or reanalyze. |
 | `_plan_summary_lines(self)` on a Plan's `reconstruction` record | Optional. Return a finite sequence of readable lines from the record's fields, which `print(plan)` adds after its first line. It has the same limits as `Result._summary_lines`. |
-| `nwqlib.blocks._archive.write_blocks(blocks, files)` | Call it in `save_archive` to write the Plan's blocks into the archive. It supports blocks made by NWQLib's own block functions, not arbitrary Python callables. |
-| `nwqlib.blocks._archive.read_blocks(data, records, files)` | Call it in `load_archive` to restore the saved blocks. It binds only the library's known constructors, so loading never imports or calls code named in the archive. |
 
 A Method that can be saved defines `result_type`, `save_archive(plan, files)` and `load_archive(saved, files)`. The base Method class provides no archive hooks. The `files` argument is an `ArchiveFiles` object, not a filename. Save the Plan description with `plan.to_record()`. `files.read_plan` rebuilds the Plan from that record, the input, output and block readers restore the in-memory objects, and `load_archive` attaches them with `plan._bind`. Each file write counts against the archive's byte limits. Use the `ArchiveFiles` object you receive rather than writing files by other means. The reference Hadamard Method writes and restores its blocks with `write_blocks` and `read_blocks`, as the [GHZ example](own_circuit.md#when-the-archive-hooks-are-required) does.
 

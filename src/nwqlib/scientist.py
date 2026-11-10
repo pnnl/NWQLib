@@ -107,6 +107,24 @@ class ComparisonRow:
         ):
             raise TypeError("comparison prior work must preserve immutable supplied occurrences")
 
+    def __str__(self):
+        """Summarize the row in one line: the Method type, then `planned`, or why it has no Plan.
+
+        A row whose planning stopped at a memory or work limit says
+        `resource limited` before its reason. The fields hold the Plan,
+        estimate and evidence in full.
+        """
+        name = type(self.method).__name__
+        if self.plan is not None:
+            return f"{name}: planned"
+        return f"{name}: {'resource limited' if self.resource_limited else 'not planned'}: {self.reason}"
+
+    def __repr__(self):
+        return str(self)
+
+    def _repr_pretty_(self, printer, cycle):
+        printer.text(f"{type(self).__name__}(...)" if cycle else str(self))
+
 
 @dataclass(frozen=True)
 class Comparison:
@@ -147,6 +165,22 @@ class Comparison:
             for row in self.rows
         ):
             raise ValueError("comparison rows must address the same original scientific Problem")
+
+    def __str__(self):
+        """Summarize the comparison: the Problem type, then one line per row in `rows` order.
+
+        Each line starts with the row index that `select` takes. The fields
+        hold the Problem and every row in full.
+        """
+        lines = [f"Comparison for {type(self.problem).__name__}:"]
+        lines.extend(f"  [{index}] {row}" for index, row in enumerate(self.rows))
+        return "\n".join(lines)
+
+    def __repr__(self):
+        return str(self)
+
+    def _repr_pretty_(self, printer, cycle):
+        printer.text(f"{type(self).__name__}(...)" if cycle else str(self))
 
     def select(self, index):
         """Return the row at `index`, unchanged.
@@ -602,7 +636,11 @@ def solve(
             holds the answer in `eigenvalue`.
 
     Raises:
-        TypeError: If a Problem is given without `method`.
+        TypeError: If a Problem is given without `method`. The message names
+            the built-in Methods that declare the Problem's type, as
+            `methods(problem)` lists them. For a `ConstrainedOptimization`,
+            which no Method declares, it names
+            `nwqlib.algorithms.qhd.solve_augmented_lagrangian` instead.
         ValueError: If a Plan or row is given with `method`, `output`,
             `accuracy`, `execution`, `shots` or `seed`. Pass them to a new
             `plan(...)` instead. With a Problem, also for the invalid values
@@ -643,7 +681,17 @@ def solve(
         selected = problem_or_plan
     else:
         if method is None:
-            raise TypeError("solve requires method= when given a raw Problem")
+            from nwqlib.problems.records import _CONSTRAINED_ENTRY, ConstrainedOptimization
+
+            name = type(problem_or_plan).__name__
+            names = [entry.factory.partition(":")[2] for entry in methods(problem_or_plan)]
+            if names:
+                candidates = f"built-in Methods that declare {name}: {', '.join(names)}"
+            else:
+                candidates = f"no built-in Method declares {name}"
+                if isinstance(problem_or_plan, ConstrainedOptimization):
+                    candidates += "; " + _CONSTRAINED_ENTRY
+            raise TypeError("solve requires method= when given a raw Problem; " + candidates)
         selected = plan(
             problem_or_plan,
             method=method,
@@ -1049,25 +1097,43 @@ def load_run(path, *, backend=None, method=None, progress=None):
     return load(path, backend=backend, method=method, progress=progress)
 
 
-def methods():
-    """List the built-in Methods.
+def methods(problem=None):
+    """List the built-in Methods, or those that declare a Problem's type.
 
     Each entry is a registration record. Its `source.name` and
-    `source.version` name the Method. A registration declares what the Method
-    is for. It does not establish that the Method or a backend has been
-    validated for a problem. Nothing is run. The command-line `algorithms`,
-    `card` and `options` commands print the same information and each
-    Method's settings ([Use the command line](../cli.md)).
+    `source.version` name the Method, and its `factory` ends with the Method's
+    class name. A registration declares what the Method is for. It does not
+    establish that the Method or a backend has been validated for a problem.
+    Nothing is run, and no Method is constructed. The command-line
+    `algorithms`, `card` and `options` commands print the same information and
+    each Method's settings ([Use the command line](../cli.md)).
+
+    Args:
+        problem (ProblemRecord | None): A Problem such as `LinearSystem(...)`.
+            Given, only the Methods whose `descriptor.problem_families` lists
+            the Problem's `kind` are returned, which can be none. No Method
+            declares `ConstrainedOptimization`, so it gives none, and
+            `nwqlib.algorithms.qhd.solve_augmented_lagrangian` solves it.
+            Default `None` lists every built-in Method.
 
     Returns:
-        registrations (tuple[Registration, ...]): One record per built-in
-            Method.
+        registrations (tuple[Registration, ...]): One record per listed
+            built-in Method, in name and version order.
 
     Examples:
-        >>> from nwqlib import methods
+        >>> from nwqlib import LinearSystem, methods
         >>> print([entry.source.name for entry in methods()])
         ['adapt_gcim', 'chebyshev_lanczos', 'finite_pauli_expectation', 'fixed_gcim', 'lchs', 'qcels', 'qfd', 'qhd', 'qls', 'rfe', 'rwpe', 'spe']
+        >>> problem = LinearSystem(A=[[2.0, 1.0], [1.0, 3.0]], b=[1.0, 0.0])
+        >>> print([entry.factory for entry in methods(problem)])
+        ['nwqlib.algorithms.qls.method:QLS']
     """
     from nwqlib.algorithms.registry import builtin_registrations
 
-    return builtin_registrations()
+    registrations = builtin_registrations()
+    if problem is None:
+        return registrations
+    # A Problem type that a Method author defines need not have a kind; no
+    # built-in Method declares it.
+    kind = getattr(problem, "kind", None)
+    return tuple(entry for entry in registrations if kind in entry.descriptor.problem_families)

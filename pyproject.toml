@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nwqlib"
-version = "1.0.4"
+version = "1.0.4.post1"
 description = "Evidence-aware quantum algorithms and scientific workflows."
 readme = "README.md"
 license = "BSD-2-Clause"
@@ -70,8 +70,9 @@ chemistry = [
 ]
 ibm = [
     "qiskit>=2.6.0",
-    # Qualified public Runtime V2 transport and result models.
-    "qiskit-ibm-runtime>=0.49.0",
+    # The first release whose top-level SamplerV2 and EstimatorV2 are the
+    # client-side primitives that IBMRuntimeBackend submits with.
+    "qiskit-ibm-runtime>=0.52.0",
 ]
 ionq = [
     "qiskit>=2.6.0",

@@ -50,7 +50,7 @@ def stored_inputs(*, calibrated=False):
         state=ingest_occupation("1", num_qubits=1),
         observable=ingest_pauli((("Z", 1.0),), num_qubits=1),
     )
-    plan = select_plan(problem, method=ExpectationMethod(preparation_choice="hzh"), seed=7)
+    plan = select_plan(problem, method=ExpectationMethod(prep_choice="hzh"), seed=7)
     realization = plan.resolve("expectation")
     # Declare only the H/Z operations and readout this supplied profile covers.
     # Assessment compares the actual selected HZH workload with that domain.

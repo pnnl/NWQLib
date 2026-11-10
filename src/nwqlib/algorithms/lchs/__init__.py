@@ -4,6 +4,10 @@ from importlib import import_module
 
 _EXPORT_GROUPS = {
     "method": ("LCHS",),
+    "route_options": (
+        "DenseExact", "Trotter", "TrotterErrorBudgeted", "QSPBlockEncoding", "MPSCircuit", "Coherent",
+        "SampledPairs", "Richardson", "PTSC",
+    ),
     "primary_records": ("LCHSAnalysis", "LCHSPairProgress"),
     "analysis": ("sampled_pair_progress",),
     "verification": ("LCHSVerification",),

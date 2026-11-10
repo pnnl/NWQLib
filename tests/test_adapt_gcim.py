@@ -18,7 +18,7 @@ def test_processed_commutator_sign_at_subnormal_squared_scale():
             A=ingest_pauli((("Z", tiny), ("I", shift)), num_qubits=1),
             pool_rows=((("Y", 1j),),),
             max_iterations=1,
-            pauli_coefficient_cutoff=0.0,
+            pauli_cutoff=0.0,
         )
         assert plan.reconstruction.pool[0].commutator.rows() == (
             ("X", 2 * tiny),
@@ -114,7 +114,7 @@ def _real_adapt(acquisition=None, *, shots=32, pool=("YI", "IY", "XY", "YX"),
                 terms=(("ZI", 1.0), ("IZ", 1.0), ("XX", .5)), max_iterations=3, **settings):
     """Sampled ADAPT from |00> with single-word generators i P, without optimization; ``settings`` go to ADAPT."""
     from nwqlib import Eigenproblem, plan
-    from nwqlib.algorithms import PencilAcquisition
+    from nwqlib.algorithms.gcim import PencilAcquisition
     from nwqlib.problems import ingest_occupation
 
     method = ADAPT(initial_state=ingest_occupation((0, 0), num_qubits=2),
@@ -159,7 +159,8 @@ def test_grouped_adapt_acquires_only_the_new_settings_of_each_stage(tmp_path, mo
     energy_decrease is the negative change, not clipped to zero.
     """
     from nwqlib import load_result, solve
-    from nwqlib.algorithms import ApplicabilityError, PencilAcquisition
+    from nwqlib.algorithms import ApplicabilityError
+    from nwqlib.algorithms.gcim import PencilAcquisition
     from nwqlib.backends import qiskit_aer
 
     groups, terms, sizes = 2, 3, (1, 2, 4, 6)
@@ -227,7 +228,7 @@ def test_grouped_adapt_acquires_only_the_new_settings_of_each_stage(tmp_path, mo
     assert not (result.data.trace.events or result.data.observations.chunks or result.data.receipts)
 
     # With PencilSampling the scalar Plan still measures nothing, and both stages have zero shots.
-    from nwqlib.algorithms import BoundedRitzGrowth, PencilSampling
+    from nwqlib.algorithms.gcim import BoundedRitzGrowth, PencilSampling
 
     staged = solve(plan_for(A=ingest_pauli((("I", .75),), num_qubits=1), initial_state=(1, 1j),
                             pool_rows=((("Y", 1j),),), shots=32, max_iterations=1, acquisition=request,
@@ -249,7 +250,7 @@ def test_grouped_adapt_acquires_only_the_new_settings_of_each_stage(tmp_path, mo
     # b = 2 states has m = 1 real overlap setting, whose estimate v_s is zero because H0 = 0, so the main
     # stage takes the uniform B - B_p = 48 - 12 = 36 shots, and only the main chunk forms the result.
     bounded = solve(_real_adapt(terms=(("II", .75), ("ZZ", 1e-9)), shots=4096, max_iterations=2,
-                                pauli_coefficient_cutoff=1e-8,
+                                pauli_cutoff=1e-8,
                                 basis_growth=BoundedRitzGrowth(max_chain_length=1),
                                 sampling=PencilSampling(total_shots=48, pilot_fraction=.25)), progress=False)
     chunks = bounded.data.observations.chunks
@@ -292,7 +293,7 @@ def test_pencil_sampling_measures_the_final_basis_again_after_an_unchanged_selec
     from fractions import Fraction
     import nwqlib._run_journal as journal
     from nwqlib import load_result, solve
-    from nwqlib.algorithms import PencilSampling
+    from nwqlib.algorithms.gcim import PencilSampling
     from nwqlib.algorithms.gcim import pencil_workflow
     from nwqlib.algorithms.gcim.fixed_basis import pencil_pairs, sampled_settings
     from nwqlib.backends import qiskit_aer
@@ -315,7 +316,7 @@ def test_pencil_sampling_measures_the_final_basis_again_after_an_unchanged_selec
     # execution, would end its final phase with no stage setting and silently leave the budget unspent,
     # so planning refuses it.
     from nwqlib import plan as plan_of
-    from nwqlib.algorithms import PencilAcquisition
+    from nwqlib.algorithms.gcim import PencilAcquisition
 
     termwise = PencilAcquisition(matrix_measurement="termwise", pair_preparation="controlled")
     with pytest.raises(ValueError, match="grouped"):
@@ -513,7 +514,8 @@ def test_one_basis_through_fixed_gcim_and_adapt_matches_its_independent_pencil(f
     from fractions import Fraction as F
     from qiskit.quantum_info import SparsePauliOp
     import nwqlib
-    from nwqlib.algorithms import FixedGCIM, PencilAcquisition
+    from nwqlib.algorithms import FixedGCIM
+    from nwqlib.algorithms.gcim import PencilAcquisition
     from nwqlib.problems import ingest_occupation, ingest_vector
     from nwqlib._prepared_execution import Run, prepare_experiment, submit_experiment
     from test_gcim_production import _entry_ranges, _hoeffding_radius, matrix
@@ -625,7 +627,7 @@ def test_prefix_joint_state_keeps_each_preparation_phase():
     import math
     from fractions import Fraction as F
     from qiskit import QuantumCircuit
-    from nwqlib.algorithms import PencilAcquisition
+    from nwqlib.algorithms.gcim import PencilAcquisition
     from nwqlib.algorithms.gcim.pair_reducer import entry_bounds
     from nwqlib.problems import ingest_occupation
     from nwqlib._prepared_execution import Run, prepare_experiment, submit_experiment
@@ -716,7 +718,7 @@ _VACUUM_TERMS = (("ZI", .5), ("XX", .25), ("IY", .375))
 
 def _vacuum_plan(rule, *, pool_rows=_VACUUM_POOL, terms=_VACUUM_TERMS, max_iterations=2, **settings):
     """Plan ADAPT from |01> on two qubits with ``pair_preparation=rule``, by default with at most two selections."""
-    from nwqlib.algorithms import PencilAcquisition
+    from nwqlib.algorithms.gcim import PencilAcquisition
     from nwqlib.problems import ingest_occupation
 
     return plan_for(A=ingest_pauli(terms, num_qubits=2), initial_state=ingest_occupation((1, 0), num_qubits=2),
@@ -1030,7 +1032,7 @@ def _double_restore_plan(shots=None):
     import nwqlib
     from qiskit.quantum_info import SparsePauliOp
     from nwqlib import Eigenproblem
-    from nwqlib.algorithms import PencilAcquisition
+    from nwqlib.algorithms.gcim import PencilAcquisition
     from nwqlib.problems import ingest_occupation
 
     hamiltonian = SparsePauliOp.from_list([
@@ -1246,7 +1248,7 @@ def _four_shot_growth():
     has x = +1 three times and -1 once with ZI parity +1, so y = x. Every
     other setting has x = +1 and parity +1 on all four shots.
     """
-    from nwqlib.algorithms import PencilAcquisition
+    from nwqlib.algorithms.gcim import PencilAcquisition
     from nwqlib.core import Source
     from nwqlib.core.planning import ObservationSpec
     from nwqlib.execution import ObservationChunk, RegisterMap
@@ -1387,6 +1389,8 @@ def test_grouped_pass_is_admitted_once_before_acquisition_and_once_from_saved_co
     del passes[:], checks[:]
     result.analyze(overlap_cutoff=1e-6)
     assert passes and not any(passes) and len(checks) == len(passes)
+    with pytest.raises(ValueError, match="ADAPT reanalysis accepts overlap_cutoff, not cutoff"):
+        result.analyze(cutoff=1e-6)
 
 
 def test_native_depth_limit_stops_adapt_on_its_last_solved_pencil(tmp_path, monkeypatch, ibm_runtime_spy):
@@ -1413,11 +1417,9 @@ def test_native_depth_limit_stops_adapt_on_its_last_solved_pencil(tmp_path, monk
     another Qiskit version is reported, raises NativeDepthCapRefusal with
     its provenance before any job and keeps its phase and pending query.
     Reopened where the recorded versions are installed, it completes with
-    the queries, depths and stop reason of the run without a limit. Only
-    qiskit-ibm-runtime 0.49.0 qualifies an IBM depth, so under another
-    installed version no depth is qualified and a limit refuses the first
-    query before its job. The synthetic counts choose the generator but
-    decide no relation tested here.
+    the queries, depths and stop reason of the run without a limit. The
+    synthetic counts choose the generator but decide no relation tested
+    here.
     """
     import importlib.metadata
 
@@ -1433,7 +1435,7 @@ def test_native_depth_limit_stops_adapt_on_its_last_solved_pencil(tmp_path, monk
         method = ADAPT(initial_state=ingest_occupation((0, 0), num_qubits=2),
                        pool=tuple(ingest_pauli(((p, 1j),), num_qubits=2) for p in ("XY", "YX")),
                        theta=pi / 8, max_iterations=1, gradient_norm_floor=0.0, optimize_every_m=1,
-                       optimize_rounds_n=1, optimize_max_evaluations=1, max_native_two_qubit_depth=limit)
+                       optimize_rounds_n=1, max_evals=1, max_2q_depth=limit)
         return nwqlib.plan(problem, method=method, execution="quantum", shots=shots, seed=7)
 
     def finish(run):
@@ -1452,17 +1454,6 @@ def test_native_depth_limit_stops_adapt_on_its_last_solved_pencil(tmp_path, monk
         assert run.result.stop_reason != "native_depth_refused"
         recorded, stop = [a.native_depth for a in run.prepared_artifacts], run.result.stop_reason
         unlimited = queries(run)
-    installed = importlib.metadata.version("qiskit-ibm-runtime")
-    if installed != "0.49.0":
-        assert all(not depth.qualified and f"qiskit-ibm-runtime {installed} is installed" in depth.reason
-                   for depth in recorded)
-        requests = len(spy.api.requests)
-        with run_with(0, tmp_path / "unchecked") as run:
-            assert run.result.stop_reason == "native_depth_refused" and run.result.history == ()
-            (label,) = run.result.pending
-            assert run.prepared_artifacts[0].content_id in label
-            assert run.trace.events == () and len(spy.api.requests) == requests
-        return
     assert all(depth.qualified for depth in recorded)
     kinds = [kind for kind, _ in unlimited]
     first = kinds.index("energy")
@@ -1532,7 +1523,7 @@ def test_bounded_growth_stops_at_its_basis_size_and_default_growth_has_no_basis_
     """The basis-size stop belongs to BoundedRitzGrowth, and the default growth plans any number of selections."""
     import nwqlib
     from nwqlib import Eigenproblem
-    from nwqlib.algorithms import BoundedRitzGrowth
+    from nwqlib.algorithms.gcim import BoundedRitzGrowth
     from nwqlib.problems import ingest_occupation
 
     terms = (("ZZ", .5), ("ZI", 1.0), ("IZ", .7), ("XX", .3), ("XI", .2))
@@ -1553,7 +1544,7 @@ def test_bounded_growth_stops_at_its_basis_size_and_default_growth_has_no_basis_
 def _bounded_plan(**growth):
     """Exact quantum bounded growth on H = 0.5 ZZ + ZI + 0.7 IZ + 0.3 XX + 0.2 XI from |00>, pool iYI, iIY, iXY, theta = pi/8."""
     from nwqlib import Eigenproblem, plan
-    from nwqlib.algorithms import BoundedRitzGrowth
+    from nwqlib.algorithms.gcim import BoundedRitzGrowth
     from nwqlib.problems import ingest_occupation
 
     terms = (("ZZ", .5), ("ZI", 1.0), ("IZ", .7), ("XX", .3), ("XI", .2))
@@ -1653,7 +1644,7 @@ def test_bounded_growth_builds_short_chains_and_pays_for_every_scored_extension(
     energies = [row.energy for row in result.history]
     assert [row.energy_decrease for row in result.history] == [None, *(x - y for x, y in zip(energies, energies[1:]))]
 
-    from nwqlib.algorithms import BoundedRitzGrowth
+    from nwqlib.algorithms.gcim import BoundedRitzGrowth
     from nwqlib.algorithms.gcim.bounded_growth import frontier
 
     def examine(cursor, limit):
@@ -1716,7 +1707,7 @@ def test_frontier_cursor_ends_with_the_parent_examined_last_and_wraps_to_the_ref
       position of the window, and the round wraps to the reference, which
       takes (b,).
     """
-    from nwqlib.algorithms import BoundedRitzGrowth
+    from nwqlib.algorithms.gcim import BoundedRitzGrowth
     from nwqlib.algorithms.gcim.bounded_growth import frontier
 
     t = pi / 8
@@ -1769,7 +1760,7 @@ def test_bounded_rows_reuse_the_screened_generator_circuits_of_their_round(monke
 
     import nwqlib
     from nwqlib import Eigenproblem
-    from nwqlib.algorithms import BoundedRitzGrowth
+    from nwqlib.algorithms.gcim import BoundedRitzGrowth
     from nwqlib.problems import ingest_occupation
     from nwqlib.subroutines import fermionic_circuits
 
@@ -1866,7 +1857,7 @@ def test_zero_bounded_score_does_not_rule_out_an_energy_decrease():
 def _sampled_bounded():
     """Bounded growth on H = ZI + 0.5 IZ + 0.3 XX from |00>, pool a = iIY and b = (i/16) YI, theta = pi/2, chains of at most 2."""
     from nwqlib import Eigenproblem
-    from nwqlib.algorithms import BoundedRitzGrowth
+    from nwqlib.algorithms.gcim import BoundedRitzGrowth
     from nwqlib.problems import ingest_occupation
 
     pool = (ingest_pauli((("IY", 1j),), num_qubits=2), ingest_pauli((("YI", 1j / 16),), num_qubits=2))
@@ -2039,7 +2030,7 @@ def test_sampled_bounded_growth_scores_only_extensions_with_resolved_independenc
     pair = next(m for m in result.group_moments if m.pair == (0, 1) and m.group == 0)
     assert pair.overlap_variance == float(overlap(((), (a,)), 0, 1)[1])
 
-    from nwqlib.algorithms import PencilAcquisition, PencilSampling
+    from nwqlib.algorithms.gcim import PencilAcquisition, PencilSampling
     from nwqlib.execution import ExecutionLimits
 
     # The rule reads overlap settings of the grouped measurement, so planning refuses termwise
@@ -2205,7 +2196,7 @@ def test_scored_candidates_keep_their_compiler_plans_through_a_reopened_run(tmp_
     three, the construction its recorded preparations used.
     """
     import nwqlib
-    from nwqlib.algorithms import BoundedRitzGrowth
+    from nwqlib.algorithms.gcim import BoundedRitzGrowth
     from nwqlib.execution import Run
     from nwqlib.problems import ingest_occupation
 

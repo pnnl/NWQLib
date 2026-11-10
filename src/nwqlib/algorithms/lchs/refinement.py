@@ -14,6 +14,7 @@ from nwqlib.execution import verification_invocation
 from nwqlib.operators.access import _check_bytes
 from nwqlib.problems import Solution, QuadraticForm, NormalizedExpectation
 from .references import dense_work
+from .route_options import route_name
 from .verification import _admit_publication, _publish, _validate_result
 
 
@@ -302,7 +303,7 @@ def refine(plan, result, *, checks):
     _validate_result(plan, result)
     rec, problem = plan.reconstruction, plan.problem
     fixed = "fixed_pf" in checks.components
-    if fixed and plan.method.hamiltonian_evolution_backend not in {"trotter", "trotter_error_budgeted"}:
+    if fixed and route_name(plan.method.ham_evo) not in {"trotter", "trotter_error_budgeted"}:
         raise ValueError("fixed_pf refinement requires the selected product-formula realization")
     if "spectral_norms" in checks.components and problem.A.reference.representation != "dense":
         raise ValueError("spectral_norms requires existing dense physical input; no implicit densification")

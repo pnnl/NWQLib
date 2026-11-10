@@ -206,7 +206,7 @@ class AdaptSymmetry(Record):
     No approximation is hidden as zero.
     A generator must be anti-Hermitian for ``exp(theta A)`` to be unitary and a
     Hamiltonian Hermitian for real energies. The input check projects each generator
-    onto its anti-Hermitian part within ``input_symmetry_tolerance`` and records
+    onto its anti-Hermitian part within ``symmetry_tol`` and records
     the correction, so the processed operator, not the raw input, is the
     declared scientific target. A Hamiltonian must already be exactly
     Hermitian, and its record shows a zero correction. The Frobenius norms
@@ -216,7 +216,7 @@ class AdaptSymmetry(Record):
     Attributes:
         target: ``Hermitian`` for a Hamiltonian, ``anti-Hermitian`` for a generator.
         projection: ``(H + H.adjoint)/2`` or ``(A - A.adjoint)/2``, matching ``target``.
-        input_symmetry_tolerance: Largest relative Frobenius correction allowed, zero for
+        symmetry_tol: Largest relative Frobenius correction allowed, zero for
             exact symmetry.
         correction_applied: Whether the projection changed any coefficient.
         correction_component_max: Largest real or imaginary component of the
@@ -231,9 +231,10 @@ class AdaptSymmetry(Record):
             to the processed operator, not to the raw input.
     """
 
+    schema_version: Literal[2] = 2
     target: Literal["Hermitian", "anti-Hermitian"]
     projection: Text
-    input_symmetry_tolerance: Annotated[Real, Field(ge=0)]
+    symmetry_tol: Annotated[Real, Field(ge=0)]
     correction_applied: Annotated[bool, Field(strict=True)]
     correction_component_max: Annotated[Real, Field(ge=0)]
     correction_frobenius_norm: Annotated[Real, Field(ge=0)] | None
@@ -267,9 +268,9 @@ class AdaptSymmetry(Record):
                 self.correction_component_max <= 0
                 or self.correction_frobenius_norm == 0
                 or self.relative_frobenius_correction == 0
-                or self.input_symmetry_tolerance == 0
+                or self.symmetry_tol == 0
                 or self.relative_frobenius_correction is not None
-                and self.relative_frobenius_correction > self.input_symmetry_tolerance
+                and self.relative_frobenius_correction > self.symmetry_tol
             ):
                 raise ValueError(
                     "an applied symmetry correction must be nonzero and admitted by its tolerance"
@@ -317,7 +318,7 @@ class AdaptReconstruction(Record):
             archive format's work formula.
         hamiltonian_dropped_l1: Sum ``delta_H`` of the absolute nonidentity
             Hamiltonian coefficients removed by the effective
-            ``pauli_coefficient_cutoff``, in the energy unit. With the removed
+            ``pauli_cutoff``, in the energy unit. With the removed
             operator ``dH = sum_P c_P P``, ``||dH||_2 <= delta_H`` because each
             Pauli word has norm 1, so the energy of a fixed normalized state,
             the lowest eigenvalue and the lowest Ritz value in one fixed trial
@@ -334,15 +335,15 @@ class AdaptReconstruction(Record):
             default thresholds and is not an error estimate. Zero means that
             H is a multiple of the identity, and the run then ends with
             ``constant_hamiltonian``.
-        pauli_coefficient_cutoff: The cutoff this Plan applied to Hamiltonian
+        pauli_cutoff: The cutoff this Plan applied to Hamiltonian
             and commutator coefficients, in the energy unit: the explicit
-            ``ADAPT.pauli_coefficient_cutoff``, or ``1e-14 Omega`` for its
+            ``ADAPT.pauli_cutoff``, or ``1e-14 Omega`` for its
             default.
         gradient_norm_floor: The floor the run compares the gradient norm
             with, in the energy unit: the explicit
             ``ADAPT.gradient_norm_floor``, or ``1e-8 Omega`` for its default.
-        energy_change_tolerance: The tolerance of the flat counter, in the
-            energy unit: the explicit ``ADAPT.energy_change_tolerance``, or
+        energy_tol: The tolerance of the flat counter, in the
+            energy unit: the explicit ``ADAPT.energy_tol``, or
             ``1e-6 Omega`` for its default, which is zero when Omega is zero.
         groups: QWC measurement groups for sampled screening. Each group is a
             tuple of indices into the sorted distinct commutator labels of the
@@ -385,7 +386,7 @@ class AdaptReconstruction(Record):
             no choice.
     """
 
-    schema_version: Literal[6] = 6
+    schema_version: Literal[7] = 7
     reference: StatePreparationSpec
     original_hamiltonian: InputRef
     processed_hamiltonian: InputRef
@@ -397,9 +398,9 @@ class AdaptReconstruction(Record):
     hamiltonian_action_work: Count
     hamiltonian_dropped_l1: Annotated[Real, Field(ge=0)]
     energy_scale: Annotated[Real, Field(ge=0)]
-    pauli_coefficient_cutoff: Annotated[Real, Field(ge=0)]
+    pauli_cutoff: Annotated[Real, Field(ge=0)]
     gradient_norm_floor: Annotated[Real, Field(ge=0)]
-    energy_change_tolerance: Annotated[Real, Field(ge=0)]
+    energy_tol: Annotated[Real, Field(ge=0)]
     groups: tuple[tuple[Count, ...], ...]
     energy_groups: tuple[tuple[Count, ...], ...]
     processing: tuple[Text, ...]
@@ -713,7 +714,7 @@ class AdaptRound(Record):
         optimizer_attempts: Cumulative optimizer invocations at this round.
         optimizer_rounds: Cumulative completed BFGS iterations at this round.
         energy_queries: Cumulative energy queries counted against
-            `optimize_max_evaluations`.
+            `max_evals`.
         sampled_failure: Sampled-pencil failure or enclosure excursion code,
             or None.
         sampled_enclosure_violation: Distance of the sampled Ritz value
@@ -766,7 +767,7 @@ class ADAPTResult(Result):
     the explicit chains `basis` and `value_basis` take their place, and
     `selected`, `theta`, `value_selected` and `value_theta` are empty.
     `print(result)` shows the value, its scope, the stop reason and, when
-    `pauli_coefficient_cutoff` removed Hamiltonian terms, the sum of their
+    `pauli_cutoff` removed Hamiltonian terms, the sum of their
     absolute coefficients. The fields below are read-only. The fields of
     [`Result`][nwqlib.core.analysis.Result] are present too.
 
@@ -811,7 +812,7 @@ class ADAPTResult(Result):
             have completed), `uncertain_native_intent` (a recorded backend
             submission may or may not have reached the backend),
             `backend_failed` and `native_depth_refused` (the next circuit's
-            native two-qubit depth exceeds `ADAPT.max_native_two_qubit_depth`
+            native two-qubit depth exceeds `ADAPT.max_2q_depth`
             or is unavailable, so it was not submitted, and `pending` holds
             the refusal, which names the circuit's experiment and preparation
             record, the limit and the depth or why it is unavailable).
@@ -821,7 +822,7 @@ class ADAPTResult(Result):
         optimizer_restarts: Records of BFGS restarts from the saved best
             point after the run was resumed.
         energy_queries: Energy queries counted against
-            `optimize_max_evaluations`.
+            `max_evals`.
         analysis_attempts: Projected analyses started by the run, the pilot
             analysis of `ADAPT.sampling` included.
         analysis_cutoff: Overlap-eigenvalue cutoff of this analysis.

@@ -11,7 +11,7 @@ from nwqlib.artifacts import ArrayOutput, UnavailableOutput
 from nwqlib.blocks.kernels import BoundKernel, KernelOutput
 from nwqlib.blocks.records import SelectedConstruction, SelectedKernel
 from nwqlib.blocks.selection import SelectedBlock
-from nwqlib._validation import NUMERICAL_RELATION_RTOL, validate_normalized_mass
+from nwqlib._validation import NUMERICAL_RELATION_RTOL, reanalysis_settings, validate_normalized_mass
 from nwqlib.core.analysis import capture_analysis_origin
 from nwqlib.core.planning import Plan, Experiment, ObservationSpec
 from nwqlib.core.records import Float64, PositiveInt, Real, Source
@@ -171,7 +171,7 @@ def _admit(problem, method, output, execution, shots):
     # Shortcut routes provide a direction without recovering the physical
     # solution norm, so unnormalized outputs cannot be admitted.
     if method.solver != "qsvt_inverse":
-        if method.encoded_solution_norm_estimate is None:
+        if method.norm_estimate is None:
             raise ApplicabilityError(
                 "shortcut requires an explicit numeric t or named classical norm model"
             )
@@ -183,7 +183,7 @@ def _admit(problem, method, output, execution, shots):
             raise ApplicabilityError(
                 "shortcut has no physical x scale; select unit StateVector modulo global phase, NormalizedExpectation or Samples"
             )
-        if execution == "quantum" and isinstance(method.encoded_solution_norm_estimate, str):
+        if execution == "quantum" and isinstance(method.norm_estimate, str):
             raise ApplicabilityError(
                 "named norm-search probability models require explicit classical execution; quantum shortcut needs numeric t"
             )
@@ -228,7 +228,7 @@ class QLS(Method):
     `epsilon_inv` sets the accuracy of the polynomial approximation. It does
     not bound the total error of x, which also depends on the spectral assumptions, the
     phase synthesis, the circuit execution and sampling. The phase synthesis
-    has its own target, `phase_residual_tolerance`. Vector outputs
+    has its own target, `phase_tol`. Vector outputs
     (`Solution`, `StateVector`) need exact readout, in which the amplitudes
     are computed without shot sampling, subject to numerical rounding, so
     they take no `shots`, and `Samples` needs positive `shots` with quantum execution.
@@ -263,7 +263,7 @@ class QLS(Method):
             Dalzell Eqs. (8)-(11)) and `"shortcut_dilation"` (an even
             polynomial on the Hermitian dilation of `G_t`) give only a unit
             `StateVector` modulo global phase, a `NormalizedExpectation` or
-            `Samples`, and need `encoded_solution_norm_estimate`.
+            `Samples`, and need `norm_estimate`.
         epsilon_inv: Default `0.01`, strictly between 0 and 1. Accuracy
             target of the polynomial. For `"qsvt_inverse"` it bounds
             `|polynomial_kappa x P(x) - 1|` on the polynomial domain
@@ -275,7 +275,7 @@ class QLS(Method):
             For the shortcuts it is `sqrt(2)` times the kernel-reflection
             parameter `eta`. It does not bound the total error of the
             physical output.
-        phase_residual_tolerance: Default `None`. Positive limit on the
+        phase_tol: Default `None`. Positive limit on the
             actual coefficient residual delta of the QSP phases of quantum
             execution, relative to the rescaled polynomial `P/s`. A number
             is used as given and can be above or below the default, which
@@ -311,7 +311,7 @@ class QLS(Method):
             `alpha/sigma_min(A)`, because QLS computes no singular values
             for them. The polynomial domain parameter `polynomial_kappa` is
             at least `kappa_be` and at least 1.01.
-        block_encoding_implementation: Default `"auto"`, which chooses among
+        block_encoding: Default `"auto"`, which chooses among
             the banded, Pauli and dense encodings that apply to the input.
             `"pauli_lcu"`, `"multiplexed_pauli"`, `"banded"` and
             `"dense_dilation"` request one family, which the input must
@@ -331,7 +331,7 @@ class QLS(Method):
             accepts a controlled dense dilation of at most 64 padded
             coordinates. A supplied encoding and a supplied RHS circuit are
             controlled gate-wise on every route.
-        encoded_solution_norm_estimate: Default `None`. Dalzell's norm
+        norm_estimate: Default `None`. Dalzell's norm
             parameter t of a shortcut, a number with
             `1 <= t <= polynomial_kappa`, which quantum shortcuts require.
             Classical shortcuts also accept `"grid"`,
@@ -360,24 +360,25 @@ class QLS(Method):
             of a banded or Pauli encoding.
 
     Raises:
-        ValueError: If `encoded_solution_norm_estimate` is set with
+        ValueError: If `norm_estimate` is set with
             `"qsvt_inverse"`.
         TypeError: If `encoding` is not a `SelectedBlock`.
     """
 
+    schema_version: Literal[2] = 2
     result_type: ClassVar[type] = QLSAnalysis
     descriptor: ClassVar[AlgorithmDescriptor] = DESCRIPTOR
     solver: Literal["qsvt_inverse", "shortcut_native_svp", "shortcut_dilation"] = "qsvt_inverse"
     epsilon_inv: Annotated[Real, Field(gt=0, lt=1)] = 0.01
-    phase_residual_tolerance: Annotated[Real, Field(gt=0)] | None = None
+    phase_tol: Annotated[Real, Field(gt=0)] | None = None
     alpha: Annotated[Real, Field(gt=0)] | Literal["auto"] = "auto"
     kappa: Annotated[Real, Field(ge=1)] | Literal["auto"] = "auto"
-    block_encoding_implementation: Literal[
+    block_encoding: Literal[
         "auto", "pauli_lcu", "multiplexed_pauli", "banded", "dense_dilation"
     ] = "auto"
     encoding: Any = None
     dense_control_route: Literal["gatewise", "whole_matrix", "auto"] = "auto"
-    encoded_solution_norm_estimate: (
+    norm_estimate: (
         Annotated[Real, Field(ge=1)]
         | Literal["grid", "noisy_binary_search", "linear_kappa_sequence"]
         | None
@@ -402,7 +403,7 @@ class QLS(Method):
 
     @model_validator(mode="after")
     def _choices(self):
-        if self.solver == "qsvt_inverse" and self.encoded_solution_norm_estimate is not None:
+        if self.solver == "qsvt_inverse" and self.norm_estimate is not None:
             raise ValueError("numeric t and norm models belong to shortcut solvers")
         return self
 
@@ -439,7 +440,7 @@ class QLS(Method):
             if self.solver == "qsvt_inverse" and problem.A.structure != "hermitian"
             else "none"
         )
-        t = self.encoded_solution_norm_estimate
+        t = self.norm_estimate
         if isinstance(t, float) and t > spectrum["polynomial_kappa"]:
             raise ApplicabilityError("numeric shortcut t exceeds the selected polynomial domain")
         source = (
@@ -529,8 +530,7 @@ class QLS(Method):
         return _classical_plan(self, problem, output=output, rng=rng, rec=rec, svd=svd)
 
     def analyze(self, plan, data, *, settings):
-        if settings:
-            raise ValueError("QLS has no posthoc algorithm changes; select a new Plan")
+        reanalysis_settings(settings, (), "QLS")
         validate_selection(plan)
         if plan.execution == "quantum":
             from .quantum import analyze_quantum
@@ -822,7 +822,7 @@ def _validate_application(plan, applications):
                 if raw != 1.0:
                     raise ValueError("inverse QLS requires its non-applicable t=1 placeholder")
             elif source == "user":
-                if raw != plan.method.encoded_solution_norm_estimate:
+                if raw != plan.method.norm_estimate:
                     raise ValueError("QLS observed t differs from the selected fixed numeric value")
             elif not 1 <= raw <= plan.reconstruction.polynomial_kappa:
                 raise ValueError("QLS observed model t lies outside selected domain")
@@ -894,7 +894,7 @@ def _realize(plan, *, matrix, rhs_direction):
             except np.linalg.LinAlgError as error:
                 raise ApplicabilityError("QLS requires an invertible original matrix") from error
         t_value, source, metadata = _resolve_shortcut_norm(
-            plan.method.encoded_solution_norm_estimate,
+            plan.method.norm_estimate,
             kappa_be=r.polynomial_kappa,
             encoded_norm=reference_norm,
             factors=factors,

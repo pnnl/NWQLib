@@ -36,7 +36,7 @@ from math import fsum, isfinite, pi
 from typing import Annotated, ClassVar, Literal
 import numpy as np
 from pydantic import Field, field_validator
-from nwqlib._validation import NUMERICAL_RELATION_RTOL
+from nwqlib._validation import NUMERICAL_RELATION_RTOL, reanalysis_settings
 from nwqlib.algorithms.protocol import Method, AlgorithmDescriptor, ApplicabilityError
 from nwqlib.blocks import SelectedConstruction, select_preparation
 from nwqlib.blocks.kernels import BoundKernel, KernelOutput
@@ -1310,12 +1310,26 @@ def _analysis_configuration(method, settings):
     Only QCELS and SPE accept ``grid_size``, which changes the analysis grid
     over the same observations. RFE's K fixes both its power distribution and
     its frequency grid, and every RWPE setting fixes its iteration loop, so
-    neither accepts a setting. A setting that would need new observations
-    raises ValueError.
+    neither accepts a setting. Any other name raises ValueError before a
+    setting is applied. A configuration field of this Method's class (those
+    of the protocol base excluded) or the ``output``, ``execution``, ``shots``
+    or ``seed`` argument of ``nwqlib.plan`` is fixed in the Plan, and the
+    message says that it needs a new Plan. ``accuracy`` is not among them,
+    because planning refuses it for these Methods. Any other name is not a
+    setting of this Method, and the message lists the names that its
+    reanalysis accepts.
     """
-    allowed = set() if method.estimator in {"rfe", "rwpe"} else {"grid_size"}
-    if set(settings) - allowed:
-        raise ValueError("these settings change acquisition/controller choices; create a new Plan")
+    allowed = () if method.estimator in {"rfe", "rwpe"} else ("grid_size",)
+    rejected = set(settings) - set(allowed)
+    planned = {"output", "execution", "shots", "seed"}
+    fixed = sorted(rejected & (set(type(method).model_fields) - set(Method.model_fields) | planned))
+    name = type(method).__name__
+    if fixed:
+        others = sorted(rejected - set(fixed))
+        raise ValueError(f"{name} fixes {', '.join(fixed)} in its Plan, so a changed value needs a new Plan"
+                         + (f", and {name} has no setting {', '.join(others)}" if others else "")
+                         + f". {name} reanalysis accepts {' and '.join(allowed) or 'no settings'}")
+    reanalysis_settings(settings, allowed, name)
     return method.revise(**settings) if settings else method
 
 
@@ -1594,13 +1608,13 @@ class _QPEMethod(Method):
             [QPE guide](../../algorithms/qpe.md) explains. Positive time step
             of `U = exp(-i*tau*H)`, in inverse operator units. Unitary input
             takes `None`.
-        controlled_power_backend: Default `"auto"`, which picks
+        ctrl_power: Default `"auto"`, which picks
             `"trotter_error_budgeted"` for Pauli input and `"dense_exact"`
             otherwise. Construction of the controlled powers `U^p`:
             `"dense_exact"`, the exact power of explicit dense input, or
             `"trotter_error_budgeted"`, a second-order product formula, which
             needs a Hamiltonian.
-        controlled_power_error_budget: Default `1e-3`, positive. Operator-norm
+        ctrl_power_budget: Default `1e-3`, positive. Operator-norm
             allowance for each power on the `"trotter_error_budgeted"` route,
             covering Pauli pruning, product-formula error, represented-time
             displacement, rotation-angle formation and the identity-phase
@@ -1635,8 +1649,8 @@ class _QPEMethod(Method):
     initial_state: StateData | None = None
     tau: Annotated[Real, Field(gt=0)] | None = None
     estimator: ClassVar[str]
-    controlled_power_backend: Literal["auto", "dense_exact", "trotter_error_budgeted"] = "auto"
-    controlled_power_error_budget: Annotated[Real, Field(gt=0)] = 1e-3
+    ctrl_power: Literal["auto", "dense_exact", "trotter_error_budgeted"] = "auto"
+    ctrl_power_budget: Annotated[Real, Field(gt=0)] = 1e-3
     pauli_pruning_rtol: Nonnegative = 1e-12
 
     # Selected scalar/array limits, independent of Run exposure and SDK internals.
@@ -1801,7 +1815,7 @@ class _QPEMethod(Method):
                 )
         # Choose a realization from available input access. A Pauli target does
         # not silently trigger dense spectral construction.
-        backend = self.controlled_power_backend
+        backend = self.ctrl_power
         if backend == "auto":
             backend = "trotter_error_budgeted" if representation == "pauli" else "dense_exact"
         if kind == "unitary" and backend != "dense_exact":
@@ -2192,9 +2206,10 @@ class QCELS(_QPEMethod):
         -0.5
     """
 
+    schema_version: Literal[2] = 2
     estimator: ClassVar[str] = "qcels"
     descriptor: ClassVar[AlgorithmDescriptor] = DESCRIPTOR.revise(
-        method="qcels", references=(REFERENCES[0],)
+        method="qcels", version="2", references=(REFERENCES[0],)
     )
     num_times: PositiveInt = 16
     max_time: Annotated[Real, Field(gt=0)] | None = None
@@ -2269,10 +2284,10 @@ class SPE(_QPEMethod):
         -0.499674
     """
 
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     estimator: ClassVar[str] = "spe"
     descriptor: ClassVar[AlgorithmDescriptor] = DESCRIPTOR.revise(
-        method="spe", version="2", references=(REFERENCES[2],)
+        method="spe", version="3", references=(REFERENCES[2],)
     )
     overlap_lower_bound: Annotated[Real, Field(gt=0, le=1)]
     num_samples: PositiveInt = 32
@@ -2331,9 +2346,10 @@ class RFE(_QPEMethod):
         -0.498866
     """
 
+    schema_version: Literal[2] = 2
     estimator: ClassVar[str] = "rfe"
     descriptor: ClassVar[AlgorithmDescriptor] = DESCRIPTOR.revise(
-        method="rfe", version="2", references=(REFERENCES[3],)
+        method="rfe", version="3", references=(REFERENCES[3],)
     )
     num_samples: PositiveInt = 97
     num_frequencies: Annotated[PositiveInt, Field(ge=2)] = 49
@@ -2393,10 +2409,10 @@ class RWPE(_QPEMethod):
         -0.4784 -0.5223 -0.4345
     """
 
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     estimator: ClassVar[str] = "rwpe"
     descriptor: ClassVar[AlgorithmDescriptor] = DESCRIPTOR.revise(
-        method="rwpe", version="2", references=(REFERENCES[1],)
+        method="rwpe", version="3", references=(REFERENCES[1],)
     )
     max_steps: Count = 14
     prior_mean: Real = 0.

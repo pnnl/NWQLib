@@ -280,7 +280,8 @@ def select_actions(data, *, elapsed, source_nodes, source_weights, has_initial):
     applications_bytes = (128*len(specifications)+128*calls+records_bytes
                           +8*sum(len(node["pruned_indices"]) for node in table.nodes))
     coefficient_phase = (decomposition_output+alignment+nodes_bytes+applications_bytes+24*union+128)
-    budgeted = method.hamiltonian_evolution_backend == "trotter_error_budgeted"
+    formula = method.ham_evo
+    budgeted = formula.kind == "trotter_error_budgeted"
     fixed_work = len(specifications)*d*d+4*calls*d+4*d
     # Scalar step selection from a cached coefficient, per application/node.
     scalar_work = 16*calls if budgeted else 0
@@ -292,7 +293,7 @@ def select_actions(data, *, elapsed, source_nodes, source_weights, has_initial):
         evaluations, ledger = _node_bound_coefficients(
             _union_nonidentity_labels(decomposition), q,
             {key: combined_nodes[key].traceless_terms for key in census_keys}, census_keys,
-            order=method.trotter_order, max_work=method.max_select_work, max_bytes=method.max_bytes,
+            order=formula.order, max_work=method.max_select_work, max_bytes=method.max_bytes,
             census_held=cache_bytes+coefficient_phase, work_used=total)
         total += ledger["work"]
     applications = []
@@ -308,21 +309,21 @@ def select_actions(data, *, elapsed, source_nodes, source_weights, has_initial):
             if budgeted and duration != 0:
                 record = _budgeted_trotter_node_record(combined, _first_use(evaluations, key, used),
                     final_time=duration, error_budget=_lchs_trotter_error_budget_per_node(method),
-                    order=method.trotter_order)
+                    order=formula.order)
             elif budgeted:
                 record = _LCHSTrotterNodeRecord(pf_bound_value=0.0,pruned_l1_mass=combined.pruned_l1_mass,
                     combined_bound_value=0.0,step_count=0,selection=None,bound_value_status="not_applicable")
             else:
                 record = _LCHSTrotterNodeRecord(pf_bound_value=None,pruned_l1_mass=combined.pruned_l1_mass,
-                    combined_bound_value=None,step_count=method.trotter_steps if terms else 0,selection=None)
-            if method.max_trotter_steps is not None and record.step_count > method.max_trotter_steps:
+                    combined_bound_value=None,step_count=formula.steps if terms else 0,selection=None)
+            if formula.max_steps is not None and record.step_count > formula.max_steps:
                 raise ResourceLimitError(f"a product-formula node needs {record.step_count} steps, above "
-                                         f"LCHS.max_trotter_steps={method.max_trotter_steps}")
+                                         f"{type(formula).__name__}.max_steps={formula.max_steps}")
             positions.append(dict(record=record))
         applications.append(dict(start=start,weight=weight,source=source,positions=tuple(positions)))
     selection_work += scalar_work+ledger["work"]
     live_selected = 32*d*d+q*union+nodes_bytes+applications_bytes
-    rotations = [_rotation_count(count, method.trotter_order) for count in kept]
+    rotations = [_rotation_count(count, formula.order) for count in kept]
     action_scratch = 0
     # Select routes against every admitted record at once, not a prefix whose
     # later records could invalidate a previously admitted dense route.

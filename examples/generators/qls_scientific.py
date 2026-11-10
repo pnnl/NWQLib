@@ -48,8 +48,8 @@ b = np.concatenate([initial, source_step, source_step, np.zeros(6)])
 started = perf_counter()
 problem = LinearSystem(A=A, b=b)
 method = QLS(solver="shortcut_native_svp",                     # Dalzell's shortcut (Section 9)
-             encoded_solution_norm_estimate=T_GUESS, epsilon_inv=EPSILON_INV,
-             block_encoding_implementation="dense_dilation")   # A as one dense unitary (Section 4)
+             norm_estimate=T_GUESS, epsilon_inv=EPSILON_INV,
+             block_encoding="dense_dilation")                  # A as one dense unitary (Section 4)
 unit = StateVector(normalization="unit", global_phase="modulo_global_phase")
 selected = plan(problem, method=method, output=unit, seed=7)  # selects the construction, runs no circuit
 plan_seconds = perf_counter() - started
@@ -311,7 +311,7 @@ display(HTML("<p><strong>" + escape(conclusion) + "</strong></p>"))
 #
 # The paper's complexity analysis (doi:10.1103/PhysRevResearch.7.013036) instead assumes an efficient oracle for the sparse, structured Carleman matrix. The blocks of the collision history are scaled identities, so a structured encoding would replace the dense query.
 #
-# The `block_encoding_implementation` option of `QLS` selects among the dense, Pauli and banded encodings that NWQLib provides, where the input's structure allows them. [Planning at scale](resource_estimation_at_scale.ipynb) gives qubits and gate counts for sizes that no simulator holds.
+# The `block_encoding` option of `QLS` selects among the dense, Pauli and banded encodings that NWQLib provides, where the input's structure allows them. [Planning at scale](resource_estimation_at_scale.ipynb) gives qubits and gate counts for sizes that no simulator holds.
 #
 # ## 5. What does it assume?
 #

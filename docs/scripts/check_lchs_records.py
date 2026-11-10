@@ -56,14 +56,14 @@ def main(argv=None):
         receipt,facts=loaded.verify(checks=LCHSVerification(reference='selected_grid'))
         assert len(receipt.applications)==1 and facts[0].fact.value.value<1e-14
         from nwqlib import QuadraticForm,plan
-        from nwqlib.algorithms.lchs import ProviderConfig
+        from nwqlib.algorithms.lchs import ProviderConfig,Trotter
         from nwqlib.operators.inputs import PeriodicStencil,ingest_pauli
         from nwqlib.problems.inputs import ingest_occupation
         # A compact two-qubit periodic generator, Strang realization and IZ readout.
         periodic=LinearDynamics(A=PeriodicStencil(num_qubits=2,mass=1.,diffusion=.25,potential=.3),
             initial_state=ingest_occupation((0,0),num_qubits=2),time=.5)
         chosen=plan(periodic,output=QuadraticForm(observable=ingest_pauli([('IZ',1.)],num_qubits=2)),
-            method=LCHS(hamiltonian_evolution_backend='trotter',trotter_steps=2,lchs_kernel='cauchy_density',
+            method=LCHS(ham_evo=Trotter(steps=2),lchs_kernel='cauchy_density',
                 k_quadrature=ProviderConfig(implementation='signed_binary_uniform',
                     parameters={'num_qubits':2,'lsb_position':0})))
         assert chosen.reconstruction.psd_premise=='analytic_periodic'

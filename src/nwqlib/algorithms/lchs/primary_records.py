@@ -28,9 +28,9 @@ FIXED_SHOT_RULES = {
                                    "and by the order of the alternatives and grids between them"),
 }
 
-METHOD = Source(name="lchs", version="3", domain="constant du/dt=-A u+b",
+METHOD = Source(name="lchs", version="4", domain="constant du/dt=-A u+b",
     reference="An, Childs and Lin, arXiv:2312.03916v2 Eqs. (4), (6)-(7), (61), (186); finite tail-budget inversion; Trefethen ATAP ISBN 978-1-61197-239-9, Theorem19.3, n=Q-1")
-DESCRIPTOR = AlgorithmDescriptor(method="lchs", version="3",
+DESCRIPTOR = AlgorithmDescriptor(method="lchs", version="4",
     problem_families=("linear_dynamics",),
     output_families=("solution", "state_vector", "norm_squared", "quadratic_form", "normalized_expectation", "samples"),
     access_families=("dense", "periodic_stencil"),
@@ -86,7 +86,7 @@ class LCHSPairBias(Record):
     k*l_P + h_P adds at most t*sum_P |rounded - exact| to a branch's error
     and is not bounded here.
 
-    Recipe stage. With ``LCHS.pair_product_formula`` other than ``"plain"``
+    Recipe stage. With ``SampledPairs.product_formula`` other than ``"plain"``
     the rows run the recipe of `LCHSReconstruction.pair_recipe`
     (`sampled_recipes`), and ``inner_relation`` names its relation. Those
     Plans have no buckets and no operator bound E, and ``inner_bias`` is the
@@ -100,7 +100,7 @@ class LCHSPairBias(Record):
     - ``"mpf"``: None for two or more distinct labels, because no uniform
       finite-step remainder is admitted, and 0 for exact evolution.
 
-    QSP stage. With ``hamiltonian_evolution_backend="qsp_block_encoding"``
+    QSP stage. With ``ham_evo="qsp_block_encoding"``
     the rows run the finite phase bank of `LCHSReconstruction.pair_qsp`
     (`sampled_qsp`), ``inner_relation`` is ``"qsp_bank"`` and
     ``inner_bias`` is (B/g)**2*(2*beta + beta**2), the independent-member
@@ -121,10 +121,10 @@ class LCHSPairBias(Record):
     observable_bound = sum_l |o_l| >= ||O||.
 
     Attributes:
-        step_rule: ``"fixed"`` (the Method's ``trotter_steps``) or
+        step_rule: ``"fixed"`` (the Method's ``Trotter.steps``) or
             ``"weighted"`` (steps selected to meet an allowance:
             ``step_allowance`` for the plain relations, the recipe's
-            ``pair_pf_allowance`` otherwise), None for a QSP bank.
+            ``pf_allowance`` otherwise), None for a QSP bank.
         inner_relation: ``"finite_sum"`` or ``"bucket_maximum"`` for the
             plain product formula, the recipe ``"richardson"``, ``"ptsc"``
             or ``"mpf"``, or ``"qsp_bank"``, as above.
@@ -133,7 +133,7 @@ class LCHSPairBias(Record):
             end covers the whole node support. Empty for a recipe.
         bucket_steps: Step count r_b of each bucket. Empty for a recipe.
         step_allowance: The allowance on E that ``"weighted"`` plain steps
-            meet, 0.1 times ``approximation_tolerance``, or None for fixed
+            meet, 0.1 times ``approx_tol``, or None for fixed
             steps and recipes. ``"finite_sum"`` steps meet it with
             T_e**(p+1) in place of the mass-weighted time power, a larger
             value.
@@ -149,7 +149,7 @@ class LCHSPairBias(Record):
         observable_bound: sum_l |o_l| of the observable terms, 0 for a
             NormSquared output.
         kernel_allowances: ``(kernel, guard)`` allowances of a continuous
-            kernel, each half of ``approximation_tolerance``, else None.
+            kernel, each half of ``approx_tol``, else None.
         reasons: Why a component is unknown, empty when every component is
             known.
     """
@@ -233,9 +233,9 @@ class LCHSFixedShotPrecision(Record):
         smallest_row: The route with the smallest recovery among the admitted
             routes this planning pass compared, in the same form. Under
             `lchs_kernel="auto"` only the pairs that a Method can name enter, so
-            a Method that names this route in `qsp_route` and its pair in
+            a Method that names this route in `QSPBlockEncoding.route` and its pair in
             `lchs_kernel` and `k_quadrature` gives this recovery. This does not
-            hold for a commuting product, because `qsp_route` has no parameter
+            hold for a commuting product, because that route has no parameter
             for its H factor, so no Method names that route.
         smallest_recovery: `Gamma` of `smallest_row`. `Gamma` of `selected_row`
             is `LCHSReconstruction.recovery`.
@@ -320,7 +320,7 @@ class LCHSReconstruction(Record):
             relative precision of a complex subnormal magnitude. The
             ``recovery`` field carries the complete physical scale of a
             quantum output. This field is neither the solution norm nor an
-            error bound. With `hamiltonian_evolution_backend` equal to
+            error bound. With `ham_evo` equal to
             `"qsp_block_encoding"` the coefficient state is the product of a
             kernel factor and an application factor, and this field is the
             one-norm `sum_j |c_j|` of the kernel's k-quadrature coefficients
@@ -333,7 +333,7 @@ class LCHSReconstruction(Record):
             `"qsp_block_encoding"` it is the number of kept applications
             times the number of k nodes, or times 1 for the imaginary-time
             filter and the commuting product; an application left out under
-            `source_drop_allowance` is not counted.
+            `source_drop` is not counted.
         padded_branches: Number of address slots of that table, a power of
             two that includes the padding slots. A classical Plan runs no
             SELECT, and the value is the number of address slots its kernel
@@ -341,7 +341,7 @@ class LCHSReconstruction(Record):
             `2**(kernel qubits + application qubits)` of the coefficient
             state.
         selected_backend: Hamiltonian-evolution implementation chosen once
-            at planning: the Method's `hamiltonian_evolution_backend`, or
+            at planning: the Method's `ham_evo`, or
             for `"auto"` the backend chosen from how A is given
             (`"dense_exact"` or `"qsp_block_encoding"`). Loading and running
             the Plan use this value.
@@ -389,25 +389,25 @@ class LCHSReconstruction(Record):
         step_counts: Product-formula step counts, where applicable.
         classical_work: Counts of classical work, not CPU timing.
         pair_rows: The drawn pair rows of a sampled-pair Plan
-            (`LCHS.observable_estimator="sampled_pairs"`), saved once at
+            (`LCHS.estimator="sampled_pairs"`), saved once at
             planning and never drawn again, or None.
         pair_bias: Steps and deterministic bias bounds of a sampled-pair
             Plan, or None.
         pair_recipe: The product-formula recipe of a sampled-pair Plan with
-            `LCHS.pair_product_formula` other than ``"plain"``: its selected
+            `SampledPairs.product_formula` other than ``"plain"``: its selected
             parameters, member law or PTSC laws, bound qualification and
             the per-row choices drawn once at planning
             (`sampled_recipes.LCHSPairMembers` or
             `sampled_recipes.LCHSPairCompensation`), or None.
         pair_qsp: The finite QSP phase bank summary and the per-row bucket
             and member choices of a sampled-pair Plan with
-            `hamiltonian_evolution_backend="qsp_block_encoding"`, drawn once
+            `ham_evo="qsp_block_encoding"`, drawn once
             at planning (`sampled_qsp.LCHSPairQSP`), or None.
         fixed_shot_precision: For a coherent route chosen under fixed shots,
             its `LCHSFixedShotPrecision` against the route with the smallest
             recovery among those compared, or None when none of them has a
             smaller recovery. Planning compares only what the Method leaves
-            open: a named `qsp_route` is that route alone, and a route under a
+            open: a named `QSPBlockEncoding.route` is that route alone, and a route under a
             named kernel and quadrature is compared within that one grid, so
             None says nothing about a route or grid that was not compared.
     """
@@ -462,17 +462,19 @@ class LCHSReconstruction(Record):
         # An accuracy request takes no success-conditional output, so only a moment measured with every shot can offer it.
         can_request = precision.readout == "unconditional_counts"
         if "commuting_product" in precision.smallest_row:
-            # qsp_route has no parameter for the H factor, so no Method names this row. Without known CX counts an
-            # accuracy request ranks the routes of one alternative by recovery first (coherent_selection._choose).
-            restricted = "Naming commuting_product in qsp_route restricts the choice to such routes"
+            # QSPBlockEncoding.route has no parameter for the H factor, so no Method names this row. Without known
+            # CX counts an accuracy request ranks the routes of one alternative by recovery first
+            # (coherent_selection._choose).
+            restricted = "Naming commuting_product in QSPBlockEncoding.route restricts the choice to such routes"
             remedy = ("To rank routes by shots times CX, make an accuracy request, which need not choose that route."
                       if known_cx and can_request else
                       f"{restricted}, and an accuracy request then ranks them by recovery factor first."
                       if can_request else f"{restricted}.")
-            action = f"The H factor of that route has no parameter in qsp_route, so the route cannot be named. {remedy}"
+            action = (f"The H factor of that route has no parameter in QSPBlockEncoding.route, so the route cannot be "
+                      f"named. {remedy}")
         else:
-            naming = "name a route in qsp_route" + (" and its pair in lchs_kernel and k_quadrature"
-                                                    if " on grid " in precision.smallest_row else "")
+            naming = "name a route in QSPBlockEncoding.route" + (" and its pair in lchs_kernel and k_quadrature"
+                                                                 if " on grid " in precision.smallest_row else "")
             action = (f"To rank routes by shots times CX, make an accuracy request, or {naming}."
                       if known_cx and can_request else f"To change the route, {naming}.")
         comparison = (f"recovery factor {_rounded_scale(self.recovery)} against "
@@ -644,7 +646,7 @@ class LCHSPairEstimate(Record):
             is unavailable.
         failure_q, failure_n: Failure probability assigned to each requested
             quantity, an equal share of the accuracy request's `1 - confidence`
-            or, without that request, of `LCHS.pair_failure_probability`.
+            or, without that request, of `SampledPairs.fail_prob`.
         ratio_interval: Interval of Q/N over the jointly covered rectangle,
             given only when N_hat - radius_n > 0, else None.
         norm_interval: The covering interval of N intersected with N >= 0,
@@ -741,7 +743,7 @@ class LCHSAnalysis(Result):
             `NormalizedExpectation` output, physical or unit-normalized as
             that output defines it. `None` for vector and `Samples` outputs
             and when unavailable. With
-            `LCHS(observable_estimator="sampled_pairs")` it is the raw
+            `LCHS(estimator="sampled_pairs")` it is the raw
             sampled estimate: a NormSquared value can be negative, and a
             NormalizedExpectation value is given only when the covering
             interval of the norm squared is strictly positive
@@ -862,7 +864,7 @@ class LCHSAnalysis(Result):
                 lines.append(f"Realization: {rec.selected_backend}; SELECT={rec.selected_select}")
                 if rec.selected_backend == "dense_exact":
                     lines.append("Dense realization uses classically exponentiated branches")
-                lines.append(f"Construction tolerance: {self._scalar_text(plan.method.approximation_tolerance)}; not a total error bound")
+                lines.append(f"Construction tolerance: {self._scalar_text(plan.method.approx_tol)}; not a total error bound")
                 lines.append(f"Selected kernel bounds per unit input before PSD growth: "
                              f"approximation={self._scalar_text(rec.kernel_approximation_bound)}; "
                              f"quadrature={self._scalar_text(rec.quadrature_bound)}; not total physical-output error")

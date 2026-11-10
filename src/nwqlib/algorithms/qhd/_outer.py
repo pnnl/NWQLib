@@ -32,7 +32,7 @@ def check_arguments(qhd, execution, shots, seed, limits, *, backend=None, execut
     circuits and shots fills their unset budgets here
     (``execution.with_paid_budgets``), so the budgets cover the whole layer
     and every round's Run receives their remainder rather than budgets of
-    its own. A QHD with ``initial_state_preparation="none"``
+    its own. A QHD with ``init_prep="none"``
     plans a resource-only construction that no round can execute, so it is
     refused before the first round, unless the caller only plans
     (``executed=False``, ``constrained.plan_augmented_lagrangian``).
@@ -53,8 +53,8 @@ def check_arguments(qhd, execution, shots, seed, limits, *, backend=None, execut
     limits = ExecutionLimits() if limits is None else limits
     if execution == "quantum":
         limits = with_paid_budgets(limits, backend)
-    if executed and qhd.initial_state_preparation == "none":
-        raise ApplicabilityError("initial_state_preparation='none' plans a resource-only QHD construction, "
+    if executed and qhd.init_prep == "none":
+        raise ApplicabilityError("init_prep='none' plans a resource-only QHD construction, "
                                  "which no round can execute")
     return execution, limits
 

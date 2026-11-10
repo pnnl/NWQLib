@@ -316,8 +316,9 @@ class Result(Record):
         The Method analyzes the attached run data again and returns a new
         Result, attached to the same Plan and data. Nothing is measured, and
         this Result is unchanged. A loaded Result can be analyzed too. The
-        settings a Method accepts are listed in its guide, for example the
-        `overlap_*` settings of Lanczos.
+        settings a Method accepts are listed in its guide, for example
+        `overlap_cutoff`, `cutoff_policy`, `noise_multiplier` and
+        `overlap_fail_prob` for Lanczos.
 
         Args:
             **settings (object): Analysis settings of the Method. Omitted, the
@@ -327,7 +328,8 @@ class Result(Record):
             result (Result): The new Result.
 
         Raises:
-            ValueError: If no Plan or run data is attached.
+            ValueError: If no Plan or run data is attached, or if the Method
+                refuses a setting.
         """
         result = self.plan.method.analyze(self.plan, self.data, settings=settings)
         if not isinstance(result, Result):

@@ -50,7 +50,7 @@ def test_exact_zero_l_removes_k_quadrature_and_keeps_physical_phase():
     from nwqlib import plan, solve
     from nwqlib.algorithms import LCHS
     problem = LinearDynamics(A=1j*np.diag([.2,.3]),initial_state=[1,1j],time=.1)
-    selected = plan(problem,method=LCHS(hamiltonian_evolution_backend='qsp_block_encoding'))
+    selected = plan(problem,method=LCHS(ham_evo='qsp_block_encoding'))
     assert selected.reconstruction.mode=='unitary'
     assert selected.reconstruction.physical_branches==1
     assert selected.reconstruction.kernel_approximation_bound==selected.reconstruction.quadrature_bound==0
@@ -67,14 +67,14 @@ def test_exact_zero_l_removes_k_quadrature_and_keeps_physical_phase():
 def test_periodic_selected_repeat_matches_independent_strang_matrix():
     from nwqlib import plan, solve, NormSquared
     from nwqlib.algorithms import LCHS
-    from nwqlib.algorithms.lchs import ProviderConfig
+    from nwqlib.algorithms.lchs import ProviderConfig, Trotter
     from nwqlib.operators.inputs import PeriodicStencil
     from nwqlib.problems.inputs import ingest_occupation
     q,steps,elapsed,mass,diffusion,potential = 4,3,.1,.1,.1,.05
     problem = LinearDynamics(A=PeriodicStencil(num_qubits=q,mass=mass,diffusion=diffusion,potential=potential),
         initial_state=ingest_occupation((0,)*q,num_qubits=q),time=elapsed)
-    chosen = plan(problem,method=LCHS(hamiltonian_evolution_backend='trotter',
-        lcu_select_implementation='structured',trotter_steps=steps,
+    chosen = plan(problem,method=LCHS(ham_evo=Trotter(steps=steps),
+        lcu_select='structured',
         k_quadrature=ProviderConfig(implementation='signed_binary_uniform',
             parameters={'num_qubits':3,'lsb_position':-1})),output=NormSquared())
     coefficients = resolve_lchs_coefficient_plan(chosen)
@@ -111,7 +111,7 @@ def test_periodic_hundred_qubit_estimate_keeps_symbolic_system(monkeypatch):
         pytest.fail('symbolic periodic work materialized a system input')
     monkeypatch.setattr(OperatorInput,'dense_array',forbidden)
     monkeypatch.setattr(StateInput,'physical_vector',forbidden)
-    chosen = plan(problem,method=LCHS(hamiltonian_evolution_backend='trotter',lcu_select_implementation='structured'),
+    chosen = plan(problem,method=LCHS(ham_evo='trotter',lcu_select='structured'),
         output=NormSquared())
     result = estimate(chosen)
     assert result.construction_id==chosen.construction.content_id
@@ -167,7 +167,7 @@ def test_source_pf_padding_and_original_readout_follow_recorded_steps():
     initial,source = np.array([1j,-.2,.1]),np.array([.1,.2j,-.1j])
     problem = LinearDynamics(A=matrix,initial_state=initial,source=source,time=.2)
     # The budgeted backend selects its own steps.
-    method = LCHS(hamiltonian_evolution_backend='trotter_error_budgeted',duhamel_nodes=3,
+    method = LCHS(ham_evo='trotter_error_budgeted',duhamel_nodes=3,
         k_quadrature=ProviderConfig(implementation='signed_binary_uniform',parameters={'num_qubits':2,'lsb_position':-1}))
     chosen = plan(problem,method=method)
     data = chosen._native['native_data']

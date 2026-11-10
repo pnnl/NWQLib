@@ -346,7 +346,7 @@ _STAGE_ORDER = (
     "initial_state_preparation",
 )
 
-# Registered under ``psd_tolerance`` in docs/ENGINEERING_CONSTANTS.md.
+# Registered under ``psd_tol`` in docs/ENGINEERING_CONSTANTS.md.
 # _numerical_psd_decision explains the value.
 DEFAULT_PSD_TOLERANCE = 1.0e-12
 
@@ -358,8 +358,8 @@ class _NumericalPSDDecision:
     Attributes:
         shift: s >= 0 added to L. The caller multiplies the propagator back by
             exp(s*t), since exp(-A*t) = exp(s*t)*exp(-(A + s*I)*t).
-        tolerance_window: psd_tolerance*max(|lambda_min|, |lambda_max|), that
-            is psd_tolerance*||L||_2, in the units of L (inverse time).
+        tolerance_window: psd_tol*max(|lambda_min|, |lambda_max|), that
+            is psd_tol*||L||_2, in the units of L (inverse time).
         premise_satisfied: Whether the shifted minimum eigenvalue lies at or
             above minus the window.
     """
@@ -373,13 +373,13 @@ def _numerical_psd_decision(
     *,
     lambda_min: float,
     lambda_max: float,
-    psd_tolerance: float,
+    psd_tol: float,
     make_l_psd: bool,
 ) -> _NumericalPSDDecision:
     """Return the shared pass/shift/raise decision for an LCHS Hermitian part.
 
-    The window is psd_tolerance*max(|lambda_min|, |lambda_max|), which is
-    psd_tolerance*||L||_2 for Hermitian L. A value inside the window is
+    The window is psd_tol*max(|lambda_min|, |lambda_max|), which is
+    psd_tol*||L||_2 for Hermitian L. A value inside the window is
     accepted unshifted, because roundoff can make an exactly PSD L look
     slightly negative. Below the window the shift s = -lambda_min + window
     leaves the shifted minimum at +window. Every caller (decomposition,
@@ -395,7 +395,7 @@ def _numerical_psd_decision(
     time unit, because replacing A by r*A and T by T/r, for r > 0, scales
     lambda_min, the window and the shift by r. An accepted unshifted violation
     lets ||exp(-A*T)||_2 reach at most
-    exp(window*T) = exp(psd_tolerance*||L||_2*T), since ||exp(-A*T)|| <=
+    exp(window*T) = exp(psd_tol*||L||_2*T), since ||exp(-A*T)|| <=
     ||exp(-L*T)|| (ACL arXiv:2312.03916v2, Lemma 21, Eq. (162)). An
     absolute term in the window would have units of inverse time, and for
     ||L||_2 much smaller than 1/T it would accept a genuinely negative
@@ -403,10 +403,10 @@ def _numerical_psd_decision(
     zero window and lambda_min = 0, so it needs no shift.
     """
 
-    if not isfinite(float(psd_tolerance)) or psd_tolerance <= 0.0:
-        raise ValueError("psd_tolerance must be finite and positive")
+    if not isfinite(float(psd_tol)) or psd_tol <= 0.0:
+        raise ValueError("psd_tol must be finite and positive")
     tolerance_window = float(
-        psd_tolerance * max(abs(lambda_min), abs(lambda_max))
+        psd_tol * max(abs(lambda_min), abs(lambda_max))
     )
     shift = 0.0
     if lambda_min < -tolerance_window:

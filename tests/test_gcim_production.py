@@ -65,7 +65,7 @@ def test_requested_real_parts_without_shots_keep_the_complex_pencil(execution):
     imaginary parts.
     """
     from fractions import Fraction as F
-    from nwqlib.algorithms import PencilAcquisition
+    from nwqlib.algorithms.gcim import PencilAcquisition
     from nwqlib.operators import ingest_pauli
 
     def near(value, exact, bound):
@@ -510,7 +510,7 @@ def test_pair_reductions_are_admitted_against_their_work_and_workspace(monkeypat
     """Preparation admits the summed pair-reduction work, and each point's workspace, before native work.
 
     Planning records the summed ``pair_work`` of the pair reductions without
-    refusing it. With ``max_classical_products`` half that sum,
+    refusing it. With ``max_products`` half that sum,
     preparation refuses with the cap and the registered work before any
     native lowering; at exactly the sum it prepares. The Method hook refuses
     a point whose ``pair_bytes`` exceeds ``max_bytes`` and otherwise returns
@@ -535,19 +535,19 @@ def test_pair_reductions_are_admitted_against_their_work_and_workspace(monkeypat
         return original(*args, **kwargs)
 
     monkeypatch.setattr(lowering, "_lower_qiskit", counted)
-    short = Run(plan_for(max_classical_products=total // 2, **settings))
-    with pytest.raises(ValueError, match=rf"registered work {total}, max_classical_products={total // 2}\. "
-                                         rf"Raise FixedGCIM\.max_classical_products to at least {total}\."):
+    short = Run(plan_for(max_products=total // 2, **settings))
+    with pytest.raises(ValueError, match=rf"registered work {total}, max_products={total // 2}\. "
+                                         rf"Raise FixedGCIM\.max_products to at least {total}\."):
         short.plan.method.prepare(short.plan, run=short)
     assert lowered[0] == 0 and short._state["preparations"] == 0
-    exact = Run(plan_for(max_classical_products=total, **settings))
+    exact = Run(plan_for(max_products=total, **settings))
     exact.plan.method.prepare(exact.plan, run=exact)
     assert lowered[0] > 0
     point = points[1]
     observation = plan.experiments[1].readout
     own = pair_work(json.loads(point.parameters))
     allowance = exact.plan.method.reduction_allowance(exact.plan, None, observation=observation, width=3, run=None)
-    assert type(allowance) is int and allowance == exact.plan.method.max_classical_products - (total - own)
+    assert type(allowance) is int and allowance == exact.plan.method.max_products - (total - own)
     needed = pair_bytes(json.loads(point.parameters))
     small = plan.method.revise(max_bytes=needed // 2)
     with pytest.raises(ValueError, match="GCIM pair reduction workspace"):
@@ -589,7 +589,7 @@ def test_pair_reduction_peak_fits_its_byte_law():
 
 
 def test_pair_reductions_run_without_a_limit_and_are_refused_beyond_an_explicit_one():
-    """Without max_classical_products or max_products the pair hooks return None.
+    """Without max_products or max_products the pair hooks return None.
 
     FixedGCIM, QFD and ADAPT then plan, prepare and run their exact pair reductions on Aer. With an explicit
     limit, QFD refuses half the summed pair work and runs at it, and ADAPT returns its ``max_products`` as
@@ -615,11 +615,11 @@ def test_pair_reductions_run_without_a_limit_and_are_refused_beyond_an_explicit_
     total = sum(work(json.loads(point.parameters)) for experiment in chosen.experiments
                 if experiment.readout is not None for point in experiment.readout.positions
                 if point.kind == "reduction")
-    with pytest.raises(ValueError, match=rf"QFD pair reductions exceed max_classical_products: "
-                                         rf"registered work {total}, max_classical_products={total // 2}\."):
-        nwqlib.solve(nwqlib.plan(problem, method=method.revise(max_classical_products=total // 2),
+    with pytest.raises(ValueError, match=rf"QFD pair reductions exceed max_products: "
+                                         rf"registered work {total}, max_products={total // 2}\."):
+        nwqlib.solve(nwqlib.plan(problem, method=method.revise(max_products=total // 2),
                                  execution="quantum", seed=7), progress=False)
-    nwqlib.solve(nwqlib.plan(problem, method=method.revise(max_classical_products=total), execution="quantum",
+    nwqlib.solve(nwqlib.plan(problem, method=method.revise(max_products=total), execution="quantum",
                              seed=7), progress=False)
 
 
@@ -913,7 +913,8 @@ def test_structurally_real_basis_measures_only_real_parts():
     """
     from fractions import Fraction as F
     import nwqlib
-    from nwqlib.algorithms import ApplicabilityError, PencilAcquisition
+    from nwqlib.algorithms import ApplicabilityError
+    from nwqlib.algorithms.gcim import PencilAcquisition
     from nwqlib.operators import ingest_pauli
     from nwqlib.problems import ingest_occupation, ingest_product, ingest_vector
 
@@ -982,7 +983,8 @@ def test_real_proof_reads_the_stored_amplitudes(kind):
     """
     import nwqlib
     from qiskit import QuantumCircuit
-    from nwqlib.algorithms import ApplicabilityError, PencilAcquisition
+    from nwqlib.algorithms import ApplicabilityError
+    from nwqlib.algorithms.gcim import PencilAcquisition
     from nwqlib.operators import ingest_pauli
     from nwqlib.problems import StateInput, ingest_occupation, ingest_product, ingest_vector
 
@@ -1116,7 +1118,7 @@ def test_overlap_noise_counts_measured_quadratures_and_keeps_missing_evidence_un
     """
     import nwqlib
     import nwqlib._prepared_execution as prepared_execution
-    from nwqlib.algorithms import PencilAcquisition
+    from nwqlib.algorithms.gcim import PencilAcquisition
     from nwqlib.operators import ingest_pauli
     from nwqlib.problems.inputs import ingest_vector
 
@@ -1530,6 +1532,8 @@ def test_failed_pilot_solve_gives_a_fresh_uniform_main_stage():
     again = result.analyze(overlap_cutoff=1e-6)
     assert again.pencil.failure_reason is None and again.eigenvalue is not None
     assert again.shot_allocation == allocation
+    with pytest.raises(ValueError, match="FixedGCIM reanalysis accepts overlap_cutoff, not cutoff"):
+        result.analyze(cutoff=1e-6)
 
 
 def test_reopened_pencil_sampling_run_measures_each_remaining_main_setting_once(tmp_path, monkeypatch):
@@ -1739,11 +1743,8 @@ def test_native_depth_limit_refuses_the_first_deeper_setting_and_keeps_the_earli
     shallow setting alone is then submitted. Aer
     records no native depth, so a limit refuses its first setting before any
     job; without a limit the existing Aer workflows above run unchanged.
-    Only qiskit-ibm-runtime 0.49.0 qualifies an IBM depth, so under another
-    installed version every IBM depth is unqualified and a limit refuses the
-    first setting as on Aer. The synthetic counts decide no relation here.
+    The synthetic counts decide no relation here.
     """
-    import importlib.metadata
     from pathlib import Path
 
     import nwqlib
@@ -1757,7 +1758,7 @@ def test_native_depth_limit_refuses_the_first_deeper_setting_and_keeps_the_earli
     basis = tuple(ingest_occupation(bits, num_qubits=2) for bits in ("00", "01", "11"))
 
     def start(limit, backend=spy.connection, directory=None):
-        selected = nwqlib.plan(problem, method=FixedGCIM(basis=basis, max_native_two_qubit_depth=limit),
+        selected = nwqlib.plan(problem, method=FixedGCIM(basis=basis, max_2q_depth=limit),
                                execution="quantum", shots=shots, seed=7)
         return selected, nwqlib.prepare(selected, backend=backend, directory=directory, progress=False)
 
@@ -1784,17 +1785,6 @@ def test_native_depth_limit_refuses_the_first_deeper_setting_and_keeps_the_earli
         assert (refused.value.experiment, refused.value.native_depth) == (names[0], None)
         assert run.trace.events == () and run.exposure["completed"]["shots"] == 0
 
-    installed = importlib.metadata.version("qiskit-ibm-runtime")
-    if installed != "0.49.0":
-        assert all(not depth.qualified and f"qiskit-ibm-runtime {installed} is installed" in depth.reason
-                   for depth in depths.values())
-        _, prepared = start(0, directory=tmp_path / "unchecked")
-        with prepared.run as run:
-            with pytest.raises(NativeDepthCapRefusal) as refused:
-                finish(prepared)
-            assert (refused.value.experiment, refused.value.depth) == (names[0], None)
-            assert run.trace.events == () and len(spy.api.requests) == 6
-        return
     assert all(depth.qualified for depth in depths.values())
     depths = {name: depth.native_two_qubit_depth for name, depth in depths.items()}
     deepest = max(depths.values())
@@ -1860,7 +1850,7 @@ def test_native_depth_limit_refuses_the_first_deeper_setting_and_keeps_the_earli
     from nwqlib.execution import Run, prepare_experiment, submit_detached
 
     shallow, deep = names[0], next(name for name in names if depths[name] > 0)
-    selected = nwqlib.plan(problem, method=FixedGCIM(basis=basis, max_native_two_qubit_depth=0),
+    selected = nwqlib.plan(problem, method=FixedGCIM(basis=basis, max_2q_depth=0),
                            execution="quantum", shots=shots, seed=7)
     sent = len(spy.api.requests)
     with Run(selected, backend=spy.connection, directory=tmp_path / "batch") as run, monkeypatch.context() as patch:
@@ -1923,7 +1913,8 @@ def test_default_limits_plan_compact_26_qubit_gcim_without_full_state_work(monke
     import tracemalloc
     from qiskit.quantum_info import Operator, SparsePauliOp, Statevector
     import nwqlib
-    from nwqlib.algorithms import ADAPT, QFD, PencilSampling
+    from nwqlib.algorithms import ADAPT, QFD
+    from nwqlib.algorithms.gcim import PencilSampling
     from nwqlib.operators import ingest_fermion, ingest_pauli
     from nwqlib.problems import ingest_occupation
     from nwqlib.resources import ResourceContext
@@ -1971,7 +1962,7 @@ def test_default_limits_plan_compact_26_qubit_gcim_without_full_state_work(monke
         # + 2l(T_max + 1) + 8n + 7 for the occupation reference's W_ref = n,
         # l = 2 selections, T_max = 2 terms and the commuting bound
         # B = 6 n T_max, so 2*26 + 6*313 + 12 + 215 = 2157.
-        from nwqlib.algorithms import PencilAcquisition
+        from nwqlib.algorithms.gcim import PencilAcquisition
 
         hopping = tuple(ingest_pauli(((word([(a, "X"), (b, "X")]), .5j), (word([(a, "Y"), (b, "Y")]), .5j)),
                                      num_qubits=n) for a, b in ((0, 2), (1, 3)))

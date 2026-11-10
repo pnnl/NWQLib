@@ -435,7 +435,7 @@ def _solve(b, target, rho, tolerance, adapter, norm_qualification, *, max_fft, m
             f"numerical phase synthesis residual {residual:.6g} exceeds its target {tolerance:.6g}. "
             f"FFT lengths {tuple(lengths)} gave residuals {tuple(float(f'{r:.3g}') for r in residuals)}. "
             f"{_stagnation_note(lengths, residuals)}The doubling stopped because {reason}. Controls: residual_tolerance "
-            "sets the target (LCHS sets it from approximation_tolerance and QLS from phase_residual_tolerance), and a "
+            "sets the target (LCHS sets it from approx_tol and QLS from phase_tol), and a "
             f"larger target accepts a larger synthesis error. The limits max_fft and max_bytes {limits}",
             evidence=evidence())
 

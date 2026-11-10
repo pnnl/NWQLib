@@ -158,7 +158,7 @@ The lifecycle rules of a Run, with the failure each prevents, the code that keep
 
 ### Estimate a construction directly
 
-`nwqlib.resources.estimate` takes a `SelectedConstruction`, the backend-independent Program and chosen definitions that logical lowering accepts, and returns a `WorkloadEstimate`. It never reads native inputs, builds a circuit, transpiles, calls a backend or chooses another recipe. The following example estimates the HZH preparation of `|1>` that `plan` chooses for an `ExpectationMethod` configured with `preparation_choice="hzh"`. The default X recipe has one operation. The [block guide](../blocks.md) describes both recipes.
+`nwqlib.resources.estimate` takes a `SelectedConstruction`, the backend-independent Program and chosen definitions that logical lowering accepts, and returns a `WorkloadEstimate`. It never reads native inputs, builds a circuit, transpiles, calls a backend or chooses another recipe. The following example estimates the HZH preparation of `|1>` that `plan` chooses for an `ExpectationMethod` configured with `prep_choice="hzh"`. The default X recipe has one operation. The [block guide](../blocks.md) describes both recipes.
 
 ```python
 from nwqlib import Expectation, plan
@@ -172,7 +172,7 @@ problem = Expectation(
     observable=ingest_pauli((("Z", 1.0),), num_qubits=1),
 )
 selected = plan(
-    problem, method=ExpectationMethod(preparation_choice="hzh"), seed=7
+    problem, method=ExpectationMethod(prep_choice="hzh"), seed=7
 )
 workload = estimate(selected.construction)
 operations = workload.quantity("operations")
@@ -267,9 +267,9 @@ In a refinement run directory of `refine_box(..., directory=path)`, each level a
 
 `resume_augmented_lagrangian(path, backend=...)` reads the constraint preprocessing and the check counts that the first call saved in `controller.json` and does not evaluate the setup's support tables and summand scans again. Resume then binds the model saved in the directory, with its errors and basis gates, to its own copy of that backend for the Runs it creates, as `load_run` binds a Run's saved model for the reopened Run, so every round is lowered to the Aer target of the original Runs. Resume reads the files that the layer wrote as they are, including the saved preprocessing and check counts, which it does not recompute, and does not detect an edit.
 
-### Ignored LCHS `trotter_steps`
+### LCHS route names and records
 
-With `hamiltonian_evolution_backend` set to `dense_exact` or `qsp_block_encoding`, LCHS does not use `trotter_steps`. Method validation sets that field to one before the content hash is computed and keeps a nondefault supplied value in the private attribute `LCHS._ignored_trotter_steps` (`src/nwqlib/algorithms/lchs/method.py`), which planning uses for its warning. The private record of that supplied value is not reconstructed by `model_copy()` or by loading the canonical Method.
+The four route fields of `LCHS` (`ham_evo`, `init_prep`, `lcu_prep` and `estimator`) accept a route name or the record of that route's options (`src/nwqlib/algorithms/lchs/route_options.py`). Method validation replaces a name that has a record by the record with default options before the content hash is computed (`LCHS._route` in `src/nwqlib/algorithms/lchs/method.py`), so `"trotter"` and `Trotter()` give one Method, one content hash and one saved form. A saved record carries its fixed `kind` field, which selects the record type when the Method is loaded. Names without options, such as `"auto"` and `"direct"`, are saved as names.
 
 ### ADAPT reanalysis of saved observations {#adapt-reanalysis-of-saved-chunks}
 
@@ -293,7 +293,7 @@ A trajectory readout is saved with the observation of every declared point, and 
 
 ### Run archive format {#run-archive-format}
 
-Current loaders support Run format 24 (`nwqlib.run/24`) and Result format 17 (`nwqlib.result/17`). In both, a classical routine declaration records `application_bytes`, the application record bytes that each invocation sets aside. Both formats keep the history of limit amendments. The Run format reserves the cache filename prefix for the Run. Each row of the run log stores the byte size of its JSON text in a column written with the text, and the size limits and saved-data totals read that column without reading the text. With each prepared Aer circuit, the format stores the prefix phases of its saved trajectory states and its thread cap. The run log keeps the initial limits and every later amendment. In both formats, the ADAPT controller state has the checkpoint format `adapt_gcim/4`, with one field per decision-history record ([Checkpoints of the iteration state](#controller-checkpoints)). Earlier versions, v1.0.3.post2 included, saved `adapt_gcim/3`, with the whole history in one field, and their archives are already refused by their format numbers. A state of another checkpoint format is refused when a Run resumes, when it retries an interrupted analysis and when its saved data are reanalyzed, with a message that names the unsupported format and differs from the message for a different Plan or runtime.
+Current loaders support Run format 25 (`nwqlib.run/25`) and Result format 18 (`nwqlib.result/18`). In both, a classical routine declaration records `application_bytes`, the application record bytes that each invocation sets aside. Both formats keep the history of limit amendments. The Run format reserves the cache filename prefix for the Run. Each row of the run log stores the byte size of its JSON text in a column written with the text, and the size limits and saved-data totals read that column without reading the text. With each prepared Aer circuit, the format stores the prefix phases of its saved trajectory states and its thread cap. The run log keeps the initial limits and every later amendment. In both formats, the ADAPT controller state has the checkpoint format `adapt_gcim/4`, with one field per decision-history record ([Checkpoints of the iteration state](#controller-checkpoints)). Earlier versions, v1.0.3.post2 included, saved `adapt_gcim/3`, with the whole history in one field, and their archives are already refused by their format numbers. A state of another checkpoint format is refused when a Run resumes, when it retries an interrupted analysis and when its saved data are reanalyzed, with a message that names the unsupported format and differs from the message for a different Plan or runtime.
 
 `run.json` contains `{format, selection, limits}`: the format, the name of the selection file and the execution limits in force when the folder was written. The selection file, normally `selection.json`, holds the Method name and the record returned by the Method's archive hook. The built-in hooks put the `Plan` record in that record and hold or name the selected data there. The manifest has a fixed set of scalar fields. The header of the run log stores the original Plan identity, which is compared with the Plan restored by the Method hook. A Run writes the manifest as `run.json.partial` and then renames it to `run.json`, which replaces the file atomically within one filesystem, before it commits the header of its run log. A creation that a `max_data_bytes` refusal or an interruption stops before or during that write therefore leaves no `run.json`, and a folder with `run.json` holds a complete one. For a folder with `run.sqlite` and no `run.json`, `load_run` adds a note that the creation of the Run stopped before any preparation or measurement. The partial file stays and counts among the folder's saved file bytes. `run.sqlite` is the run log, which holds the current limits, the preparation and observation records, cache references and the completed Result when present. An observation row leaves out its readout declaration, which its preparation record stores, and reopening restores the declaration from that record, so a readout with many labels is stored once per preparation. The adjacent `.lock` file lets only one process at a time hold the Run open. These files and their referenced payloads form one Run, and `run.json` alone is not sufficient for continuation.
 
@@ -311,7 +311,7 @@ Plan inputs and method-cache arrays, which are not observation arrays, are saved
 
 ### Result archive format
 
-A saved Result directory contains `result.json` and its supporting payload files. The JSON object in `result.json` is `{format, selection, data, result}`, with format `nwqlib.result/17`. It is distinct from the human-readable dictionary returned by `result.report()`. That report is not a loadable archive. The `selection` entry of this object holds the Method name and the record returned by the Method's archive hook. The built-in hooks put the `Plan` record in that record and hold or name the selected data there. LCHS, for example, saves its node tables, the actions of its classical routine (`host_actions`) and SELECT angle tables in their own JSON file with NPY arrays. A Run folder uses its separate `run.json` and run-log format, described in [Run archive format](#run-archive-format).
+A saved Result directory contains `result.json` and its supporting payload files. The JSON object in `result.json` is `{format, selection, data, result}`, with format `nwqlib.result/18`. It is distinct from the human-readable dictionary returned by `result.report()`. That report is not a loadable archive. The `selection` entry of this object holds the Method name and the record returned by the Method's archive hook. The built-in hooks put the `Plan` record in that record and hold or name the selected data there. LCHS, for example, saves its node tables, the actions of its classical routine (`host_actions`) and SELECT angle tables in their own JSON file with NPY arrays. A Run folder uses its separate `run.json` and run-log format, described in [Run archive format](#run-archive-format).
 
 ### Circuit entries and Qiskit UCGate compatibility {#qiskit-ucgate-compatibility}
 
@@ -329,9 +329,9 @@ The small `test_native_ucgate_qpy_limitation_canary` test exercises raw QPY on o
 
 ### Method record formats
 
-QLS archives use `qls/9`, which also store `QLS.phase_residual_tolerance` and `QLSReconstruction.phase_tolerance`. QPE archives use `qpe/<estimator>/9`, which also store the selected polar base of a unitary input. QCELS keeps analysis source `qpe.qcels.analysis` version 3, and the other estimators use `qpe.analysis` version 3. Earlier development formats require their original source/environment.
+QLS archives use `qls/9`, which also store `QLS.phase_tol` and `QLSReconstruction.phase_tolerance`. QPE archives use `qpe/<estimator>/9`, which also store the selected polar base of a unitary input. QCELS keeps analysis source `qpe.qcels.analysis` version 3, and the other estimators use `qpe.analysis` version 3. Earlier development formats require their original source/environment.
 
-The outer record of a QHD constrained run uses `qhd.constrained_run/5`, and that of a standalone refinement uses `qhd.refinement_run/6`. A saved constrained-result archive uses `qhd.constrained/4`, and a saved standalone refinement archive uses `qhd.refinement/4`, both with inner QHD Results in `qhd/8`. These format names belong to the layer and Method records, separately from the common Run and Result formats.
+The outer record of a QHD constrained run uses `qhd.constrained_run/6`, and that of a standalone refinement uses `qhd.refinement_run/7`. A saved constrained-result archive uses `qhd.constrained/5`, and a saved standalone refinement archive uses `qhd.refinement/5`, both with inner QHD Results in `qhd/8`. These format names belong to the layer and Method records, separately from the common Run and Result formats.
 
 ## Backend adapter contract {#backend-adapter-contract}
 

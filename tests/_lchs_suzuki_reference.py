@@ -127,20 +127,21 @@ def fixed_trotter_term_unitary_with_record(*, final_time, k_value, method, trott
     from nwqlib.algorithms.lchs.time_independent_terms import _LCHSTrotterNodeRecord, _combined_trotter_terms
 
     combined = _combined_trotter_terms(trotter_paulis, k_value=k_value)
+    trotter = method.ham_evo
     if combined.traceless_terms:
         step_circuit = fixed_trotter_product_circuit(
             SparsePauliOp.from_list(combined.traceless_terms),
             num_qubits=trotter_paulis.num_qubits,
-            final_time=final_time / method.trotter_steps,
+            final_time=final_time / trotter.steps,
             reps=1,
-            order=method.trotter_order,
+            order=trotter.order,
         )
-        step_count = int(method.trotter_steps)
+        step_count = int(trotter.steps)
     else:
         step_circuit = QuantumCircuit(trotter_paulis.num_qubits)
         step_count = 0
     step_product = np.asarray(Operator(step_circuit.decompose()).data)
-    product = np.linalg.matrix_power(step_product, method.trotter_steps)
+    product = np.linalg.matrix_power(step_product, trotter.steps)
     phase = np.exp(-1.0j * final_time * combined.identity_coefficient)
     return phase * product, _LCHSTrotterNodeRecord(
         pf_bound_value=None,

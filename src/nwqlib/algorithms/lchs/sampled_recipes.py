@@ -1,6 +1,6 @@
 """Finite product-formula recipes of the sampled-pair LCHS observable: Richardson, PTSC and two-member MPF.
 
-``LCHS(observable_estimator="sampled_pairs", pair_product_formula=...)``
+``LCHS(estimator=SampledPairs(product_formula=...))``
 replaces the plain branch product formula of every pair row by one of three
 finite recipes. The pair rows, their proposal law, phase-aware readout and
 signed Q/N reducer are those of `sampled_rows`, `sampled_native` and
@@ -66,14 +66,16 @@ E_eff = sum_l |pi_l*gamma_hat_l - w_l|. Since |f_l| <= 1,
 
     |E Z_N - N_v| <= B**2*(B_ext + E_eff),   |E Z_Q - Q_v| <= C_O*B**2*(B_ext + E_eff).
 
-With a pair_pf_allowance epsilon on N (and C_O*epsilon on Q), the selection
+With a Richardson.pf_allowance epsilon on N (and C_O*epsilon on Q), the selection
 needs B_ext(s) <= epsilon/B**2 - E_eff; B_ext decreases as s**-4 once
-s > 2A. A set max_trotter_steps gives the cap s_max = floor(max_trotter_steps/2),
+s > 2A. A set TrotterErrorBudgeted.max_steps gives the cap s_max = floor(max_steps/2),
 which is tested first, and otherwise the upper end doubles until it meets
 the allowance. An integer bisection then finds the least sufficient s, all
-in exact rationals. Fixed
-``trotter_steps`` publish the bound at s when s > 2A and otherwise leave it
-unknown.
+in exact rationals. A fixed
+``Trotter.steps`` publishes the bound at s when s > 2A and, in the general
+case of L >= 2 centered labels with A > 0, otherwise leaves it unknown. With
+L <= 1 or L_* = 0, B_ext = 0 needs no s > 2A, and the published operator
+bound B_ext + E_eff is E_eff.
 
 PTSC (XS12-XS14, XS28; Zeng, Sun, Jiang and Zhao, arXiv:2212.04566v2,
 Sec. IV.2, Proposition 4). One branch evolves for t under
@@ -122,9 +124,9 @@ and
 
 Selection: the least r with r > 2 L_time and
 r**3 log mu_cap >= (e + 2/9)(2 L_time)**4 (XS13), at most a set
-max_trotter_steps, found by bisection after testing that cap or after
+TrotterErrorBudgeted.max_steps, found by bisection after testing that cap or after
 doubling to a sufficient r, then the first s_c = 3, 4, ... at
-most pair_taylor_cutoff with
+most PTSC.taylor_cutoff with
 r mu_cap {[2e L_time/(r(s_c + 1))]**(s_c + 1) + d_seg(s_c)} <= delta_allow,
 delta_allow = min(1, epsilon/(3 B**2)), because 2 delta + delta**2 <= 3 delta
 for delta <= 1. The sum is not monotone in s_c, so it is scanned, not
@@ -216,7 +218,7 @@ class LCHSPairMembers(Record):
         remainder: Richardson B_ext at the selected s, rounded upward, zero
             for exact evolution, or None when the XS9 premise s > 2A fails
             or (MPF with K >= 2) no finite remainder is admitted.
-        allowance: The ``pair_pf_allowance`` the selection met, or None for
+        allowance: The ``Richardson.pf_allowance`` the selection met, or None for
             fixed steps.
         member: Member index of every row, int64.
         qualification: Scope of the bound and the unenclosed arithmetic.
@@ -269,8 +271,8 @@ class LCHSPairCompensation(Record):
         version, draw_order: Versioned recipe and draw order.
         steps: Common segment count r of every branch.
         cutoff: Taylor cutoff s_c.
-        mu_cap: The ``pair_mu_cap`` that bounds every branch normalization.
-        allowance: The ``pair_pf_allowance`` the selection met.
+        mu_cap: The ``PTSC.mu_cap`` that bounds every branch normalization.
+        allowance: The ``PTSC.pf_allowance`` the selection met.
         taylor_bound: r mu_cap [2e L_time/(r(s_c + 1))]**(s_c + 1).
         law_bound: r mu_cap d_seg(s_c), the count part of the finite law.
         branch_bound: delta_* = taylor_bound + law_bound.
@@ -422,8 +424,8 @@ def select_richardson(method, support):
         reasons (tuple): Why the remainder is unknown.
 
     Raises:
-        ResourceLimitError: When a set max_trotter_steps leaves no s up to
-            floor(max_trotter_steps/2) that meets the allowance.
+        ResourceLimitError: When a set TrotterErrorBudgeted.max_steps leaves no s up to
+            floor(max_steps/2) that meets the allowance.
         ApplicabilityError: When E_eff alone exceeds the allowance.
     """
     count = support.labels
@@ -432,23 +434,24 @@ def select_richardson(method, support):
         counts = integer_categorical(np.log([abs(float(w)) for w in _RICHARDSON_WEIGHTS])).counts
     multipliers, bound, second, discrepancy = _member_table(_RICHARDSON_WEIGHTS, counts)
     reasons = ()
-    if method.hamiltonian_evolution_backend == "trotter":
-        rule, s = "fixed", method.trotter_steps
+    formula, recipe = method.ham_evo, method.estimator.product_formula
+    if formula.kind == "trotter":
+        rule, s = "fixed", formula.steps
         remainder = _richardson_remainder(a, s) if a == 0 or s > 2 * a else None
         if remainder is None:
             reasons = (f"the Richardson remainder needs s > 2A for the XS9 bound; s = {s} and "
                        f"A = {float(a)!r}",)
     else:
         rule = "weighted"
-        target = _operator_allowance(method.pair_pf_allowance, support.mean_weight) - discrepancy
+        target = _operator_allowance(recipe.pf_allowance, support.mean_weight) - discrepancy
         if target <= 0:
             raise ApplicabilityError(
                 f"the Richardson coefficient discrepancy E_eff = {float(discrepancy)!r} times B**2 already "
-                f"reaches pair_pf_allowance={method.pair_pf_allowance!r}; no level s reduces it. Raise "
-                "pair_pf_allowance")
-        cap = None if method.max_trotter_steps is None else method.max_trotter_steps // 2
+                f"reaches Richardson.pf_allowance={recipe.pf_allowance!r}; no level s reduces it. Raise "
+                "pf_allowance")
+        cap = None if formula.max_steps is None else formula.max_steps // 2
         if cap is not None and cap < 1:
-            raise ResourceLimitError("Richardson levels (s, 2s) need max_trotter_steps >= 2")
+            raise ResourceLimitError("Richardson levels (s, 2s) need TrotterErrorBudgeted.max_steps >= 2")
         if a == 0:
             s = 1
         else:
@@ -456,10 +459,10 @@ def select_richardson(method, support):
                 reached = (f"{_upward(_richardson_remainder(a, cap) + discrepancy)!r}" if cap > 2 * a
                            else f"unavailable, because s = {cap} is not above 2A = {float(2 * a)!r}")
                 raise ResourceLimitError(
-                    f"Richardson levels (s, 2s) need 2s <= max_trotter_steps={method.max_trotter_steps}; at "
+                    f"Richardson levels (s, 2s) need 2s <= TrotterErrorBudgeted.max_steps={formula.max_steps}; at "
                     f"s = {cap} the bound B_ext + E_eff on each pair observable is {reached}, above the "
-                    f"allowance pair_pf_allowance/B**2 = {float(target + discrepancy)!r}. Raise "
-                    "pair_pf_allowance or max_trotter_steps")
+                    f"allowance Richardson.pf_allowance/B**2 = {float(target + discrepancy)!r}. Raise "
+                    "pf_allowance or max_steps")
             # B_ext decreases as s**-4 above 2A and the target is positive.
             s = _least_step(floor(2 * a) + 1, lambda steps: _richardson_remainder(a, steps) <= target, cap)
         remainder = _richardson_remainder(a, s)
@@ -474,18 +477,18 @@ def select_richardson(method, support):
                   multiplier_bound=bound, multiplier_second_moment=second,
                   coefficient_discrepancy=_upward(discrepancy),
                   remainder=None if remainder is None else _upward(remainder),
-                  allowance=None if rule == "fixed" else float(method.pair_pf_allowance), qualification=qualification)
+                  allowance=None if rule == "fixed" else float(recipe.pf_allowance), qualification=qualification)
     return fields, None if remainder is None else remainder + discrepancy, rule, reasons
 
 
 def select_mpf(method, support):
-    """Return the two fixed MPF members at the Method's even ``trotter_steps`` (module docstring).
+    """Return the two fixed MPF members at the Method's even ``Trotter.steps`` (module docstring).
 
     Returns the same tuple as `select_richardson`. The operator bound is zero
     for K <= 1 (exact evolution) and None otherwise, because no uniform
     finite-step remainder is admitted.
     """
-    r = method.trotter_steps
+    r = method.ham_evo.steps
     counts = (3 * _TOTAL // 4, _TOTAL // 4)
     multipliers, bound, second, discrepancy = _member_table(_MPF_WEIGHTS, counts)
     exact = support.labels <= 1
@@ -497,7 +500,12 @@ def select_mpf(method, support):
                   member_counts=counts, member_multipliers=multipliers, multiplier_bound=bound,
                   multiplier_second_moment=second, coefficient_discrepancy=_upward(discrepancy),
                   remainder=0.0 if exact else None,
-                  qualification=("two-member MPF on the P7 skeleton with exact (3/4, 1/4) member law and gamma = "
+                  qualification=("Two-member MPF with exact (3/4, 1/4) member law and gamma = (2, -2). At most one "
+                                 "distinct nonidentity Pauli label occurs, so both members implement the same "
+                                 "evolution and the exact-exponential remainder is zero. A covering radius also "
+                                 "requires the complete planned row set and known model bias. Gate, score, "
+                                 "reduction and radius arithmetic have no complete error enclosure." if exact else
+                                 "two-member MPF on the P7 skeleton with exact (3/4, 1/4) member law and gamma = "
                                  "(2, -2); the finite-step remainder and the binary64 alpha perturbation are "
                                  "unknown; raw signed estimates carry sampling radii only"))
     return fields, Fraction(0) if exact else None, "fixed", reasons
@@ -521,16 +529,17 @@ def select_ptsc(method, support, *, h_count, l_count, clusters):
         size (int): Known bytes of the saved arrays and generation scratch.
 
     Raises:
-        ResourceLimitError: For an r above a set ``max_trotter_steps`` or
+        ResourceLimitError: For an r above a set ``TrotterErrorBudgeted.max_steps`` or
             generation work above ``max_select_work``.
         ApplicabilityError: For more than 63 system qubits, or no cutoff up
-            to ``pair_taylor_cutoff`` within the allowance.
+            to ``PTSC.taylor_cutoff`` within the allowance.
     """
     q = support.num_qubits
     if q > 63:
         raise ApplicabilityError("PTSC saves each correction as int64 Pauli masks and supports at most 63 system "
                                  f"qubits; got {q}")
-    mu_cap, ceiling, cap = float(method.pair_mu_cap), method.pair_taylor_cutoff, method.max_trotter_steps
+    recipe = method.estimator.product_formula
+    mu_cap, ceiling, cap = float(recipe.mu_cap), recipe.taylor_cutoff, method.ham_evo.max_steps
     time_norm = support.time_norm
     log_cap = log(mu_cap)
 
@@ -542,15 +551,15 @@ def select_ptsc(method, support, *, h_count, l_count, clusters):
     else:
         if cap is not None and not admitted(cap):
             raise ResourceLimitError(
-                f"PTSC needs r > 2*L_time and r**3*log(pair_mu_cap) >= (e + 2/9)*(2*L_time)**4 with "
-                f"L_time = {float(time_norm)!r}; r = max_trotter_steps={cap} does not meet them. Raise "
-                "pair_mu_cap or max_trotter_steps")
-        # pair_mu_cap > 1, so both conditions hold for every large enough r.
+                f"PTSC needs r > 2*L_time and r**3*log(mu_cap) >= (e + 2/9)*(2*L_time)**4 with "
+                f"L_time = {float(time_norm)!r}; r = TrotterErrorBudgeted.max_steps={cap} does not meet them. Raise "
+                "PTSC.mu_cap or max_steps")
+        # mu_cap > 1, so both conditions hold for every large enough r.
         r = _least_step(1, admitted, cap)
-    delta = float(min(Fraction(1), _operator_allowance(method.pair_pf_allowance, support.mean_weight, 3)))
+    delta = float(min(Fraction(1), _operator_allowance(recipe.pf_allowance, support.mean_weight, 3)))
     if not delta > 0:
-        raise ApplicabilityError("pair_pf_allowance/(3*B**2) is not a positive binary64 number; raise "
-                                 "pair_pf_allowance")
+        raise ApplicabilityError("PTSC.pf_allowance/(3*B**2) is not a positive binary64 number; raise "
+                                 "pf_allowance")
     mixed = bool(h_count and l_count and support.node_bound > 0)
     for cutoff in range(3, ceiling + 1):
         if time_norm == 0:
@@ -562,9 +571,9 @@ def select_ptsc(method, support, *, h_count, l_count, clusters):
             break
     else:
         raise ApplicabilityError(
-            f"no PTSC cutoff s_c <= pair_taylor_cutoff={ceiling} brings r*mu_cap*(Taylor tail + finite-law term) "
-            f"at r = {r} to the branch allowance {delta!r} = min(1, pair_pf_allowance/(3*B**2)); at s_c = "
-            f"{ceiling} it is {taylor + law!r}. Raise pair_taylor_cutoff or pair_pf_allowance")
+            f"no PTSC cutoff s_c <= PTSC.taylor_cutoff={ceiling} brings r*mu_cap*(Taylor tail + finite-law term) "
+            f"at r = {r} to the branch allowance {delta!r} = min(1, PTSC.pf_allowance/(3*B**2)); at s_c = "
+            f"{ceiling} it is {taylor + law!r}. Raise taylor_cutoff or pf_allowance")
     branch = taylor + law
     lists = h_count + l_count
     work = (h_count * max(1, h_count.bit_length()) + l_count * max(1, l_count.bit_length())
@@ -575,7 +584,7 @@ def select_ptsc(method, support, *, h_count, l_count, clusters):
                                  f"LCHS.max_select_work={method.max_select_work}")
     size = (2 * clusters * r * 4 * _SAVED + 2 * clusters * (cutoff + 3) * _SAVED + 32 * r * cutoff
             + 256 * lists)
-    fields = dict(recipe="ptsc", steps=r, cutoff=cutoff, mu_cap=mu_cap, allowance=float(method.pair_pf_allowance),
+    fields = dict(recipe="ptsc", steps=r, cutoff=cutoff, mu_cap=mu_cap, allowance=float(recipe.pf_allowance),
                   taylor_bound=taylor, law_bound=law, branch_bound=branch,
                   qualification=("first-order PTSC with common r and s_c; the bound covers the XS12 Taylor tail and "
                                  "the P4 count quantization only; the arithmetic forming the integer targets, the "
@@ -740,8 +749,8 @@ def draw_compensation(fields, rng, rows, l_terms, h_terms, num_qubits):
                 segments[:, row, side, j] = (s, phase, x, z)
                 start += s
     if np.any(log_mu.sum(axis=1) > 2.0 * log(fields["mu_cap"])):
-        raise ApplicabilityError("a drawn PTSC row has stored normalization mu_x*mu_y above pair_mu_cap**2, so the "
-                                 "declared score range does not hold; raise pair_mu_cap")
+        raise ApplicabilityError("a drawn PTSC row has stored normalization mu_x*mu_y above PTSC.mu_cap**2, so the "
+                                 "declared score range does not hold; raise mu_cap")
     return LCHSPairCompensation(
         **fields, h_counts=FrozenArray(np.zeros(0, np.int64) if h_law is None else h_law.counts),
         l_counts=FrozenArray(np.zeros(0, np.int64) if l_law is None else l_law.counts),

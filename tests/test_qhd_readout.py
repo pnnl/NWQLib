@@ -203,7 +203,7 @@ def test_tie_window_is_relative_to_the_computed_maximum():
         assert ("Mode status: unresolved." in str(result)) == (name != "b")
 
     excluded = solve(LINE, method=QHD(num_grid_points=3, num_steps=1, total_time=0.4, schedule=STATIC, trotter_order=1,
-                                      initial_state_preparation="qiskit_state_preparation"), seed=7)
+                                      init_prep="qiskit_state_preparation"), seed=7)
     width = excluded.plan.reconstruction.width
     values = {format(1 << i, f"0{width}b"): p for i, p in enumerate((0.3 - w / 2, 0.3, 0.2))}
     values["0" * width] = 0.2 + w / 2

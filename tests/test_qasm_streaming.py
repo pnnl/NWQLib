@@ -82,7 +82,7 @@ def test_actual_expectation_selection_and_json_file_consumer(tmp_path):
               (ingest_occupation("1", num_qubits=1), "hzh", ["h", "z", "h"]))
     for state, choice, expected in states:
         selected = select_plan(Expectation(state=state, observable=plan.problem.observable),
-            method=ExpectationMethod(preparation_choice=choice), seed=7)
+            method=ExpectationMethod(prep_choice=choice), seed=7)
         construction = SelectedConstruction.model_validate_json(selected.construction.model_dump_json())
         text, receipt, parsed = emit(construction)
         # Independent intended preparations: |+>, |1>, and HZH = X.

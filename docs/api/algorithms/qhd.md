@@ -1,6 +1,6 @@
 # QHD
 
-<a id="qhd-api"></a>Use an `Optimization` with `QHD` to search for a minimizer of an objective over a box, and use the entries below to choose its schedule and initial state, read the observed points and estimate fault-tolerant resources. Import every name on this page from `nwqlib.algorithms.qhd`, for example `from nwqlib.algorithms.qhd import QHD, circuit_resources`.
+<a id="qhd-api"></a>Use an `Optimization` with `QHD` to search for a minimizer of an objective over a box, and use the entries below to choose its schedule and initial state, read the observed points and estimate fault-tolerant resources. Import every name on this page from `nwqlib.algorithms.qhd`, for example `from nwqlib.algorithms.qhd import QHD, circuit_resources`. `QHDBlock` is the exception and imports from `nwqlib.algorithms.qhd.records`.
 
 The [QHD guide](../../algorithms/qhd.md) explains the model, the readout and the measured evidence, and its [source map](../../algorithms/qhd.md#source-map) gives the paper, version and equation behind each step. <a id="constrained-problems"></a><a id="box-refinement"></a>The augmented-Lagrangian layer for constrained problems and box refinement are on [QHD constrained problems and box refinement](qhd_constrained.md). The `QHD` entry below has a complete example.
 
@@ -25,6 +25,7 @@ The [QHD guide](../../algorithms/qhd.md) explains the model, the readout and the
 ::: nwqlib.algorithms.qhd.binary.BinarySynthesis
     options:
       heading_level: 3
+      show_bases: false
 
 ## Schedules
 
@@ -34,35 +35,41 @@ The guide's [schedules](../../algorithms/qhd.md#schedules-and-coefficient-rule) 
     options:
       heading_level: 3
       members: false
+      show_bases: false
 
 ::: nwqlib.algorithms.qhd.schedules.CubicSchedule
     options:
       heading_level: 3
       members: false
+      show_bases: false
 
 ::: nwqlib.algorithms.qhd.schedules.ShiftedCubicSchedule
     options:
       heading_level: 3
       members: false
+      show_bases: false
 
 ## Initial states
 
-Each initial state is a product of nonnegative per-variable amplitude vectors, and `QHD.initial_state_preparation` selects how quantum execution prepares it. The guide's [initial states](../../algorithms/qhd.md#initial-states-and-preparation) section compares them. [Mathematics](../../mathematics.md#qhd-initial-state-vectors) gives the construction error of each vector.
+Each initial state is a product of nonnegative per-variable amplitude vectors, and `QHD.init_prep` selects how quantum execution prepares it. The guide's [initial states](../../algorithms/qhd.md#initial-states-and-preparation) section compares them. [Mathematics](../../mathematics.md#qhd-initial-state-vectors) gives the construction error of each vector.
 
 ::: nwqlib.algorithms.qhd.initial_state.KineticGroundState
     options:
       heading_level: 3
       members: false
+      show_bases: false
 
 ::: nwqlib.algorithms.qhd.initial_state.UniformState
     options:
       heading_level: 3
       members: false
+      show_bases: false
 
 ::: nwqlib.algorithms.qhd.initial_state.GaussianState
     options:
       heading_level: 3
       members: false
+      show_bases: false
 
 ## Read the result
 

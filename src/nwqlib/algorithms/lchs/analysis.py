@@ -314,7 +314,9 @@ _COUNTS_SAMPLING = ("Hoeffding bound for each counts setting's independent shots
 
 
 def _counts_radius(rec,output,groups,value,failure,*,returned=None):
-    """Return ``(radius, reason)``: the shot radius of a coherent counts estimate in the output frame, or None.
+    """Return ``(radius, reason)``: the shot radius of a counts estimate in the output frame, or None.
+
+    Counts estimates include a no-evolution readout selected by either estimator.
 
     Each nonidentity Pauli term of a group setting is measured jointly with
     the others of that group, so the per-shot score of group g is
@@ -538,7 +540,7 @@ def _pair_rows(plan,chunks):
 def sampled_pair_progress(run):
     """Return the raw sums of the measured rows of a sampled-pair LCHS Run, without any confidence statement.
 
-    Use it on a Run of a Plan with `LCHS(observable_estimator="sampled_pairs")`
+    Use it on a Run of a Plan with `LCHS(estimator="sampled_pairs")`
     that stopped before every row was measured, for example one reopened with
     `load_run`. It reads the Run's saved data, checks every present row's data
     collection as the complete analysis does, and returns which rows are
@@ -590,7 +592,7 @@ def _pair_analysis(plan,data,chunks):
     requested quantity is its Hoeffding radius plus the deterministic bias
     of `LCHSPairBias.norm_bias` (times the observable bound for the
     quadratic form), for the failure share
-    pair_failure_probability/len(quantities). A normalized value is
+    SampledPairs.fail_prob/len(quantities). A normalized value is
     published only when N_hat - e_N > 0, so that every N in the covering
     interval is positive, with the conservative error
     ``|Q_hat/N_hat - Q/N| <= (e_Q + C_O*e_N)/N_hat``, which follows from
@@ -599,7 +601,7 @@ def _pair_analysis(plan,data,chunks):
     expression with only the Hoeffding radii and only the biases. An
     accuracy request owns the confidence of its Plan, whose rows it chose
     (`sampled_plan.sampled_accuracy_shots`): its 1 - confidence replaces
-    pair_failure_probability.
+    SampledPairs.fail_prob.
     """
     from .primary_records import LCHSPairEstimate
     from .sampled_moments import hoeffding_radius, pair_confidence, ratio_interval
@@ -611,7 +613,7 @@ def _pair_analysis(plan,data,chunks):
     bias_n = bias.norm_bias()
     bias_q = None if bias_n is None else bias.observable_bound*bias_n
     accuracy = plan.selection_accuracy
-    failure = method.pair_failure_probability if accuracy is None else 1.0-accuracy.confidence
+    failure = method.estimator.fail_prob if accuracy is None else 1.0-accuracy.confidence
     confidence = pair_confidence(moments,failure=failure,quantities=quantities,
                                  bias_q=bias_q,bias_n=bias_n)
     scale = rows.scale
@@ -797,7 +799,9 @@ def analyze_quantum(plan,data,chunks):
     if not sampling and isinstance(output,(NormSquared,QuadraticForm,NormalizedExpectation)) and unavailable is None:
         # An accuracy request owns the confidence of its Plan (LCHS.sampling_shots), whose shots it chose.
         accuracy = plan.selection_accuracy
-        failure = plan.method.moment_failure_probability if accuracy is None else 1.0-accuracy.confidence
+        # A sampled-pair Method reaches these counts only through its exact no-evolution readout, whose
+        # radius does not depend on the estimator, so either estimator's fail_prob applies.
+        failure = plan.method.estimator.fail_prob if accuracy is None else 1.0-accuracy.confidence
         radius,reason = _counts_radius(rec,output,groups,value,failure,returned=first.returned_shots)
         sampling = (_sampling_fact(frame,radius,failure,assumption=_COUNTS_SAMPLING,
                                    reason=reason or "the shot radius is not representable in binary64"),)

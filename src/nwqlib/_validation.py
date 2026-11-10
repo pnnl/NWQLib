@@ -504,6 +504,24 @@ def integer(value: Any, name: str, minimum: int) -> int:
     return resolved
 
 
+def reanalysis_settings(settings: dict, accepted: tuple[str, ...], method: str) -> None:
+    """Refuse a reanalysis setting that the Method does not read.
+
+    A misspelled or renamed name would otherwise leave the analysis
+    unchanged without telling the caller. An empty `accepted` means that the
+    Method has no reanalysis settings, so every setting is refused.
+    """
+
+    unknown = sorted(set(settings) - set(accepted))
+    if not unknown:
+        return
+    if not accepted:
+        raise ValueError(f"{method} reanalysis accepts no settings, not {', '.join(unknown)}. Its Plan fixes "
+                         "every setting, so a changed setting needs a new Plan")
+    names = accepted[0] if len(accepted) == 1 else ", ".join(accepted[:-1]) + " and " + accepted[-1]
+    raise ValueError(f"{method} reanalysis accepts {names}, not {', '.join(unknown)}")
+
+
 def finite_real(value: Any, name: str) -> float:
     """Return a finite real scalar without accepting booleans or strings."""
 

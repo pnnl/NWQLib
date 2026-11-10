@@ -182,7 +182,7 @@ def _original_factors(operator, method):
 
 def classical_factor_consumer(method):
     """Return whether a classical evaluation needs the original factors, as the inverse and the linear norm model do."""
-    return method.solver == "qsvt_inverse" or method.encoded_solution_norm_estimate == "linear_kappa_sequence"
+    return method.solver == "qsvt_inverse" or method.norm_estimate == "linear_kappa_sequence"
 
 
 def _original_svd(operator, method):
@@ -547,7 +547,7 @@ def select_inputs(problem, method, *, execution):
             raise ApplicabilityError(
                 "a supplied encoding needs its own coherent non-power-of-two extension"
             )
-        if method.block_encoding_implementation != "auto":
+        if method.block_encoding != "auto":
             raise ValueError("supplied encoding conflicts with a constructor override")
         if method.alpha != "auto" and method.alpha != semantics.alpha:
             raise ValueError("supplied encoding and requested alpha differ")
@@ -567,7 +567,7 @@ def select_inputs(problem, method, *, execution):
     elif original.reference.representation == "dense":
         force_dense = d != padded or original.structure != "hermitian"
         selected = None
-        if force_dense and method.block_encoding_implementation not in {"auto", "dense_dilation"}:
+        if force_dense and method.block_encoding not in {"auto", "dense_dilation"}:
             raise ApplicabilityError(
                 "general/padded QLS uses the explicitly normalized dense dilation"
             )
@@ -579,14 +579,14 @@ def select_inputs(problem, method, *, execution):
         # multiplexed_pauli is requested. Under auto the Pauli transform
         # depends on the circulant detection, so it is not included.
         known_bytes = 192 * padded * padded + 32 * padded
-        if execution == "quantum" and (force_dense or method.block_encoding_implementation == "dense_dilation"):
+        if execution == "quantum" and (force_dense or method.block_encoding == "dense_dilation"):
             known_bytes = max(known_bytes, 256 * padded * padded + 32 * padded)
-        elif method.block_encoding_implementation in ("pauli_lcu", "multiplexed_pauli"):
+        elif method.block_encoding in ("pauli_lcu", "multiplexed_pauli"):
             qubits = padded.bit_length() - 1
             known_bytes = max(known_bytes, 192 * padded * padded + 64 * padded * padded * (qubits + 16))
         refuse_known_need("QLS", "max_bytes", method.max_bytes, known_bytes,
                           "the selected polynomial, norming grid and QSP phase solve")
-        if execution == "quantum" and (force_dense or method.block_encoding_implementation == "dense_dilation"):
+        if execution == "quantum" and (force_dense or method.block_encoding == "dense_dilation"):
             # 256 p^2 + 32 p bytes and p^3 work are the completion laws of
             # _admit_dense_input(construction=True, selected_svd=True) in
             # subroutines/block_encoding/core.py ("Dense block-encoding arrays
@@ -610,7 +610,7 @@ def select_inputs(problem, method, *, execution):
                 return float(svd.singular[0])
 
             selected = _plan_block_encoding(original.dense_array(),
-                implementation=method.block_encoding_implementation,
+                implementation=method.block_encoding,
                 normalization=None if method.alpha == "auto" else method.alpha,
                 max_bytes=method.max_bytes, max_work=method.max_work, dense_norm=dense_norm)
             if selected.implementation == "dense_dilation" and svd is None:
@@ -639,7 +639,7 @@ def select_inputs(problem, method, *, execution):
             vector = np.zeros(padded, dtype=complex)
             vector[:d] = rhs.physical_vector()
             rhs = ingest_vector(vector, max_bytes=method.max_bytes)
-        family = "dense_dilation" if force_dense else method.block_encoding_implementation
+        family = "dense_dilation" if force_dense else method.block_encoding
         # 192 p^2 bytes is the matrix term of the dense intake law of
         # _admit_dense_input (192 D^2 + 32 D bytes), which
         # plan_block_encoding also applies to the padded matrix.
@@ -692,8 +692,8 @@ def select_inputs(problem, method, *, execution):
         )
         family = (
             "multiplexed_pauli"
-            if method.block_encoding_implementation == "auto"
-            else method.block_encoding_implementation
+            if method.block_encoding == "auto"
+            else method.block_encoding
         )
         if family != "multiplexed_pauli" and family != "pauli_lcu":
             raise ApplicabilityError(

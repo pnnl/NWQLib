@@ -12,6 +12,7 @@ from nwqlib.operators.access import _check_bytes
 from nwqlib.operators.inputs import _freeze_array
 from .provider_config import ProviderConfig
 from .providers import _homogeneous_coefficient_plan
+from .route_options import Trotter, dense_options, requested_qsp_route, route_name
 
 # Generator representations that LCHS reads through operators.cartesian,
 # without a matrix of the system dimension.
@@ -29,31 +30,31 @@ def resolve_evolution_backend(method, problem):
     PeriodicStencil dispatches, which read no backend, and the selected data
     keep the result (``LCHSData.backend``), so loading, estimating and
     running a Plan never resolve again. An explicit
-    ``lcu_select_implementation`` that the resolved backend cannot use is a
+    ``lcu_select`` that the resolved backend cannot use is a
     representation-dependent conflict of an ``"auto"`` Method, so it raises
     ApplicabilityError here, which ``scientist.compare`` records as a
     rejected row; with an explicit backend ``native.resolve_lcu_select_implementation``
     keeps its ValueError.
     """
-    backend = method.hamiltonian_evolution_backend
+    backend = route_name(method.ham_evo)
     if backend != "auto":
         return backend
     compact = problem.A.reference.representation in COMPACT_REPRESENTATIONS
     backend = "qsp_block_encoding" if compact else "dense_exact"
     usable = ("auto",) if compact else ("auto", "branch_controlled")
-    if method.lcu_select_implementation not in usable:
+    if method.lcu_select not in usable:
         if not compact:
             remedy = "name the backend explicitly to use that SELECT"
         else:
             # Every other backend refuses a compact A ("a compact LCHS generator currently uses ...").
             remedy = "supply a dense A to use that SELECT"
-            if method.lcu_select_implementation in ("multiplexor", "structured"):
+            if method.lcu_select in ("multiplexor", "structured"):
                 remedy += (", or for a scalar output from finite shots on a Pauli A set "
-                           "observable_estimator='sampled_pairs' and hamiltonian_evolution_backend='trotter'")
+                           "estimator='sampled_pairs' and ham_evo='trotter'")
         raise ApplicabilityError(
-            f"hamiltonian_evolution_backend='auto' resolves to {backend!r} for this "
-            f"{'compact' if compact else 'dense'} A, which accepts lcu_select_implementation "
-            f"{' or '.join(map(repr, usable))}, not {method.lcu_select_implementation!r}; {remedy}")
+            f"ham_evo='auto' resolves to {backend!r} for this "
+            f"{'compact' if compact else 'dense'} A, which accepts lcu_select "
+            f"{' or '.join(map(repr, usable))}, not {method.lcu_select!r}; {remedy}")
     return backend
 
 
@@ -603,7 +604,7 @@ def _kk6_entry(method, problem, common, context, paper, *, accuracy):
     """Return the KK6 entry: one Apel-Berntson radius from the access form of this pass (KK6 policy K4).
 
     The form follows the actual access: an explicit
-    ``qsp_route.parameters["joint"]``, else ``"single_a"`` when the
+    ``QSPBlockEncoding.route`` parameter ``joint``, else ``"single_a"`` when the
     generator is one supplied encoding of A and ``"separate_parts"``
     otherwise. Its query normalizations are those of the actual compiled
     children (``joint.access_summary``), a = alpha_L (0 for an absent L
@@ -622,12 +623,13 @@ def _kk6_entry(method, problem, common, context, paper, *, accuracy):
     from .providers import LCHSProblemContext, _component_allowances, kk6_radius
     label, kernel, quadrature = "apel_berntson_kk6", ProviderConfig(implementation="apel_berntson"), \
         ProviderConfig(implementation="tanh_sinh")
-    request = dict(method.qsp_route.parameters)
-    route = None if method.qsp_route.implementation == "auto" else method.qsp_route.implementation
+    requested = requested_qsp_route(method)
+    request = dict(requested.parameters)
+    route = None if requested.implementation == "auto" else requested.implementation
     joint = request.get("joint") or ("single_a" if common.generator.single_a is not None else "separate_parts")
     reason = None
     if route is not None and route not in _REAL_TIME_ROUTES:
-        reason = f"the requested qsp_route {route!r} has no kernel radius to propose"
+        reason = f"the requested QSPBlockEncoding.route {route!r} has no kernel radius to propose"
     elif request.get("node", "table") != "table":
         reason = f"the Apel-Berntson nonuniform grid cannot meet the requested node encoding {request['node']!r}"
     elif joint == "convex_contraction":
@@ -639,7 +641,7 @@ def _kk6_entry(method, problem, common, context, paper, *, accuracy):
     if reason is not None:
         return ProviderEntry(label, kernel, quadrature, skip=("not_generated", reason))
     allowances = _component_allowances(LCHSProblemContext(final_time=float(problem.elapsed_time),
-        epsilon=float(method.approximation_tolerance), l_norm=common.l_norm), ("apel_berntson", "tanh_sinh"),
+        epsilon=float(method.approx_tol), l_norm=common.l_norm), ("apel_berntson", "tanh_sinh"),
         "'apel_berntson' + 'tanh_sinh'")
     if joint == "single_a":
         inputs = dict(alpha_a=access_summary(common.generator.single_a).alpha)
@@ -663,7 +665,7 @@ def _kk6_entry(method, problem, common, context, paper, *, accuracy):
 
 
 _NO_ACCURACY = ("LCHS sampling accuracy (LCHS.sampling_shots) is implemented for the coherent "
-                "hamiltonian_evolution_backend='qsp_block_encoding' route and the no-evolution identities; give "
+                "ham_evo='qsp_block_encoding' route and the no-evolution identities; give "
                 "explicit shots for this backend, whose counts report their sampling radius")
 
 
@@ -706,11 +708,13 @@ def _route(method, problem, *, output, execution, accuracy=None):
     # The synthesis tolerance inverts the weighted Strang bound of the
     # periodic route. Fixed-step dense routes publish no synthesis bound at
     # planning, so there is nothing to invert.
-    if method.trotter_synthesis_tolerance is not None and problem.A.reference.representation != "periodic_stencil":
-        raise ApplicabilityError("trotter_synthesis_tolerance selects steps only for a PeriodicStencil A. " + (
-            "This compact A plans with hamiltonian_evolution_backend='qsp_block_encoding' or 'auto', without a step "
+    backend = method.ham_evo
+    if (type(backend) is Trotter and backend.synthesis_tol is not None
+            and problem.A.reference.representation != "periodic_stencil"):
+        raise ApplicabilityError("Trotter.synthesis_tol selects steps only for a PeriodicStencil A. " + (
+            "This compact A plans with ham_evo='qsp_block_encoding' or 'auto', without a step "
             "count or tolerance" if problem.A.reference.representation in COMPACT_REPRESENTATIONS else
-            "Give trotter_steps, or use trotter_error_budgeted for per-node step selection"))
+            "Give Trotter.steps, or use trotter_error_budgeted for per-node step selection"))
     zero = (problem.initial_state.preparation.physical_scale.mantissa == 0 and
             (problem.elapsed_time==0 or problem.source is None or problem.source.preparation.physical_scale.mantissa == 0))
     if problem.elapsed_time == 0 or zero:
@@ -718,18 +722,18 @@ def _route(method, problem, *, output, execution, accuracy=None):
     if problem.A.reference.representation == "periodic_stencil":
         if execution != "quantum":
             raise ApplicabilityError("PeriodicStencil LCHS currently has a quantum Strang realization; no implicit dense host model")
-        if method.hamiltonian_evolution_backend == "auto":
+        if backend == "auto":
             # The periodic route is a product formula, whose step count "auto" does not choose; the default step
             # count 1 would leave its synthesis error uncontrolled.
             raise ApplicabilityError("a PeriodicStencil A uses the second-order product formula; set "
-                                     "hamiltonian_evolution_backend='trotter' with trotter_steps or "
-                                     "trotter_steps=None and trotter_synthesis_tolerance")
+                                     "ham_evo=Trotter(steps=...) or "
+                                     "Trotter(steps=None, synthesis_tol=...)")
         # The periodic Strang construction is the only one for this A, so another choice is a legal request
         # that no construction supports, refused before any grid.
-        if (method.hamiltonian_evolution_backend != "trotter" or method.trotter_order != 2
-                or method.lcu_select_implementation not in {"auto", "structured"}):
+        if (route_name(backend) != "trotter" or backend.order != 2
+                or method.lcu_select not in {"auto", "structured"}):
             raise ApplicabilityError("periodic LCHS requires fixed second-order trotter and auto/structured SELECT")
-        if method.initial_state_preparation != "direct" or method.lcu_state_preparation != "direct":
+        if method.init_prep != "direct" or method.lcu_prep != "direct":
             raise ApplicabilityError("periodic LCHS uses direct basis/product/input and coefficient PREP")
         if problem.source is not None:
             raise ApplicabilityError("PeriodicStencil LCHS currently has a homogeneous Strang realization")
@@ -744,25 +748,25 @@ def _route(method, problem, *, output, execution, accuracy=None):
         raise ApplicabilityError("lchs_kernel='auto' with k_quadrature='auto' compares the providers by the "
                                  "rows of the coherent qsp_block_encoding route with quantum execution; this request "
                                  f"has backend {backend!r} and execution {execution!r}, so give a concrete pair")
-    if method.lcu_state_preparation == "analytic" and backend != "qsp_block_encoding":
-        raise ApplicabilityError("lcu_state_preparation='analytic' prepares the kernel factor of the coherent "
-                                 f"qsp_block_encoding LCU; hamiltonian_evolution_backend='auto' chose {backend!r} "
+    if method.lcu_prep == "analytic" and backend != "qsp_block_encoding":
+        raise ApplicabilityError("lcu_prep='analytic' prepares the kernel factor of the coherent "
+                                 f"qsp_block_encoding LCU; ham_evo='auto' chose {backend!r} "
                                  "for this A")
     # The coherent route prepares the application and kernel factors of its coefficient state separately, so an
     # MPS coefficient PREP extends to a source there, one MPS circuit per factor; the branch layouts of the other
     # backends have no such construction.
     if execution == "quantum" and problem.source is not None and (
-            method.initial_state_preparation != "direct" or (method.lcu_state_preparation != "direct"
+            method.init_prep != "direct" or (method.lcu_prep != "direct"
                                                              and backend != "qsp_block_encoding")):
         raise ApplicabilityError("constant-source LCHS currently has direct PREP only, except an MPS coefficient "
-                                 "PREP with hamiltonian_evolution_backend='qsp_block_encoding'")
+                                 "PREP with ham_evo='qsp_block_encoding'")
     if problem.A.reference.representation in COMPACT_REPRESENTATIONS:
         if execution != "quantum":
             raise ApplicabilityError("a compact LCHS generator has no classical evaluation; it would need the dense matrix")
         if backend != "qsp_block_encoding":
-            raise ApplicabilityError("a compact LCHS generator currently uses hamiltonian_evolution_backend="
+            raise ApplicabilityError("a compact LCHS generator currently uses ham_evo="
                                      "'qsp_block_encoding' (or 'auto'); the other backends need a supplied dense A")
-        if method.initial_state_preparation == "mps_circuit":
+        if route_name(method.init_prep) == "mps_circuit":
             raise ApplicabilityError("MPS initial-state preparation needs the dense initial vector; "
                                      "a compact generator uses the state's own preparation")
         return "coherent", compact_common(method, problem, backend=backend)
@@ -770,7 +774,7 @@ def _route(method, problem, *, output, execution, accuracy=None):
         return "coherent", dense_common(method, problem, backend=backend)
     # Only the quantum dense_exact SELECT synthesizes a controlled dense exponential per address slot, which this limit
     # bounds. The same grid evaluated classically, or with product-formula branches, has no such limit.
-    slot_limit = method.max_dense_select_slots if execution == "quantum" and backend == "dense_exact" else None
+    slot_limit = dense_options(method).max_select_slots if execution == "quantum" and backend == "dense_exact" else None
     return "selected", select_dense(method, problem, backend=backend, dense_select_slot_limit=slot_limit)
 
 
@@ -846,11 +850,11 @@ def accuracy_shots(method, problem, *, output, accuracy):
     the coherent choice are computed once per planning call
     (`core.planning.planning_memo`), so ``plan`` reads them instead of
     repeating them and checks that its shots are this count. None means the
-    Plan acquires nothing. Sampled pairs (``observable_estimator="sampled_pairs"``)
+    Plan acquires nothing. Sampled pairs (``estimator="sampled_pairs"``)
     branch here to ``sampled_plan.sampled_accuracy_shots``, which returns the
     B*m shots of B independent rows.
     """
-    if method.observable_estimator == "sampled_pairs":
+    if route_name(method.estimator) == "sampled_pairs":
         from .sampled_plan import sampled_accuracy_shots
         return sampled_accuracy_shots(method, problem, output=output, accuracy=accuracy)
     route, value = _accuracy_route(method, problem, output=output, accuracy=accuracy)

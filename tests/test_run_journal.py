@@ -6,28 +6,37 @@ import pytest
 
 from nwqlib._prepared_execution import Run
 from nwqlib._run_archive import load
-from test_run_lifecycle import CountsMethod, InjectedBackend, selected
+from test_run_lifecycle import CountsMethod, InjectedBackend
 from test_run_lifecycle import clear_backend as clear_backend
 from test_saved_evidence import supplied_qhd as supplied_qhd
 
 
-@pytest.mark.skipif(os.name != "posix", reason="actual child-process crash uses fork and POSIX lock")
+@pytest.mark.skipif(os.name != "posix", reason="durable Run journals and their flock exist only on POSIX")
 @pytest.mark.parametrize("completed", [False, True])
 def test_process_exit_reopens_original_job_rng_and_once_only_result(tmp_path, monkeypatch, completed):
+    import subprocess
+    import sys
+    from pathlib import Path
+
     path = tmp_path / "process"
-    child = os.fork()
-    if child == 0:
-        try:
-            run = Run(selected(), backend=InjectedBackend(), directory=path)
-            run.resume()
-            if completed:
-                InjectedBackend.status = "completed"
-                run.resume()
-            os._exit(0)
-        except BaseException:
-            os._exit(1)
-    _, status = os.waitpid(child, 0)
-    assert os.waitstatus_to_exitcode(status) == 0
+    # The child is a new interpreter, so its InjectedBackend starts from the
+    # class defaults that clear_backend also sets. It leaves with os._exit,
+    # without closing the Run or running finalizers, so the operating system
+    # releases its flock as for a crashed process.
+    code = '''
+import os, sys
+sys.path.insert(0, sys.argv[1])
+from nwqlib._prepared_execution import Run
+from test_run_lifecycle import InjectedBackend, selected
+run = Run(selected(), backend=InjectedBackend(), directory=sys.argv[2])
+run.resume()
+if sys.argv[3] == "completed":
+    InjectedBackend.status = "completed"
+    run.resume()
+os._exit(0)
+'''
+    subprocess.run([sys.executable, '-c', code, str(Path(__file__).parent), str(path),
+                    "completed" if completed else "pending"], check=True, timeout=60)
     monkeypatch.setattr(CountsMethod, "plan", lambda *a, **k: pytest.fail("reopen replanned"))
     InjectedBackend.status = "completed"
     with load(path, backend=InjectedBackend(), method=CountsMethod) as run:

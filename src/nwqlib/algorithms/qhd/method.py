@@ -70,6 +70,7 @@ from nwqlib._validation import (
     expm_multiply_state_error,
     integer,
     probability_difference_window,
+    reanalysis_settings,
     state_mass_window,
     validate_normalized_mass,
 )
@@ -109,7 +110,9 @@ from nwqlib.ir import (
     Setting,
 )
 from nwqlib.ir.validation import _Admission
-from nwqlib.problems.records import Optimization, OptimizationCandidate
+from nwqlib.problems.records import (
+    _CONSTRAINED_ENTRY, ConstrainedOptimization, Optimization, OptimizationCandidate,
+)
 from nwqlib.resources.records import ResourceLaw, Workspace
 from .binary import BinarySynthesis
 from .compiler import QHDCompiler
@@ -463,7 +466,7 @@ def _grid(plan):
     changes no coordinate.
     """
     key = (plan.problem.variable_names, plan.problem.bounds, plan.method.num_grid_points,
-           plan.method.include_boundary_points, plan.method.boundary)
+           plan.method.boundary_points, plan.method.boundary)
     cached = plan._cache.get("qhd_grid")
     if cached is not None and cached[0] == key:
         return cached[1]
@@ -2853,7 +2856,7 @@ class QHD(Method):
             `"dirichlet"` or `"periodic"`. The periodic grid takes no boundary points,
             and with the one-hot encoding it needs an even K of at least 4. The Grids
             note below gives the grid points.
-        include_boundary_points: Default `False`. Place the Dirichlet grid on both box
+        boundary_points: Default `False`. Place the Dirichlet grid on both box
             endpoints instead of the interior. Not available with the periodic boundary.
         kinetic_model: Default `"finite_difference"`, which every route applies. Kinetic
             operator K of each variable: `"finite_difference"`, the three-point stencil
@@ -2874,7 +2877,7 @@ class QHD(Method):
             The row "QHD Method defaults" of the
             [engineering constants](../../ENGINEERING_CONSTANTS.md#safety-factors-and-workflow-defaults)
             gives the evidence for the default and its limits.
-        initial_state_preparation: Default `"structured"`, the library's circuit for the
+        init_prep: Default `"structured"`, the library's circuit for the
             encoding and state, whose CX count the Plan records. How quantum execution
             prepares the initial state. `"qiskit_state_preparation"` appends a Qiskit
             `StatePreparation`, and `"none"` selects a resource-only construction, which
@@ -2922,7 +2925,7 @@ class QHD(Method):
 
     Grids:
         The Dirichlet interior grid, the default, has the vanishing boundary values of
-        Leng et al.'s Eq. (F.4), and the endpoint grid of `include_boundary_points=True`
+        Leng et al.'s Eq. (F.4), and the endpoint grid of `boundary_points=True`
         keeps the endpoint amplitudes, as their Eq. (F.9) does. The periodic grid, the
         mesh of their Eq. (E.1), is `x_i = lower + i (upper - lower)/K`, i = 0..K-1,
         with `upper` identified with `lower`, and adds the wrap link between the points
@@ -2980,7 +2983,7 @@ class QHD(Method):
         `pruning_error_bound`.
 
     State preparation:
-        `initial_state_preparation="structured"` builds the library's structured circuit
+        `init_prep="structured"` builds the library's structured circuit
         for the encoding and initial state, and the Plan records its CX count as a
         cost rule (`ResourceLaw`). On the one-hot encoding it is the nonnegative amplitude chain of
         O(dK) gates, which for the uniform state is the linear W-state chain. The chain
@@ -3012,7 +3015,7 @@ class QHD(Method):
 
     Raises:
         ValueError: If `boundary="periodic"` is combined with
-            `include_boundary_points=True`, or with the one-hot encoding and an odd
+            `boundary_points=True`, or with the one-hot encoding and an odd
             `num_grid_points` or one below 4. If `kinetic_model="spectral"` is used with
             a Dirichlet boundary. If `encoding="binary"` is used without the periodic
             boundary or with a `num_grid_points` that is not a power of two. If
@@ -3046,7 +3049,7 @@ class QHD(Method):
 
     result_type: ClassVar[type] = QHDAnalysis
 
-    schema_version: Literal[3] = 3
+    schema_version: Literal[4] = 4
     # num_grid_points=2, num_steps=1 and total_time=1 are the smallest legal
     # grid and step count with unit time, so a default solve uses two qubits
     # per variable. The quadratic schedule with gamma=0.3 is the illustrative
@@ -3081,7 +3084,7 @@ class QHD(Method):
     coefficient_rule: Literal["midpoint", "integrated"] = "midpoint"
     trotter_order: Literal[1, 2] = 2
     boundary: Literal["dirichlet", "periodic"] = "dirichlet"
-    include_boundary_points: StrictBool = False
+    boundary_points: StrictBool = False
     kinetic_model: Literal["finite_difference", "spectral"] = "finite_difference"
     rotation_threshold: Nonnegative = DEFAULT_ROTATION_THRESHOLD
     # The kinetic ground state is the ground state of the kinetic term,
@@ -3117,7 +3120,7 @@ class QHD(Method):
     # option. Registered in docs/ENGINEERING_CONSTANTS.md ("QHD Method
     # defaults").
     initial_state: InitialState = KineticGroundState()
-    initial_state_preparation: Literal["structured", "qiskit_state_preparation", "none"] = "structured"
+    init_prep: Literal["structured", "qiskit_state_preparation", "none"] = "structured"
     theory_flavor: Literal["schrodinger", "ir_product", "split_step"] = "schrodinger"
     keep_state: StrictBool = False
     # Limits on known table and array bytes and on counted work, not process
@@ -3164,11 +3167,11 @@ class QHD(Method):
         off-diagonal ``-1/h**2``. The binary encoding therefore accepts K = 2.
         """
         if self.boundary == "periodic":
-            if self.include_boundary_points:
+            if self.boundary_points:
                 raise ValueError(
                     "boundary='periodic' has no boundary points to include. Its grid "
                     "lower + i*(upper - lower)/K, i = 0..K-1, identifies upper with lower, so "
-                    "include_boundary_points=True does not apply"
+                    "boundary_points=True does not apply"
                 )
             if self.encoding == "one_hot" and (self.num_grid_points < 4 or self.num_grid_points % 2):
                 raise ValueError(
@@ -3526,7 +3529,7 @@ class QHD(Method):
         # bound for first order, plus one or two projector passes over the
         # support tables.
         links = OneHotGrid(problem.variable_names, problem.bounds, k,
-                           self.include_boundary_points, self.boundary).num_links
+                           self.boundary_points, self.boundary).num_links
         occurrences = (
             self.num_steps
             * (d * (links + links // 2) + (2 if self.trotter_order == 2 else 1) * evaluations)
@@ -3633,15 +3636,18 @@ class QHD(Method):
         may be subnormal and are rounded upward.
         """
         if not isinstance(problem, Optimization) or not isinstance(output, OptimizationCandidate):
-            raise ApplicabilityError("QHD requires an Optimization and OptimizationCandidate")
+            message = "QHD requires an Optimization and OptimizationCandidate"
+            if isinstance(problem, ConstrainedOptimization):
+                message += "; " + _CONSTRAINED_ENTRY
+            raise ApplicabilityError(message)
         from .validation import _validate_qhd_problem_fields
 
         _validate_qhd_problem_fields(problem)
         if execution == "classical" and shots is not None:
             raise ValueError("classical QHD has no sampled circuit acquisition")
-        if self.initial_state_preparation == "none" and execution != "quantum":
+        if self.init_prep == "none" and execution != "quantum":
             raise ValueError(
-                "initial_state_preparation='none' describes a quantum resource-only construction"
+                "init_prep='none' describes a quantum resource-only construction"
             )
         if self.keep_state and shots is not None:
             raise ValueError("keep_state requires exact amplitude acquisition")
@@ -3650,12 +3656,12 @@ class QHD(Method):
         # the uniform state, equal to the kinetic ground state of the periodic
         # grid (initial_state.append_binary_initial_state). Classical
         # execution prepares no circuit.
-        if (execution == "quantum" and self.encoding == "binary" and self.initial_state_preparation == "structured"
+        if (execution == "quantum" and self.encoding == "binary" and self.init_prep == "structured"
                 and not isinstance(self.initial_state, (UniformState, KineticGroundState))):
             raise ValueError(
                 "the structured preparation of the binary encoding is one H per qubit, which prepares the "
                 f"uniform state only, not {type(self.initial_state).__name__}. Use "
-                "initial_state_preparation='qiskit_state_preparation'"
+                "init_prep='qiskit_state_preparation'"
             )
         # The physical one-hot register has d*K qubits, while its admissible
         # grid sector has K**d states. These are distinct resource dimensions.
@@ -3685,7 +3691,7 @@ class QHD(Method):
                     stage="initial state and schedule rows", later={
                         "max_work": "symbolic supports, table evaluation and selected evolution",
                         "max_bytes": "support tables, their identities and selected evolution workspace"})
-        grid = OneHotGrid(problem.variable_names, problem.bounds, k, self.include_boundary_points,
+        grid = OneHotGrid(problem.variable_names, problem.bounds, k, self.boundary_points,
                           self.boundary)
         if self.kinetic_model == "spectral":
             # The spectral kinetic energies reach pi**2/(2 h**2) at the Nyquist
@@ -3818,7 +3824,7 @@ class QHD(Method):
                 ledger["range_omissions"].update(identity_events=1, identity_charge=lost)
         ledger["range_omissions"] = _range_omissions(
             tables, ledger["range_omissions"],
-            chains=bits is None and execution == "quantum" and self.initial_state_preparation == "structured",
+            chains=bits is None and execution == "quantum" and self.init_prep == "structured",
             amplitudes=stored)
         # The native circuit adds the compiled identity phase to its global
         # phase and the ir_product reference multiplies its state by it before
@@ -3959,7 +3965,7 @@ class QHD(Method):
             reconstruction=r,
             error_model=model,
             experiments=()
-            if self.initial_state_preparation == "none"
+            if self.init_prep == "none"
             else ((Experiment(name="qhd", setting="qhd", observation=observation),)
                   if execution == "classical" else
                   (Experiment(name="qhd", batch="root", setting_index=0,
@@ -4190,11 +4196,11 @@ class QHD(Method):
         schedule = r.onehot
         providers = {p.support_size: p for p in schedule.providers}
         prep_work = prep_cx = links = 0
-        if self.initial_state_preparation == "structured":
+        if self.init_prep == "structured":
             links = sum(chain_links(vector) for vector in amplitudes)
             # d X gates, one CRY and one CX per emitted link. A CRY lowers to two CX.
             prep_work, prep_cx = d + 2 * links, 3 * links
-        elif self.initial_state_preparation == "qiskit_state_preparation":
+        elif self.init_prep == "qiskit_state_preparation":
             prep_work = d * k * (1 << k)
         # A hopping block is an XX+YY gate on two qubits, 1 + 2 + 2**2 units.
         work = prep_work + 7 * schedule.hopping_blocks + sum(
@@ -4213,7 +4219,7 @@ class QHD(Method):
         # The arbitrary-rotation law counts the same emitted blocks and chain
         # (resources.rotation_population), so it has the same exception.
         laws = ()
-        if self.initial_state_preparation != "qiskit_state_preparation":
+        if self.init_prep != "qiskit_state_preparation":
             from .resources import onehot_rotation_bound
 
             cx = prep_cx + 2 * schedule.hopping_blocks + sum(
@@ -4270,15 +4276,15 @@ class QHD(Method):
             signature=signature,
             semantics=semantics,
             implementation=source,
-            choice=self.initial_state_preparation,
+            choice=self.init_prep,
             decomposition=None,
             cost_law=None,
             coefficient_selection_id=r.content_id,
             cost_context="actual compact schedule; SDK synthesis and routing unknown",
             construction_work=work,
             resource_laws=laws,
-            blocker="initial_state_preparation='none' is resource-only"
-            if self.initial_state_preparation == "none"
+            blocker="init_prep='none' is resource-only"
+            if self.init_prep == "none"
             else None,
             workspace=(
                 Workspace(
@@ -4403,9 +4409,9 @@ class QHD(Method):
         d, k, bits = len(problem.variables), self.num_grid_points, _bits(self)
         blocks = tuple(b for group in r.steps for b in group)
         prep_work = 0
-        if self.initial_state_preparation == "structured":
+        if self.init_prep == "structured":
             prep_work = d * bits
-        elif self.initial_state_preparation == "qiskit_state_preparation":
+        elif self.init_prep == "qiskit_state_preparation":
             prep_work = d * bits * k
         walsh_tables = () if self.binary_synthesis.potential == "dense_diagonal" else r.support_values
         work = prep_work + d * kinetic_setup_work(bits)
@@ -4423,7 +4429,7 @@ class QHD(Method):
                 work += (3 * n + 1) * entries + 2
         work += (r.range_omissions.dense_entries
                  + 2 * r.range_omissions.rotations + 4 * r.dropped_count)
-        if self.initial_state_preparation == "none":
+        if self.init_prep == "none":
             native_bytes = 0
         else:
             from .native import _binary_workspace_bytes
@@ -4433,7 +4439,7 @@ class QHD(Method):
         # checks it before allocating. Planning itself admits only its work.
         self._admit(work, 0, stage="native binary construction")
         laws = ()
-        if self.initial_state_preparation != "qiskit_state_preparation":
+        if self.init_prep != "qiskit_state_preparation":
             evidence = Evidence(kind="proved_relation", source=source)
             laws = (
                 ResourceLaw(
@@ -4482,15 +4488,15 @@ class QHD(Method):
             signature=signature,
             semantics=semantics,
             implementation=source,
-            choice=self.initial_state_preparation,
+            choice=self.init_prep,
             decomposition=None,
             cost_law=None,
             coefficient_selection_id=r.content_id,
             cost_context="actual compact binary schedule; SDK synthesis and routing unknown",
             construction_work=work,
             resource_laws=laws,
-            blocker="initial_state_preparation='none' is resource-only"
-            if self.initial_state_preparation == "none" else None,
+            blocker="init_prep='none' is resource-only"
+            if self.init_prep == "none" else None,
             workspace=(
                 Workspace(location="host", purpose="preparation", bytes=native_bytes,
                           source=source),
@@ -4550,8 +4556,10 @@ class QHD(Method):
         total returned shots as ``valid_count`` and ``returned_shots``.
         Exact probabilities are averaged over chunks. ``_readout_window``
         gives each path's tie window from its preparation records or from the
-        application record of the classical routine.
+        application record of the classical routine. QHD has no reanalysis
+        settings, so any setting is refused before the data are read.
         """
+        reanalysis_settings(settings, (), "QHD")
         observations, trace = data.observations, data.trace
         artifacts = data
         if type(plan) is not Plan or plan.method != self or trace.plan_id != plan.content_id:

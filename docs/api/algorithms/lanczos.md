@@ -4,7 +4,8 @@
 
 ```python
 from nwqlib import Eigenproblem, solve
-from nwqlib.algorithms import Lanczos, LanczosResult, SensitivitySampling
+from nwqlib.algorithms import Lanczos
+from nwqlib.algorithms.lanczos import LanczosResult, SensitivitySampling
 ```
 
 The construction follows Kirby, Motta and Mezzacapo, arXiv:2208.00567v4, Sections 2.1–3.1. The shift and rescaling follow Oumarou et al., arXiv:2603.15552v1, whose sensitivity allocation NWQLib adapts, and the thresholded pencil solve follows Epperly, Lin and Nakatsukasa, arXiv:2110.07492v2, Algorithm 1.1. The [Lanczos guide](../../algorithms/lanczos.md) explains the cutoff analysis and sensitivity sampling, and its [source and code map](../../algorithms/lanczos.md#source-and-code-map) gives the equation, page and implementing function of each step.
@@ -19,6 +20,7 @@ The construction follows Kirby, Motta and Mezzacapo, arXiv:2208.00567v4, Section
 ::: nwqlib.algorithms.lanczos.method.SensitivitySampling
     options:
       heading_level: 3
+      show_bases: false
 
 ## Read the result
 

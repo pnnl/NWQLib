@@ -44,7 +44,7 @@ def test_two_finite_recipes_reach_aer_and_preserve_their_actual_error_scope(monk
     for tolerance in (0.01, 0.001):
         # Execute the approved nine-qubit default once below. Both scalar
         # finite sums also admit an independent two-dimensional reference.
-        selected = plan(problem, method=LCHS(approximation_tolerance=tolerance), execution="classical", seed=7)
+        selected = plan(problem, method=LCHS(approx_tol=tolerance), execution="classical", seed=7)
         result = solve(selected)
         if tolerance == .01:
             classical = result

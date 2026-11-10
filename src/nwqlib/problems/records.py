@@ -180,6 +180,28 @@ class _ScientificModel(Record):
         return type(self).model_validate({**values, **changes})
 
 
+def _field_summary(value):
+    """Return the short text of one Problem field for `ProblemRecord.__str__`, reading only metadata."""
+    from nwqlib.operators.inputs import OperatorInput
+    from nwqlib.problems.inputs import StateInput
+    if isinstance(value, OperatorInput):
+        dimension = value.basis.dimension
+        return f"{value.reference.representation} {dimension}x{dimension}"
+    if isinstance(value, StateInput):
+        return f"{value.reference.representation}, dimension {value.basis.dimension}"
+    if isinstance(value, Unit):
+        return value.symbol
+    if isinstance(value, Scope):
+        return value.domain
+    if isinstance(value, InputRef):
+        return f"{value.representation} input"
+    if isinstance(value, SymbolicDescription):
+        return value.display
+    if isinstance(value, tuple):
+        return "(" + ", ".join(_field_summary(item) for item in value) + ("," if len(value) == 1 else "") + ")"
+    return str(value)
+
+
 class ProblemRecord(_ScientificModel):
     """The optional fields that every Problem accepts besides its own inputs.
 
@@ -246,6 +268,32 @@ class ProblemRecord(_ScientificModel):
         The numerical data stay in the input objects.
         """
         return self.model_dump(mode="json", exclude_computed_fields=True)
+
+    def __str__(self):
+        """Summarize the Problem in a few lines, without reading its numerical data.
+
+        The first line is the Problem type. Each given field follows on its
+        own line: an operator as its representation and shape, such as
+        `dense 2x2`, a state as its representation and dimension, such as
+        `circuit, dimension 4`, a unit by its
+        symbol, and a scalar, bound or expression as written. Fields left at
+        `None` or empty are omitted, and `coordinates` and `facts` are shown
+        as counts. `model_dump()` returns every field in full.
+        """
+        lines = [type(self).__name__]
+        for name in type(self).model_fields:
+            value = getattr(self, name)
+            if name == "kind" or value is None or value == ():
+                continue
+            shown = f"{len(value)} {name}" if name in ("coordinates", "facts") else _field_summary(value)
+            lines.append(f"  {name}: {shown}")
+        return "\n".join(lines)
+
+    def __repr__(self):
+        return str(self)
+
+    def _repr_pretty_(self, printer, cycle):
+        printer.text(f"{type(self).__name__}(...)" if cycle else str(self))
 
     def default_output(self):
         """Return the output that `plan` and `compare` use when no `output` is given.
@@ -824,6 +872,12 @@ def _residual(value, field, position):
             raise ValueError(f"{where} has {part} {type(term).__name__}, which is not a scalar SymPy expression. "
                              "A constraint is a scalar expression or an admitted relation between two of them")
     return sides[0] - sides[1] if sides else value
+
+
+# The supported entry for a ConstrainedOptimization, which no Method declares.
+# QHD's refusal and solve without method= both end with it.
+_CONSTRAINED_ENTRY = ("solve a ConstrainedOptimization with "
+                      "nwqlib.algorithms.qhd.solve_augmented_lagrangian(problem, qhd=QHD(...))")
 
 
 class ConstrainedOptimization(ProblemRecord):

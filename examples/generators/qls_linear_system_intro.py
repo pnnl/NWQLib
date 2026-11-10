@@ -467,7 +467,7 @@ unit = StateVector(normalization="unit", global_phase="modulo_global_phase")
 reference_direction = reference / np.linalg.norm(reference)
 rows = []
 for guess in (1.0, 2.0, 3.0, 5.0):
-    shortcut = solve(problem, method=QLS(solver="shortcut_native_svp", encoded_solution_norm_estimate=guess),
+    shortcut = solve(problem, method=QLS(solver="shortcut_native_svp", norm_estimate=guess),
                      output=unit, seed=7, progress=False)
     rows.append((guess, 1 - abs(np.vdot(reference_direction, np.asarray(shortcut.value))) ** 2,
                  shortcut.algorithm_success_mass, shortcut.plan.reconstruction.width,

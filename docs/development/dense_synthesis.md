@@ -1,6 +1,6 @@
 # Exact dense synthesis
 
-This page is for contributors and for readers who check NWQLib's CX counts and work formulas. It describes how NWQLib builds a circuit that equals a dense unitary matrix to rounding, and its controlled form, where Qiskit's own synthesis is not exact. It also covers how the `dense_control_route` option of LCHS, QLS and `build_control_diagonal_generator_encoding` chooses between the two controlled routes, how each construction counts the synthesis work against its limits, and how an uncontrolled multiplexer is inverted. The user guide for blocks is [Compose blocks](../blocks.md).
+This page is for contributors and for readers who check NWQLib's CX counts and work formulas. It describes how NWQLib builds a circuit that equals a dense unitary matrix to rounding, and its controlled form, where Qiskit's own synthesis is not exact. It also covers how the control-route option of LCHS (`DenseExact.control_route`), QLS and `build_control_diagonal_generator_encoding` (`dense_control_route`) chooses between the two controlled routes, how each construction counts the synthesis work against its limits, and how an uncontrolled multiplexer is inverted. The user guide for blocks is [Compose blocks](../blocks.md).
 
 ## Controlled dense unitaries
 
@@ -22,7 +22,7 @@ An uncontrolled `UnitaryGate` stays a matrix in the logical circuit, and Aer app
 
 ## Dense control route
 
-In `LCHS`, `QLS` and `build_control_diagonal_generator_encoding`, the `dense_control_route` option selects one of two routes by which a construction adds controls to a dense unitary on two or more qubits (`subroutines/_dense_synthesis.select_dense_control_route`).
+The `control_route` option of `DenseExact`, the LCHS `dense_exact` backend, and the `dense_control_route` option of `QLS` and `build_control_diagonal_generator_encoding` select one of two routes by which a construction adds controls to a dense unitary on two or more qubits (`subroutines/_dense_synthesis.select_dense_control_route`).
 
 | Value | Route |
 | --- | --- |
@@ -68,7 +68,7 @@ The table lists the constructions that synthesize dense unitaries and how each c
 | Compilation to the gate basis by NWQ-Sim, Nexus, IonQ with the QIS gateset, IBM at levels 0 and 1, and Aer with a noise model whose basis omits the unitary instruction | Each distinct uncontrolled dense matrix once per Run object, through the Run's synthesis cache | The physical memory, with the kept bytes of the Run's synthesis cache, before the syntheses. The Run counts the work of the matrices missing from the cache in `ExecutionTrace.synthesis_work` once the preparation is saved |
 | MPS preparation on n qubits | At most `layers * (n - 1)` two-qubit syntheses, none when every bond dimension the sweep can keep is one | The builder's `max_svd_work`, once with the TT-SVD and the layered construction before the first SVD, and its `max_bytes` before the first synthesis. LCHS planning compares the same total with `LCHS.max_svd_work` |
 
-QLS counts the forward and the adjoint synthesis of a controlled dense query and their control against `max_work` and `max_bytes` at planning. An explicit `max_work=1_000_000_000` permits at most 64 padded coordinates for this route. LCHS counts its `dense_exact` branches and dense-dilation QSP children against `max_select_work` and `max_bytes`, whose defaults are `None` (no work cap) and `None` (the physical memory). With an explicit billion-unit work cap and the default limit of 4096 address slots (`max_dense_select_slots`, the basis states of the address register), the formulas of the dense SELECT stage for generic homogeneous branches permit at most 16, 64, 256 and 1024 power-of-two branches at q=6, 5, 4 and 3 respectively. At q=5 and q=6, the next power-of-two branch count exceeds that work cap, and planning reports bytes first when they also exceed `max_bytes`. Independent spectral and PREP checks and complete execution remain separate, as the [LCHS limits table](../algorithms/lchs.md#what-fits-the-default-limits) explains.
+QLS counts the forward and the adjoint synthesis of a controlled dense query and their control against `max_work` and `max_bytes` at planning. An explicit `max_work=1_000_000_000` permits at most 64 padded coordinates for this route. LCHS counts its `dense_exact` branches and dense-dilation QSP children against `max_select_work` and `max_bytes`, whose defaults are `None` (no work cap) and `None` (the physical memory). With an explicit billion-unit work cap and the default limit of 4096 address slots (`DenseExact.max_select_slots`, the basis states of the address register), the formulas of the dense SELECT stage for generic homogeneous branches permit at most 16, 64, 256 and 1024 power-of-two branches at q=6, 5, 4 and 3 respectively. At q=5 and q=6, the next power-of-two branch count exceeds that work cap, and planning reports bytes first when they also exceed `max_bytes`. Independent spectral and PREP checks and complete execution remain separate, as the [LCHS limits table](../algorithms/lchs.md#what-fits-the-default-limits) explains.
 
 ### Synthesis cache of a Run
 

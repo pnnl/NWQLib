@@ -41,7 +41,7 @@ def test_flat_counter_follows_minimum_user_and_twenty_percent_limits(pool_size, 
     result = solve(
         h,
         pool,
-        energy_change_tolerance=1e9,
+        energy_tol=1e9,
         gradient_norm_floor=0,
         t_user=patience,
         max_iterations=20,

@@ -175,7 +175,7 @@ def normalized_taylor_energy_gradient(
 
 
 class _EvaluationBudgetExhausted(Exception):
-    """Raised by the ``evaluate`` callback of the ADAPT iteration when a new energy query would exceed ``optimize_max_evaluations``."""
+    """Raised by the ``evaluate`` callback of the ADAPT iteration when a new energy query would exceed ``max_evals``."""
 
 
 def _generator_shift_rule(

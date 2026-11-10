@@ -157,7 +157,7 @@ def test_rotation_law_bounds_the_emitted_circuit_and_a_budget_classifies_it():
         counts[name] = emitted[0]
     assert counts["pruned"] < counts["unpruned"]
     # The SDK preparation has no rotation law, like its CX law.
-    sdk = _plan(problem, method.revise(initial_state_preparation="qiskit_state_preparation"))
+    sdk = _plan(problem, method.revise(init_prep="qiskit_state_preparation"))
     assert sdk.construction.selections[0].resource_laws == ()
     with pytest.raises(ValueError, match="no rotation law"):
         circuit_resources(sdk)
@@ -328,7 +328,7 @@ def test_evolution_bound_dominates_the_time_ordered_error(k, box, objective, ord
     # below 1e-10, is negligible against the margins (the bound exceeds the measured error by at least a
     # factor 1.5 in these cases), so the check allows only that.
     method = QHD(num_grid_points=k, num_steps=steps, total_time=total, trotter_order=order, schedule=schedule,
-                 coefficient_rule=rule, boundary=boundary, initial_state_preparation="none")
+                 coefficient_rule=rule, boundary=boundary, init_prep="none")
     selected = _plan(Optimization(objective=objective, variables=(x,), bounds=(box,)), method)
     r = selected.reconstruction
     circuit = QuantumCircuit(k)
@@ -397,7 +397,7 @@ def test_norm_inputs_bound_the_dense_commutators():
     # mu_T and mu_V, of the closed form of Gamma and of the layer constants J_E and J_O.
     problem = Optimization(objective=x**2 / 4 + y**2 / 8 + x * y / 3 + sp.Rational(7, 8), variables=(x, y),
                            bounds=((-1.0, 1.0),) * 2)
-    method = QHD(num_grid_points=4, num_steps=1, boundary="periodic", initial_state_preparation="none")
+    method = QHD(num_grid_points=4, num_steps=1, boundary="periodic", init_prep="none")
     first, second = _plan(problem, method.revise(trotter_order=1)), _plan(problem, method)
     r = first.reconstruction
     k = 4
@@ -561,7 +561,7 @@ def test_one_hot_angle_formation_bounds_the_exact_discrepancies():
     problem = Optimization(objective=x + 3 * x * y * z * w + y / 1000 + x * y / 7, variables=(x, y, z, w),
                            bounds=((-1.0, 1.0), (-0.7, 1.3), (-1.0, 1.0), (-1.0, 1.0)))
     method = QHD(num_grid_points=3, num_steps=3, total_time=0.7, schedule=QuadraticSchedule(gamma=0.3),
-                 initial_state_preparation="none")
+                 init_prep="none")
     selected = _plan(problem, method)
     r, grid = selected.reconstruction, _grid(selected)
     k, dt = grid.num_grid_points, Fraction(method.total_time / method.num_steps)
@@ -611,7 +611,7 @@ def test_later_ledger_stages_bound_the_native_circuit_against_the_split_product(
     k, box = 3, ((lower, 1.2), (-0.8, 1.0))
     problem = Optimization(objective=objective, variables=(x, y), bounds=box)
     method = QHD(num_grid_points=k, num_steps=3, total_time=0.6, trotter_order=order, schedule=schedule,
-                 rotation_threshold=threshold, initial_state_preparation="none")
+                 rotation_threshold=threshold, init_prep="none")
     selected = _plan(problem, method)
     r = selected.reconstruction
     circuit = QuantumCircuit(2 * k)
@@ -758,7 +758,7 @@ def test_coefficient_residual_matches_exact_integrals_and_midpoints(schedule, ru
     # exactly, so it lies at or above the exact sum and within one unit in the last place per step of it.
     problem = Optimization(objective=x**2 / 3 + x / 5 + sp.Rational(1, 7), variables=(x,), bounds=((-1.0, 1.0),))
     selected = _plan(problem, QHD(num_grid_points=3, num_steps=5, total_time=0.9, schedule=schedule,
-                                  coefficient_rule=rule, initial_state_preparation="none"))
+                                  coefficient_rule=rule, init_prep="none"))
     bound = evolution_bound(selected)
     t = sp.Symbol("t")
     # The schedule parameter is read as the exact rational of its binary64 value, as in the finite model.
@@ -892,7 +892,7 @@ def test_binary_evolution_bound_dominates_the_time_ordered_error(k, model, rule,
     box = ((-1.0, 1.0), (-1.0, 1.0))
     method = QHD(encoding="binary", boundary="periodic", kinetic_model=model, num_grid_points=k, num_steps=4,
                  total_time=0.25, trotter_order=order, schedule=QuadraticSchedule(gamma=0.3), coefficient_rule=rule,
-                 initial_state_preparation="none")
+                 init_prep="none")
     objective = x**2 / 4 + y**2 / 8 + x * y / 3 + sp.Rational(7, 8)
     selected = _plan(Optimization(objective=objective, variables=(x, y), bounds=box), method)
     r = selected.reconstruction
@@ -1099,7 +1099,7 @@ def test_binary_norm_inputs_bound_the_dense_commutators(k, objective):
     variables = (x,) if objective.free_symbols == {x} else (x, y)
     bounds = ((0.0, 1.7), (-1.0, 1.2))[: len(variables)]
     method = QHD(encoding="binary", boundary="periodic", kinetic_model="finite_difference", num_grid_points=k,
-                 num_steps=1, total_time=0.3, initial_state_preparation="none")
+                 num_steps=1, total_time=0.3, init_prep="none")
     selected = _plan(Optimization(objective=objective, variables=variables, bounds=bounds), method)
     r, d = selected.reconstruction, len(variables)
     q = np.arange(k)
@@ -1366,7 +1366,7 @@ def _aer_positions(circuit):
 
 @pytest.mark.parametrize("fields", [
     dict(num_grid_points=20, num_steps=10),
-    dict(num_grid_points=4, num_steps=2, initial_state_preparation="qiskit_state_preparation"),
+    dict(num_grid_points=4, num_steps=2, init_prep="qiskit_state_preparation"),
     dict(num_grid_points=16, num_steps=4, encoding="binary", boundary="periodic"),
     dict(num_grid_points=16, num_steps=2, encoding="binary", boundary="periodic",
          binary_synthesis=BinarySynthesis(qft_bit_reversal="swap")),

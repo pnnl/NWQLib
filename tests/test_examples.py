@@ -572,7 +572,7 @@ LCHS_QUICKSTART = """
 import numpy as _np
 from scipy.linalg import expm as _expm
 _reference = _expm(-0.1 * _np.array([[0.4, 0.15], [0.05, 0.25]])) @ _np.array([1.0, 0.0])
-# Method-error-bounded: LCHS splits approximation_tolerance = 0.01 between the dropped k tail and the k
+# Method-error-bounded: LCHS splits approx_tol = 0.01 between the dropped k tail and the k
 # quadrature. The dense SELECT runs on Aer's exact statevector, which adds only rounding (an imaginary residue of
 # 1.5e-12 here), covered by 1e-9.
 assert _np.linalg.norm(result.solution - _reference) <= 0.01 + 1e-9
@@ -582,7 +582,7 @@ DOC_CHECKS = {
     "docs/index.md": (("LCHS()", LCHS_QUICKSTART),),
     "docs/quickstart.md": (
         ("method=LCHS())\nprint", LCHS_QUICKSTART),
-        ("approximation_tolerance=0.001", """
+        ("approx_tol=0.001", """
 # Method-error-bounded: the classical evaluation of the finite sum adds only rounding to the 0.001 budget.
 assert _np.linalg.norm(refined.solution - _reference) <= 0.001 + 1e-12
 """),

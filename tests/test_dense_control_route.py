@@ -125,12 +125,12 @@ def _lchs_dense_plan(num_qubits, address_bits, route, source=False):
     sys.path.insert(0, str(Path(__file__).parent))
     from test_lchs_resource_structural_law import _dense_select_problem
     from nwqlib import plan
-    from nwqlib.algorithms.lchs import LCHS, ProviderConfig
+    from nwqlib.algorithms.lchs import LCHS, DenseExact, ProviderConfig
 
     grid = ProviderConfig(implementation="signed_binary_uniform",
                           parameters={"num_qubits": address_bits, "lsb_position": -1})
     problem = _dense_select_problem(num_qubits, source=source)
-    method = LCHS(hamiltonian_evolution_backend="dense_exact", k_quadrature=grid, dense_control_route=route,
+    method = LCHS(ham_evo=DenseExact(control_route=route), k_quadrature=grid,
                   **({"duhamel_nodes": 1} if source else {}))
     return problem, plan(problem, method=method)
 
@@ -173,8 +173,8 @@ def _qls_query(solver, route, controls):
 
     matrix = np.array([[1.0, 0.2, 0.0, 0.1], [0.0, 0.8, 0.1, 0.0], [0.1, 0.0, 0.9, 0.2], [0.0, 0.1, 0.0, 0.7]])
     selected = nwqlib.plan(LinearSystem(A=matrix, b=np.ones(4)),
-                           method=QLS(solver=solver, encoded_solution_norm_estimate=1.5, epsilon_inv=0.1,
-                                      block_encoding_implementation="dense_dilation", dense_control_route=route),
+                           method=QLS(solver=solver, norm_estimate=1.5, epsilon_inv=0.1,
+                                      block_encoding="dense_dilation", dense_control_route=route),
                            output=StateVector(normalization="unit", global_phase="modulo_global_phase"),
                            execution="quantum", seed=3)
     block = next(item for item in selected.blocks if item.record.signature.name == f"original_A_query_c{controls}")

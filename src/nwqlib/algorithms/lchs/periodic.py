@@ -178,12 +178,12 @@ def select_periodic_parameters(operator, *, elapsed, method):
     which is the bound above for a unit input.
 
     Step count. Write B = T**3*sum_j |c_j|*W_q(a_j,p), so the bound is
-    B/r**2. With ``trotter_steps`` given, r is that value. With
-    ``trotter_synthesis_tolerance`` eps instead, r is the smallest positive
+    B/r**2. With ``Trotter.steps`` given, r is that value. With
+    ``Trotter.synthesis_tol`` eps instead, r is the smallest positive
     integer with B/r**2 <= eps, which is r = ceil(sqrt(n)) with
     n = ceil(B/eps) (r = 1 when B = 0). B depends only on the planned grid,
     T and the stencil, so r is chosen after the grid and before the
-    construction limits (max_trotter_steps, then the construction formula's
+    construction limits (Trotter.max_steps, then the construction formula's
     max_select_work) are applied. Planning builds no circuit, so the bytes of
     the circuit are compared only at preparation (_leaf_memory), and a plan or
     estimate of a large stencil needs none of that memory.
@@ -197,7 +197,7 @@ def select_periodic_parameters(operator, *, elapsed, method):
     and eps (trotterization.error_budget._smallest_step_count, shared with
     the step rule of Childs et al., Sec. V B), so for r > 1, B/(r - 1)**2
     exceeds eps. The recorded bound is B/r**2 rounded upward, so it is at
-    most eps and positive whenever B is. With ``trotter_steps`` given, a
+    most eps and positive whenever B is. With ``Trotter.steps`` given, a
     B/r**2 above the largest binary64 number is recorded as unavailable. The
     bound is sufficient and not tight, so a smaller r may also keep the
     synthesis error itself within eps.
@@ -219,7 +219,7 @@ def select_periodic_parameters(operator, *, elapsed, method):
         raise ValueError("periodic LCHS requires finite positive mass+4*diffusion")
     plan = _resolve_coefficient_context(lchs_kernel=method.lchs_kernel,
         k_quadrature=method.k_quadrature,max_bytes=method.max_bytes,max_quadrature_work=method.max_quadrature_work,
-        problem_context=LCHSProblemContext(final_time=elapsed,epsilon=method.approximation_tolerance,
+        problem_context=LCHSProblemContext(final_time=elapsed,epsilon=method.approx_tol,
             l_norm=l_norm))
     a = (len(plan.coefficients)-1).bit_length()
     # B = T**3 * sum_j |c_j|*W_q(a_j,p), exactly relative to stored floats.
@@ -229,15 +229,16 @@ def select_periodic_parameters(operator, *, elapsed, method):
          + 4*node_diffusion**2*potential/3 + node_diffusion*potential**2/3)
         for k,c in zip(plan.nodes,plan.coefficients,strict=True)
         for node_diffusion in (abs(Fraction(k))*diffusion,)), Fraction(0))
-    steps = method.trotter_steps
+    formula = method.ham_evo
+    steps = formula.steps
     if steps is None:
         # Smallest r >= 1 with B/r**2 <= tolerance.
-        steps = _smallest_step_count(exact,method.trotter_synthesis_tolerance,2)
-        if method.max_trotter_steps is not None and steps > method.max_trotter_steps:
+        steps = _smallest_step_count(exact,formula.synthesis_tol,2)
+        if formula.max_steps is not None and steps > formula.max_steps:
             raise ResourceLimitError(
                 f"periodic Strang synthesis needs {steps} steps for "
-                f"trotter_synthesis_tolerance={method.trotter_synthesis_tolerance!r}, "
-                f"above max_trotter_steps={method.max_trotter_steps}"
+                f"Trotter.synthesis_tol={formula.synthesis_tol!r}, "
+                f"above Trotter.max_steps={formula.max_steps}"
             )
     counts = _construction_law(q,a,steps)
     required_work = counts["construction_work"]
@@ -254,7 +255,7 @@ def select_periodic_parameters(operator, *, elapsed, method):
     if not all(isfinite(value) for value in (*angles,*phases,elapsed/steps*parameters.potential)):
         raise ValueError('periodic LCHS selected rotations and phases must be finite')
     # B/r**2 rounded upward, so a step count selected from the tolerance records a bound at most the
-    # tolerance, and an unrepresentable bound for given trotter_steps is unavailable.
+    # tolerance, and an unrepresentable bound for given Trotter.steps is unavailable.
     bound = _upward_float(exact/steps**2)
     bound = None if bound == inf else bound
     payload = _PeriodicPayload(operator,elapsed,steps,plan,amplitudes,angles,phases,bound,'')

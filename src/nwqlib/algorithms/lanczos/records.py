@@ -143,7 +143,8 @@ class LanczosResult(Result):
     is a projected estimate with unresolved error sources, and it does not
     establish the smallest full-space eigenvalue. `print(result)` shows it
     with its cutoff and rank notes, and `result.analyze(...)` recomputes it
-    from the same moments with other `overlap_*` settings. The fields below
+    from the same moments with other values of `overlap_cutoff`,
+    `cutoff_policy`, `noise_multiplier` and `overlap_fail_prob`. The fields below
     are read-only. The fields of [`Result`][nwqlib.core.analysis.Result] are
     present too.
 

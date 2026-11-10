@@ -27,7 +27,7 @@ from nwqlib._quantum_readout import ReadoutSetting
 
 METHOD = Source(
     name="qls",
-    version="2",
+    version="3",
     domain="original-coordinate Ax=b",
     reference=(
         "selected inverse Chebyshev QSVT and Dalzell arXiv:2406.12086v2 kernel-reflection methods"
@@ -35,7 +35,7 @@ METHOD = Source(
 )
 DESCRIPTOR = AlgorithmDescriptor(
     method="qls",
-    version="2",
+    version="3",
     problem_families=("linear_system",),
     output_families=(
         "solution",
@@ -246,7 +246,7 @@ class QLSReconstruction(Record):
             over ``[-1, 1]``; its binary64 evaluation is a numerical
             estimate without an enclosure. None means unavailable.
         phase_tolerance: The limit that synthesis applied to ``phase_error``:
-            the Method's ``phase_residual_tolerance``, or its default rule
+            the Method's ``phase_tol``, or its default rule
             (``quantum._phase_tolerance``). None for classical execution,
             which has no phase synthesis.
         phase_fft_lengths: FFT lengths that the canonical phase synthesis

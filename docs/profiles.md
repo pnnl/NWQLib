@@ -49,7 +49,7 @@ from nwqlib.problems import ingest_occupation
 
 problem = Expectation(state=ingest_occupation("1", num_qubits=1),
                       observable=ingest_pauli([("Z", 1.0)], num_qubits=1))
-method = ExpectationMethod(preparation_choice="hzh")
+method = ExpectationMethod(prep_choice="hzh")
 selected = plan(problem, method=method, seed=7)
 
 # The machine: Aer's exact state-vector simulator in complex128

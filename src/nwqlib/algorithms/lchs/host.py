@@ -28,7 +28,7 @@ from .solution_error_budget import (application_weight, psd_recovery, psd_recove
 
 
 def initial_accuracy_shots(method,problem,*,output,accuracy):
-    """Return the shots of a sampling-accuracy request on the no-evolution route, or None when it acquires nothing.
+    """Return the shots per measurement setting of a sampling-accuracy request on the no-evolution route, or None when it acquires nothing.
 
     ``plan_initial`` answers a NormSquared and a zero physical quadratic form
     from the input, with no data collection, so no count is selected. A
@@ -677,7 +677,8 @@ def _evolve_pauli_actions(plan,data):
                 raise ValueError('constant-source classical LCHS needs representable application norms')
         branch = np.zeros_like(solution)
         for coefficient,(_,sequence,phase,steps,route) in zip(data.quadrature.coefficients,
-                application_actions(table,action,elapsed=elapsed,order=data.method.trotter_order),strict=True):
+                application_actions(table,action,elapsed=elapsed,
+                                    order=data.method.ham_evo.order),strict=True):
             branch += coefficient*apply_node(sequence,phase,steps,route,vector)
         branch *= psd_recovery_part(shift,elapsed-action['start'],exponent)
         solution += action['weight']*branch

@@ -1,5 +1,12 @@
 """IBM Quantum Runtime adapter for SamplerV2 counts and EstimatorV2 estimates, with jobs that continue after Python exits.
 
+Jobs run on the client-side ``SamplerV2`` and ``EstimatorV2`` that
+qiskit-ibm-runtime exports at its top level from 0.52.0 on. Each builds the
+program of IBM's ``executor`` from its PUBs on this computer and sends it in
+one request (``launch``). The SDK turns a returned executor result into
+Sampler counts or Estimator values when the job is read, and qiskit-mitigation
+computes the Estimator's values from the returned bits (``_estimate_result``).
+
 Preparation compiles each circuit to the device's instruction set (an ISA
 circuit, in IBM's terms) with the Plan's runtime seed and keeps the
 logical-to-physical layout. Every submitted job carries the tag
@@ -47,18 +54,6 @@ from nwqlib.operators.access import Count
 from nwqlib.backends._qpy_buffer import check_qpy_read, run_qpy_buffer
 
 
-# The only qiskit-ibm-runtime version under which counts can have a qualified
-# native depth (IBMRuntimeBackend._options). For this version the Sampler
-# options were read for the meaning and effective default of
-# dynamical_decoupling.enable, twirling.enable_gates and
-# twirling.enable_measure, for an explicit False being sent to the service
-# rather than dropped like an unset option, and for every other supported
-# Sampler option that transforms the submitted circuit or turns such a
-# transformation on by default. Repeat these three checks before adding
-# another version. That the three fields still parse shows none of them.
-_CHECKED_RUNTIME_VERSION = "0.49.0"
-
-
 def sampler_decode_bytes(widths, shots):
     """Estimate the array bytes of joining and decoding one Sampler PUB, ``S*(9*Q + w + 32)``.
 
@@ -83,23 +78,58 @@ def sampler_decode_bytes(widths, shots):
 
 
 # The reasons that _estimate_result gives for an unavailable standard error:
-# no stds, ZNE fit uncertainty and an unknown statistical meaning.
+# no stds, ZNE applied, and ZNE neither shown nor excluded.
 _ESTIMATE_REASONS = (
     "provider did not return stds",
-    "provider stds reports extrapolation-fit uncertainty, stored separately from sampling standard error",
-    "provider did not establish the statistical meaning of stds",
+    "ZNE was applied, so the provider's stds is kept only in provider_metadata_json",
+    "NWQLib did not determine whether ZNE was applied, so the provider's stds is kept only in provider_metadata_json",
 )
 
 
 def _estimate_value(estimate_id, value, error, reason, options_text, metadata_text):
-    """The `EstimateValue` of one Estimator PUB, with the uncertainty source of the installed SDK."""
+    """The `EstimateValue` of one Estimator PUB, with the versions of the installed packages that compute its values.
+
+    The client-side Estimator's values and stds are computed on this
+    computer when the job is read, by qiskit-ibm-runtime with
+    qiskit-mitigation.
+    """
     from importlib.metadata import version
     from nwqlib.execution import EstimateValue
     return EstimateValue(estimate_id=estimate_id, value=value, standard_error=error, uncertainty_unavailable=reason,
-        uncertainty_source=Source(name="IBM EstimatorV2 data.stds", version=version("qiskit-ibm-runtime"),
-            domain="stds is SEM across twirls without ZNE, or extrapolation-fit uncertainty with ZNE; no physical bias bound",
+        uncertainty_source=Source(name="IBM EstimatorV2 data.stds",
+            version=f"qiskit-ibm-runtime {version('qiskit-ibm-runtime')}, "
+                    f"qiskit-mitigation {version('qiskit-mitigation')}",
+            domain="Provider-reported stds. NWQLib does not verify its statistical interpretation. "
+                   "NWQLib's error budget excludes provider processing and hardware error.",
             reference="https://quantum.cloud.ibm.com/docs/en/guides/estimator-input-output"),
         requested_options_json=options_text, provider_metadata_json=metadata_text)
+
+
+def _portable_metadata(value):
+    """The JSON form of the provider metadata ``value``, with every key kept, for the Run's journal.
+
+    The client-side Estimator's metadata holds the SDK's ``Metadata``
+    dataclass, whose timing spans have datetimes, NumPy arrays and scalars,
+    and tuples in its options, which ``nwqlib._run_journal.encode`` refuses.
+    Dataclasses become dictionaries of their fields, dictionary keys text,
+    tuples and arrays lists, NumPy scalars Python numbers and datetimes ISO
+    8601 text. Any other object becomes its ``repr``, so a paid estimate is
+    saved whatever objects its metadata holds.
+    """
+    import dataclasses
+    from datetime import datetime
+    import numpy as np
+    if isinstance(value, dict):
+        return {str(key): _portable_metadata(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_portable_metadata(item) for item in value]
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {field.name: _portable_metadata(getattr(value, field.name)) for field in dataclasses.fields(value)}
+    if isinstance(value, (np.ndarray, np.generic)):
+        return _portable_metadata(value.tolist())
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value if value is None or type(value) in (bool, int, float, str) else repr(value)
 
 
 def _rzz_angles(circuit):
@@ -108,7 +138,7 @@ def _rzz_angles(circuit):
     Returns ``((expression, count), ...)`` in the order of each expression's
     first RZZ gate. Gates whose angles are equal Qiskit expressions share one
     entry. Only top-level gates are read: IBM does not run fractional gates
-    in a circuit with control flow (qiskit-ibm-runtime 0.49.0,
+    in a circuit with control flow (qiskit-ibm-runtime 0.52.0,
     ``utils.is_fractional_gate``), and the SDK's RZZ check before a job is
     recorded (``IBMRuntimeBackend.admit_batch``) still reads nested gates.
     """
@@ -174,7 +204,12 @@ class IBMRuntimeBackend(Record):
     `IBMRuntimeBackend(device="ibm_example", instance="my-instance")`,
     and pass it as `backend=` to [`prepare`][nwqlib.scientist.prepare].
     `device` and `instance` are required. It needs the `ibm`
-    extra. Counts use SamplerV2 and a provider estimate uses EstimatorV2.
+    extra. Counts use the client-side SamplerV2 of qiskit-ibm-runtime and a
+    provider estimate its client-side EstimatorV2, which build each job on
+    this computer and submit it to IBM's `executor` program. The Estimator's
+    values and their reported uncertainty are computed on this computer by
+    qiskit-mitigation when the job is read, and NWQLib keeps them as
+    reported without verifying their statistical interpretation.
     Construction reads no credential and contacts no service. Preparation and
     retrieval use the saved SDK account named by `account_name`, or otherwise the
     token in the environment variable named by `token_env`, and no credential is
@@ -186,8 +221,8 @@ class IBMRuntimeBackend(Record):
     ([`PreparedArtifact.native_depth`][nwqlib.execution.PreparedArtifact]). It
     is qualified only for counts whose options keep the provider's dynamical
     decoupling, gate twirling and measurement twirling off (`options_json`),
-    and only with qiskit-ibm-runtime 0.49.0, the version whose Sampler options
-    were checked for this. It is never qualified for a provider estimate,
+    and it describes the compiled circuit that NWQLib submits. It is never
+    qualified for a provider estimate,
     because the Estimator measures the observable with circuits that the
     provider builds from the compiled one. A requested depth limit also
     refuses a circuit when the installed nwqlib, Qiskit or qiskit-ibm-runtime
@@ -201,8 +236,9 @@ class IBMRuntimeBackend(Record):
     bytes, it compares their number with what is left of `max_data_bytes` and
     twice their number with the Method's `max_bytes` or the physical memory of
     the computer. The Run also bounds decoded arrays. SDK HTTP buffering, retries,
-    compilation memory, the SDK's own QPY serialization, wall time and billing are
-    not bounded. When a later result fails to
+    compilation memory, the SDK's own QPY serialization, the SDK's building of
+    each job and processing of its result on this computer, wall time and
+    billing are not bounded. When a later result fails to
     decode, `Run.resume`, which `Run.wait` calls on each pass, keeps the
     results already decoded. A resumed read fetches the whole job payload
     again, and results already saved skip only the local decoding. NWQLib has
@@ -211,7 +247,7 @@ class IBMRuntimeBackend(Record):
     [IBM Runtime guide](../ibm.md) describes jobs, retrieval and cancellation.
 
     When a Plan's experiments differ only in rotation angles, as the rows of
-    `LCHS(observable_estimator="sampled_pairs")` do, preparation compiles one
+    `LCHS(estimator="sampled_pairs")` do, preparation compiles one
     circuit with those angles as parameters for each group of experiments
     with the same gates, and one job sends all unsubmitted experiments, each
     group as one Sampler PUB with one row of parameter values per experiment.
@@ -245,8 +281,15 @@ class IBMRuntimeBackend(Record):
             and the configuration keeps it as given. For counts, preparation
             sets each of `dynamical_decoupling.enable`, `twirling.enable_gates`
             and `twirling.enable_measure` that the request leaves unset to
-            `false`, the Sampler default that qiskit-ibm-runtime 0.49.0
-            documents. The preparation record keeps these effective options
+            `false`, the client-side Sampler's default. With twirling on,
+            `twirling.num_randomizations` and
+            `twirling.shots_per_randomization` must both be integers whose
+            product is the requested shots, so that the Sampler returns that
+            number of shots. Preparation refuses `environment.private=true`,
+            whose result IBM returns only once. A request that the SDK
+            refuses while it builds a job raises only after the submission
+            is recorded, and the Run keeps that submission as uncertain with
+            its usage counted. The preparation record keeps these effective options
             ([`PreparedArtifact.provider_options_json`][nwqlib.execution.PreparedArtifact]),
             and every job of the preparation is sent with them, also from a
             reopened Run with another installed SDK, whose own validation can
@@ -353,8 +396,9 @@ class IBMRuntimeBackend(Record):
 
         Every other field is known before submission: the estimate's identity,
         a value and a standard error, or instead the longest reason that
-        `_estimate_result` can give, the uncertainty source of the installed
-        qiskit-ibm-runtime and the options text saved with the preparation.
+        `_estimate_result` can give, the uncertainty source with the installed
+        qiskit-ibm-runtime and qiskit-mitigation versions and the options
+        text saved with the preparation.
         ``readout_bytes`` reserves this bound with the declaration. The
         provider metadata is counted at its actual size when the outcome is
         saved (``Run._write``).
@@ -390,7 +434,7 @@ class IBMRuntimeBackend(Record):
     def _backend(self, context):
         """The Run's device object, opened with the configured fractional-gate choice and checked to be the configured device.
 
-        qiskit-ibm-runtime 0.49.0 raises ``IBMInputValueError`` when
+        qiskit-ibm-runtime 0.52.0 raises ``IBMInputValueError`` when
         ``use_fractional_gates`` is True for a device without ``rx`` and
         ``rzz``.
         """
@@ -415,18 +459,18 @@ class IBMRuntimeBackend(Record):
         another SDK. Estimator precision belongs to the Plan and
         cannot be overridden here. Resilience level zero is the Estimator
         default so the wrapper does not start mitigation work unasked
-        (ENGINEERING_CONSTANTS.md, "IBM primitive preparation").
+        (ENGINEERING_CONSTANTS.md, "IBM primitive preparation"). The options
+        of a private job (``environment.private``) are refused, because IBM
+        returns its result only once.
 
         For counts, each of ``dynamical_decoupling.enable``,
         ``twirling.enable_gates`` and ``twirling.enable_measure`` holds its
         SDK-validated Boolean, with an unset one written as False. The reason
-        is None only for counts with all three False under the checked
-        qiskit-ibm-runtime version (``_CHECKED_RUNTIME_VERSION``). Otherwise it
-        is the text that the preparation records in place of the native depth.
+        is None only for counts with all three False. Otherwise it is the text
+        that the preparation records in place of the native depth.
         """
-        from importlib.metadata import version
         from nwqlib._optional import optional_import
-        options_module = optional_import("qiskit_ibm_runtime.options", extra="ibm")
+        options_module = optional_import("qiskit_ibm_runtime.options_models", extra="ibm")
         from nwqlib._run_journal import encode
         # Text length bounds the JSON node population before parsing it. A text
         # of n characters has at most n JSON nodes and at most 4n UTF-8 bytes.
@@ -448,6 +492,12 @@ class IBMRuntimeBackend(Record):
             options = options_module.SamplerOptions(**values)
         if self.use_fractional_gates:
             self._refuse_fractional_options(options, kind)
+        # IBM returns the result of a private job only once
+        # (EnvironmentOptions.private), so a Run could not read a paid result
+        # again after a failed or interrupted retrieval.
+        if options.environment.private:
+            raise ValueError("environment.private=True lets IBM return a job's result only once, so a Run could not "
+                             "read it again after a failed or interrupted retrieval; leave it false")
         # The native depth of the ISA circuit describes the execution only when
         # the provider runs that circuit unchanged. The same unitary is not
         # enough: gate folding turns one CX, of two-qubit depth 1, into three
@@ -466,43 +516,26 @@ class IBMRuntimeBackend(Record):
         else:
             # The counts decoder reads classified bit strings, so another
             # measurement type is refused.
-            Unset = optional_import("qiskit_ibm_runtime.options.utils", extra="ibm").Unset
-            if options.execution.meas_type not in (Unset, "classified"):
+            if options.execution.meas_type != "classified":
                 raise ValueError("counts require classified IBM measurement results")
-            # qiskit-ibm-runtime 0.49.0 documents False as the Sampler default
-            # of the three transformations, but an unset option is not sent
-            # (OptionsV2._get_program_inputs drops it) and Unset is falsy, so
-            # the server's default would decide. Each unset option is written
-            # as an explicit False into the options that are saved and sent.
-            # Each option keeps its SDK-validated Boolean, so the saved JSON
-            # holds the values that the job sends, and an option set to True
-            # stays on.
+            # The client-side Sampler applies these three options on this
+            # computer when it builds the job. An unset twirling option is None,
+            # which the Sampler takes as False (finalize_sampler_options), and
+            # dynamical decoupling defaults to False. Each unset option is
+            # written as an explicit False, so the saved JSON states the
+            # values with which every job of the preparation is built, and an
+            # option set to True stays on.
             enabled = []
             for section, name in (("dynamical_decoupling", "enable"), ("twirling", "enable_gates"),
                                   ("twirling", "enable_measure")):
-                value = getattr(getattr(options, section), name)
-                value = False if value is Unset else value
-                if type(value) is bool:
-                    values.setdefault(section, {})[name] = value
-                if value is not False:
-                    enabled.append(f"{section}.{name}={value!r}")
-            # The defaults and the sending of an explicit False above were
-            # checked only for _CHECKED_RUNTIME_VERSION. Another version is
-            # unqualified even when the three options parse and are all False.
-            installed, reasons = version("qiskit-ibm-runtime"), []
-            if installed != _CHECKED_RUNTIME_VERSION:
-                reasons.append(
-                    f"qiskit-ibm-runtime {installed} is installed, but the IBM Sampler options were checked "
-                    f"for a qualified native depth only with qiskit-ibm-runtime {_CHECKED_RUNTIME_VERSION}, "
-                    "so it is unknown whether this version sends the requested options unchanged and turns "
-                    "on no other transformation of the submitted circuit")
-            if enabled:
-                reasons.append(
-                    "a qualified native depth needs the IBM Sampler options dynamical_decoupling.enable, "
-                    "twirling.enable_gates and twirling.enable_measure all false, so that the provider runs "
-                    "the submitted circuit without changing its gates, but this request has "
-                    + ", ".join(enabled))
-            unqualified = "; ".join(reasons) or None
+                value = getattr(getattr(options, section), name) is True
+                values.setdefault(section, {})[name] = value
+                if value:
+                    enabled.append(f"{section}.{name}=True")
+            unqualified = None if not enabled else (
+                "a qualified native depth needs the IBM Sampler options dynamical_decoupling.enable, "
+                "twirling.enable_gates and twirling.enable_measure all false, so that the provider runs "
+                "the submitted circuit without changing its gates, but this request has " + ", ".join(enabled))
         # UTF-8 JSON, the serialization that encode() admitted above and that
         # the Run journal and record identities write, so the stored text never
         # exceeds the admitted size. ASCII escaping could take up to 12 bytes
@@ -519,23 +552,20 @@ class IBMRuntimeBackend(Record):
         Pauli (gate) twirling, probabilistic error cancellation (PEC) and
         zero-noise extrapolation by probabilistic error amplification (PEA)
         as unsupported, and measurement twirling (TREX) as supported. The
-        effective values follow the defaults that the qiskit-ibm-runtime
-        0.49.0 option docstrings state: Sampler gate twirling is off unless
-        set; for the Estimator an unset gate twirling or ZNE is off at
-        resilience levels 0 and 1 and on at level 2, and PEC is off unless
-        set. ``_options`` writes resilience level 0 into an Estimator request
-        that leaves it unset.
+        effective values follow the defaults that the client-side option
+        docstrings of qiskit-ibm-runtime 0.52.0 state, where an unset option
+        is None: Sampler gate twirling is off unless set; for the Estimator an
+        unset gate twirling or ZNE is off at resilience levels 0 and 1 and on
+        at level 2, and PEC is off unless set. ``_options`` writes resilience
+        level 0 into an Estimator request that leaves it unset.
         """
-        from nwqlib._optional import optional_import
-        Unset = optional_import("qiskit_ibm_runtime.options.utils", extra="ibm").Unset
-
         def effective(value, level_two):
             return value if type(value) is bool else level_two
         level_two = kind == "estimated_observable" and options.resilience_level == 2
         found = []
         if effective(options.twirling.enable_gates, level_two):
             found.append("gate twirling (twirling.enable_gates" + (", on at resilience level 2)"
-                                                                   if options.twirling.enable_gates is Unset else ")"))
+                                                                   if options.twirling.enable_gates is None else ")"))
         if kind == "estimated_observable":
             if options.resilience.pec_mitigation is True:
                 found.append("probabilistic error cancellation (resilience.pec_mitigation)")
@@ -596,10 +626,16 @@ class IBMRuntimeBackend(Record):
         The preparation record keeps the effective primitive options
         (``_options``) and the native two-qubit depth of the ISA circuit on the
         device target (``inspection.inspect_native_depth``). When those options
-        or the Estimator let the provider change the circuit, or the installed
-        qiskit-ibm-runtime is not the checked version, the record keeps an
-        unqualified depth with the reason instead, and the circuit is not
+        or the Estimator let the provider change the circuit, the record keeps
+        an unqualified depth with the reason instead, and the circuit is not
         scanned.
+
+        Counts with twirling are refused here unless
+        ``twirling.num_randomizations`` times
+        ``twirling.shots_per_randomization``, both integers, equals the
+        requested shots, because otherwise the client-side Sampler chooses
+        the split and can return another number of shots, which shows only
+        after the job is paid.
 
         A counts template from the Run's template preparation
         (``_prepared_execution._bind_template``) keeps its parameters through
@@ -617,6 +653,20 @@ class IBMRuntimeBackend(Record):
 
         self.target_for(observation)
         options_json, unqualified = self._options(run, observation.kind)
+        twirling = json.loads(options_json).get("twirling", {}) if observation.kind == "counts" else {}
+        if twirling.get("enable_gates") or twirling.get("enable_measure"):
+            # A twirled Sampler returns num_randomizations * shots_per_randomization
+            # shots of each row when both are integers, and with an automatic
+            # split possibly another number. Only the requested number is
+            # accepted here, because the decoder would refuse more only after
+            # the job is paid (_decode) and would keep fewer as the counts.
+            split = (twirling.get("num_randomizations"), twirling.get("shots_per_randomization"))
+            if any(type(value) is not int for value in split) or split[0] * split[1] != observation.shots:
+                raise ValueError(
+                    f"IBM twirling needs twirling.num_randomizations and twirling.shots_per_randomization in "
+                    f"options_json as integers whose product is the {observation.shots} shots of each experiment, "
+                    "for example 16 and 64 for 1024 shots, because the Sampler otherwise chooses the split and can "
+                    "return another number of shots")
         backend = self._backend(context)
         if backend.name != self.device or circuit.num_qubits > backend.num_qubits:
             raise ValueError("logical circuit differs from the selected IBM device or exceeds its width")
@@ -664,8 +714,8 @@ class IBMRuntimeBackend(Record):
         native.metadata = {**(native.metadata or {}), "nwqlib_snapshot": snapshot}
         # The native depth of this ISA circuit on the device target that
         # compiled it describes the execution only when the effective options
-        # and the installed SDK let the provider run the circuit unchanged
-        # (_options). Otherwise the record keeps the width and the reason. A
+        # let the provider run the circuit unchanged (_options). Otherwise the
+        # record keeps the width and the reason. A
         # Method's requested depth limit reads it before submission
         # (inspection.check_native_depth_cap).
         # The scan uses the inspection's default, which sets no operation
@@ -1012,15 +1062,14 @@ class IBMRuntimeBackend(Record):
         """
         options = self._job_options(natives)
         if any(native.values is not None for native in natives):
-            # SamplerV2.run checks every row's RZZ angles against IBM's
-            # [0, pi/2] only after the submission is recorded, where a refusal
-            # would leave it uncertain with its shots counted. The same SDK
-            # check runs here first. The binding arrays are built for it once,
-            # as float64 copies of the values in the preparation records of
-            # the job's items, repeated items included, with the circuits'
-            # actual columns. They take eight bytes per value, less than each
-            # item's own admitted record and circuit, so these transient
-            # arrays are not checked on their own.
+            # The client-side SamplerV2 does not check RZZ angles (launch), so
+            # this SDK check is the only one before the job is sent. The
+            # binding arrays are built for it once, as float64 copies of the
+            # values in the preparation records of the job's items, repeated
+            # items included, with the circuits' actual columns. They take
+            # eight bytes per value, less than each item's own admitted record
+            # and circuit, so these transient arrays are not checked on their
+            # own.
             from qiskit.primitives.containers.sampler_pub import SamplerPub
             from nwqlib._optional import optional_import
             validate_rzz_pubs = optional_import("qiskit_ibm_runtime.utils", extra="ibm").validate_rzz_pubs
@@ -1065,7 +1114,7 @@ class IBMRuntimeBackend(Record):
         if any(native.circuit is None for native in natives):
             raise ValueError("new IBM submission requires the original native payloads")
         from nwqlib._optional import optional_import
-        options_module = optional_import("qiskit_ibm_runtime.options", extra="ibm")
+        options_module = optional_import("qiskit_ibm_runtime.options_models", extra="ibm")
         # The saved text belongs to the preparation record, which passed the
         # Run's data limit when it was written (Run._write), so it is parsed
         # here without another check.
@@ -1117,18 +1166,27 @@ class IBMRuntimeBackend(Record):
         The job's structure is checked here too, and it is sent with the
         options that ``_job_options`` builds from the effective options saved
         at preparation, tagged ``nwqlib:<submission_id>`` for ``reconcile``.
-        On any backend that is not a simulator, ``primitive.run`` checks the
-        RZZ angles of the PUBs sent before its request, so the shared
-        execution code checks them locally only once, in ``admit_batch``
-        before the intent. In job mode an ambient
-        Session or Batch context is rejected, since the SDK would otherwise
-        attach the job to that container. Batch and Session modes attach only
-        to the configured existing container. ``primitive.run`` is called once.
-        The SDK's own HTTP retries are described in docs/ibm.md.
+        In job mode an ambient Session or Batch context is rejected, since
+        the SDK would otherwise attach the job to that container. Batch and
+        Session modes attach only to the configured existing container.
+        ``primitive.run`` is called once. The SDK's own HTTP retries are
+        described in docs/ibm.md.
+
+        The primitives are the client-side ``SamplerV2`` and ``EstimatorV2``
+        of qiskit-ibm-runtime 0.52.0 and later. Their ``run`` builds the
+        program of IBM's ``executor`` from the PUBs on this computer, applying
+        the twirling, dynamical decoupling and mitigation options there, and
+        then sends one request. A refusal raised by ``run`` comes after the
+        shared execution code has saved the submission intent, so the Run
+        keeps that submission as uncertain with its usage counted. NWQLib's
+        own earlier refusals are those of preparation (``_options`` and
+        ``prepare``) and of ``admit_batch``. These primitives do not check the
+        RZZ angles or the instruction set of the PUBs, so the RZZ check of
+        ``admit_batch`` is the only one before a job is sent.
         """
         from nwqlib._optional import optional_import
         sdk = optional_import("qiskit_ibm_runtime", extra="ibm")
-        Batch, EstimatorV2, SamplerV2, Session = sdk.Batch, sdk.EstimatorV2, sdk.SamplerV2, sdk.Session
+        Batch, Session, EstimatorV2, SamplerV2 = sdk.Batch, sdk.Session, sdk.EstimatorV2, sdk.SamplerV2
         from nwqlib.execution import JobLocator
         options = self._job_options(natives)
         kind = natives[0].metadata["observation"].kind
@@ -1141,8 +1199,9 @@ class IBMRuntimeBackend(Record):
 
             service = self._service(run._state["backend_context"])
             # The container opens its device with the fractional-gate choice
-            # of preparation, so the SDK checks the circuits against the same
-            # target.
+            # of preparation, so the target that the SDK reads when it builds
+            # the job, for dynamical decoupling, is the one the circuits were
+            # compiled for.
             mode = cls.from_id(self.container_id, service=service, calibration_id=self.calibration_id,
                                use_fractional_gates=self.use_fractional_gates)
             if (mode.backend() != self.device or service.active_instance() != self.instance
@@ -1180,7 +1239,12 @@ class IBMRuntimeBackend(Record):
         return locator
 
     def _job(self, locator, run):
-        """Return the original job, rejecting a locator or job from another account, instance or device."""
+        """Return the original job, rejecting a locator or job from another account, instance or device.
+
+        Both primitives submit to IBM's ``executor`` program, so the program
+        does not tell counts from an estimate. ``_decode`` checks the kind of
+        each returned PUB.
+        """
         if (locator.provider != self.kind or locator.instance != self.instance
                 or locator.account != (self.account_name or self.token_env)):
             raise ValueError("IBM job locator differs from the original provider/account/instance")
@@ -1190,29 +1254,29 @@ class IBMRuntimeBackend(Record):
             jobs[locator.job_id] = self._service(run._state["backend_context"]).job(locator.job_id)
         job = jobs[locator.job_id]
         if (job.job_id() != locator.job_id or job.instance != self.instance
-                or job.primitive_id not in {"sampler", "estimator"} or job.backend().name != self.device):
+                or job.primitive_id != "executor" or job.backend().name != self.device):
             raise ValueError("retrieved IBM job has a different identity/instance/primitive")
         return job
 
     def reconcile(self, submission, natives, *, run):
         """Find a job whose creation acknowledgement was lost by its submission tag.
 
-        At most two matches are requested. One verified match becomes the job
-        locator. No match leaves the intent unresolved, and two raise, because
-        neither case identifies the original job and neither authorizes a new
-        submission.
+        At most two ``executor`` jobs of the configured device and instance
+        with the submission's tag are requested. One verified match becomes
+        the job locator. No match leaves the intent unresolved, and two raise,
+        because neither case identifies the original job and neither
+        authorizes a new submission.
         """
         from nwqlib.execution import JobLocator
 
-        primitive = "estimator" if natives[0].metadata["observation"].kind == "estimated_observable" else "sampler"
         matches = self._service(run._state["backend_context"]).jobs(limit=2, backend_name=self.device, instance=self.instance,
-                                        program_id=primitive, job_tags=["nwqlib:" + submission.submission_id])
+                                        program_id="executor", job_tags=["nwqlib:" + submission.submission_id])
         if not matches:
             return None  # Absence is not proof that a lost submission was rejected.
         if len(matches) != 1:
             raise ValueError("IBM submission correlation is ambiguous; no new job is authorized")
         job, = matches
-        if (job.instance != self.instance or job.primitive_id != primitive
+        if (job.instance != self.instance or job.primitive_id != "executor"
                 or job.backend().name != self.device or "nwqlib:" + submission.submission_id not in job.tags):
             raise ValueError("IBM reconciliation returned a foreign job")
         locator = JobLocator(provider=self.kind, job_id=job.job_id(), instance=self.instance,
@@ -1342,8 +1406,12 @@ class IBMRuntimeBackend(Record):
         return ordered
 
     def _estimate_result(self, pub, job_metadata, native, *, job_id, run):
-        """Decode one weighted scalar estimate without conflating sampling and extrapolation
-        uncertainty.
+        """Decode one weighted scalar estimate, with the provider's stds as its standard error only when ZNE was
+        not applied.
+
+        The raw stds and ensemble standard error stay in the provider metadata
+        in every case. Their statistical interpretation is the provider's and
+        is not verified here.
         """
         import numpy as np
         from nwqlib._run_journal import encode
@@ -1354,11 +1422,16 @@ class IBMRuntimeBackend(Record):
         value = pub.data["evs"] if "evs" in pub.data else None
         error = pub.data["stds"] if "stds" in pub.data else None
         ensemble = pub.data["ensemble_standard_error"] if "ensemble_standard_error" in pub.data else None
-        if (not isinstance(value, np.ndarray) or value.shape != () or value.dtype.kind != "f"
-                or error is not None and (not isinstance(error, np.ndarray) or error.shape != () or error.dtype.kind != "f")):
+        # A scalar field is a 0-d float array, or with ZNE (qiskit-mitigation
+        # 0.2.0) a NumPy float scalar, which has the same shape and dtype.
+        scalar = (np.ndarray, np.floating)
+        if (not isinstance(value, scalar) or value.shape != () or value.dtype.kind != "f"
+                or error is not None and (not isinstance(error, scalar) or error.shape != () or error.dtype.kind != "f")):
             raise ValueError("Estimator data must match the original scalar observable and parameter coordinate")
-        if ensemble is not None and (not isinstance(ensemble, np.ndarray) or ensemble.shape != () or ensemble.dtype.kind != "f"):
+        if ensemble is not None and (not isinstance(ensemble, scalar) or ensemble.shape != () or ensemble.dtype.kind != "f"):
             raise ValueError("Estimator ensemble uncertainty has a foreign observable/parameter shape")
+        # The client-side EstimatorV2 of qiskit-ibm-runtime 0.52.0 puts target_precision in the job
+        # metadata, not in the PUB metadata read here, so this check does not trigger on its results.
         target_precision = pub.metadata.get("target_precision")
         if target_precision is not None and target_precision != estimate.precision:
             raise ValueError("Estimator result has a different original target precision")
@@ -1366,8 +1439,8 @@ class IBMRuntimeBackend(Record):
         raw_error, raw_ensemble = (None if error is None else float(error)), (None if ensemble is None else float(ensemble))
         if any(item is not None and (not isfinite(item) or item < 0) for item in (raw_error, raw_ensemble)):
             raise ValueError("provider-reported uncertainty must be finite and nonnegative")
-        # The meaning of stds depends on whether ZNE was applied. Preserve raw
-        # provider uncertainties even when a sampling standard error is unavailable.
+        # stds becomes the standard error only when ZNE is known to be off,
+        # and the raw provider uncertainties are kept either way.
         # The options text was admitted at preparation and reserved with the
         # estimate (estimate_bytes).
         options_text = native.metadata["requested_options_json"]
@@ -1380,7 +1453,7 @@ class IBMRuntimeBackend(Record):
             zne = False
         no_stds, fit, unknown = _ESTIMATE_REASONS
         reason = (no_stds if error is None else fit if zne is True else unknown if zne is not False else None)
-        metadata = dict(primitive=job_metadata, pub=pub.metadata,
+        metadata = dict(primitive=_portable_metadata(job_metadata), pub=_portable_metadata(pub.metadata),
                         reported_data=dict(stds=raw_error, ensemble_standard_error=raw_ensemble))
         # The provider metadata of a paid job is encoded without a size limit and counted at its actual
         # size when the outcome is saved (Run._write), so a large one never needs a second fetch.
@@ -1402,10 +1475,6 @@ class IBMRuntimeBackend(Record):
         """
         from nwqlib.backends.connection import BackendRefresh
         job = self._job(locator, run)
-        primitive = "estimator" if natives[0].metadata["observation"].kind == "estimated_observable" else "sampler"
-        if job.primitive_id != primitive:
-            raise ValueError("retrieved IBM primitive differs from the original acquisition kind")
-
         status = job.status()
         if status in {"INITIALIZING", "QUEUED", "RUNNING", "VALIDATING"}:
             return BackendRefresh(status="acknowledged", provider_status=status)

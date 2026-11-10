@@ -122,7 +122,7 @@ The output is a logical Qiskit circuit that is not compiled, run or exported. QA
 How NWQLib synthesizes and controls dense unitary matrices, and how each construction counts that work against its limits, is on the contributor page [Exact dense synthesis](development/dense_synthesis.md).
 
 - <a id="controlled-dense-unitaries"></a>Exact synthesis of dense and controlled dense unitaries: [Controlled dense unitaries](development/dense_synthesis.md#controlled-dense-unitaries).
-- <a id="dense-control-route"></a>The `dense_control_route` option of LCHS, QLS and `build_control_diagonal_generator_encoding`: [Dense control route](development/dense_synthesis.md#dense-control-route).
+- <a id="dense-control-route"></a>The control-route option of LCHS (`DenseExact.control_route`), QLS and `build_control_diagonal_generator_encoding` (`dense_control_route`): [Dense control route](development/dense_synthesis.md#dense-control-route).
 - <a id="admission-of-the-exact-synthesis"></a>Work and byte formulas of the synthesis, and the limit each construction checks: [Limit checks of the exact synthesis](development/dense_synthesis.md#admission-of-the-exact-synthesis).
 - <a id="adjoint-multiplexers"></a>Inverting an uncontrolled multiplexer by its adjoint table: [Adjoint multiplexers](development/dense_synthesis.md#adjoint-multiplexers).
 

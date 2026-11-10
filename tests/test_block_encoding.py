@@ -1199,7 +1199,7 @@ def test_saved_analytic_kernel_prep_prepares_the_low_somma_kernel_state_with_con
 
     rounding = 1e-10
     recipe = next(r for r in uniform_node_recipes(1, .5) if r.kind == "comparator")
-    planned = ap.plan_analytic_kernel_preparation(recipe, gamma=1., approximation_tolerance=1e-3, margin=.25,
+    planned = ap.plan_analytic_kernel_preparation(recipe, gamma=1., approx_tol=1e-3, margin=.25,
                                                   max_rounds=4, max_bytes=32 * 2**20)
     rho, m_rho = 1 + math.sqrt(2), 2 / math.sqrt(3) * math.exp(1 / 32)
 
@@ -1261,7 +1261,7 @@ def test_analytic_kernel_mp1_pass_is_admitted_before_it_runs(monkeypatch):
     from nwqlib.subroutines.qsp.phases import _QSPPhaseConvergenceError
 
     recipe = next(r for r in uniform_node_recipes(4096, 1e-3) if r.kind == "comparator")
-    planned = ap.plan_analytic_kernel_preparation(recipe, gamma=1., approximation_tolerance=1e-3, margin=.25,
+    planned = ap.plan_analytic_kernel_preparation(recipe, gamma=1., approx_tol=1e-3, margin=.25,
                                                   max_rounds=64, max_bytes=32 * 2**20)
     reference = ap.prepare_analytic_kernel(planned)
     needed = ap._mp1_bytes(planned.degree + 1, planned.degree + 1, 2 * 4096 + 1)

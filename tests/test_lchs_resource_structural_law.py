@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from nwqlib import LinearDynamics
-from nwqlib.algorithms.lchs import LCHS,ProviderConfig
+from nwqlib.algorithms.lchs import LCHS,DenseExact,ProviderConfig,QSPBlockEncoding,Trotter
 from nwqlib.algorithms.lchs.select_synthesis import build_multiplexed_product_formula_select
 from nwqlib.algorithms.lchs.time_independent_terms import generate_lchs_product_formula_select_plan
 from conftest import lchs_dense_quadrature
@@ -34,14 +34,12 @@ def _pf_options(
 ) -> LCHS:
     return LCHS(
         lchs_kernel=ProviderConfig(implementation="near_optimal_eq7", parameters={"beta": 0.8}),
-        approximation_tolerance=epsilon,
+        approx_tol=epsilon,
         k_quadrature=ProviderConfig(
             implementation="composite_gauss",
             parameters={"truncation_multiplier": truncation_multiplier},
         ),
-        hamiltonian_evolution_backend="trotter",
-        trotter_order=order,
-        trotter_steps=steps,
+        ham_evo=Trotter(order=order, steps=steps),
     )
 
 
@@ -233,7 +231,7 @@ _QSP_PROBLEMS = {
 def _qsp_plan(case):
     from nwqlib import plan
     problem = _QSP_PROBLEMS[case]()
-    method = LCHS(hamiltonian_evolution_backend='qsp_block_encoding', approximation_tolerance=.3,
+    method = LCHS(ham_evo='qsp_block_encoding', approx_tol=.3,
                   k_quadrature=ProviderConfig(implementation='signed_binary_uniform',
                                               parameters={'num_qubits': 1, 'lsb_position': -1}),
                   **({'duhamel_nodes': 1} if problem.source is not None else {}))
@@ -289,8 +287,8 @@ def test_branch_controlled_product_formula_law_bounds_the_built_select():
     from nwqlib.algorithms.lchs.native import construct_select
     problem = _xx_generator_problem()
     grid = ProviderConfig(implementation='signed_binary_uniform', parameters={'num_qubits': 3, 'lsb_position': -1})
-    selected = plan(problem, method=LCHS(hamiltonian_evolution_backend='trotter', trotter_steps=1, trotter_order=1,
-                                         lcu_select_implementation='branch_controlled', k_quadrature=grid))
+    selected = plan(problem, method=LCHS(ham_evo=Trotter(steps=1, order=1),
+                                         lcu_select='branch_controlled', k_quadrature=grid))
     record = next(item for item in selected.construction.selections if item.signature.name == 'lchs_select')
     law = next(item.value for item in record.resource_laws if not item.adjoint)
     built = construct_select(SimpleNamespace(_payload=(selected._native['native_data'], problem.elapsed_time)), (), None)
@@ -355,8 +353,8 @@ def test_dense_exact_select_cx_law_bounds_the_built_select(q,a,route):
     from nwqlib.algorithms.lchs.native import construct_select
     grid=ProviderConfig(implementation='signed_binary_uniform',parameters={'num_qubits':a,'lsb_position':-1})
     problem=_dense_select_problem(q)
-    selected=plan(problem,method=LCHS(hamiltonian_evolution_backend='dense_exact',k_quadrature=grid,
-                                      dense_control_route=route,max_select_work=10**9))
+    selected=plan(problem,method=LCHS(ham_evo=DenseExact(control_route=route),k_quadrature=grid,
+                                      max_select_work=10**9))
     record=next(item for item in selected.construction.selections if item.signature.name=='lchs_select')
     law=next(item.value for item in record.resource_laws if not item.adjoint)
     built=construct_select(SimpleNamespace(_payload=(selected._native['native_data'],problem.elapsed_time)),(),None)
@@ -394,8 +392,8 @@ def test_dense_exact_select_cx_law_bounds_a_source_layout(route):
     from nwqlib.algorithms.lchs.native import construct_select
     grid=ProviderConfig(implementation='signed_binary_uniform',parameters={'num_qubits':2,'lsb_position':-1})
     problem=_dense_select_problem(3,source=True)
-    selected=plan(problem,method=LCHS(hamiltonian_evolution_backend='dense_exact',k_quadrature=grid,duhamel_nodes=1,
-                                      dense_control_route=route))
+    selected=plan(problem,method=LCHS(ham_evo=DenseExact(control_route=route),k_quadrature=grid,
+                                      duhamel_nodes=1))
     record=next(item for item in selected.construction.selections if item.signature.name=='lchs_select')
     law=next(item.value for item in record.resource_laws if not item.adjoint)
     built=construct_select(SimpleNamespace(_payload=(selected._native['native_data'],problem.elapsed_time)),(),None)
@@ -434,7 +432,7 @@ def test_dense_exact_select_charges_the_syntheses_it_makes(monkeypatch,q,a,sourc
     from nwqlib.algorithms.lchs.native import construct_select
     grid=ProviderConfig(implementation='signed_binary_uniform',parameters={'num_qubits':a,'lsb_position':-1})
     problem=_dense_select_problem(q,source=source)
-    options=dict(hamiltonian_evolution_backend='dense_exact',k_quadrature=grid,dense_control_route=route,
+    options=dict(ham_evo=DenseExact(control_route=route),k_quadrature=grid,
                  **({'duhamel_nodes':1} if source else {}))
     selected=plan(problem,method=LCHS(**options))
     calls=_counted_syntheses(monkeypatch)
@@ -485,7 +483,7 @@ def test_dense_select_breakdown_reports_its_structural_bound_without_building(mo
     from nwqlib.algorithms.lchs.quantum_resources import resource_breakdown
     from nwqlib.subroutines import _dense_synthesis
     grid=ProviderConfig(implementation='signed_binary_uniform',parameters={'num_qubits':1,'lsb_position':-1})
-    selected=plan(_dense_select_problem(2),method=LCHS(hamiltonian_evolution_backend='dense_exact',k_quadrature=grid))
+    selected=plan(_dense_select_problem(2),method=LCHS(ham_evo='dense_exact',k_quadrature=grid))
     for name in ('_node_eigensystem','_branch_unitary'):
         monkeypatch.setattr(time_independent_terms,name,lambda *a,**k:pytest.fail('branch matrix formed'))
     monkeypatch.setattr(_dense_synthesis,'dense_unitary_circuit',lambda *a,**k:pytest.fail('branch synthesized'))
@@ -493,7 +491,7 @@ def test_dense_select_breakdown_reports_its_structural_bound_without_building(mo
         (select,)=[row for row in entry['blocks'] if row['block']=='lchs_select']
         (law,)=select['laws']
         assert select['calls']==1 and selected.reconstruction.physical_branches==2
-        assert law.value==2*dense_branch_select_cx(2,1,selected.method.dense_control_route)
+        assert law.value==2*dense_branch_select_cx(2,1,selected.method.ham_evo.control_route)
 
 
 def test_coherent_lcu_completes_each_dense_child_once(monkeypatch):
@@ -560,7 +558,7 @@ def test_coherent_planning_counts_the_table_queries_that_its_select_builds(monke
 
     a = ingest_pauli([("III", 1.+.3j), ("XII", .25), ("IZI", .4j), ("IIY", -.1), ("ZZI", .05j)], num_qubits=3)
     problem = LinearDynamics(A=a, initial_state=ingest_occupation("000", num_qubits=3), time=.2)
-    options = dict(hamiltonian_evolution_backend="qsp_block_encoding", duhamel_nodes=2, qsp_route="gqet",
+    options = dict(ham_evo=QSPBlockEncoding(route="gqet"), duhamel_nodes=2,
                    lchs_kernel=ProviderConfig(implementation="cauchy_density"),
                    k_quadrature=ProviderConfig(implementation="signed_binary_uniform",
                                                parameters={"num_qubits": 2, "lsb_position": -1}))

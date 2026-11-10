@@ -1,6 +1,6 @@
 # LCHS derivations {#lchs-derivations}
 
-Use this page to reconstruct what a reported LCHS radius, normalization or component error means and which premises it needs. It derives the relations behind [sampled branch pairs](lchs.md#sampled-branch-pairs), the node and joint block encodings of `qsp_block_encoding`, the constant-source preparation, `lcu_state_preparation="analytic"` and the `apel_berntson` kernel. The [LCHS guide](lchs.md) explains how to request these features.
+Use this page to reconstruct what a reported LCHS radius, normalization or component error means and which premises it needs. It derives the relations behind [sampled branch pairs](lchs.md#sampled-branch-pairs), the node and joint block encodings of `qsp_block_encoding`, the constant-source preparation, `lcu_prep="analytic"` and the `apel_berntson` kernel. The [LCHS guide](lchs.md) explains how to request these features.
 
 Three kinds of statement appear below, and they are not interchangeable:
 
@@ -58,7 +58,7 @@ Scores in a row table are in a binary scale: each is the physical score divided 
 
 ### Rows, variance and confidence {#sampled-confidence}
 
-Write $K$ for the number of independent rows and $m$ for `pair_repeats`, the conditionally independent shots of each row. The [accuracy request](lchs.md#accuracy-requests) writes this row count as $B$. A row holds every random choice that stays fixed during its shots, including the observable term and, on the QSP route, the polynomial members. With $V_b=\operatorname{Var}(\mathbb E[Z\mid\text{row}])$ and $V_w=\mathbb E\operatorname{Var}(Z\mid\text{row})$, the law of total variance gives
+Write $K$ for the number of independent rows and $m$ for `SampledPairs.repeats`, the conditionally independent shots of each row. The [accuracy request](lchs.md#accuracy-requests) writes this row count as $B$. A row holds every random choice that stays fixed during its shots, including the observable term and, on the QSP route, the polynomial members. With $V_b=\operatorname{Var}(\mathbb E[Z\mid\text{row}])$ and $V_w=\mathbb E\operatorname{Var}(Z\mid\text{row})$, the law of total variance gives
 
 ```math
 \operatorname{Var}(\widehat Z)=\frac{V_b}{K}+\frac{V_w}{Km}.
@@ -69,7 +69,7 @@ At a fixed total $N=Km$ of shots, the ratio of this variance to the case $m=1$ i
 Each row mean lies in $[-H,H]$, so Hoeffding's inequality for bounded independent variables (doi:10.1080/01621459.1963.10500830, Theorem 2) gives the sampling radius
 
 ```math
-r=H\sqrt{\frac{2\log(2/\delta)}{K}},\qquad\text{equivalently}\qquad K=\Bigl\lceil 2(H/\epsilon)^2\log(2/\delta)\Bigr\rceil\ \text{ for }r\le\epsilon.
+r=H\sqrt{\frac{2\log(2/\delta)}{K}},\qquad\text{equivalently}\qquad K=\max\Bigl(1,\Bigl\lceil 2(H/\epsilon)^2\log(2/\delta)\Bigr\rceil\Bigr)\ \text{ for }r\le\epsilon.
 ```
 
 This radius depends on $K$ and not on $m$. A simultaneous claim about $Q$ and $N$ gives $\delta/2$ to each and uses the union bound, which needs no independence between them. The two scores come from the same shots, so their covariance is not zero in a variance analysis. The statement requires every planned row to be complete with the same $m$, so a partial Run has raw sums and no confidence statement.
@@ -107,10 +107,10 @@ Each route supplies its own bias relation for the pair observable. With $B$ and 
 
 | Route | Relation for the bias of $N$ (multiply by $C_O$ for $Q$) | Premises and limits |
 | --- | --- | --- |
-| Richardson, `pair_product_formula="richardson"` | $B^2(B_{\mathrm{ext}}+E_{\mathrm{eff}})$, with $B_{\mathrm{ext}}\le4\Lambda\max(1,A)^2(A/s)^4$, $\Lambda=5/3$ | Levels $(s,2s)$ with weights $(-1/3,4/3)$ cancel the shared Strang $h^2$ term. Needs $s>2A$, where $A=(2\mathcal L-1)\,4L_*$ for $\mathcal L$ Pauli labels and $L_*=T_e(\lambda_H+K_*\lambda_L)$, with $\lambda_H,\lambda_L$ the coefficient one-norms and $K_*$ the node bound. Below that, a fixed step count leaves the bias unknown. $E_{\mathrm{eff}}=\sum_l\lvert\pi_l\widehat\gamma_l-w_l\rvert$ is the exact discrepancy of the saved multipliers. One level is shared by both branches, so this extrapolates the joint pair observable (Watson and Watkins, arXiv:2408.14385v2, Eq. (84)) |
-| Paired Taylor-series compensation, `"ptsc"` | $B^2(2\delta+\delta^2)$ | $\delta$ is a uniform recovered-branch bound, the Taylor tail of Zeng, Sun, Jiang and Zhao, arXiv:2212.04566v2, Eqs. (79) and (84), plus NWQLib's perturbation from the finite integer laws. Independent branch corrections give a mean-vector error at most $B\delta$. Only the Taylor and count components are covered |
-| Two-member multi-product formula, `"mpf"` | Unknown for two or more joint terms | $\alpha_1=(3+\sqrt3)/9$, $\alpha_2=(1+\sqrt3)/3$ and $c=(3/2,-1/2)$ obey $\sum c=1$, $\sum c\alpha=1/3$, $\sum c\alpha^2=0$, which cancels the leading $h^2$ term of the pair observable (arXiv:2607.12225v1, Sec. VIII, Eqs. (17)–(24)). Probabilities $(3/4,1/4)$ give multipliers $(2,-2)$ and a second-moment factor 4. The relation supplies no finite-step remainder, so only raw estimates and sampling radii are reported |
-| QSP phase bank, `pair_qsp_bank` | $B^2(2\beta+\beta^2)$ | $\beta$ is a support-wide bound on the error of the mean polynomial, derived below |
+| Richardson, `SampledPairs(product_formula=Richardson(...))` | $B^2(B_{\mathrm{ext}}+E_{\mathrm{eff}})$, with $B_{\mathrm{ext}}\le4\Lambda\max(1,A)^2(A/s)^4$, $\Lambda=5/3$ | Levels $(s,2s)$ with weights $(-1/3,4/3)$ cancel the shared Strang $h^2$ term. Needs $s>2A$, where $A=(2\mathcal L-1)\,4L_*$ for $\mathcal L$ distinct nonidentity Pauli labels in the union of the labels of $H_c$ and $L_c$ (a label in both counts once) and $L_*=T_e(\lambda_H+K_*\lambda_L)$, with $\lambda_H,\lambda_L$ the coefficient one-norms of $H_c$ and $L_c$, $T_e$ the largest elapsed time and $K_*$ a bound on $|k|$ over the entire kernel support. Below that, a fixed step count leaves the bias unknown. $E_{\mathrm{eff}}=\sum_l\lvert\pi_l\widehat\gamma_l-w_l\rvert$ is the exact discrepancy of the saved multipliers. With at most one distinct nonidentity Pauli label, or $L_*=0$, the evolution is exact, so $B_{\mathrm{ext}}=0$ without $s>2A$, and $E_{\mathrm{eff}}$ remains. One level is shared by both branches, so this extrapolates the joint pair observable (Watson and Watkins, arXiv:2408.14385v2, Eq. (84)) |
+| Paired Taylor-series compensation, `PTSC(...)` | $B^2(2\delta+\delta^2)$ | $\delta$ is a uniform recovered-branch bound, the Taylor tail of Zeng, Sun, Jiang and Zhao, arXiv:2212.04566v2, Eqs. (79) and (84), plus NWQLib's perturbation from the finite integer laws. Independent branch corrections give a mean-vector error at most $B\delta$. Only the Taylor and count components are covered |
+| Two-member multi-product formula, `"mpf"` | Unknown for two or more distinct nonidentity Pauli labels in the union of the labels of $H_c$ and $L_c$ (a label in both counts once) | $\alpha_1=(3+\sqrt3)/9$, $\alpha_2=(1+\sqrt3)/3$ and $c=(3/2,-1/2)$ obey $\sum c=1$, $\sum c\alpha=1/3$, $\sum c\alpha^2=0$, which cancels the leading $h^2$ term of the pair observable (arXiv:2607.12225v1, Sec. VIII, Eqs. (17)–(24)). Probabilities $(3/4,1/4)$ give multipliers $(2,-2)$ and a second-moment factor 4. With two or more such labels the relation supplies no finite-step remainder, so only raw estimates and sampling radii are reported. With at most one, the evolution remainder is zero |
+| QSP phase bank, `SampledPairs.qsp_bank` | $B^2(2\beta+\beta^2)$ | $\beta$ is a support-wide bound on the error of the mean polynomial, derived below |
 
 For the stochastic bank, write the Jacobi–Anger polynomial of a bucket in the paired shells $\mathcal B_n=(z^n+z^{-n})/2$ with coefficients $c_n$. The bank keeps the shells through a cutoff $n_c$ and adds one drawn shell: member $n$ is $R_n=p_{n_c}+\gamma_n\mathcal B_n$, with $\gamma_n=W_cc_n/|c_n|$ and $W_c=\sum_{n_c<n\le d}|c_n|$. With the actual integer probabilities $\pi_n$, the mean member differs from the deterministic polynomial by at most $e_{\mathrm{law}}=\sum_n|\pi_n\gamma_n-c_n|$. Its recovered error is at most $\delta+e_{\mathrm{law}}+\zeta\sum_n\pi_n\kappa_n$ plus the rounding of the normalized coefficients, where $\delta$ is the expansion tail, $\zeta$ the common recovery and $\kappa_n$ the phase residual of member $n$. The two branches draw their members independently, so conditional on the outer pair $(x,y)$ and its shared bucket,
 
@@ -234,14 +234,14 @@ Let $\Gamma>0$ be fixed before $N$ independent stationary shots, with $\|u_{\rm 
 
 ```math
 \Pr(|\widehat q-q|\gt\epsilon)\le2\exp\Bigl(-\frac{2N\epsilon^2}{\Gamma^4}\Bigr),\qquad
-N\ge\Bigl\lceil\frac{\Gamma^4}{2\epsilon^2}\log\frac2\delta\Bigr\rceil,
+N\ge\max\Bigl(1,\Bigl\lceil\frac{\Gamma^4}{2\epsilon^2}\log\frac2\delta\Bigr\rceil\Bigr),
 ```
 
 for a positive integer $N$. This controls sampling about $q$, not the error against the exact solution. The [LCHS guide](lchs.md#declared-lower-bound) gives the conditions under which it compares routes and shifts.
 
 ## Analytic Low–Somma preparation {#analytic-preparation}
 
-With `lcu_state_preparation="analytic"` the kernel factor of $|p\rangle$ is prepared on the trapezoid grid of `low_somma_f2`. Equal weights and the constant kernel prefactor cancel on normalizing, which leaves
+With `lcu_prep="analytic"` the kernel factor of $|p\rangle$ is prepared on the trapezoid grid of `low_somma_f2`. Equal weights and the constant kernel prefactor cancel on normalizing, which leaves
 
 ```math
 f(k)=\frac{e^{-k^2/(8\gamma_{\mathrm{LS}}^2)}}{\sqrt{1+k^2}},\qquad
@@ -277,7 +277,7 @@ Bounding each alias by the coefficient estimate and summing over $m=0,\dots,n$ g
 \epsilon_{\mathrm{alias}}\le\frac{2M_\rho(1+2n)\rho^{-(2N-n)}}{1-\rho^{-2N}}.
 ```
 
-The two terms share 0.1 times `approximation_tolerance`. Write $p(x)=\sum_{m=0}^n c_mT_m(x)$ for the polynomial formed from the sampled coefficients. With $\Delta=\epsilon_{\mathrm{tail}}+\epsilon_{\mathrm{alias}}$, a margin $0<\eta<1$ and $\mu=(1+\Delta)/(1-\eta)$, the target $q=p/\mu$ has coefficients $q_m=c_m/\mu$ and obeys $\lVert q\rVert_\infty\le1-\eta$, because $|F|\le1$ on $[-1,1]$. On the ideal physical nodes, $x_j=hj/\lambda$. This is an ideal coefficient statement. The binary64 samples, transform and bound evaluation have no enclosure.
+The two terms share 0.1 times `approx_tol`. Write $p(x)=\sum_{m=0}^n c_mT_m(x)$ for the polynomial formed from the sampled coefficients. With $\Delta=\epsilon_{\mathrm{tail}}+\epsilon_{\mathrm{alias}}$, a margin $0<\eta<1$ and $\mu=(1+\Delta)/(1-\eta)$, the target $q=p/\mu$ has coefficients $q_m=c_m/\mu$ and obeys $\lVert q\rVert_\infty\le1-\eta$, because $|F|\le1$ on $[-1,1]$. On the ideal physical nodes, $x_j=hj/\lambda$. This is an ideal coefficient statement. The binary64 samples, transform and bound evaluation have no enclosure.
 
 ### State and amplification relations {#analytic-state}
 

@@ -76,7 +76,7 @@ from .refinement_records import (
 
 # The saved standalone refinement (BoxRefinementResult.save). The format
 # changes with the fields of the record (docs/FRAMEWORK.md, "API stability").
-ARCHIVE_FORMAT = "qhd.refinement/4"
+ARCHIVE_FORMAT = "qhd.refinement/5"
 ARCHIVE_RECORD = "refinement.json"
 
 # Largest valid grid, in points, whose kept-state readout forms the dense
@@ -98,7 +98,7 @@ def _level_grid(problem, box, qhd, search):
     """
     names = tuple(f"u_{name}" for name in problem.variable_names) if search else problem.variable_names
     bounds = ((0.0, 1.0),) * len(box) if search else box
-    return OneHotGrid(names, bounds, qhd.num_grid_points, qhd.include_boundary_points, qhd.boundary)
+    return OneHotGrid(names, bounds, qhd.num_grid_points, qhd.boundary_points, qhd.boundary)
 
 
 def _to_box(side, u):
@@ -629,7 +629,7 @@ def _support_tables(qhd, problem, show=None):
 
     _validate_qhd_problem_fields(problem)
     evaluations, decomposer, _, chunks = qhd._admit_symbolic_work(problem, False)
-    grid = OneHotGrid(problem.variables, problem.bounds, qhd.num_grid_points, qhd.include_boundary_points,
+    grid = OneHotGrid(problem.variables, problem.bounds, qhd.num_grid_points, qhd.boundary_points,
                       qhd.boundary)
     coerce_real_scalar(decomposer.constant, context="constant objective")
     k = grid.num_grid_points
@@ -2148,15 +2148,14 @@ def load_box_refinement(path):
         result (BoxRefinementResult): The saved refinement, with `problem` and `results`
             attached.
     """
-    from nwqlib._choice_archive import ArchiveFiles
+    from nwqlib._choice_archive import ArchiveFiles, unsupported_archive_format
     from nwqlib.scientist import load_result
     from .archive import _SymbolicReader
 
     files = ArchiveFiles(Path(path), None)
     saved = files.read_json(ARCHIVE_RECORD)
     if saved.get("format") != ARCHIVE_FORMAT:
-        raise ValueError(f"unsupported box-refinement archive format {saved.get('format')!r}, expected "
-                         f"{ARCHIVE_FORMAT!r}")
+        raise unsupported_archive_format("box-refinement archive", saved.get("format"), ARCHIVE_FORMAT)
     result = BoxRefinementResult.model_validate(saved["record"])
     stored = Optimization.model_validate(saved["problem_record"])
     with files.read_path(saved["problem"]).open("rb") as stream:
@@ -2174,13 +2173,13 @@ def check_refinement_options(options, qhd, execution):
     (``constrained.solve_augmented_lagrangian``) both call it. The binary
     encoding's structured preparation prepares the uniform state only
     (``method.QHD``), so a quantum refinement with best-point Gaussians on
-    that encoding needs ``initial_state_preparation="qiskit_state_preparation"``.
+    that encoding needs ``init_prep="qiskit_state_preparation"``.
     """
     if (options.level_initial_state == "best_point_gaussian" and execution == "quantum"
-            and qhd.encoding == "binary" and qhd.initial_state_preparation == "structured"):
+            and qhd.encoding == "binary" and qhd.init_prep == "structured"):
         raise ValueError("level_initial_state='best_point_gaussian' starts later levels from a GaussianState, "
                          "which the binary encoding's structured preparation cannot prepare. Use "
-                         "initial_state_preparation='qiskit_state_preparation'")
+                         "init_prep='qiskit_state_preparation'")
     splitting = options.stall_split == "best_region"
     if splitting and execution == "classical" and not qhd.keep_state:
         raise ValueError("stall_split='best_region' scores each region at its most probable joint grid point, "

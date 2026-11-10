@@ -18,7 +18,8 @@ from time import perf_counter
 import sympy as sp
 
 from nwqlib import Optimization, plan, solve
-from nwqlib.algorithms import QHD, QuadraticSchedule
+from nwqlib.algorithms import QHD
+from nwqlib.algorithms.qhd import QuadraticSchedule
 
 x, y = sp.symbols("x y", real=True)
 # A double well (2x² - 1)² with minima near x = ±0.71, tilted by 3x/5 so that the valley at negative x is deeper.
@@ -313,7 +314,7 @@ show_table([
 # **The answer is checked against a search of every grid point and against the minimum that gradient descent finds.** Each row says which kind of number it is: measured against reference, computed by the simulator, upper bound, or unavailable with its reason.
 
 # %%
-from nwqlib.algorithms import QHDVerification
+from nwqlib.algorithms.qhd import QHDVerification
 
 f = baseline["f"]
 check, _ = result.verify(checks=QHDVerification(comparisons=("grid_minimum",)))  # evaluates every grid point
@@ -405,7 +406,8 @@ import numpy as np
 import sympy as sp
 
 from nwqlib import Optimization, plan, solve
-from nwqlib.algorithms import QHD, QuadraticSchedule
+from nwqlib.algorithms import QHD
+from nwqlib.algorithms.qhd import QuadraticSchedule
 
 a, b, c = sp.symbols("a b c", real=True)
 my_objective = ((a**2 - 1) ** 2 + sp.Rational(3, 10) * a + (b - sp.Rational(1, 2)) ** 2
@@ -443,7 +445,8 @@ print(f"search of all {my_values.size} grid points: smallest objective {my_value
 import sympy as sp
 
 from nwqlib import ConstrainedOptimization
-from nwqlib.algorithms import QHD, QuadraticSchedule, constrained_grid_minimum, solve_augmented_lagrangian
+from nwqlib.algorithms import QHD
+from nwqlib.algorithms.qhd import QuadraticSchedule, constrained_grid_minimum, solve_augmented_lagrangian
 
 x, y = sp.symbols("x y", real=True)
 DISK_BOUNDS = ((0.0, 1.0), (0.0, 1.0))  # contains x*, and the grid points (0.6, 0.8) and (0.8, 0.6) lie on the circle
@@ -561,7 +564,7 @@ show_table([(item.iteration + 1, item.penalty, item.inequality_multipliers[0], i
 # **Your own constraints.**
 #
 # - **Constraints.** Each entry of `equalities` is a SymPy expression $h$ with $h=0$, and each entry of `inequalities` an expression $g$ with $g\le 0$. A problem with an equality must set `feasibility_tolerance`, because a grid seldom contains a point where $h=0$ exactly.
-# - **Options.** `options=AugmentedLagrangian(...)`, imported from `nwqlib.algorithms`, sets the penalty, the tolerances, scales for constraints in different units, the point rule and the stopping rule. Go deeper D covers slack variables for inequalities.
+# - **Options.** `options=AugmentedLagrangian(...)`, imported from `nwqlib.algorithms.qhd`, sets the penalty, the tolerances, scales for constraints in different units, the point rule and the stopping rule. Go deeper D covers slack variables for inequalities.
 # - **Cost.** Each round is one QHD solve on the same grid, and a run makes at most `max_iterations` of them. A larger penalty can increase the effective objective's range and the counted work of classical evolution. The range need not increase monotonically, because the objective, multiplier term and penalty can cancel.
 # - **Refusal.** A later round whose planning exceeds `max_work` ends the run with status `inner_failed`.
 #
@@ -694,7 +697,7 @@ plt.show()
 # `plan_augmented_lagrangian(problem, *, qhd, options, execution, shots, seed)` returns `(preprocessing, representation, plan)` for an unrefined round 0. It performs preprocessing, representation selection and QHD planning, with no Run, circuit preparation, evolution or grid-reference solve. Its counts are planning and resource-formula results, not runtime measurements.
 
 # %%
-from nwqlib.algorithms import AugmentedLagrangian, plan_augmented_lagrangian
+from nwqlib.algorithms.qhd import AugmentedLagrangian, plan_augmented_lagrangian
 
 xs = sp.symbols("x0:8", real=True)
 affine = ConstrainedOptimization(objective=sum((v - sp.Rational(1, 2)) ** 2 for v in xs), variables=xs,
@@ -778,7 +781,7 @@ show_table([(item.iteration + 1, ", ".join(slack_forms[item.iteration]["forms"].
 #
 # The recorded probability, tie deficit and tie window belong to the selected joint inner grid point. They are not marginal probabilities or tie diagnostics after summing over the slack coordinates.
 #
-# **The slack grid and its bound.** Each slack uses the Method's common `num_grid_points`, `boundary` and `include_boundary_points`, with no separate slack-grid setting. A Dirichlet slack box has upper end U = U_0.
+# **The slack grid and its bound.** Each slack uses the Method's common `num_grid_points`, `boundary` and `boundary_points`, with no separate slack-grid setting. A Dirichlet slack box has upper end U = U_0.
 #
 # The cap U_0 = max(0, −ℓ), where ℓ is a lower bound of the normalized inequality on the grid, contains every required continuous slack on the grid of the original preprocessed box for every nonnegative entering multiplier and positive penalty.
 #

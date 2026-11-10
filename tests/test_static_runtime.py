@@ -108,7 +108,7 @@ def test_aer_binds_sampled_pair_rows_to_their_templates_with_each_rows_seed(tmp_
     from nwqlib.blocks import lowering
     from test_ibm_backend import sampled_lchs_plan
 
-    plan = sampled_lchs_plan(lcu_select_implementation="structured", pair_control_copies=2)
+    plan = sampled_lchs_plan(lcu_select="structured", control_copies=2)
     # This built-in route's memory check keeps to the first point of an axis.
     assert all(_fixes_footprint(plan, experiment) for experiment in plan.experiments)
     lowered, translated, seeds = [], [], []
@@ -166,7 +166,7 @@ def test_aer_prepares_the_rows_of_templates_it_cannot_bind_one_by_one(monkeypatc
     from nwqlib.blocks import lowering
     from test_ibm_backend import sampled_lchs_plan
 
-    plan = sampled_lchs_plan(lcu_select_implementation="structured", pair_control_copies=2)
+    plan = sampled_lchs_plan(lcu_select="structured", control_copies=2)
     ordinary = type(plan.method).row_templates
 
     def timed(template):

@@ -12,7 +12,7 @@ from scipy.linalg import expm
 from _lchs_suzuki_reference import sorted_pauli_lie_1_reference, sorted_pauli_suzuki_2_reference
 from conftest import lchs_dense_quadrature
 from nwqlib import LinearDynamics
-from nwqlib.algorithms.lchs import LCHS
+from nwqlib.algorithms.lchs import LCHS, SampledPairs, Trotter
 from nwqlib.algorithms.lchs.native import (
     resolve_lcu_select_implementation,
 )
@@ -52,10 +52,9 @@ def _signed_options(
             implementation="signed_binary_uniform",
             parameters={"num_qubits": address_qubits, "lsb_position": -2},
         ),
-        hamiltonian_evolution_backend="trotter",
-        trotter_steps=1,
-        lcu_select_implementation=select,
-        lcu_state_preparation=preparation,
+        ham_evo=Trotter(steps=1),
+        lcu_select=select,
+        lcu_prep=preparation,
     )
 
 
@@ -97,7 +96,7 @@ def test_structured_and_multiplexed_select_match_independent_dense_blocks(
     order: int,
 ) -> None:
     problem = problem_factory()
-    options = _signed_options(address_qubits).revise(trotter_order=order)
+    options = _signed_options(address_qubits).revise(ham_evo=Trotter(steps=1, order=order))
     quadrature, *parts = lchs_dense_quadrature(problem.A.dense_array(), problem.elapsed_time, options)
     data = generate_lchs_product_formula_select_plan(
         quadrature=quadrature,
@@ -407,9 +406,9 @@ def test_sampled_pair_row_templates_bind_to_their_direct_circuits(implementation
 
     linear = LinearDynamics(A=ingest_pauli([("I", .3+.1j), ("X", .25), ("Z", .2j), ("Y", -.15j)], num_qubits=1),
                             initial_state=[.6, .8j], time=.7)
-    chosen = nwqlib.plan(linear, method=LCHS(observable_estimator="sampled_pairs", pair_repeats=2,
-                                             hamiltonian_evolution_backend="trotter", trotter_steps=2,
-                                             lcu_select_implementation=implementation),
+    chosen = nwqlib.plan(linear, method=LCHS(estimator=SampledPairs(repeats=2),
+                                             ham_evo=Trotter(steps=2),
+                                             lcu_select=implementation),
                          output=NormSquared(), shots=12, seed=11)
     block = next(item for item in chosen.blocks if item.record.signature.name == "lchs_pair")
     payload, rec, _ = block._payload

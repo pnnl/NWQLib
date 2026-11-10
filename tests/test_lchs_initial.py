@@ -2,8 +2,8 @@
 
 import numpy as np
 import pytest
-from nwqlib import LinearDynamics,solve
-from nwqlib.algorithms.lchs import LCHS
+from nwqlib import LinearDynamics,QuadraticForm,solve
+from nwqlib.algorithms.lchs import LCHS,Coherent,SampledPairs
 from nwqlib.operators.inputs import OperatorInput
 from nwqlib.problems.inputs import StateInput
 
@@ -33,3 +33,21 @@ def test_initial_identity_does_not_need_unused_source_data(monkeypatch):
     result=solve(explicit,method=LCHS())
     assert result.data.observations.chunks==()
     np.testing.assert_array_equal(result.solution,np.array([1j,0,-.5]))
+
+
+def test_initial_counts_radius_reads_the_estimators_failure_probability():
+    """The no-evolution counts do not depend on the estimator, so their radius takes the estimator's own probability.
+
+    At zero elapsed time both estimators measure the same initial-state PREP,
+    so equal shots and seed give equal counts. Each must report the shot
+    radius at its own `fail_prob`, here 0.2 rather than the default 0.05.
+    """
+    problem,observable,_,_=initial_problem()
+    sampling=[]
+    for estimator in (Coherent(fail_prob=.2),SampledPairs(fail_prob=.2)):
+        result=solve(problem,method=LCHS(ham_evo='trotter',estimator=estimator),
+            output=QuadraticForm(observable=observable),execution='quantum',shots=400,seed=5)
+        sampling.append(next(item for item in result.facts if item.fact.quantity=='sampling'))
+    assert [item.failure_probability for item in sampling]==[.2,.2]
+    # Same counts, same radius function and probability: the same binary64 value.
+    assert sampling[0].fact.value==sampling[1].fact.value

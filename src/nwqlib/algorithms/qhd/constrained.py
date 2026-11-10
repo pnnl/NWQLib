@@ -118,7 +118,7 @@ from .potential import coerce_real_scalar
 from .refinement import _refine, check_refinement_options
 from .refinement_records import BoxRefinement, RefinementLevel
 
-ARCHIVE_FORMAT = "qhd.constrained/4"
+ARCHIVE_FORMAT = "qhd.constrained/5"
 
 # Functions whose derivative is undefined or discontinuous somewhere. The
 # stationarity diagnostic is not applicable to a problem that contains one,
@@ -556,7 +556,7 @@ def _setup(problem, qhd, options, refinement=None, stored=None):
         terms.append(_Term(name, expression, scale, function, supports[position], nodes[position], gradient))
     # The grid of every inner QHD Plan on the preprocessed box, with the
     # Method's boundary (grid.OneHotGrid defines the three grids).
-    grid = OneHotGrid(problem.variable_names, box, k, qhd.include_boundary_points, qhd.boundary)
+    grid = OneHotGrid(problem.variable_names, box, k, qhd.boundary_points, qhd.boundary)
     if stored is not None:
         # A resumed run reads the preprocessing and the check counts that its first call saved, rebuilding
         # only what needs no function evaluation: the grid, the lambdified terms and the reserved round work.
@@ -1436,7 +1436,7 @@ def _slack_axis(setup, qhd, t, multiplier, penalty):
         return None, "its periodic slack margin exceeds binary64"
     name = setup.slack_symbols[t].name
     try:
-        grid = OneHotGrid((name,), ((0.0, upper),), k, qhd.include_boundary_points, qhd.boundary)
+        grid = OneHotGrid((name,), ((0.0, upper),), k, qhd.boundary_points, qhd.boundary)
     except ValueError as error:
         return None, f"its slack grid on [0, {upper!r}] is not admissible: {error}"
     h, rho = Fraction(grid.spacing(0)), Fraction(penalty)
@@ -2516,7 +2516,7 @@ def plan_augmented_lagrangian(problem, *, qhd, options=AugmentedLagrangian(), ex
     its slack variables. Nothing is prepared, executed or measured, no state is evolved,
     and neither a classical reference nor `constrained_grid_minimum` runs, so the call
     also serves problems whose evolution cannot be simulated. A resource-only QHD with
-    `initial_state_preparation="none"` is accepted, since no round runs.
+    `init_prep="none"` is accepted, since no round runs.
 
     A planning-only call reports the first round only: the preprocessing, with the
     inequality ranges on the grid, round 0's representation, with its slack caps and its
@@ -3148,7 +3148,7 @@ class ConstrainedQHDResult:
         if qhd.boundary == "periodic":
             model += (" A periodic grid contains the lower edge of each side of its box and not the upper edge, so "
                       "a grid point can lie on an absorbed lower bound and none lies on an absorbed upper bound.")
-        elif qhd.include_boundary_points:
+        elif qhd.boundary_points:
             model += " The endpoint grid contains the edges of its box, so a grid point can lie on an absorbed bound."
         else:
             model += (" The Dirichlet interior grid contains no point on the edges of its box, so no grid point lies "
@@ -3321,12 +3321,12 @@ class ConstrainedQHDResult:
     def save(self, path):
         """Write the run to a new directory and return its path.
 
-        The directory holds `constrained.json` (format `qhd.constrained/4`) with the record,
+        The directory holds `constrained.json` (format `qhd.constrained/5`) with the record,
         `problem.pickle` with the SymPy objective, variables and constraints, and
         `iterations/<k>/result/`, each inner Result saved by its own archive. With
         refinement each completed level z of round k has its Result under
         `iterations/<k>/levels/<z>/result/` instead, and the record nests the refinement
-        records. One format, `qhd.constrained/4`, covers both shapes, because the record
+        records. One format, `qhd.constrained/5`, covers both shapes, because the record
         itself says which shape a folder has. `load_augmented_lagrangian` reads it back. The
         archive saves the problem itself, because no Plan holds a ConstrainedOptimization.
         A failed save removes the directory.
@@ -3381,15 +3381,14 @@ def load_augmented_lagrangian(path):
         result (ConstrainedQHDResult): The saved run, with its problem and inner Results
             attached.
     """
-    from nwqlib._choice_archive import ArchiveFiles
+    from nwqlib._choice_archive import ArchiveFiles, unsupported_archive_format
     from nwqlib.scientist import load_result
     from .archive import _SymbolicReader
 
     files = ArchiveFiles(Path(path), None)
     saved = files.read_json("constrained.json")
     if saved.get("format") != ARCHIVE_FORMAT:
-        raise ValueError(f"unsupported constrained QHD archive format {saved.get('format')!r}, expected "
-                         f"{ARCHIVE_FORMAT!r}")
+        raise unsupported_archive_format("constrained QHD archive", saved.get("format"), ARCHIVE_FORMAT)
     record = AugmentedLagrangianRecord.model_validate(saved["record"])
     with files.read_path(saved["problem"]).open("rb") as stream:
         problem = live_problem(record.problem, _SymbolicReader(stream).load())
@@ -3658,7 +3657,7 @@ def constrained_grid_minimum(result, *, max_work=None, max_bytes=None):
         raise ValueError("constrained_grid_minimum is the reference of the preprocessed box's grid, and a run with "
                          "box refinement searches the nested grids of its levels")
     grid = OneHotGrid(problem.variable_names, record.preprocessing.bounds, record.qhd.num_grid_points,
-                      record.qhd.include_boundary_points, record.qhd.boundary)
+                      record.qhd.boundary_points, record.qhd.boundary)
     d, k = grid.num_variables, grid.num_grid_points
     named = [("objective", problem.objective, record.options.objective_scale)]
     named += [(f"equalities[{i}]", problem.equalities[i], s)

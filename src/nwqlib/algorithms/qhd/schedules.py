@@ -43,7 +43,7 @@ from typing import Annotated, ClassVar, Literal
 from pydantic import Field
 
 from nwqlib._validation import finite_real
-from nwqlib.core.records import Nonnegative, Real, Record
+from nwqlib.core.records import Nonnegative, Real, Record, _ConstructorDisplay
 
 from .validation import _normal_quotient, _normal_range
 
@@ -229,7 +229,7 @@ def _unit_mean(start, width, numerator_power):
     return fsum(terms)
 
 
-class QuadraticSchedule(Record):
+class QuadraticSchedule(_ConstructorDisplay, Record):
     """Quadratic schedule `a(t) = 1/(1 + gamma t**2)`, `b(t) = 1 + gamma t**2`, the QHD default.
 
     Build it as `QuadraticSchedule(gamma=0.3)` and pass it as `QHD(schedule=...)`.
@@ -414,7 +414,7 @@ class QuadraticSchedule(Record):
                 2 * gamma * upper, 2 * gamma)
 
 
-class CubicSchedule(Record):
+class CubicSchedule(_ConstructorDisplay, Record):
     """Cubic schedule `a(t) = 2/(s + t**3)`, `b(t) = 2 t**3` of Leng et al., Eq. (C.4).
 
     Build it as `CubicSchedule(s=...)` and pass it as `QHD(schedule=...)`. `s` is
@@ -580,7 +580,7 @@ class CubicSchedule(Record):
                 12 * upper / (d * d) + 36 * upper ** 4 / (d * d * d), 6 * upper * upper, 12 * upper)
 
 
-class ShiftedCubicSchedule(Record):
+class ShiftedCubicSchedule(_ConstructorDisplay, Record):
     """Shifted cubic schedule `a(t) = (2/(s + t))**3`, `b(t) = 2 t**3` of Wu et al., Eq. (15).
 
     Build it as `ShiftedCubicSchedule(s=...)` and pass it as `QHD(schedule=...)`. `s` is

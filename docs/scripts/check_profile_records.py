@@ -41,7 +41,7 @@ def calibrated_inputs():
     expires = datetime(2026, 2, 1, tzinfo=timezone.utc)
     problem = Expectation(state=ingest_occupation("1", num_qubits=1),
                           observable=ingest_pauli((("Z", 1.0),), num_qubits=1))
-    plan = select_plan(problem, method=ExpectationMethod(preparation_choice="hzh"), seed=7)
+    plan = select_plan(problem, method=ExpectationMethod(prep_choice="hzh"), seed=7)
     # Declare only the H/Z operations and readout that the supplied profile covers.
     target = AER_STATEVECTOR_TARGET.revise(
         description="supplied one-qubit HZH/Pauli subset", artifacts=("selected_construction",),
@@ -126,7 +126,7 @@ def child(poison=False):
     plan, realization, profile, allocation, context, runtime, at = calibrated_inputs()
     from nwqlib import compare, estimate
     from nwqlib.algorithms.expectation import ExpectationMethod
-    comparison = compare(plan.problem, methods=(ExpectationMethod(), ExpectationMethod(preparation_choice="hzh")), seed=7)
+    comparison = compare(plan.problem, methods=(ExpectationMethod(), ExpectationMethod(prep_choice="hzh")), seed=7)
     assert [row.estimate.quantity("operations").fact.value.numerator for row in comparison.rows] == [1, 3]
     events = []
     def blocked(*args, **kwargs):

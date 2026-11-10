@@ -58,11 +58,11 @@ def test_selected_qsp_resource_structure_and_classification_admission(system_qub
         initial[1]=.25
     # Four explicitly declared grid nodes keep this resource-law check bounded.
     # Default finite-tail selection is tested independently in test_lchs_default.
-    method=LCHS(hamiltonian_evolution_backend='qsp_block_encoding',
+    method=LCHS(ham_evo='qsp_block_encoding',
         k_quadrature=ProviderConfig(implementation='signed_binary_uniform',
             parameters={'num_qubits':2,'lsb_position':0}))
     if not diagonal:
-        method=method.revise(approximation_tolerance=.5,
+        method=method.revise(approx_tol=.5,
             lchs_kernel=ProviderConfig(implementation='near_optimal_eq7',parameters={'beta':.8}),
             k_quadrature=method.k_quadrature)
     problem=LinearDynamics(A=matrix,initial_state=initial,time=.1 if diagonal else .25)

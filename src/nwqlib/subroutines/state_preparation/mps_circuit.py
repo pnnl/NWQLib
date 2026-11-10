@@ -41,7 +41,7 @@ def _require_scikit_tt() -> tuple[Any, Any]:
         from scikit_tt import TT
     except ImportError as exc:
         raise ImportError(
-            "lcu_state_preparation='mps_circuit' requires the optional tensor "
+            "lcu_prep='mps_circuit' requires the optional tensor "
             "dependency scikit_tt, which is not on PyPI. Install it with "
             "`python -m pip install 'scikit_tt @ git+https://github.com/PGelss/scikit_tt.git'`."
         ) from exc

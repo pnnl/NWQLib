@@ -3,7 +3,8 @@
 This page lists the classes and functions for adding a method: the `Method` base class and its hooks, the checker and registry for a new method, the `Program` (NWQLib's description of a circuit as named steps), the blocks a Program calls, the readouts it requests and the hooks that save its data. [Add a Method](../algorithm_protocol.md) states every requirement of a Method, and [Run your own circuit](../own_circuit.md) builds the smallest Method step by step.
 
 ```python
-from nwqlib.algorithms import AlgorithmDescriptor, ApplicabilityError, Method, ResourceLimitError
+from nwqlib.algorithms import ApplicabilityError, ResourceLimitError
+from nwqlib.algorithms.protocol import AlgorithmDescriptor, Method
 from nwqlib.algorithms.authoring import MethodCase, check_method
 from nwqlib.blocks import SelectedConstruction, lower_qiskit, select_preparation
 from nwqlib.ir import (
@@ -11,7 +12,7 @@ from nwqlib.ir import (
 )
 ```
 
-The Program records and expressions import from `nwqlib.ir`, the block functions and records from `nwqlib.blocks`, and `Experiment`, `ObservationSpec`, `ReadoutDetails`, `ObservationPoint`, `ObservableEstimateSpec`, `ReductionContext`, `Reducer`, `registered_reducer`, `Realization` and `RandomStreams` from `nwqlib.core.planning`. `PreparedHandle`, `ObservationChunk`, `Histogram`, `PreparedArtifact` and `ReducedValues` import from `nwqlib.execution`, `AmplitudeReadout` from `nwqlib.amplitudes`, `InputRef` from `nwqlib.core.records`, `MethodCase` and `check_method` from `nwqlib.algorithms.authoring`, and the registry entries from `nwqlib.algorithms`.
+The Program records and expressions import from `nwqlib.ir`, the block functions and records from `nwqlib.blocks`, and `Experiment`, `ObservationSpec`, `ReadoutDetails`, `ObservationPoint`, `ObservableEstimateSpec`, `ReductionContext`, `Reducer`, `registered_reducer`, `Realization` and `RandomStreams` from `nwqlib.core.planning`. `PreparedHandle`, `ObservationChunk`, `Histogram`, `PreparedArtifact` and `ReducedValues` import from `nwqlib.execution`, `AmplitudeReadout` from `nwqlib.amplitudes`, `InputRef` from `nwqlib.core.records`, `MethodCase` and `check_method` from `nwqlib.algorithms.authoring`, and the registry entries from `nwqlib.algorithms.registry`.
 
 A new Method provides a `case()` function that returns a `MethodCase`, and `check_method` runs it. The reference Hadamard Method lives in the repository's test suite, `tests/_hadamard_method.py`, and is not part of the installed package. In a source checkout with `tests/` on the import path, its case passes the check:
 
@@ -46,6 +47,7 @@ Subclass `Method`, give it a `descriptor`, and implement `plan` and `analyze`. T
 ::: nwqlib.algorithms.protocol.Method
     options:
       heading_level: 3
+      show_bases: false
       members:
         - plan
         - analyze
@@ -536,7 +538,7 @@ A Plan's experiments name the readout each circuit returns. Reducers that turn a
 
 ## Save and restore a method's data
 
-A Method whose Runs or Results are saved implements `save_archive(plan, files)` and `load_archive(saved, files)` and names its Result class in `result_type`. Both hooks receive an `ArchiveFiles` object, `save_archive` reads the bound blocks from `plan.blocks`, and [When the archive hooks are required](../own_circuit.md#when-the-archive-hooks-are-required) shows them for a small Method. Import `write_blocks` and `read_blocks` from `nwqlib.blocks._archive`, a protected module that is a supported hook for Method authors ([supported protected extension hooks](../algorithm_protocol.md#supported-protected-extension-hooks)).
+A Method whose Runs or Results are saved implements `save_archive(plan, files)` and `load_archive(saved, files)` and names its Result class in `result_type`. Both hooks receive an `ArchiveFiles` object, `save_archive` reads the bound blocks from `plan.blocks`, and [When the archive hooks are required](../own_circuit.md#when-the-archive-hooks-are-required) shows them for a small Method. Import `write_blocks` and `read_blocks` from `nwqlib.blocks`.
 
 ::: nwqlib._choice_archive.ArchiveFiles
     options:

@@ -354,7 +354,7 @@ def test_binary_routes_start_from_the_stored_gaussian_amplitudes():
 
     problem = _problem()
     gaussian = GaussianState(center=(0.85, 0.1), widths=(0.5, 0.6))
-    method = _method(4, initial_state=gaussian, initial_state_preparation="qiskit_state_preparation",
+    method = _method(4, initial_state=gaussian, init_prep="qiskit_state_preparation",
                      keep_state=True)
     native = plan(problem, method=method, execution="quantum", seed=7)
     stored = native.reconstruction.initial_amplitudes

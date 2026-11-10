@@ -89,12 +89,13 @@ from nwqlib.ir import (
 from nwqlib.ir.validation import _Admission
 from nwqlib.operators.access import Count, _check_bytes
 from nwqlib._limits import ResourceLimitError, exceeds
+from nwqlib._validation import reanalysis_settings
 from nwqlib.problems.inputs import PhysicalScale, ingest_occupation
 from nwqlib.problems.records import Accuracy, Expectation, NormalizedExpectation, QuadraticForm
 
 _METHOD = Source(
     name="finite_pauli_expectation",
-    version="2",
+    version="3",
     domain="normalized expectation or physical quadratic form of admitted Hermitian input",
     reference="nwqlib.algorithms.expectation.ExpectationMethod",
 )
@@ -472,13 +473,15 @@ class ExpectationAnalysis(Result):
             lines.append("Count inference uses its recorded sampling and calibration premises")
         elif self.estimates:
             lines.append(
-                "Provider-estimated observable; uncertainty has the provider's stated scope"
+                "Provider estimate. NWQLib does not verify the reported uncertainty's statistical "
+                "interpretation. Its error budget excludes provider processing and hardware error."
             )
             if len(self.estimates) == 1 and self._plan is not None:
                 estimate = self.provider_output_estimates[0]
                 if estimate["standard_error"] is not None:
                     lines.append(
-                        f"Provider standard error in output frame: {estimate['standard_error']:.6g}"
+                        "Provider-reported uncertainty in output frame: "
+                        f"{estimate['standard_error']:.6g}"
                     )
                 else:
                     lines.append(estimate["uncertainty_unavailable"])
@@ -491,8 +494,11 @@ class ExpectationAnalysis(Result):
         One dict per entry of `estimates`, with the keys `source_id`, `value`,
         `standard_error` and `uncertainty_unavailable`. They are computed when
         read and are not saved, and `estimates` keeps the original provider
-        values. The standard error keeps the provider's meaning, and several
-        estimates carry no covariance or combined standard error.
+        values. The `standard_error` field contains the provider-reported
+        uncertainty in the output's units. NWQLib does not verify its
+        statistical interpretation, and its error budget excludes provider
+        processing and hardware error. Several estimates carry no covariance
+        or combined uncertainty.
         """
         rec = self.plan.reconstruction
         views = []
@@ -2228,7 +2234,7 @@ def _measured_program(problem, labels, method, shots):
 
     Without mitigation, the nonzero nonidentity labels are partitioned into
     qubit-wise commuting groups by deterministic first fit in term order
-    (PauliTerms.group with strategy "qwc"), with max_classical_products as
+    (PauliTerms.group with strategy "qwc"), with max_products as
     the running comparison budget. The Program declares one width-q
     register ``system`` and one width-q classical value ``readout``, and
     each group gets one science experiment with the five-child body
@@ -2298,7 +2304,7 @@ def _measured_program(problem, labels, method, shots):
         registers = (Register(name="system", width=q),)
         classical = (ClassicalValue(name="readout", dtype="bits", width=q),)
         port = (PortMap(port="system", wire="system"),)
-        blocks = [select_preparation("state", state, choice=method.preparation_choice, per_bit=False)]
+        blocks = [select_preparation("state", state, choice=method.prep_choice, per_bit=False)]
         definitions = [
             Definition(id="allocate", node=Allocate(wire="system")),
             Definition(id="release", node=Release(wire="system")),
@@ -2307,8 +2313,8 @@ def _measured_program(problem, labels, method, shots):
         ]
         table = pauli_table(((label, 1.0) for label in labels), num_qubits=q, max_bytes=method.max_bytes)
         grouping = table.group(
-            strategy="qwc", max_bytes=method.max_bytes, max_comparisons=method.max_classical_products,
-            limit_name="ExpectationMethod.max_classical_products",
+            strategy="qwc", max_bytes=method.max_bytes, max_comparisons=method.max_products,
+            limit_name="ExpectationMethod.max_products",
         )
         for index, members in enumerate(grouping.groups):
             members = tuple(labels[member] for member in members)
@@ -2340,7 +2346,7 @@ def _measured_program(problem, labels, method, shots):
         definitions = [Definition(id=name, node=Allocate(wire=f"bit_{bit}")) for bit, name in enumerate(allocate)]
         definitions += [Definition(id=name, node=Release(wire=f"bit_{bit}")) for bit, name in enumerate(release)]
         ports = tuple(PortMap(port=f"system_{bit}", wire=f"bit_{bit}") for bit in range(q))
-        blocks = [select_preparation("state", state, choice=method.preparation_choice, per_bit=True)]
+        blocks = [select_preparation("state", state, choice=method.prep_choice, per_bit=True)]
         definitions.append(Definition(id="prepare_science", node=BlockCall(signature="state", ports=ports)))
 
         def pivot_body(setting, calls, count):
@@ -2502,7 +2508,7 @@ class ExpectationMethod(Method):
     statistical quantities and their assumptions.
 
     Attributes:
-        preparation_choice: Default `"native"`, the state's own preparation
+        prep_choice: Default `"native"`, the state's own preparation
             circuit. `"hzh"` prepares each occupied site with the gates H, Z,
             H, which equal X, in place of X, and is accepted only for
             occupation-number states.
@@ -2522,7 +2528,7 @@ class ExpectationMethod(Method):
         max_bytes: Default `None`, the physical memory of this computer.
             Limit on the known bytes of the operator, the state and the
             classical workspace.
-        max_classical_products: Default `None`, no limit. Optional limit on
+        max_products: Default `None`, no limit. Optional limit on
             the counted scalar work of the classical evaluation, including
             matrix-vector products, reductions and known state-preparation
             work. Planning checks the action of the observable O, or the
@@ -2555,14 +2561,14 @@ class ExpectationMethod(Method):
         -7.0
     """
 
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     result_type: ClassVar[type[Result]] = ExpectationAnalysis
-    preparation_choice: Literal["native", "hzh"] = "native"
+    prep_choice: Literal["native", "hzh"] = "native"
     inference: BinaryInferenceOptions = BinaryInferenceOptions()
     mitigation: BinaryReadoutMitigation | None = None
     estimate_precision: Annotated[Real, Field(gt=0)] | None = None
     max_bytes: PositiveInt | None = None
-    max_classical_products: PositiveInt | None = None
+    max_products: PositiveInt | None = None
 
     descriptor: ClassVar[AlgorithmDescriptor] = _DESCRIPTOR
 
@@ -2741,7 +2747,7 @@ class ExpectationMethod(Method):
             program, blocks, experiments, settings = _measured_program(problem, labels, self, shots)
         elif labels:
             q = (problem.dimension - 1).bit_length()
-            block = select_preparation("state", problem.state, choice=self.preparation_choice)
+            block = select_preparation("state", problem.state, choice=self.prep_choice)
             blocks = (block,)
             program = Program(
                 root="root",
@@ -2847,12 +2853,12 @@ class ExpectationMethod(Method):
                 operator, state, max_bytes=self.max_bytes, scaled=certain,
                 operation="classical expectation scaled copy O*2**(-e) that every state needs, with the preparation"
                 if certain else None)
-            if exceeds(work, self.max_classical_products):
+            if exceeds(work, self.max_products):
                 stage = ("the scaled copy O*2**(-e) that every state needs, with the preparation" if certain
                          else "the action of O, the reduction and the preparation")
                 raise ResourceLimitError(f"classical expectation: {stage} requires {work} classical products, above "
-                                         f"max_classical_products={self.max_classical_products}. Raise "
-                                         f"max_classical_products to at least {work} or set it to None.")
+                                         f"max_products={self.max_products}. Raise "
+                                         f"max_products to at least {work} or set it to None.")
             construction, experiments = host_construction(
                 _METHOD,
                 (state.reference, operator.reference),
@@ -2949,12 +2955,12 @@ class ExpectationMethod(Method):
                     operation="classical expectation scaled copy O*2**(-e) that this state's direction needs, "
                               "with the preparation")
                 work += 2 * operator.basis.dimension
-                if exceeds(work, self.max_classical_products):
+                if exceeds(work, self.max_products):
                     raise ValueError(
                         f"classical expectation: this state's direction does not scale exactly by 2**(-{exponent}), "
                         f"so the evaluation needs the scaled copy O*2**(-e), which requires {work} classical "
-                        f"products, above max_classical_products={self.max_classical_products}. Raise "
-                        f"max_classical_products to at least {work} or set it to None.")
+                        f"products, above max_products={self.max_products}. Raise "
+                        f"max_products to at least {work} or set it to None.")
 
             # O*2**(-e) keeps the matvec finite for extreme coefficients.
             # _classical_value restores 2**e in exact arithmetic.
@@ -3009,6 +3015,7 @@ class ExpectationMethod(Method):
         """Dispatch the analysis by the kind of data returned, keeping its statistical
         assumptions.
         """
+        reanalysis_settings(settings, ("inference",), "ExpectationMethod")
         inference = settings.get("inference", self.inference)
         if not isinstance(inference, BinaryInferenceOptions):
             raise TypeError("inference must be BinaryInferenceOptions")

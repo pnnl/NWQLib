@@ -1,5 +1,8 @@
-"""Public names of the built-in Methods, their records and helper functions, the Method protocol and the registry, imported on first access.
+"""The built-in Methods and the two exceptions a caller catches around plan, solve and compare, imported on first access.
 
+Records, options and functions of one family import from that family's
+subpackage, such as `nwqlib.algorithms.qhd`. The Method protocol imports from
+`nwqlib.algorithms.protocol` and the registry from `nwqlib.algorithms.registry`.
 `_METHOD_OWNERS` is also the list that `registry.builtin_registrations` reads.
 """
 
@@ -21,44 +24,7 @@ _METHOD_OWNERS = {
     "LCHS": "lchs.method",
     "ExpectationMethod": "expectation",
 }
-_EXPORT_GROUPS = {
-    "qhd": (
-        "QHDAnalysis", "QHDVerification", "QuadraticSchedule", "CubicSchedule", "ShiftedCubicSchedule",
-        "UniformState", "KineticGroundState", "GaussianState",
-        "solve_augmented_lagrangian", "plan_augmented_lagrangian", "resume_augmented_lagrangian",
-        "load_augmented_lagrangian",
-        "constrained_grid_minimum", "ConstrainedQHDResult", "AugmentedLagrangian", "MultiplierBounds",
-        "ConstraintPreprocessing", "AbsorbedBound", "ALIteration", "ALEvaluation", "ALResources",
-        "AugmentedLagrangianRecord", "InnerRepresentation", "SlackAxis", "FormTrial", "ConstrainedGridMinimum",
-        "refine_box", "resume_box_refinement", "load_box_refinement",
-        "BoxRefinement", "RefinementLevel", "RefinementResources",
-        "BoxRefinementResult", "StallSplit", "BinarySynthesis",
-        "circuit_resources", "run_resources", "QHDCircuitResources", "QHDSynthesisProjection",
-        "QHDErrorSource", "QHDRunResources", "QHDRunEntry", "evolution_bound", "QHDEvolutionBound",
-    ),
-    "gcim": ("ADAPTResult", "AdaptVerificationOptions", "BoundedRitzGrowth"),
-    "gcim.fixed_basis": ("FixedGCIMBasis", "FixedGCIMResult", "PencilAcquisition", "PencilSampling",
-                         "ProjectedPencil"),
-    "lanczos": ("LanczosResult", "SensitivitySampling"),
-    "qfd": ("QFDResult",),
-    "qpe": ("QPEAnalysis", "QPEVerification"),
-    "lchs": ("LCHSAnalysis",),
-    "expectation": ("ExpectationAnalysis",),
-    "protocol": ("Method", "AlgorithmDescriptor", "ApplicabilityError", "ResourceLimitError"),
-    "registry": (
-        "Registration",
-        "AlgorithmRegistry",
-        "third_party_registrations",
-        "builtin_registrations",
-        "algorithm_card",
-        "options_schema",
-        "direct_method",
-    ),
-}
-_OWNERS = {
-    **_METHOD_OWNERS,
-    **{name: owner for owner, names in _EXPORT_GROUPS.items() for name in names},
-}
+_OWNERS = {**_METHOD_OWNERS, "ApplicabilityError": "protocol", "ResourceLimitError": "protocol"}
 __all__ = list(_OWNERS)
 
 
@@ -71,4 +37,4 @@ def __getattr__(name):
 
 
 def __dir__():
-    return sorted(set(globals()) | set(__all__))
+    return sorted(__all__)

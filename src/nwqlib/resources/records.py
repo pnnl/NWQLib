@@ -559,9 +559,41 @@ class WorkloadEstimate(Record):
         return matches[0]
 
     def __str__(self):
-        """Display the resource totals, including unavailable costs and conditions."""
+        """Display the resource totals, including unavailable costs and conditions.
+
+        Unavailable quantities whose entries differ only in the metric name
+        share one entry that lists each of those metrics, so a block without a
+        gate-count rule is named once rather than once per gate metric. Every
+        quantity keeps its own reason in `fact.reason`. `quantities` holds
+        every quantity in full, and `model_dump()` returns every field.
+        """
         lines = [f"Selected resources ({self.context.basis}):"]
-        lines.extend(str(quantity) for quantity in self.quantities)
+        entries, groups = [], {}
+        for quantity in self.quantities:
+            text = str(quantity)
+            if quantity.interpretation != "unavailable":
+                entries.append((None, text))
+                continue
+            metric = quantity.metric
+            # The fold names the metric in a block's missing gate rule as
+            # "no selected <metric> law/decomposition"; drop it there so the
+            # gate metrics of the same blocks share one entry.
+            shared = text.removeprefix(metric).replace(
+                f"no selected {metric} law/decomposition", "no selected law/decomposition")
+            if shared in groups:
+                groups[shared].append(metric)
+            else:
+                groups[shared] = [metric]
+                entries.append((shared, text))
+        for shared, text in entries:
+            metrics = groups.get(shared, ())
+            lines.append(", ".join(metrics) + shared if len(metrics) > 1 else text)
         if self.assumptions:
             lines.append("Conditions: " + "; ".join(self.assumptions))
         return "\n".join(lines)
+
+    def __repr__(self):
+        return str(self)
+
+    def _repr_pretty_(self, printer, cycle):
+        printer.text(f"{type(self).__name__}(...)" if cycle else str(self))

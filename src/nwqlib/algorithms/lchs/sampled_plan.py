@@ -1,13 +1,13 @@
 """Planning, product-formula steps, bias bounds and the row-bound circuit block of the sampled-pair LCHS observable.
 
-``LCHS(observable_estimator="sampled_pairs")`` estimates the quadratic form,
+``LCHS(estimator="sampled_pairs")`` estimates the quadratic form,
 norm squared or normalized expectation of the selected LCHS vector from
 pair rows (`sampled_rows`, `sampled_moments`, `sampled_native`). For
 product-formula branches the generator A must be a Pauli sum or a Cartesian
 input with Pauli or zero parts, since other parts have no Pauli exponential
 here; the QSP bank below takes more forms. A constant source
 b may act with the initial state or alone. The applications come from
-``source_selection.application_facts``. With ``pair_source_time="discrete"``
+``source_selection.application_facts``. With ``SampledPairs.source_time="discrete"``
 they are the initial state and the ``duhamel_nodes`` Gauss-Legendre nodes
 r_q of the source integral on [0, T] (An, Childs and Lin,
 arXiv:2312.03916v2, Eq. (2)), each acting for the elapsed time T - r_q with
@@ -30,7 +30,7 @@ preparation for equal kinds and, for different kinds, each direction under
 the branch value of its slot, which keeps their physical relative phase
 (`sampled_native.build_pair_circuit`). One `MeasurementBatch` has one
 `Setting`, which binds nothing, one range axis over ``row`` in [0, B) and
-``pair_repeats`` repetitions, and the Plan has one `Experiment`, so its
+``SampledPairs.repeats`` repetitions, and the Plan has one `Experiment`, so its
 records do not grow with B. Each point of the axis is one row and one outer
 cluster of `sampled_moments`, and a static Run prepares and runs it once
 under the key ``pairs[row=i]``. Every number of a row
@@ -62,7 +62,7 @@ relaxed order-2 census such a product with the minimum of two
 nondecreasing linear forms of the magnitudes, so the census only grows
 with every magnitude.
 
-Fixed steps use one bucket and the Method's ``trotter_steps`` and publish
+Fixed steps use one bucket and the Method's ``Trotter.steps`` and publish
 their bound. Weighted steps meet the per-unit allowance epsilon of
 ``trotter_error_budgeted`` on E. ``"finite_sum"`` requires
 ``T_e**(p+1)*sum_b M_b/r_b**p <= epsilon*beta`` with
@@ -73,10 +73,10 @@ probabilities P_b, r_b proportional to (M_b/P_b)**(1/(p+1)), round up and
 add a step to every bucket until the exact rational check holds.
 ``"bucket_maximum"`` gives each bucket the smallest r_b with
 ``T_e**(p+1)*Wbar_b/r_b**p <= epsilon``, which meets E_sup <= epsilon with
-the fewest steps in every bucket. A schedule above a set ``max_trotter_steps``
+the fewest steps in every bucket. A schedule above a set ``TrotterErrorBudgeted.max_steps``
 is refused with the bound it reaches at the cap.
 
-Recipes. ``pair_product_formula`` other than ``"plain"`` selects the
+Recipes. ``SampledPairs.product_formula`` other than ``"plain"`` selects the
 Richardson, PTSC or two-member MPF recipe of `sampled_recipes` from
 support-wide facts (B, K_*, T_e and the Pauli one-norms) before any row is
 drawn, admits its saved arrays and generation work, draws the plain row
@@ -85,7 +85,7 @@ recipe's own bias relation. The model, source and finite-bit bounds of the
 plain route are shared (`_model_bias`). Every row's circuit is the word
 `_row_words` gives from the saved choices.
 
-QSP bank. With ``hamiltonian_evolution_backend="qsp_block_encoding"`` each
+QSP bank. With ``ham_evo="qsp_block_encoding"`` each
 branch runs a polynomial of a finite phase bank instead (`sampled_qsp`), on
 encodings of the parts of A: native Pauli or band parts, supplied encodings
 of Hermitian parts, or a general A given as one supplied encoding; the bank
@@ -93,7 +93,7 @@ is planned with the laws, prepared once before the rows are drawn, and its
 bias replaces the product-formula stage.
 
 Every evolving sampled route prepares each input direction with the state's
-own preparation, so it refuses ``initial_state_preparation="mps_circuit"``
+own preparation, so it refuses ``init_prep="mps_circuit"``
 before the common stage rather than ignore it.
 
 Accuracy. An ``accuracy`` request fixes B before any draw from the
@@ -123,6 +123,7 @@ from nwqlib.problems.inputs import PhysicalScale, compose_recovery
 from nwqlib.problems.records import NormalizedExpectation, NormSquared, QuadraticForm
 from nwqlib.resources.records import ResourceLaw, Workspace
 from .primary_records import ASSERTED_L_BOUNDS, METHOD, LCHSPairBias, LCHSReconstruction
+from .route_options import route_name
 from .sampled_rows import DiscreteKernel, draw_pair_rows, kernel_law
 
 PAIR_TARGET = "lchs.sampled_pair"
@@ -208,7 +209,8 @@ def _census(labels, rows, num_qubits, method, held):
     if not labels or not present:
         return {key: Fraction(0) for key in rows}, 0
     evaluations, ledger = _node_bound_coefficients(labels, num_qubits, present, tuple(present),
-        order=method.trotter_order, max_work=method.max_select_work, max_bytes=method.max_bytes, census_held=held)
+        order=method.ham_evo.order, max_work=method.max_select_work, max_bytes=method.max_bytes,
+        census_held=held)
     return {key: Fraction(evaluations[key].coefficient) if key in present else Fraction(0) for key in rows}, \
         ledger["work"]
 
@@ -239,7 +241,7 @@ def _application_facts(method, problem, generator, shift):
     if problem.source is None:
         return application_facts(kind="homogeneous", **common)
     source = problem.source.preparation.physical_scale
-    if method.pair_source_time == "continuous":
+    if method.estimator.source_time == "continuous":
         return application_facts(kind="continuous_source", source_norm=source, source_interval=(0.0, final), **common)
     nodes = weights = ()
     if source.mantissa > 0:
@@ -350,13 +352,14 @@ def _select_steps(method, relation, values, probabilities, norm, time_power):
 
     Raises:
         ResourceLimitError: When the schedule needs more than a set
-            ``max_trotter_steps`` steps.
+            ``max_steps`` steps of the product-formula backend.
     """
     from nwqlib.subroutines.trotterization.error_budget import _smallest_step_count, _upward_float
     from .time_independent_terms import _lchs_trotter_error_budget_per_node
-    order = method.trotter_order
-    if method.hamiltonian_evolution_backend == "trotter":
-        return (method.trotter_steps,) * len(values), None
+    formula = method.ham_evo
+    order = formula.order
+    if formula.kind == "trotter":
+        return (formula.steps,) * len(values), None
     allowance = _lchs_trotter_error_budget_per_node(method)
     if relation == "bucket_maximum":
         steps = tuple(_smallest_step_count(time_power * value, allowance, order) if value else 1 for value in values)
@@ -372,7 +375,7 @@ def _select_steps(method, relation, values, probabilities, norm, time_power):
         while time_power * sum(value / Fraction(step) ** order for value, step in zip(values, steps)) > target:
             steps = [step + 1 if value else step for value, step in zip(values, steps)]
         steps = tuple(steps)
-    cap = method.max_trotter_steps
+    cap = formula.max_steps
     if cap is not None and max(steps) > cap:
         capped = [min(step, cap) for step in steps]
         if relation == "bucket_maximum":
@@ -381,12 +384,12 @@ def _select_steps(method, relation, values, probabilities, norm, time_power):
         else:
             reached = time_power * sum(value / Fraction(step) ** order for value, step in zip(values, capped)) / norm
             name = "weighted bound T_e**(p+1)*sum_b M_b/r_b**p/beta"
-            remedies = ", use pair_step_buckets=1" if len(values) > 1 else ""
+            remedies = ", use SampledPairs(step_buckets=1)" if len(values) > 1 else ""
         raise ResourceLimitError(
-            f"sampled-pair product-formula steps {max(steps)} exceed max_trotter_steps={cap}: at the cap the "
-            f"{name} is {_upward_float(reached)!r}, above the allowance {allowance!r} (0.1 times "
-            f"approximation_tolerance). Raise approximation_tolerance or max_trotter_steps{remedies}, or choose "
-            "hamiltonian_evolution_backend='trotter' with fixed trotter_steps, which publishes its bound")
+            f"sampled-pair product-formula steps {max(steps)} exceed {type(formula).__name__}.max_steps={cap}: at "
+            f"the cap the {name} is {_upward_float(reached)!r}, above the allowance {allowance!r} (0.1 times "
+            f"approx_tol). Raise approx_tol or max_steps{remedies}, or choose "
+            "ham_evo=Trotter(steps=...) with a fixed step count, which publishes its bound")
     return steps, allowance
 
 
@@ -579,9 +582,9 @@ def _pair_bias(method, problem, common, data, kernel, facts, frame, terms, l_ter
     from nwqlib.subroutines.trotterization.error_budget import _upward_float
     from .solution_error_budget import scaled_sum
     from .time_independent_terms import _node_cache_bytes
-    order, active, q = method.trotter_order, float(facts.active_time), common.generator.num_qubits
+    order, active, q = method.ham_evo.order, float(facts.active_time), common.generator.num_qubits
     labels = tuple(sorted({label for label, _ in l_terms} | {label for label, _ in h_terms}))
-    count = method.pair_step_buckets
+    count = method.estimator.step_buckets
     discrete = isinstance(kernel, DiscreteKernel)
     held += _node_cache_bytes(len(kernel.coefficients) if discrete else count, len(labels) + 1, q)
     _check_bytes(held, method.max_bytes, "sampled LCHS held data, pair rows and product-formula census map")
@@ -639,7 +642,7 @@ def _pair_bias(method, problem, common, data, kernel, facts, frame, terms, l_ter
         bucket_steps=steps, step_allowance=allowance, product_formula_operator=operator, mean_weight_bound=mean,
         model_vector_bound=vector, inner_bias=pf_bias, model_bias=model,
         observable_bound=_observable_bound(terms),
-        kernel_allowances=None if discrete else (0.5 * float(method.approximation_tolerance),) * 2,
+        kernel_allowances=None if discrete else (0.5 * float(method.approx_tol),) * 2,
         reasons=tuple(reasons))
     return bias, work
 
@@ -680,11 +683,12 @@ def _recipe_bias(method, problem, common, data, kernel, facts, frame, terms, sup
     vector, model, model_reasons = _model_bias(method, problem, common, data, kernel, facts, total, mean, cap, end,
                                                frame)
     return LCHSPairBias(
-        step_rule=rule, inner_relation=method.pair_product_formula, product_formula_operator=None,
+        step_rule=rule, inner_relation=route_name(method.estimator.product_formula),
+        product_formula_operator=None,
         mean_weight_bound=mean, model_vector_bound=vector, inner_bias=pf_bias, model_bias=model,
         observable_bound=_observable_bound(terms),
         kernel_allowances=None if isinstance(kernel, DiscreteKernel) else
-        (0.5 * float(method.approximation_tolerance),) * 2, reasons=tuple(reasons + model_reasons))
+        (0.5 * float(method.approx_tol),) * 2, reasons=tuple(reasons + model_reasons))
 
 
 def _row_words(payload, rec, corrections=True):
@@ -794,7 +798,7 @@ def row_select_cx(payload, rec):
         selected = _pair_plan(payload, rows, row, template, steps, repetitions, coefficients)
         if not selected.structure_certificate["eligible"]:
             raise ApplicabilityError(f"row {row} has a structured pair SELECT table outside its binary64 affine "
-                                     "window; use lcu_select_implementation 'auto' or 'multiplexor'")
+                                     "window; use lcu_select 'auto' or 'multiplexor'")
         counts[row] = segments * product_formula_select_resource_law(
             selected, implementation="structured")["select_basis_cx_count"]
     return counts
@@ -1099,18 +1103,18 @@ def _sampled_applicability(method, output, execution):
     if not isinstance(output, (NormSquared, QuadraticForm, NormalizedExpectation)):
         raise ApplicabilityError("sampled pairs estimate NormSquared, QuadraticForm or NormalizedExpectation. "
                                  "Their pair draws and signed scores are not a Solution, StateVector or Born "
-                                 "Samples; use observable_estimator='coherent' for those outputs")
+                                 "Samples; use estimator='coherent' for those outputs")
     if execution != "quantum":
         raise ApplicabilityError("sampled pairs need quantum execution, because their scores are measured")
     if method.lchs_kernel.implementation == "auto":
         raise ApplicabilityError("lchs_kernel='auto' with k_quadrature='auto' compares the providers by the rows of "
                                  "the coherent route; sampled pairs draw from one concrete kernel-quadrature pair. "
-                                 "Give a concrete pair, or use observable_estimator='coherent'")
-    if method.lcu_state_preparation != "direct":
-        raise ApplicabilityError(f"lcu_state_preparation={method.lcu_state_preparation!r} prepares the coefficient "
+                                 "Give a concrete pair, or use estimator='coherent'")
+    if method.lcu_prep != "direct":
+        raise ApplicabilityError(f"lcu_prep={route_name(method.lcu_prep)!r} prepares the coefficient "
                                  "state of the coherent LCU; sampled pairs draw their applications and kernel nodes "
                                  "classically and prepare no coefficient state. Use 'direct', or "
-                                 "observable_estimator='coherent'")
+                                 "estimator='coherent'")
 
 
 @dataclass
@@ -1176,7 +1180,8 @@ def _sufficient_rows(method, laws, factor, output, accuracy):
         if byte_limit is not None and required > byte_limit // 1024:
             budget = (f"LCHS.max_bytes={method.max_bytes}" if method.max_bytes is not None
                       else f"the physical memory of {byte_limit} bytes (LCHS.max_bytes=None)")
-            raise ResourceLimitError(f"the sampling accuracy needs B = {required:.6E} independent rows ({method.pair_repeats} "
+            raise ResourceLimitError(f"the sampling accuracy needs B = {required:.6E} independent rows "
+                                     f"({method.estimator.repeats} "
                                      f"shots each), whose row data alone exceed {budget} "
                                      f"(1024 bytes per row); raise the tolerance or max_bytes")
         return max(1, int(required.to_integral_value(rounding=ROUND_CEILING)))
@@ -1205,12 +1210,13 @@ def _forecast(method, problem, output, *, shots=None, accuracy=None):
     from .sampled_rows import pair_laws
     from .selection import compact_common, with_providers
     from .solution_error_budget import signed_shift
-    qsp = method.hamiltonian_evolution_backend == "qsp_block_encoding"
-    if method.initial_state_preparation != "direct":
+    qsp = route_name(method.ham_evo) == "qsp_block_encoding"
+    estimator = method.estimator
+    if method.init_prep != "direct":
         raise ApplicabilityError(
-            f"initial_state_preparation={method.initial_state_preparation!r} compresses a dense initial vector, "
+            f"init_prep={route_name(method.init_prep)!r} compresses a dense initial vector, "
             "and sampled pairs evolve the compact parts of A and prepare each input with the state's own "
-            "preparation, so the request would be ignored. Use initial_state_preparation='direct'")
+            "preparation, so the request would be ignored. Use init_prep='direct'")
     representation = problem.A.reference.representation
     allowed = ("pauli", "cartesian", "band", "block_encoding") if qsp else ("pauli", "cartesian")
     if representation not in allowed:
@@ -1220,7 +1226,7 @@ def _forecast(method, problem, output, *, shots=None, accuracy=None):
         raise ApplicabilityError(
             f"sampled {'QSP ' if qsp else ''}pairs evolve each branch from the {parts} of A, and a "
             f"{representation!r} A has no such {'encoding' if qsp else 'exponential'} in this route; give A as "
-            f"{forms}, or use observable_estimator='coherent'")
+            f"{forms}, or use estimator='coherent'")
     common = compact_common(method, problem)
     generator = common.generator
     if not qsp:
@@ -1236,8 +1242,8 @@ def _forecast(method, problem, output, *, shots=None, accuracy=None):
         h_terms = _centered_terms(generator.hamiltonian, identity, method.max_bytes)
     terms = observable_terms(problem, output, max_bytes=method.max_bytes)
     data = None
-    if method.pair_kernel == "continuous" and common.l_norm != 0:
-        half = 0.5 * float(method.approximation_tolerance)
+    if estimator.kernel == "continuous" and common.l_norm != 0:
+        half = 0.5 * float(method.approx_tol)
         kernel = resolve_lchs_continuous_kernel(lchs_kernel=method.lchs_kernel, kernel_allowance=half,
                                                 guard_allowance=half)
     else:
@@ -1249,7 +1255,7 @@ def _forecast(method, problem, output, *, shots=None, accuracy=None):
     facts = _application_facts(method, problem, generator, signed_shift(common.conversion))
     laws = pair_laws(kernel=kernel, applications=facts, terms=terms)
     held = _held_bytes(problem, output, common, data)
-    name, factor, forecast, recipe, selection = method.pair_product_formula, Fraction(1), None, None, None
+    name, factor, forecast, recipe, selection = route_name(estimator.product_formula), Fraction(1), None, None, None
     if qsp:
         from .sampled_qsp import forecast_qsp
         forecast = forecast_qsp(method, common, kernel, facts)
@@ -1258,18 +1264,18 @@ def _forecast(method, problem, output, *, shots=None, accuracy=None):
         from . import sampled_recipes
         support, scales = _recipe_support(method, kernel, facts, l_terms, h_terms, q)
         if name == "ptsc":
-            factor = Fraction(method.pair_mu_cap) ** 2
+            factor = Fraction(estimator.product_formula.mu_cap) ** 2
         else:
             select = sampled_recipes.select_richardson if name == "richardson" else sampled_recipes.select_mpf
             selection = select(method, support)
             factor = Fraction(selection[0]["multiplier_bound"])
     clusters = (_sufficient_rows(method, laws, factor, output, accuracy) if accuracy is not None
-                else shots // method.pair_repeats)
+                else shots // estimator.repeats)
     # Known bytes held from the first law to the assembled Plan, admitted
     # before any row array or draw: H (_held_bytes) and R (_row_bytes). The
     # Plan's one Setting and range axis over the rows (`_pair_batch`) do not
     # grow with B.
-    buckets = (len(forecast.bank.buckets) if forecast.bank is not None else 1) if qsp else method.pair_step_buckets
+    buckets = (len(forecast.bank.buckets) if forecast.bank is not None else 1) if qsp else estimator.step_buckets
     held += _row_bytes(clusters, facts, kernel, terms, buckets, qsp=qsp)
     # A recipe's parameters, bounds, generation work and saved arrays are
     # selected and admitted from support-wide facts and B before any row is
@@ -1293,7 +1299,7 @@ def _forecast(method, problem, output, *, shots=None, accuracy=None):
     if not qsp and name == "plain":
         bias, census_work = _pair_bias(method, problem, common, data, kernel, facts, laws.frame, terms, l_terms,
                                        h_terms, held=held)
-    if not qsp and method.lcu_select_implementation == "structured":
+    if not qsp and method.lcu_select == "structured":
         # Two-entry tables per occurrence of the longest word: 2L - 1 for the
         # plain and Richardson Strang word, 4L - 3 for the MPF macrostep and
         # the unmerged H and L lists for a PTSC Lie step.
@@ -1319,7 +1325,7 @@ def sampled_accuracy_shots(method, problem, *, output, accuracy):
     `LCHS.sampling_shots` reaches it through ``selection.accuracy_shots``.
     The exact no-evolution readout keeps its own count
     (``host.initial_accuracy_shots``). Otherwise one deterministic pass
-    (`_forecast`) gives B, and the count is ``B * pair_repeats``: the Program
+    (`_forecast`) gives B, and the count is ``B * SampledPairs.repeats``: the Program
     runs m shots of each of the B rows, while the radius counts B.
     `plan_sampled` in the same planning call reads this pass
     (`_accuracy_forecast`) and checks the count. A ValueError from the pass
@@ -1332,7 +1338,7 @@ def sampled_accuracy_shots(method, problem, *, output, accuracy):
         from .selection import _route
         _route(method, problem, output=output, execution="quantum", accuracy=accuracy)
         return initial_accuracy_shots(method, problem, output=output, accuracy=accuracy)
-    return _accuracy_forecast(method, problem, output, accuracy).clusters * method.pair_repeats
+    return _accuracy_forecast(method, problem, output, accuracy).clusters * method.estimator.repeats
 
 
 def _accuracy_forecast(method, problem, output, accuracy):
@@ -1413,9 +1419,9 @@ def plan_sampled(method, problem, *, output, execution, shots, rng, accuracy=Non
     Raises:
         ApplicabilityError: For an output other than NormSquared,
             QuadraticForm or NormalizedExpectation, classical execution,
-            shots that are absent or not divisible by ``pair_repeats``, a
+            shots that are absent or not divisible by ``SampledPairs.repeats``, a
             coherent-only choice (`_sampled_applicability`), and, when the
-            state evolves, ``initial_state_preparation`` other than
+            state evolves, ``init_prep`` other than
             ``"direct"``, an A that the route cannot evolve (product formulas
             need Pauli parts; QSP also takes band parts, supplied encodings
             of Hermitian parts and one supplied encoding of a general A), a
@@ -1430,10 +1436,11 @@ def plan_sampled(method, problem, *, output, execution, shots, rng, accuracy=Non
     """
     from .sampled_qsp_bank import prepare_sampled_qsp_bank
     _sampled_applicability(method, output, execution)
-    repeats = method.pair_repeats
+    estimator = method.estimator
+    repeats = estimator.repeats
     if accuracy is None and (shots is None or shots % repeats):
-        raise ApplicabilityError(f"sampled pairs need finite shots divisible by pair_repeats={repeats}, which "
-                                 f"gives shots/pair_repeats rows; got shots={shots}")
+        raise ApplicabilityError(f"sampled pairs need finite shots divisible by SampledPairs.repeats={repeats}, "
+                                 f"which gives shots/repeats rows; got shots={shots}")
     if _exact_readout(problem):
         from .selection import plan_lchs
         return plan_lchs(method, problem, output=output, execution=execution, shots=shots, rng=rng,
@@ -1459,7 +1466,8 @@ def plan_sampled(method, problem, *, output, execution, shots, rng, accuracy=Non
     if p.qsp is not None:
         from .sampled_qsp import bind_rows, expected_pair_signals, generator_error, qsp_pair_bias, qsp_record
         binding = bind_rows(p.qsp, rows, prepared, rng)
-        payload = LCHSSampledPayload(num_system_qubits=q, l_terms=(), h_terms=(), order=method.trotter_order,
+        # The QSP bank applies no product formula; its payload keeps the order field at 2.
+        payload = LCHSSampledPayload(num_system_qubits=q, l_terms=(), h_terms=(), order=2,
                                      implementation="qsp", control_copies=1, term_labels=term_labels,
                                      prepares_inputs=has_source, max_bytes=method.max_bytes, qsp_bank=prepared,
                                      l_child=p.qsp.l_child, h_child=p.qsp.h_child)
@@ -1471,17 +1479,17 @@ def plan_sampled(method, problem, *, output, execution, shots, rng, accuracy=Non
         # counted (None when a supplied definition is not built).
         census_work = p.qsp.query_work
     else:
-        implementation = "structured" if method.lcu_select_implementation == "structured" else "multiplexor"
+        implementation = "structured" if method.lcu_select == "structured" else "multiplexor"
         payload = LCHSSampledPayload(num_system_qubits=q, l_terms=p.l_terms, h_terms=p.h_terms,
-                                     order=method.trotter_order, implementation=implementation,
-                                     control_copies=method.pair_control_copies, term_labels=term_labels,
+                                     order=method.ham_evo.order, implementation=implementation,
+                                     control_copies=estimator.control_copies, term_labels=term_labels,
                                      prepares_inputs=has_source, max_bytes=method.max_bytes)
         if p.recipe is None:
             step_counts = bias.bucket_steps
         else:
             from . import sampled_recipes
             fields, operator, rule, recipe_reasons, support, scales, census_work = p.recipe
-            if method.pair_product_formula == "ptsc":
+            if route_name(estimator.product_formula) == "ptsc":
                 pair_recipe = sampled_recipes.draw_compensation(fields, rng, rows, p.l_terms, p.h_terms, q)
                 step_counts = (pair_recipe.steps,)
             else:
@@ -1500,7 +1508,7 @@ def plan_sampled(method, problem, *, output, execution, shots, rng, accuracy=Non
         source_nodes=tuple(item.start_time for item in sources), source_weights=tuple(item.weight for item in sources),
         terms=p.terms, coefficient_l1_norm=quadrature.coefficient_l1_norm if discrete else 0.0,
         physical_branches=len(quadrature.k_nodes) if discrete else 0,
-        selected_backend=method.hamiltonian_evolution_backend, selected_select="sampled_pairs",
+        selected_backend=route_name(method.ham_evo), selected_select="sampled_pairs",
         psd_premise=conversion["psd_premise_evidence"] if common.psd_premise_satisfied else "unavailable",
         psd_shift=conversion["psd_shift"], scalar_decay=conversion["scalar_decay"], l_norm=common.l_norm,
         kernel_approximation_bound=(quadrature.coefficient_plan.quadrature.approximate_lchs_error_bound if discrete

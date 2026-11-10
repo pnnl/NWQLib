@@ -74,8 +74,9 @@ RECORD = "controller.json"
 PROBLEM = "problem.pickle"
 NOISE = "noise-model.json"
 # One format per layer, bumped when a current reader could misread an older directory
+# or could not validate its stored records, so that the older directory is refused by its format
 # (docs/FRAMEWORK.md, "API stability").
-FORMATS = {"constrained": "qhd.constrained_run/5", "refinement": "qhd.refinement_run/6"}
+FORMATS = {"constrained": "qhd.constrained_run/6", "refinement": "qhd.refinement_run/7"}
 RESUME = {"constrained": "resume_augmented_lagrangian", "refinement": "resume_box_refinement"}
 
 
@@ -216,7 +217,10 @@ class Directory:
         with _controller(path):
             saved = ArchiveFiles(path, None).read_json(RECORD)
             if saved.get("format") != FORMATS[kind]:
-                raise ValueError(f"{path} holds format {saved.get('format')!r}, not {FORMATS[kind]!r}")
+                raise ValueError(f"{path} holds format {saved.get('format')!r}, not {FORMATS[kind]!r}, the only "
+                                 "format this function resumes. Formats are not converted: resume the directory "
+                                 "with the NWQLib release and resume function that match its format, or run the "
+                                 "problem again in a new directory.")
             yield cls(path, kind, saved["settings"], saved)
 
     def bind(self, backend):

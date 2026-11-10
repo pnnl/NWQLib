@@ -4,12 +4,14 @@ import nwqlib
 from uuid import uuid4
 from nwqlib._run_archive import load as load_run
 from nwqlib.algorithms.expectation import ExpectationMethod
+from nwqlib.algorithms.lchs import PTSC, SampledPairs, Trotter, TrotterErrorBudgeted
 from test_expectation_current import problem
 
 import json
 from types import SimpleNamespace
 import numpy as np
 import pytest
+from conftest import executor_items, executor_program, executor_result_json, offline_ibm_service
 from nwqlib.backends import IBMRuntimeBackend
 from nwqlib.core.planning import ObservationSpec, RuntimeOptions
 from nwqlib._prepared_execution import (
@@ -32,52 +34,50 @@ def template_row_outcome(values, width, register):
     return int.from_bytes(digest[:8], "little") % (1 << width)
 
 
-def template_rows_data(pub):
-    """Array-shaped register data of a parameterized PUB: each row repeats ``template_row_outcome``."""
-    from qiskit.primitives.containers import BitArray
+def counts_outcomes(index, item, register_index, register, shape, shots):
+    """The outcome of each shot that the synthetic service of ``runtime_api`` returns for one Sampler register.
 
-    rows = pub.parameter_values.as_array()
-    data = {}
-    for register_index, register in enumerate(pub.circuit.cregs):
-        bits = np.zeros((rows.shape[0], pub.shots, register.size), dtype=bool)
-        for row, values in enumerate(rows):
-            outcome = template_row_outcome(values, register.size, register_index)
-            bits[row, :, :] = [bool(outcome >> (register.size - 1 - bit) & 1) for bit in range(register.size)]
-        data[register.name] = BitArray.from_bool_array(bits, order="big")
-    return data
+    Each row of parameter values repeats ``template_row_outcome`` of its
+    values. Without parameter values, item 0 returns the outcomes 0, 0, 0, 1
+    and every other item 0, 1, 1, 1, repeated to the requested shots.
+    """
+    values = getattr(item, "circuit_arguments", None)
+    if values is not None and values.ndim == 2 and values.shape[0]:
+        return np.array([[template_row_outcome(row, register.size, register_index)] for row in values])
+    return np.resize([0, 0, 0, 1] if index == 0 else [0, 1, 1, 1], shots)
 
 
 @pytest.fixture
 def runtime_api(monkeypatch):
-    """Use real SDK containers with a synthetic service and reversed PUB order to test
-    acquisition association offline. A parameterized PUB returns one array row per
-    binding row (``template_rows_data``).
-    """
-    from qiskit.primitives.containers import BitArray, DataBin, PrimitiveResult, PubResult, SamplerPubResult
-    from qiskit_ibm_runtime import IBMBackend, IBMQuantumComputeService, RuntimeEncoder
-    from qiskit_ibm_runtime.fake_provider import FakeManilaV2
+    """Use the real SDK primitives and decoders with a synthetic executor service that returns the PUBs in
+    reverse order, to test acquisition association offline.
 
+    Sampler items return ``counts_outcomes``. Estimator items return 0 in every
+    measured bit, so each Pauli term measures +1 and the estimate is the sum
+    of the observable's coefficients with zero spread. ``api.estimate_outcomes``
+    replaces that rule, and ``api.transform_result(data, passthrough)`` edits
+    the item arrays and passthrough data of a result before it is sent.
+    ``api.item_metadata`` gives each item's metadata fields. Every result has
+    one timing span, as a result from the service does.
+    ``api.params`` holds the last job request's executor parameters.
+    """
     instance = "crn:supplied-instance"
-    fake = FakeManilaV2()
-    configuration = fake.configuration()
-    configuration.backend_name = "ibm_supplied"
     requests = []
 
     class API:
         _instance = instance
         status = "QUEUED"
-        pubs = ()
+        params = None
+        program_id = "executor"
         tags = ()
         reads = 0
         fail_status = False
-        primitive = "sampler"
-        estimate = 2.25
-        standard_error = 0.125
-        result_metadata = {"resilience": {"zne_mitigation": False}}
         container_mode = "dedicated"
         cancel_calls = 0
         fail_cancel = False
         transform_result = None
+        item_metadata = None
+        estimate_outcomes = staticmethod(lambda *args: 0)
 
         def backend_status(self, name):
             return dict(
@@ -86,8 +86,8 @@ def runtime_api(monkeypatch):
 
         def program_run(self, **kwargs):
             requests.append(kwargs)
-            self.pubs = kwargs["params"]["pubs"]
-            self.primitive = kwargs["program_id"]
+            self.params = kwargs["params"]
+            self.program_id = kwargs["program_id"]
             self.tags = kwargs["job_tags"]
             return {"id": "original-ibm-job", "backend": "ibm_supplied"}
 
@@ -97,7 +97,7 @@ def runtime_api(monkeypatch):
             return dict(
                 id=job_id,
                 backend="ibm_supplied",
-                program={"id": self.primitive},
+                program={"id": self.program_id},
                 state={"status": self.status},
                 tags=self.tags,
             )
@@ -113,47 +113,28 @@ def runtime_api(monkeypatch):
 
         def job_results(self, job_id):
             self.reads += 1
-            result = []
-            for index, pub in enumerate(self.pubs):
-                if self.primitive == "estimator":
-                    result.append(
-                        PubResult(
-                            DataBin(evs=np.asarray(self.estimate), stds=np.asarray(self.standard_error)),
-                            metadata={
-                                "circuit_metadata": pub.circuit.metadata,
-                                "target_precision": pub.precision,
-                                "shots": 4096,
-                                "num_randomizations": 32,
-                            },
-                        )
-                    )
-                    continue
-                if pub.parameter_values.shape:
-                    data = DataBin(**template_rows_data(pub), shape=pub.parameter_values.shape)
-                else:
-                    bits = ["0", "0", "0", "1"] if index == 0 else ["0", "1", "1", "1"]
-                    data = DataBin(readout=BitArray.from_samples(bits))
-                result.append(
-                    SamplerPubResult(data, metadata={"circuit_metadata": pub.circuit.metadata, "shots": 4})
-                )
-            output = PrimitiveResult(result[::-1], metadata=self.result_metadata)
+            program = executor_program(self.params)
+            estimator = program._semantic_role == "estimator_v2"
+            data = executor_items(program, self.estimate_outcomes if estimator else counts_outcomes)
+            # Reverse the PUBs: a Sampler result lists its items in reverse
+            # with their circuit metadata, and an Estimator result its
+            # qiskit-mitigation tasks, which name their items.
+            passthrough = dict(program.passthrough_data)
+            processor = passthrough["post_processor"] = dict(passthrough["post_processor"])
+            processor["circuits_metadata"] = processor["circuits_metadata"][::-1]
+            if estimator:
+                passthrough["qiskit_mitigation"] = passthrough["qiskit_mitigation"][::-1]
+            else:
+                data = data[::-1]
             if self.transform_result is not None:
-                output = self.transform_result(output)
-            return json.dumps(output, cls=RuntimeEncoder)
+                data, passthrough = self.transform_result(data, passthrough)
+            span = {"start": "2026-11-10T00:00:00", "stop": "2026-11-10T00:00:01",
+                    "parts": [{"idx_item": 0, "size": 1, "permutation": [], "element_range": [0, 1, 1]}]}
+            return executor_result_json(program, data, passthrough=passthrough, item_metadata=self.item_metadata,
+                                        chunk_timing=[span])
 
     api = API()
-    service = object.__new__(IBMQuantumComputeService)
-    service._channel = "ibm_quantum_platform"
-    service._api_clients = {instance: api}
-    service._active_api_client = api
-    # IBMQuantumComputeService.__init__ starts with this value. From qiskit-ibm-runtime 0.51
-    # on, decoding a job looks its backend up here, and an empty list gives is_mock=False.
-    service._backend_instance_groups = []
-    service._check_instance_usage = lambda: None
-    backend = IBMBackend(configuration, service=service, api_client=api, instance=instance)
-    backend._target, backend._properties = (fake.target, fake.properties())
-    service.backend = lambda name, **kwargs: backend
-    service._create_backend_obj = lambda name, **kwargs: backend
+    service, backend = offline_ibm_service(api, instance)
     monkeypatch.setattr(IBMRuntimeBackend, "_new_service", lambda self: service)
     connection = IBMRuntimeBackend(
         device=backend.name, instance=instance, initial_layout=(2,)
@@ -170,8 +151,12 @@ def test_later_pub_failure_preserves_prior_result_and_skips_its_decode_on_resume
 ):
     """Fail a later PUB after one completes, then poison repeat decoding and preserve the
     original exception cause.
+
+    An invalid Sampler PUB returns five shots of the four requested. An invalid Estimator PUB
+    returns no shots, so its estimate and stds are NaN. The Estimator's PUB 0 measures 0 and PUB 1
+    measures 1 in every shot, so for I + Z they estimate 2 and 0 with zero spread.
     """
-    from qiskit.primitives.containers import BitArray, DataBin, PrimitiveResult, PubResult, SamplerPubResult
+    from qiskit.primitives.containers import SamplerPubResult
 
     if primitive == "sampler":
         selected = counts_selection()
@@ -182,23 +167,18 @@ def test_later_pub_failure_preserves_prior_result_and_skips_its_decode_on_resume
     failure.__cause__ = cause
     failing, consumed = (True, False)
     decoded_indices = []
+    api.estimate_outcomes = lambda index, item, register_index, register, *args: (1 << register.size) - 1 if index else 0
 
-    def transform(result):
-        pubs = []
-        for pub in result:
-            index = pub.metadata["circuit_metadata"]["nwqlib_pub"]
-            if primitive == "estimator":
-                error = -0.125 if failing and failure_kind == "invalid" and (index == 0) else 0.125
-                pub = PubResult(
-                    DataBin(evs=np.asarray(0.75 if index == 0 else 1.25), stds=np.asarray(error)),
-                    metadata=pub.metadata,
-                )
-            elif failing and failure_kind == "invalid" and (index == 0):
-                pub = SamplerPubResult(
-                    DataBin(readout=BitArray.from_samples(["0"] * 5)), metadata=pub.metadata
-                )
-            pubs.append(pub)
-        return PrimitiveResult(pubs, metadata=result.metadata)
+    def transform(data, passthrough):
+        if failing and failure_kind == "invalid":
+            # An Estimator item's index is its PUB's. Sampler items follow their circuit metadata.
+            position = 0 if primitive == "estimator" else next(
+                position for position, metadata in enumerate(passthrough["post_processor"]["circuits_metadata"])
+                if metadata["nwqlib_pub"] == 0)
+            shots = 0 if primitive == "estimator" else 5
+            data[position] = {name: np.zeros((*array.shape[:-2], shots, array.shape[-1]), bool)
+                              for name, array in data[position].items()}
+        return data, passthrough
 
     api.transform_result = transform
 
@@ -254,7 +234,7 @@ def test_later_pub_failure_preserves_prior_result_and_skips_its_decode_on_resume
             assert histogram.width == 1 and dict(zip(histogram.index_list(), histogram.weights.tolist())) == {0: 1, 1: 3}
             assert prior.returned_shots == 4
         else:
-            assert prior.values[0].value == 1.25 and prior.values[0].standard_error == 0.125
+            assert prior.values[0].value == 0.0 and prior.values[0].standard_error == 0.0
             assert prior.returned_shots is None
         assert run.collect(prior)
         assert not run.trace.submissions[0].results_consumed
@@ -267,21 +247,15 @@ def test_later_pub_failure_preserves_prior_result_and_skips_its_decode_on_resume
         if primitive == "sampler" and failure_kind == "decoder":
             for defect in ("missing", "duplicate", "swapped_snapshot"):
 
-                def corrupt(result):
-                    pubs = list(result)
+                def corrupt(data, passthrough):
+                    metadata = passthrough["post_processor"]["circuits_metadata"]
                     if defect == "missing":
-                        return PrimitiveResult(pubs[:1], metadata=result.metadata)
-                    first, second = pubs
-                    owner = dict(first.metadata["circuit_metadata"])
-                    owner["nwqlib_pub" if defect == "duplicate" else "nwqlib_snapshot"] = (
-                        second.metadata["circuit_metadata"]["nwqlib_pub"]
-                        if defect == "duplicate"
-                        else second.metadata["circuit_metadata"]["nwqlib_snapshot"]
-                    )
-                    pubs[0] = SamplerPubResult(
-                        first.data, metadata={**first.metadata, "circuit_metadata": owner}
-                    )
-                    return PrimitiveResult(pubs, metadata=result.metadata)
+                        passthrough["post_processor"]["circuits_metadata"] = metadata[:1]
+                        return data[:1], passthrough
+                    first, second = metadata
+                    key = "nwqlib_pub" if defect == "duplicate" else "nwqlib_snapshot"
+                    metadata[0] = {**first, key: second[key]}
+                    return data, passthrough
 
                 api.transform_result = corrupt
                 with pytest.raises(ValueError, match="PUB"):
@@ -299,7 +273,7 @@ def test_later_pub_failure_preserves_prior_result_and_skips_its_decode_on_resume
         if primitive == "sampler":
             assert sum((event.returned_shots for event in run.trace.events)) == 8
         else:
-            assert remaining.values[0].value == 0.75 and remaining.values[0].standard_error == 0.125
+            assert remaining.values[0].value == 2.0 and remaining.values[0].standard_error == 0.0
             assert run.exposure["completed"]["provider_managed_sampling"] == 2
     reads = api.reads
     with load_run(path, backend=backend) as run:
@@ -353,15 +327,7 @@ def test_actual_http_transport_preserves_one_accepted_job_and_reconciles_origina
     from threading import Thread
     from urllib.parse import parse_qs, urlsplit
     from qiskit_ibm_runtime import RuntimeDecoder
-    from qiskit.primitives.containers.sampler_pub import SamplerPub
-    try:
-        from qiskit_ibm_runtime.api.client import RuntimeClient
-    except ModuleNotFoundError as missing:
-        # qiskit-ibm-runtime 0.49 has the same client in api.clients.runtime. Any
-        # other missing module is a real failure.
-        if missing.name != "qiskit_ibm_runtime.api.client":
-            raise
-        from qiskit_ibm_runtime.api.clients.runtime import RuntimeClient
+    from qiskit_ibm_runtime.api.client import RuntimeClient
     from qiskit_ibm_runtime.exceptions import IBMRuntimeError
 
     api = runtime_api.api
@@ -370,7 +336,7 @@ def test_actual_http_transport_preserves_one_accepted_job_and_reconciles_origina
     status_data = dict(
         id="original-ibm-job",
         backend="ibm_supplied",
-        program={"id": "sampler"},
+        program={"id": "executor"},
         state={"status": "COMPLETED"},
     )
     make_results = api.job_results
@@ -391,9 +357,9 @@ def test_actual_http_transport_preserves_one_accepted_job_and_reconciles_origina
             post_bodies.append(wire)
             body = json.loads(wire, cls=RuntimeDecoder)
             exchanges.append(("POST", self.path, body))
-            assert self.path == "/jobs"
+            assert self.path == "/jobs" and body["program_id"] == "executor"
             accepted.append(body)
-            api.pubs = tuple((SamplerPub.coerce(pub) for pub in body["params"]["pubs"]))
+            api.params = body["params"]
             api.tags = body["tags"]
             status_data["tags"] = api.tags
             self.close_connection = True
@@ -406,7 +372,7 @@ def test_actual_http_transport_preserves_one_accepted_job_and_reconciles_origina
                 fail_get = False
                 self.respond(503, {"error": {"message": "temporary read failure", "code": "supplied"}})
             elif path == "/jobs":
-                assert query["tags"] == [api.tags[-1]] and query["limit"] == ["2"]
+                assert query["tags"] == [api.tags[-1]] and query["limit"] == ["2"] and query["program"] == ["executor"]
                 self.respond(200, {"jobs": [status_data], "count": 1})
             elif path.endswith("/results"):
                 self.respond(200, make_results("original-ibm-job"))
@@ -476,7 +442,7 @@ def test_actual_sdk_sampler_pub_mapping_and_original_job_resume(tmp_path, monkey
         assert all((handle.record.logical_to_native == (2,) for handle in handles))
         submitted = submit_detached(handles, run=run)
         assert submitted.locator.job_id == "original-ibm-job" and run.trace.jobs == 1
-        assert len(runtime_api.requests) == 1 and len(runtime_api.requests[0]["params"]["pubs"]) == 2
+        assert len(runtime_api.requests) == 1 and len(executor_program(runtime_api.requests[0]["params"]).items) == 2
         assert "nwqlib_pub" not in handles[0]._native.circuit.metadata
         assert "nwqlib:" + submitted.submission_id in api.tags
         assert not refresh_submissions(run=run) and api.reads == 0
@@ -641,31 +607,64 @@ def counts_selection():
     return nwqlib.plan(problem(), method=ExpectationMethod(), shots=4, seed=7)
 
 
-def estimate_selection(coefficient=1.0):
+def estimate_selection(coefficient=1.0, state=None):
     return nwqlib.plan(
-        problem((("I", 1.0), ("Z", coefficient))), method=ExpectationMethod(estimate_precision=0.1), seed=7
+        problem((("I", 1.0), ("Z", coefficient)), state=state), method=ExpectationMethod(estimate_precision=0.1),
+        seed=7
     )
 
 
-@pytest.mark.parametrize("zne", [False, True])
+@pytest.mark.parametrize(("options", "reason", "spread"), [
+    pytest.param("{}", None, False, id="level-0"),
+    pytest.param('{"resilience_level":2}', 2, False, id="level-2"),
+    pytest.param('{"resilience_level":2,"resilience":{"zne_mitigation":true}}', 1, False, id="zne-on"),
+    pytest.param('{"resilience_level":1,"resilience":{"zne_mitigation":false}}', None, True, id="zne-off-spread"),
+])
 def test_estimator_weighted_observable_layout_uncertainty_and_saved_resume(
-    tmp_path, monkeypatch, runtime_api, zne
+    tmp_path, monkeypatch, runtime_api, options, reason, spread
 ):
-    """Map the weighted observable to physical qubits and distinguish ZNE fit uncertainty from
-    sampling standard error.
+    """Map the weighted observable to physical qubits, decode the client-side Estimator's values from
+    the returned bits through the real SDK, and save them with the provider metadata.
+
+    The full observable, the coefficient 1e-12 included, is handed to the SDK. Without spread the
+    synthetic service measures 0 in every shot, so each Pauli term that the provider keeps measures +1
+    and the estimate is the sum of the kept coefficients with zero spread: 2 for I + Z, and 1 or
+    1 + 1e-12 for I + 1e-12 Z, as the provider's coercion may remove the small term. That observable
+    is estimated on |+>, whose circuit has a gate: qiskit-mitigation 0.2.0 refuses a circuit without
+    instructions when its observable keeps only the identity. With spread it returns random outcomes
+    from a fixed seed, and the estimate and stds are the values that the SDK decodes from them. The
+    standard error is the provider's stds when ZNE is known to be off, here at resilience level 0 and
+    with zne_mitigation false. With spread the SDK's stds and ensemble_standard_error differ, so the
+    standard error is shown to be the stds. With zne_mitigation true it is unavailable with
+    _ESTIMATE_REASONS[1]. Resilience level 2 alone does not state in the request whether ZNE ran, so it
+    is unavailable with _ESTIMATE_REASONS[2]. The raw stds stays in the provider metadata either way.
     """
-    coefficient = 1.0 if zne else 1e-12
-    plan = estimate_selection(coefficient)
+    from qiskit_ibm_runtime import EstimatorV2
+    from nwqlib.backends.ibm_runtime import _ESTIMATE_REASONS
+
+    level0 = options == "{}"
+    coefficient = 1e-12 if level0 else 1.0
+    plan = estimate_selection(coefficient, state=[1.0, 1.0] if level0 else None)
     spec = plan.experiments[0].observation
     assert spec.estimate.labels == ("I", "Z") and spec.estimate.coefficients == (1.0, coefficient)
     api = runtime_api.api
-    api.estimate = -0.25 if zne else 1.0
-    api.standard_error = 0.125 if zne else coefficient / 64
-    api.result_metadata = {"resilience": {"zne_mitigation": zne}}
-    backend = runtime_api.connection.revise(options_json='{"resilience_level":2}' if zne else "{}")
+    if spread:
+        rng = np.random.default_rng(3)
+        api.estimate_outcomes = lambda index, item, register_index, register, shape, shots: rng.integers(
+            0, 1 << register.size, size=(*shape, shots), dtype=np.uint64)
+    sent, run_estimator = [], EstimatorV2.run
+    monkeypatch.setattr(EstimatorV2, "run", lambda self, pubs, **kwargs: (
+        sent.append(tuple(pubs)), run_estimator(self, pubs, **kwargs))[1])
+    # The data fields of the PUB that the SDK decodes, before NWQLib reads them.
+    decoded, estimate_result = [], IBMRuntimeBackend._estimate_result
+    monkeypatch.setattr(IBMRuntimeBackend, "_estimate_result", lambda self, pub, *args, **kwargs: (
+        decoded.append({name: float(pub.data[name]) for name in ("evs", "stds", "ensemble_standard_error")
+                        if name in pub.data}), estimate_result(self, pub, *args, **kwargs))[1])
+    level = json.loads(options).get("resilience_level", 0)
+    backend = runtime_api.connection.revise(options_json=options)
     path = tmp_path / "estimate"
     with Run(plan, backend=backend, directory=path) as run:
-        if not zne:
+        if level0:
 
             def interrupted(*args, **kwargs):
                 raise RuntimeError("before submission intent")
@@ -677,7 +676,7 @@ def test_estimator_weighted_observable_layout_uncertainty_and_saved_resume(
             assert run.trace.preparations == 1 and run.trace.jobs == 0
         else:
             run.resume()
-    if not zne:
+    if level0:
         with load_run(path, backend=backend) as run, monkeypatch.context() as patch:
             patch.setattr(
                 IBMRuntimeBackend,
@@ -687,10 +686,11 @@ def test_estimator_weighted_observable_layout_uncertainty_and_saved_resume(
             run.resume()
             assert run.trace.preparations == run.trace.jobs == 1
     with load_run(path, backend=backend) as run:
-        (pub,) = runtime_api.requests[0]["params"]["pubs"]
-        assert pub.precision == 0.1
-        assert pub.observables.tolist() == {"IIIII": 1.0, "IIZII": coefficient}
-        assert runtime_api.requests[0]["params"]["resilience_level"] == (2 if zne else 0)
+        ((pub,),) = sent
+        assert pub[3] == 0.1
+        assert pub[1].tolist() == {"IIIII": 1.0, "IIZII": coefficient}
+        processor = executor_program(runtime_api.requests[0]["params"]).passthrough_data["post_processor"]
+        assert processor["precision"] == 0.1 and processor["options"]["resilience_level"] == level
         original = run.trace.submissions[0].locator
 
     def forbidden(*args, **kwargs):
@@ -702,30 +702,27 @@ def test_estimator_weighted_observable_layout_uncertainty_and_saved_resume(
     api.status = "COMPLETED"
     with load_run(path, backend=backend) as run:
         result = run.wait(timeout=1, poll_interval=0)
-        assert result.value == api.estimate and result.statistics is None
+        (sdk,) = decoded
+        expected = (sdk["evs"],) if spread else (1.0, 1.0 + coefficient) if level0 else (2.0,)
+        assert result.value in expected and result.statistics is None
+        if not spread:
+            assert sdk["stds"] == 0.0
         (estimate,) = result.estimates
-        assert estimate.value == api.estimate
+        assert estimate.value == result.value
         (view,) = result.provider_output_estimates
         assert view["source_id"] == estimate.content_id and view["value"] == result.value
-        if zne:
-            assert (
-                estimate.standard_error is None
-                and "fit uncertainty" in estimate.uncertainty_unavailable
-            )
-            assert (
-                view["standard_error"] is None
-                and "fit uncertainty" in view["uncertainty_unavailable"]
-            )
+        if reason is None:
+            assert estimate.standard_error == sdk["stds"] and estimate.uncertainty_unavailable is None
+            assert view["standard_error"] == sdk["stds"]
         else:
-            assert (
-                estimate.standard_error == api.standard_error
-                and estimate.uncertainty_unavailable is None
-            )
-            assert view["standard_error"] == api.standard_error
-        assert (
-            json.loads(estimate.provider_metadata_json)["reported_data"]["stds"]
-            == api.standard_error
-        )
+            assert estimate.standard_error is None and estimate.uncertainty_unavailable == _ESTIMATE_REASONS[reason]
+            assert view["standard_error"] is None and view["uncertainty_unavailable"] == _ESTIMATE_REASONS[reason]
+        if spread:
+            assert estimate.standard_error != sdk["ensemble_standard_error"]
+        provider = json.loads(estimate.provider_metadata_json)
+        assert provider["reported_data"]["stds"] == sdk["stds"]
+        assert provider["primitive"]["options"]["resilience_level"] == level
+        assert provider["pub"]["circuit_metadata"]["nwqlib_pub"] == 0
         assert result.data.trace.submissions[0].locator == original
         assert result.data.observations.chunks[0].returned_shots is None
         assert run.exposure["completed"]["provider_managed_sampling"] == 1
@@ -762,6 +759,17 @@ def test_public_cloud_run_reopens_original_job_without_planning(tmp_path, monkey
     assert len(runtime_api.requests) == 1
 
 
+def sampler_options_of(request):
+    """The three circuit-changing options with which the client-side Sampler built the job of ``request``.
+
+    The SDK applies them on this computer and records its finalized options
+    in the job's passthrough data.
+    """
+    options = executor_program(request["params"]).passthrough_data["post_processor"]["options"]
+    return {"dynamical_decoupling": {"enable": options["dynamical_decoupling"]["enable"]},
+            "twirling": {name: options["twirling"][name] for name in ("enable_gates", "enable_measure")}}
+
+
 def cx_path_depth(circuit):
     """Largest number of CX gates on one dependency path, and the CX count.
 
@@ -783,7 +791,7 @@ def test_isa_native_depth_is_saved_with_its_preparation_and_decides_a_requested_
 ):
     """The recorded depth is that of the ISA circuit that executes, qualified only for counts
     whose effective options, saved and sent, keep the provider's dynamical decoupling and
-    twirling off, and only under qiskit-ibm-runtime 0.49.0. It survives reopening without
+    twirling off. It survives reopening without
     compiling again, and a limit refuses before the submission is recorded when the depth is
     missing or unqualified, or when the Run is reopened where another version of a recorded
     package is installed or one cannot be read. Without a limit, nothing is looked up. A
@@ -792,23 +800,20 @@ def test_isa_native_depth_is_saved_with_its_preparation_and_decides_a_requested_
     """
     import importlib.metadata
     from qiskit import QuantumCircuit
-    from qiskit.primitives.containers import BitArray, DataBin, PrimitiveResult, SamplerPubResult
-    import qiskit_ibm_runtime.options as sdk_options
-    from qiskit_ibm_runtime.options.utils import Unset
+    import qiskit_ibm_runtime.options_models as sdk_options
     from nwqlib._prepared_execution import PreparedHandle, restore_prepared
     from nwqlib.backends.inspection import NativeDepthCapRefusal, check_native_depth_cap
     from nwqlib.execution import NativeDepth
     from nwqlib.operators import ingest_pauli
     from nwqlib.problems import Expectation
 
-    # qiskit-ibm-runtime 0.49.0 documents False as the Sampler default of the
-    # three transformation options. An unset one must be sent and saved as that
-    # explicit False, and an explicit True must stay. Only that version was
-    # checked, so under another installed version no depth is qualified.
+    # The client-side Sampler takes False as the default of the three
+    # transformation options. An unset one must be sent and saved as that
+    # explicit False, and an explicit True must stay.
     frozen = {"dynamical_decoupling": {"enable": False}, "twirling": {"enable_gates": False, "enable_measure": False}}
     twirled_options = {**frozen, "twirling": {"enable_gates": True, "enable_measure": False}}
+    split = {"num_randomizations": 2, "shots_per_randomization": 2}
     installed = importlib.metadata.version("qiskit-ibm-runtime")
-    checked = installed == "0.49.0"
 
     # Three CX on the linear chain 0-1-2-3, two of them parallel.
     state = QuantumCircuit(4)
@@ -832,22 +837,13 @@ def test_isa_native_depth_is_saved_with_its_preparation_and_decides_a_requested_
         assert recorded.width == circuit.num_qubits
         assert connection.options_json == "{}" and json.loads(handle.record.provider_options_json) == frozen
         check_native_depth_cap((handle,), None)
-        if checked:
-            assert recorded.qualified
-            assert (recorded.native_two_qubit_depth, recorded.native_two_qubit_gates) == (depth, gates)
-            check_native_depth_cap((handle,), depth)
-            with pytest.raises(NativeDepthCapRefusal) as refused:
-                check_native_depth_cap((handle,), depth - 1)
-            assert (refused.value.experiment, refused.value.prepared_id) == (point.experiment, handle.record.content_id)
-            assert (refused.value.depth, refused.value.cap, refused.value.reason) == (depth, depth - 1, None)
-        else:
-            # The three options parse and are all false, but this version was not checked.
-            assert not recorded.qualified
-            assert f"qiskit-ibm-runtime {installed} is installed" in recorded.reason
-            assert "only with qiskit-ibm-runtime 0.49.0" in recorded.reason
-            with pytest.raises(NativeDepthCapRefusal) as refused:
-                check_native_depth_cap((handle,), depth)
-            assert (refused.value.depth, refused.value.reason) == (None, recorded.reason)
+        assert recorded.qualified
+        assert (recorded.native_two_qubit_depth, recorded.native_two_qubit_gates) == (depth, gates)
+        check_native_depth_cap((handle,), depth)
+        with pytest.raises(NativeDepthCapRefusal) as refused:
+            check_native_depth_cap((handle,), depth - 1)
+        assert (refused.value.experiment, refused.value.prepared_id) == (point.experiment, handle.record.content_id)
+        assert (refused.value.depth, refused.value.cap, refused.value.reason) == (depth, depth - 1, None)
         # The same circuit with an unqualified depth: no limit admits an unknown depth.
         unknown = NativeDepth(qualified=False, reason="supplied unqualified depth", width=circuit.num_qubits)
         rebuilt = PreparedHandle._make(handle.record.revise(native_depth=unknown), handle.realization,
@@ -861,15 +857,15 @@ def test_isa_native_depth_is_saved_with_its_preparation_and_decides_a_requested_
         restored = restore_prepared(handle.record.content_id, run=run, for_submission=True)
         assert restored.record.native_depth == recorded
         assert restored.record.provider_options_json == handle.record.provider_options_json
-        if checked:
-            check_native_depth_cap((restored,), depth)
-            with pytest.raises(NativeDepthCapRefusal):
-                check_native_depth_cap((restored,), depth - 1)
+        check_native_depth_cap((restored,), depth)
+        with pytest.raises(NativeDepthCapRefusal):
+            check_native_depth_cap((restored,), depth - 1)
 
-    # The saved Run reopened where qiskit-ibm-runtime 0.50.0 is installed, whose
-    # Sampler turns gate twirling on unless the request sets it. Only the
-    # installed-version lookup and the SDK's options class are replaced.
-    lookup, looked_up, replaced = importlib.metadata.version, [], {"qiskit-ibm-runtime": "0.50.0"}
+    # The saved Run reopened where another qiskit-ibm-runtime, here called
+    # 99.0.0, is installed, whose Sampler turns gate twirling on unless the
+    # request sets it. Only the installed-version lookup and the SDK's options
+    # class are replaced.
+    lookup, looked_up, replaced = importlib.metadata.version, [], {"qiskit-ibm-runtime": "99.0.0"}
 
     def reopened_version(name):
         looked_up.append(name)
@@ -882,20 +878,16 @@ def test_isa_native_depth_is_saved_with_its_preparation_and_decides_a_requested_
 
     def twirling_by_default(**values):
         options = sampler_options(**values)
-        if options.twirling.enable_gates is Unset:
+        if options.twirling.enable_gates is None:
             options.twirling.enable_gates = True
         return options
 
     def rejecting(**values):
         raise ValueError("this SDK does not accept the saved Sampler options")
 
-    def all_zero(result):
-        """Every classical bit 0 in each shot of each submitted PUB."""
-        return PrimitiveResult([SamplerPubResult(
-            DataBin(**{register.name: BitArray.from_samples(["0" * register.size] * pub.shots, num_bits=register.size)
-                       for register in pub.circuit.cregs}),
-            metadata={"circuit_metadata": pub.circuit.metadata, "shots": pub.shots}) for pub in runtime_api.api.pubs],
-            metadata=result.metadata)
+    def all_zero(data, passthrough):
+        """Every classical bit 0 in each shot of each item."""
+        return [{name: np.zeros_like(array) for name, array in item.items()} for item in data], passthrough
 
     sent = len(runtime_api.requests)
     with monkeypatch.context() as patch, load_run(path, backend=connection) as run:
@@ -912,20 +904,17 @@ def test_isa_native_depth_is_saved_with_its_preparation_and_decides_a_requested_
             with pytest.raises(NativeDepthCapRefusal) as refused:
                 submit_detached((restored,), run=run)
         assert refused.value.depth is None and refused.value.native_depth == recorded
-        if checked:
-            assert "qiskit-ibm-runtime 0.49.0" in refused.value.reason
-            assert "qiskit-ibm-runtime 0.50.0 is installed" in refused.value.reason
-            # With qiskit-ibm-runtime as recorded, an installed Qiskit whose
-            # version cannot be read refuses on its own.
-            replaced.update({"qiskit-ibm-runtime": installed, "qiskit": importlib.metadata.PackageNotFoundError("qiskit")})
-            with pytest.raises(NativeDepthCapRefusal) as unreadable:
-                check_native_depth_cap((restored,), depth)
-            assert unreadable.value.depth is None
-            assert "installed version of qiskit cannot be read" in unreadable.value.reason
-            replaced.update({"qiskit-ibm-runtime": "0.50.0"})
-            del replaced["qiskit"]
-        else:
-            assert refused.value.reason == recorded.reason
+        assert f"qiskit-ibm-runtime {installed}" in refused.value.reason
+        assert "qiskit-ibm-runtime 99.0.0 is installed" in refused.value.reason
+        # With qiskit-ibm-runtime as recorded, an installed Qiskit whose
+        # version cannot be read refuses on its own.
+        replaced.update({"qiskit-ibm-runtime": installed, "qiskit": importlib.metadata.PackageNotFoundError("qiskit")})
+        with pytest.raises(NativeDepthCapRefusal) as unreadable:
+            check_native_depth_cap((restored,), depth)
+        assert unreadable.value.depth is None
+        assert "installed version of qiskit cannot be read" in unreadable.value.reason
+        replaced.update({"qiskit-ibm-runtime": "99.0.0"})
+        del replaced["qiskit"]
         assert not run.trace.submissions and len(runtime_api.requests) == sent
         # The installed SDK checks the saved options before the submission is recorded.
         patch.setattr(sdk_options, "SamplerOptions", rejecting)
@@ -936,7 +925,7 @@ def test_isa_native_depth_is_saved_with_its_preparation_and_decides_a_requested_
         # this SDK would turn gate twirling on for the configuration's "{}".
         patch.setattr(sdk_options, "SamplerOptions", twirling_by_default)
         submitted = submit_detached((restored,), run=run)
-        assert len(runtime_api.requests) == sent + 1 and runtime_api.requests[-1]["params"]["options"] == frozen
+        assert len(runtime_api.requests) == sent + 1 and sampler_options_of(runtime_api.requests[-1]) == frozen
     # The job submitted there is retrieved there.
     runtime_api.api.status, runtime_api.api.transform_result = "COMPLETED", all_zero
     with monkeypatch.context() as patch, load_run(path, backend=connection) as run:
@@ -949,14 +938,15 @@ def test_isa_native_depth_is_saved_with_its_preparation_and_decides_a_requested_
     # Gate twirling requested: it is sent as requested, and the depth of the
     # same ISA circuit is unqualified, so a limit refuses it before the
     # submission is recorded while execution without a limit proceeds.
-    twirled = connection.revise(options_json='{"twirling":{"enable_gates":true}}')
+    twirled = connection.revise(options_json=json.dumps({"twirling": {"enable_gates": True, **split}}))
     sent = len(runtime_api.requests)
     with Run(plan, backend=twirled, directory=tmp_path / "twirled") as run:
         handle = prepare(point, run=run)
         unqualified = handle.record.native_depth
         assert (unqualified.qualified, unqualified.width) == (False, runtime_api.backend.num_qubits)
         assert "twirling.enable_gates=True" in unqualified.reason
-        assert json.loads(handle.record.provider_options_json) == twirled_options
+        saved = json.loads(handle.record.provider_options_json)
+        assert saved == {**twirled_options, "twirling": {**twirled_options["twirling"], **split}}
         with monkeypatch.context() as patch:
             patch.setattr(ExpectationMethod, "before_submit",
                           lambda self, plan, prepared, *, run: check_native_depth_cap(prepared, depth))
@@ -965,7 +955,7 @@ def test_isa_native_depth_is_saved_with_its_preparation_and_decides_a_requested_
         assert (refused.value.depth, refused.value.reason) == (None, unqualified.reason)
         assert not run.trace.submissions and len(runtime_api.requests) == sent
         submit_detached((handle,), run=run)
-        assert len(runtime_api.requests) == sent + 1 and runtime_api.requests[-1]["params"]["options"] == twirled_options
+        assert len(runtime_api.requests) == sent + 1 and sampler_options_of(runtime_api.requests[-1]) == twirled_options
     # A provider estimate, at the default resilience level 0, is unqualified.
     estimate = estimate_selection()
     with Run(estimate, backend=runtime_api.connection, directory=tmp_path / "estimate") as run:
@@ -1035,7 +1025,7 @@ def fractional_device(runtime_api):
     return device, opened
 
 
-def sampled_lchs_plan(time=.7, **options):
+def sampled_lchs_plan(time=.7, control_copies=1, **options):
     """Eight sampled-pair LCHS rows of two shots on one system qubit, with a source, so rows mix
     initial and source inputs and carry branch phases."""
     from nwqlib import LinearDynamics
@@ -1045,8 +1035,8 @@ def sampled_lchs_plan(time=.7, **options):
 
     linear = LinearDynamics(A=ingest_pauli([("I", .3+.1j), ("X", .25), ("Z", .2j), ("Y", -.15j)], num_qubits=1),
                             initial_state=[.6, .8j], source=[.3, -.4j], time=time)
-    return nwqlib.plan(linear, method=LCHS(observable_estimator="sampled_pairs", pair_repeats=2,
-                                           hamiltonian_evolution_backend="trotter", trotter_steps=2, **options),
+    return nwqlib.plan(linear, method=LCHS(estimator=SampledPairs(repeats=2, control_copies=control_copies),
+                                           ham_evo=Trotter(steps=2), **options),
                        output=QuadraticForm(observable=ingest_pauli([("X", .7), ("Z", -.45)], num_qubits=1)),
                        shots=16, seed=11)
 
@@ -1070,10 +1060,13 @@ def logical_row_operator(plan, realization, width):
 
 
 @pytest.mark.parametrize("options", [
-    dict(hamiltonian_evolution_backend="trotter", trotter_steps=2, pair_product_formula="richardson"),
-    dict(hamiltonian_evolution_backend="trotter", trotter_steps=2, pair_product_formula="mpf"),
-    dict(hamiltonian_evolution_backend="trotter_error_budgeted", trotter_order=1, pair_product_formula="ptsc",
-         pair_pf_allowance=1e-2, pair_mu_cap=1.5, pair_taylor_cutoff=8)], ids=["richardson", "mpf", "ptsc"])
+    dict(ham_evo=Trotter(steps=2), estimator=SampledPairs(
+        repeats=2, product_formula="richardson")),
+    dict(ham_evo=Trotter(steps=2), estimator=SampledPairs(
+        repeats=2, product_formula="mpf")),
+    dict(ham_evo=TrotterErrorBudgeted(order=1), estimator=SampledPairs(
+        repeats=2, product_formula=PTSC(pf_allowance=1e-2, mu_cap=1.5, taylor_cutoff=8)))],
+    ids=["richardson", "mpf", "ptsc"])
 def test_product_formula_recipe_row_templates_bind_to_each_row_circuit(options, monkeypatch):
     """Each recipe row's template, bound to that row's values, is the row's own pair circuit.
 
@@ -1092,7 +1085,7 @@ def test_product_formula_recipe_row_templates_bind_to_each_row_circuit(options, 
 
     linear = LinearDynamics(A=ingest_pauli([("I", .3+.1j), ("X", .25), ("Z", .2j), ("Y", -.15j)], num_qubits=1),
                             initial_state=[.6, .8j], source=[.3, -.4j], time=.7)
-    chosen = nwqlib.plan(linear, method=LCHS(observable_estimator="sampled_pairs", pair_repeats=2, **options),
+    chosen = nwqlib.plan(linear, method=LCHS(**options),
                          output=QuadraticForm(observable=ingest_pauli([("X", .7), ("Z", -.45)], num_qubits=1)),
                          shots=16, seed=11)
     block = next(item for item in chosen.blocks if item.record.signature.name == "lchs_pair")
@@ -1167,13 +1160,13 @@ def test_sampled_lchs_rows_share_compiled_templates_in_one_job_and_resume_by_row
     import weakref
     from collections import Counter
     from qiskit import qpy
-    from qiskit.primitives.containers import BitArray, DataBin, PrimitiveResult, SamplerPubResult
+    from qiskit.primitives.containers import BitArray
     from qiskit.quantum_info import Operator
     from nwqlib._run_journal import LocalJournal
     from nwqlib.algorithms.lchs import sampled_rows
 
-    selected = sampled_lchs_plan(time=2.0 if fractional else .7, lcu_select_implementation="structured",
-                                 pair_control_copies=2)
+    selected = sampled_lchs_plan(time=2.0 if fractional else .7, lcu_select="structured",
+                                 control_copies=2)
     points = tuple(selected._static_points())
     names = tuple(point.key for point in points)
     templates = selected.method.row_templates(selected, points)
@@ -1213,7 +1206,8 @@ def test_sampled_lchs_rows_share_compiled_templates_in_one_job_and_resume_by_row
     with load_run(directory, backend=connection) as run:
         run.resume()
         assert run.result is None and run.trace.jobs == 1 and len(runtime_api.requests) == 1
-        pubs = runtime_api.requests[0]["params"]["pubs"]
+        program = executor_program(runtime_api.requests[0]["params"])
+        pubs = program.passthrough_data["post_processor"]["circuits_metadata"]
         records = run.prepared_artifacts
         assert len(records) == run.trace.preparations == len(names)
         # One compilation per logical template; one circuit, snapshot, saved QPY and PUB per
@@ -1223,7 +1217,7 @@ def test_sampled_lchs_rows_share_compiled_templates_in_one_job_and_resume_by_row
         snapshots = Counter(record.snapshot for record in records)
         classes = {(record.template.key, record.template.correction) for record in records}
         assert len(snapshots) == len(classes) == len({record.payload.content_id for record in records}) == len(pubs)
-        assert sorted(pub.parameter_values.shape[0] for pub in pubs) == sorted(snapshots.values())
+        assert sorted(item.circuit_arguments.shape[0] for item in program.items) == sorted(snapshots.values())
         bases = {record.template.key: record.template.base for record in records}
         assert all(record.template.base == bases[record.template.key] for record in records)
         assert all((base is not None) == fractional for base in bases.values())
@@ -1242,22 +1236,20 @@ def test_sampled_lchs_rows_share_compiled_templates_in_one_job_and_resume_by_row
             assert np.max(np.abs(Operator.from_circuit(bound).data - expected)) <= 1e-10
         first = {"read": True}
 
-        def invalid_pub_zero(result):
-            pubs = []
-            for pub in result:
-                metadata = pub.metadata["circuit_metadata"]
-                if first["read"] and metadata["nwqlib_pub"] == 0:
-                    rows = len(metadata["nwqlib_items"])
-                    pub = SamplerPubResult(DataBin(**{name: BitArray.from_bool_array(
-                        np.zeros((rows, 5, array.num_bits), bool)) for name, array in pub.data.items()},
-                        shape=(rows,)), metadata=pub.metadata)
-                pubs.append(pub)
-            return PrimitiveResult(pubs, metadata=result.metadata)
+        def invalid_pub_zero(data, passthrough):
+            """On the first read, PUB 0 returns five shots in each row, more than the two requested."""
+            if first["read"]:
+                position = next(position for position, metadata
+                                in enumerate(passthrough["post_processor"]["circuits_metadata"])
+                                if metadata["nwqlib_pub"] == 0)
+                data[position] = {name: np.zeros((*array.shape[:-2], 5, array.shape[-1]), bool)
+                                  for name, array in data[position].items()}
+            return data, passthrough
 
         api.status, api.transform_result = "COMPLETED", invalid_pub_zero
         with pytest.raises(ValueError, match="template rows or shot cap"):
             run.resume()
-        missing = len(pubs[0].circuit.metadata["nwqlib_items"])
+        missing = len(pubs[0]["nwqlib_items"])
         assert sum(event.status == "completed" for event in run.trace.events) == len(names) - missing
         assert run.result is None and api.reads == 1
     first["read"] = False
@@ -1304,8 +1296,7 @@ def test_fractional_gates_open_the_device_fold_bound_rzz_and_check_template_rows
     phase alignment, and pass the SDK's ISA check, and one job of all rows passes the SDK's RZZ
     check. pi/4 and 2*pi+pi/4 need the same correction gates, so only the folded global phase
     gives the opposite sign of the second. The compiled template bound to -0.4 without folding is
-    refused before a job could be recorded, and a direct launch of it is refused by the primitive
-    before its request. Options that IBM documents as unsupported with
+    refused before a job could be recorded. Options that IBM documents as unsupported with
     fractional gates are refused, and measurement twirling is accepted."""
     from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister
     from qiskit.circuit import Parameter
@@ -1372,10 +1363,6 @@ def test_fractional_gates_open_the_device_fold_bound_rzz_and_check_template_rows
         # The SDK's RZZ check still runs before a job is recorded.
         with pytest.raises(ValueError, match=r"RZZ angle outside \[0, pi/2\]"):
             connection.admit_batch((connection.bind_template(compiled, (-0.4,), runtime=None)[0],))
-        # A direct launch checks the job it sends: the primitive refuses the same angle before its request.
-        with pytest.raises(ValueError, match=r"rzz is supported only for angles in the range \[0, pi/2\]"):
-            connection.launch((connection.bind_template(compiled, (-0.4,), runtime=None)[0],),
-                              submission_id=str(uuid4()), run=run)
         assert not runtime_api.requests
 
         connection.revise(options_json='{"twirling": {"enable_measure": true}}')._options(run, "counts")
@@ -1438,7 +1425,7 @@ def test_interrupted_template_preparation_never_compiles_a_template_twice(tmp_pa
 
     fractional_device(runtime_api)
     connection = runtime_api.connection.revise(initial_layout=None, use_fractional_gates=True)
-    selected = sampled_lchs_plan(time=2.0, lcu_select_implementation="structured")
+    selected = sampled_lchs_plan(time=2.0, lcu_select="structured")
     points = tuple(selected._static_points())
     names = tuple(point.key for point in points)
     templates = selected.method.row_templates(selected, points)
@@ -1774,29 +1761,31 @@ def test_an_estimate_reserves_its_known_fields_before_submission(tmp_path, runti
 def test_large_provider_metadata_of_a_paid_estimate_is_saved_after_one_fetch(tmp_path, runtime_api):
     """The provider metadata of an admitted estimate is saved at its actual size, with no limit on its encoding.
 
-    73,728 characters of job metadata exceed max_data_bytes = 65,536. The first wait saves the estimate 0.75 with
-    all of its metadata and then refuses the derived result row, naming extend_limits. After the limit is
-    raised the result is read from the saved estimate, so the job is submitted and fetched once.
+    73,728 characters of scheduler timing in the PUB's item metadata exceed max_data_bytes = 65,536. The
+    first wait saves the estimate 2, the sum of the coefficients of I + Z for outcomes that are all 0, with all
+    of its metadata and then refuses the derived result row, naming extend_limits. After the limit is raised
+    the result is read from the saved estimate, so the job is submitted and fetched once.
     """
     from nwqlib.execution import ExecutionLimits
     api = runtime_api.api
-    api.estimate, api.status = 0.75, "QUEUED"
+    api.status = "QUEUED"
     backend = runtime_api.connection.revise(options_json="{}")
     directory = tmp_path / "estimate"
     with Run(estimate_selection(), backend=backend, directory=directory,
              limits=ExecutionLimits(max_data_bytes=65536), progress=False) as run:
         run.resume()
         locator = run.trace.submissions[0].locator
-    api.status, api.result_metadata = "COMPLETED", {"provider_detail": "x" * 73728}
+    api.status, api.item_metadata = "COMPLETED", [{"scheduler_timing": {"timing": "x" * 73728, "circuit_duration": 1}}]
     with load_run(directory, backend=backend) as run:
         with pytest.raises(ValueError, match="extend_limits"):
             run.wait(timeout=1, poll_interval=0)
         estimate, = run.observations.chunks[0].values
-        assert estimate.value == 0.75
-        assert json.loads(estimate.provider_metadata_json)["primitive"]["provider_detail"] == "x" * 73728
+        assert estimate.value == 2.0
+        timing = json.loads(estimate.provider_metadata_json)["pub"]["compilation"]["scheduler_timing"]["timing"]
+        assert timing == "x" * 73728
     with load_run(directory, backend=backend) as run:
         run.extend_limits(max_data_bytes=4_000_000)
-        assert run.wait(timeout=1, poll_interval=0).value == 0.75
+        assert run.wait(timeout=1, poll_interval=0).value == 2.0
         assert run.trace.submissions[0].locator == locator
     assert len(runtime_api.requests) == api.reads == 1
 
@@ -1812,6 +1801,49 @@ def test_sampler_decode_arrays_are_admitted_before_submission(tmp_path, runtime_
         with pytest.raises(ValueError, match=rf"{decode_bytes} bytes exceeds this Run's max_data_bytes=200000"):
             run.resume()
     assert not runtime_api.requests
+
+
+@pytest.mark.parametrize(("kind", "options", "reason"), [
+    pytest.param("counts", '{"twirling":{"enable_measure":true}}', "twirling.num_randomizations",
+                 id="automatic-twirling-split"),
+    pytest.param("counts", '{"twirling":{"enable_gates":true,"num_randomizations":3,"shots_per_randomization":2}}',
+                 "product is the 4 shots", id="twirling-split-of-other-shots"),
+    pytest.param("counts", '{"twirling":{"enable_measure":true,"num_randomizations":1,"shots_per_randomization":2}}',
+                 "product is the 4 shots", id="twirling-split-of-fewer-shots"),
+    pytest.param("counts", '{"environment":{"private":true}}', "only once", id="private-counts"),
+    pytest.param("estimate", '{"environment":{"private":true}}', "only once", id="private-estimate"),
+])
+def test_a_private_job_or_a_twirling_split_of_other_shots_is_refused_before_the_submission_intent(
+        tmp_path, runtime_api, kind, options, reason):
+    """IBM returns a private job's result only once, so a Run could not read it again, and a twirled Sampler
+    without a split equal to the requested shots can return another number of shots. Both requests are refused
+    during preparation: the Run records no submission and no circuit, shot or provider-managed exposure, and no
+    request is sent. Each refusal names its cause."""
+    from nwqlib.execution import ExecutionLimits
+    chosen = counts_selection() if kind == "counts" else estimate_selection()
+    backend = runtime_api.connection.revise(options_json=options)
+    with Run(chosen, backend=backend, directory=tmp_path / "run", progress=False,
+             limits=ExecutionLimits(max_data_bytes=4_000_000)) as run:
+        with pytest.raises(ValueError, match=reason):
+            run.resume()
+        assert not run.trace.submissions
+        assert all(not any(counts.values()) for counts in run.exposure.values())
+    assert not runtime_api.requests
+
+
+def test_twirled_counts_with_an_explicit_split_return_the_requested_shots(tmp_path, runtime_api):
+    """Measurement twirling with num_randomizations * shots_per_randomization equal to the requested 4 shots is sent
+    through the real SDK, whose decoder undoes the measurement flips that the synthetic service applied. The counts
+    are the service's outcomes 0, 0, 0, 1 for the one PUB."""
+    connection = runtime_api.connection.revise(
+        options_json='{"twirling":{"enable_measure":true,"num_randomizations":1,"shots_per_randomization":4}}')
+    with Run(counts_selection(), backend=connection, directory=tmp_path / "run", progress=False) as run:
+        run.resume()
+        runtime_api.api.status = "COMPLETED"
+        (chunk,) = refresh_submissions(run=run)
+    assert executor_program(runtime_api.requests[0]["params"]).passthrough_data["post_processor"]["twirling"]
+    histogram = chunk.histogram()
+    assert chunk.returned_shots == 4 and dict(zip(histogram.index_list(), histogram.weights.tolist())) == {0: 3, 1: 1}
 
 
 def test_each_point_of_an_estimator_batch_is_checked_before_the_first_preparation(tmp_path, monkeypatch,
@@ -1865,16 +1897,13 @@ def test_template_experiments_record_the_depth_of_their_bound_class_circuit(runt
     Every experiment of a class runs the same gates on the same qubits with its own values, so the record equals
     the depth of each experiment's bound circuit. Folding RZZ angles adds only one-qubit gates, so the classes
     share their two-qubit depth. Gate twirling, which IBM allows without fractional gates, leaves the depth
-    unqualified with the option as the reason. Only qiskit-ibm-runtime 0.49.0 was checked, so under another
-    installed version no depth is qualified.
+    unqualified with the option as the reason.
     """
-    import importlib.metadata
     from nwqlib.backends import inspection
 
-    checked = importlib.metadata.version("qiskit-ibm-runtime") == "0.49.0"
-    target = fractional_device(runtime_api)[0].target if fractional else runtime_api.backend.target
+    target =fractional_device(runtime_api)[0].target if fractional else runtime_api.backend.target
     connection = runtime_api.connection.revise(initial_layout=None, use_fractional_gates=fractional)
-    selected = sampled_lchs_plan(time=2.0, lcu_select_implementation="structured")
+    selected = sampled_lchs_plan(time=2.0, lcu_select="structured")
     scans, scan = [], inspection.inspect_native_depth
     monkeypatch.setattr(inspection, "inspect_native_depth",
                         lambda circuit, *args, **kwargs: (scans.append(circuit.num_parameters),
@@ -1898,14 +1927,13 @@ def test_template_experiments_record_the_depth_of_their_bound_class_circuit(runt
             circuit = run._state["handles"][record.content_id]._native.circuit
             values = dict(zip(record.template.parameters, record.template.values, strict=True))
             bound = circuit.assign_parameters({parameter: values[parameter.name] for parameter in circuit.parameters})
-            assert record.native_depth.qualified is checked
-            assert not checked or record.native_depth == scan(bound, target)
+            assert record.native_depth.qualified and record.native_depth == scan(bound, target)
             classes.setdefault((record.template.key, record.template.correction), set()).add(record.native_depth)
     finally:
         run.close()
     assert all(len(depths) == 1 for depths in classes.values())
-    # One scan per class, of its bound circuit, and none of an unbound template. An unqualified depth needs no scan.
-    assert scans == [0] * (len(classes) if checked else 0) and len(run.prepared_artifacts) > len(classes)
+    # One scan per class, of its bound circuit, and none of an unbound template.
+    assert scans == [0] * len(classes) and len(run.prepared_artifacts) > len(classes)
     scans.clear()
     with load_run(tmp_path / "depth", backend=connection) as reopened:
         assert [record.native_depth for record in reopened.prepared_artifacts] == [
@@ -1918,7 +1946,8 @@ def test_template_experiments_record_the_depth_of_their_bound_class_circuit(runt
         assert len(classes) > len(by_key) and all(len(depths) == 1 for depths in by_key.values())
     if not fractional:
         # IBM refuses gate twirling with fractional gates, so this check uses the compiled template.
-        run = prepared_rows(connection.revise(options_json='{"twirling":{"enable_gates":true}}'), tmp_path / "twirled")
+        twirled = '{"twirling":{"enable_gates":true,"num_randomizations":1,"shots_per_randomization":2}}'
+        run = prepared_rows(connection.revise(options_json=twirled), tmp_path / "twirled")
         try:
             reasons = {record.native_depth.reason for record in run.prepared_artifacts}
         finally:

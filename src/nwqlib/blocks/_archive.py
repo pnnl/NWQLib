@@ -39,8 +39,7 @@ _CONSTRUCTORS = dict(preparation=native._preparation_circuit, primitives=native.
 def write_blocks(blocks, files):
     """Return the saved form of a Method's selected blocks, for its `save_archive` hook.
 
-    Import it from `nwqlib.blocks._archive`, a supported module for Method
-    authors despite its leading underscore. Call it in
+    Import it from `nwqlib.blocks`. Call it in
     `save_archive(plan, files)` with the archive object `files` that the hook
     receives, and store the returned dict with the saved Plan. Each
     block is written once, base blocks before the blocks that transform them.
@@ -116,8 +115,7 @@ def write_blocks(blocks, files):
 def read_blocks(data, records, files):
     """Restore the blocks saved by `write_blocks`, for a Method's `load_archive` hook.
 
-    Import it from `nwqlib.blocks._archive`, a supported module for Method
-    authors despite its leading underscore. A saved kind selects one
+    Import it from `nwqlib.blocks`. A saved kind selects one
     constructor from a fixed table of built-in block
     kinds, so loading never imports or calls code named in the archive. A
     preparation is bound to its restored state input, and a transformed block

@@ -321,7 +321,7 @@ def test_adapt_checks_the_final_stage_analysis_on_the_basis_that_growth_ends_wit
     growth and nothing more.
     """
     from nwqlib import _limits
-    from nwqlib.algorithms import PencilSampling
+    from nwqlib.algorithms.gcim import PencilSampling
     from nwqlib.algorithms.gcim import adapt, pencil_workflow
 
     def unexpected(*args, **kwargs):
@@ -376,7 +376,7 @@ def test_grouped_adapt_resume_keeps_its_population_and_exposure(tmp_path, monkey
     main-stage analysis that stops is continued only by
     run.resume(reanalyze=True), which measures nothing again.
     """
-    from nwqlib.algorithms import PencilSampling
+    from nwqlib.algorithms.gcim import PencilSampling
     from nwqlib.algorithms.gcim import adapt_acquisition as acquisition, pencil_workflow
     from nwqlib.execution import ExecutionLimits
 

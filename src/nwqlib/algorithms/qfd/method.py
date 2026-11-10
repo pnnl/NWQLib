@@ -18,6 +18,7 @@ import numpy as np
 from pydantic import Field, model_validator
 
 from nwqlib._limits import ResourceLimitError
+from nwqlib._validation import reanalysis_settings
 from nwqlib.algorithms._eigen_inputs import eigen_operator, eigen_state
 from nwqlib.algorithms._eigen_support import matched_chunks
 from nwqlib.algorithms.gcim.fixed_basis import (
@@ -62,7 +63,7 @@ from .records import QFDEvolutionDiagnostics, QFDReconstruction, QFDResult
 
 METHOD = Source(
     name="qfd",
-    version="1",
+    version="2",
     domain="projected Hermitian eigenvalue in a fixed product-formula basis",
     reference="Parrish and McMahon, arXiv:1909.08925v1, Sec. II.C, Eqs. (5)-(8)",
 )
@@ -209,7 +210,7 @@ class QFD(Method):
     again in a main stage whose shots per setting the pilot pencil decides,
     and only the main-stage measurements form H, S and the reference
     energy. A setting stops the run when its circuit fails
-    `max_native_two_qubit_depth`, with the earlier settings' counts kept.
+    `max_2q_depth`, with the earlier settings' counts kept.
     `overlap_cutoff` can be changed after the run with
     `result.analyze(overlap_cutoff=...)`, which reuses the same matrix
     elements.
@@ -267,7 +268,7 @@ class QFD(Method):
             work of the projected solve and of each pass of the grouped
             count analysis, checked at planning for one measurement per
             setting and again before the stored counts are decoded.
-        max_classical_products: Default `None`, no limit. Optional limit on
+        max_products: Default `None`, no limit. Optional limit on
             the summed classical work of the exact pair reductions.
         input_conversion: Default `"auto"`, which keeps Pauli input as it
             is and converts an explicit dense matrix of dimension at most 16
@@ -291,7 +292,7 @@ class QFD(Method):
             is recorded as None. The Plan records the resolved choices, with
             the construction of every pair, in
             `plan.reconstruction.pencil.acquisition`.
-        max_native_two_qubit_depth: Default `None`, which requests no depth
+        max_2q_depth: Default `None`, which requests no depth
             limit. A nonnegative integer D requires each submitted circuit,
             every grouped count setting and every exact pair reduction, to
             have a native two-qubit depth of at most D, with D itself
@@ -363,7 +364,7 @@ class QFD(Method):
         2.0 4.0
     """
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     initial_state: StateData
     time_step: Annotated[Real, Field(gt=0)]
     powers: Annotated[tuple[StrictInteger, ...], Field(min_length=1)]
@@ -378,10 +379,10 @@ class QFD(Method):
     max_basis_size: PositiveInt = 64
     max_bytes: PositiveInt | None = None
     max_analysis_work: PositiveInt | None = None
-    max_classical_products: PositiveInt | None = None
+    max_products: PositiveInt | None = None
     input_conversion: Literal["auto", "dense_pauli"] = "auto"
     acquisition: PencilAcquisition = PencilAcquisition()
-    max_native_two_qubit_depth: Count | None = None
+    max_2q_depth: Count | None = None
     sampling: PencilSampling | None = None
     result_type: ClassVar[type] = QFDResult
 
@@ -556,23 +557,23 @@ class QFD(Method):
             error_model=eigen_error_model(components, METHOD),
         )
         if e and not shots:
-            # Under an explicit max_classical_products, the summed registered
+            # Under an explicit max_products, the summed registered
             # work of the pair reductions is recorded once in the Plan's cache
             # and admitted at preparation.
-            if self.max_classical_products is not None:
+            if self.max_products is not None:
                 _pair_work_total(plan)
             return plan._bind(blocks=blocks, operator=operator, reference=reference,
                               pair_table=_pair_table(operator))
         return plan._bind(blocks=blocks, operator=operator, reference=reference)
 
     def before_submit(self, plan, prepared, *, run):
-        """Refuse a circuit whose native two-qubit depth exceeds `max_native_two_qubit_depth` or is unavailable, before the Run records its submission."""
+        """Refuse a circuit whose native two-qubit depth exceeds `max_2q_depth` or is unavailable, before the Run records its submission."""
         from nwqlib.backends.inspection import check_native_depth_cap
 
-        check_native_depth_cap(prepared, self.max_native_two_qubit_depth)
+        check_native_depth_cap(prepared, self.max_2q_depth)
 
     def reduction_allowance(self, plan, point, *, observation, width, run):
-        """Check a point's workspace and, under ``max_classical_products``, the summed pair work, and return the remaining allowance or None (``pair_reduction_allowance``)."""
+        """Check a point's workspace and, under ``max_products``, the summed pair work, and return the remaining allowance or None (``pair_reduction_allowance``)."""
         return pair_reduction_allowance(self, plan, observation, label="QFD")
 
     def prepare_all_refusal(self):
@@ -633,6 +634,7 @@ class QFD(Method):
         saved iteration state (``gcim.pencil_workflow.frozen_allocation``),
         so neither the pilot solve nor the allocation is repeated.
         """
+        reanalysis_settings(settings, ("overlap_cutoff",), "QFD")
         cutoff = settings.get("overlap_cutoff", self.overlap_cutoff)
         if not isinstance(cutoff, (int, float)) or not 0 < cutoff < float("inf"):
             raise ValueError("overlap_cutoff must be finite and positive")

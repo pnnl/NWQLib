@@ -1,7 +1,7 @@
 """QHD initial states, their classical start vector and their circuit preparation in the one-hot or binary encoding.
 
 ``QHD.initial_state`` selects one of the state records below and
-``QHD.initial_state_preparation`` the recipe that prepares it in the quantum
+``QHD.init_prep`` the recipe that prepares it in the quantum
 circuit. Every state is a product of nonnegative per-variable amplitude
 vectors on the Method's grid (``variable_amplitudes``). Planning evaluates
 them once, together with the construction error of the classical start
@@ -52,7 +52,7 @@ import numpy as np
 from pydantic import Field, model_validator
 
 from nwqlib._validation import UNIT_ROUNDOFF
-from nwqlib.core.records import Real, Record
+from nwqlib.core.records import Real, Record, _ConstructorDisplay
 
 if TYPE_CHECKING:
     from qiskit import QuantumCircuit
@@ -86,7 +86,7 @@ def _normalized(values):
     return np.array([value / norm for value in values], dtype=float)
 
 
-class UniformState(Record):
+class UniformState(_ConstructorDisplay, Record):
     """Uniform initial state: equal amplitude on every valid grid point.
 
     Pass it as `QHD(initial_state=UniformState())`. It takes no arguments. Each variable
@@ -117,7 +117,7 @@ class UniformState(Record):
         return tuple(np.full(k, 1.0 / math.sqrt(k)) for _ in range(grid.num_variables))
 
 
-class KineticGroundState(Record):
+class KineticGroundState(_ConstructorDisplay, Record):
     """Ground state of each variable's kinetic operator, the default initial state of QHD.
 
     Pass it as `QHD(initial_state=KineticGroundState())`, which is the default. It takes
@@ -297,7 +297,7 @@ def _gaussian_beta(values, shifted, enclosures):
     return _OUTWARD * _within_range(math.hypot, *errors) / math.hypot(*values)
 
 
-class GaussianState(Record):
+class GaussianState(_ConstructorDisplay, Record):
     """Gaussian warm start `prod_j exp(-(x_j - c_j)**2/(2 sigma_j**2))`, normalized on the grid points.
 
     Build it with keyword arguments, for example
@@ -902,7 +902,7 @@ def append_register_state_preparation(circuit: QuantumCircuit, grid: OneHotGrid,
 def append_initial_state(circuit: QuantumCircuit, grid: OneHotGrid, amplitudes, *, recipe: str) -> None:
     """Append the QHD initial state with the circuit recipe that the Method chose.
 
-    ``recipe`` is the Method's ``initial_state_preparation``. On this one-hot
+    ``recipe`` is the Method's ``init_prep``. On this one-hot
     register ``"structured"`` appends the amplitude chain
     (``append_amplitude_chain``) and ``"qiskit_state_preparation"`` one
     ``StatePreparation`` per register. ``"none"`` is resource-only and is

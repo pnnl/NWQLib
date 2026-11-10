@@ -478,7 +478,7 @@ def select_source_branches(*, coefficients, k_nodes, initial_scale, source_scale
         if drop_allowance is None or upper is None or upper > drop_allowance:
             raise ApplicabilityError(
                 f"{omitted} constant-source address slot(s) have PREP amplitudes below the binary64 range; "
-                f"set source_drop_allowance to at least their physical bound {dropped_bound.mantissa}*2**"
+                f"set source_drop to at least their physical bound {dropped_bound.mantissa}*2**"
                 f"{dropped_bound.exponent} to omit them")
         keep = np.flatnonzero(amplitude_rows.any(axis=1))
         applications = [applications[index] for index in keep]

@@ -163,7 +163,7 @@ def show_card(sizes, qls, qls_cx, lchs, lchs_cx, qpe, qpe_fold, qpe_cx, gcim_cx,
     steps = {model: [qpe[model, q].reconstruction.powers[-1].steps for q in sizes] for model in ("Ising", "Heisenberg")}
     norm = qpe["Ising", top].reconstruction.spectral_radius_bound
     lchs_steps = lchs[top].reconstruction.step_counts[0]
-    budget = qpe["Ising", top].method.controlled_power_error_budget
+    budget = qpe["Ising", top].method.ctrl_power_budget
     display(HTML(
         f"<p><strong>Result.</strong> At {top} system qubits, this configuration estimates {cx['QLS'][-1] / 1e3:.3g} "
         f"thousand CX gates for one QLS attempt and bounds one LCHS attempt by {cx['LCHS'][-1] / 1e6:.3g} million CX "
@@ -262,7 +262,7 @@ def show_card(sizes, qls, qls_cx, lchs, lchs_cx, qpe, qpe_fold, qpe_cx, gcim_cx,
 
 # %%
 from nwqlib import Eigenproblem, LinearDynamics, NormSquared
-from nwqlib.algorithms import LCHS
+from nwqlib.algorithms.lchs import LCHS, Trotter
 from nwqlib.algorithms.gcim import FixedGCIM
 from nwqlib.algorithms.qpe import QCELS
 from nwqlib.operators import ingest_pauli
@@ -299,15 +299,14 @@ qls_cx = {q: timed(("QLS CX", q), estimate, qls[q], context=CX) for q in SIZES}
 # quadrature for SELECTION_ALLOWANCE, then takes the smallest Strang step count that meets STRANG_ALLOWANCE.
 heat_flow = {q: LinearDynamics(A=PeriodicStencil(q, mass=0.0, diffusion=0.25),
                                initial_state=ingest_occupation("0" * q, num_qubits=q), time=1.0) for q in SIZES}
-lchs_method = LCHS(hamiltonian_evolution_backend="trotter", approximation_tolerance=SELECTION_ALLOWANCE,
-                   trotter_steps=None, trotter_synthesis_tolerance=STRANG_ALLOWANCE)
+lchs_method = LCHS(ham_evo=Trotter(synthesis_tol=STRANG_ALLOWANCE), approx_tol=SELECTION_ALLOWANCE)
 lchs = {q: timed(("LCHS plan", q), plan, heat_flow[q], method=lchs_method, output=NormSquared(), seed=7) for q in SIZES}
 lchs_cx = {q: timed(("LCHS CX", q), estimate, lchs[q], context=CX) for q in SIZES}
 steps = lchs[100].reconstruction.step_counts[0]
 
 # Section 3: QCELS on |0101...⟩ selects the product-formula steps of every power from the Hamiltonian's commutators.
 neel_qcels = {q: QCELS(initial_state=ingest_occupation("01" * (q // 2), num_qubits=q),
-                       controlled_power_error_budget=POWER_ALLOWANCE, **QCELS_SCHEDULE) for q in SIZES}
+                       ctrl_power_budget=POWER_ALLOWANCE, **QCELS_SCHEDULE) for q in SIZES}
 qpe = {(model, q): timed((model, "plan", q), plan, Eigenproblem(A=ingest_pauli(chain_terms(q, model), num_qubits=q)),
                          method=neel_qcels[q], shots=SHOTS, seed=7)
        for model in ("Ising", "Heisenberg") for q in SIZES}
@@ -363,7 +362,7 @@ def small_plan(family, q):
         return plan(problem_q, method=lchs_method, output=NormSquared(), seed=7)
     return plan(Eigenproblem(A=ingest_pauli(chain_terms(q, family), num_qubits=q)), shots=SHOTS, seed=7,
                 method=QCELS(initial_state=ingest_occupation("01" * (q // 2), num_qubits=q),
-                             controlled_power_error_budget=POWER_ALLOWANCE, **QCELS_SCHEDULE))
+                             ctrl_power_budget=POWER_ALLOWANCE, **QCELS_SCHEDULE))
 
 
 compiled_checks, optimized_cx, started = [], None, perf_counter()
@@ -814,7 +813,7 @@ def qhd_method(k, encoding):
     """One first-order QHD step from 0 to 0.001 on K grid points per variable, from the uniform state, without pruning."""
     return QHD(num_grid_points=k, encoding=encoding, boundary="periodic", kinetic_model="finite_difference",
                num_steps=1, total_time=0.001, schedule=CubicSchedule(s=1.0), coefficient_rule="midpoint",
-               trotter_order=1, initial_state=UniformState(), initial_state_preparation="structured",
+               trotter_order=1, initial_state=UniformState(), init_prep="structured",
                rotation_threshold=0.0, binary_synthesis=BinarySynthesis())
 
 
@@ -1013,7 +1012,7 @@ C_beta = 2 * pi * exp(-2**beta)
 x = cos(beta * pi / 2) * K**beta
 rho = exp(asinh(1.8 / (K / rule.interval_count_each_side)))
 B_independent = T**3 * fsum(abs(c) * (abs(k) * 0.25) ** 3 / 2 for k, c in zip(coefficients.nodes, coefficients.coefficients))
-one_step = plan(heat_flow[100], method=lchs_method.revise(trotter_steps=1, trotter_synthesis_tolerance=None),
+one_step = plan(heat_flow[100], method=lchs_method.revise(ham_evo=Trotter(steps=1)),
                 output=NormSquared(), seed=7)  # records B itself, since its bound is B/1²
 B = next(item.fact.value.value for item in one_step.facts if item.fact.quantity == "trotter_synthesis")
 # The exact coefficient that LCHS inverts lies within B_independent(1 ± 15u), so every value in that interval must
@@ -1126,7 +1125,7 @@ def check_power(selected_qpe, W_exact, delta_W):
     that the exact commutator coefficient would give and the bounds are B_p at W and at W(1 + delta), rounded upward.
     """
     rec = selected_qpe.reconstruction
-    allowance = selected_qpe.method.controlled_power_error_budget
+    allowance = selected_qpe.method.ctrl_power_budget
     W_up, terms = Q(*rec.bound_coefficient), rec.pauli_terms
     coefficients = [Q(c) for _, c in terms]
     M = sum((abs(c) for c in coefficients), Q(0))
@@ -1556,11 +1555,11 @@ show_table([(3, gcim_compiled["circuits"], gcim_compiled["one_execution"], gcim_
 #
 # **Heat flow.** The periodic LCHS route solves homogeneous dynamics $du/dt=-Lu$, with no source term, for a `PeriodicStencil`. It supports quantum execution only, with direct state preparation and the second-order product formula. The cell starts from a basis state from `ingest_occupation`, and a product state from `ingest_product` is also a compact input.
 #
-# LCHS selects the step count from `trotter_synthesis_tolerance` as in Section 2, and the cell prints it with the CX upper bound of one attempt. Appendix D gives what these plans need against an explicit limit.
+# LCHS selects the step count from `Trotter.synthesis_tol` as in Section 2, and the cell prints it with the CX upper bound of one attempt. Appendix D gives what these plans need against an explicit limit.
 
 # %%
 from nwqlib import LinearDynamics, NormSquared, estimate, plan
-from nwqlib.algorithms import LCHS
+from nwqlib.algorithms.lchs import LCHS, Trotter
 from nwqlib.operators import PeriodicStencil
 from nwqlib.problems import ingest_occupation
 from nwqlib.resources import ResourceContext
@@ -1568,8 +1567,8 @@ from nwqlib.resources import ResourceContext
 my_q = 100
 my_problem = LinearDynamics(A=PeriodicStencil(my_q, mass=0.0, diffusion=0.25),
                             initial_state=ingest_occupation("0" * my_q, num_qubits=my_q), time=1.0)
-my_method = LCHS(hamiltonian_evolution_backend="trotter", approximation_tolerance=0.005,   # kernel cutoff and quadrature
-                 trotter_steps=None, trotter_synthesis_tolerance=0.005)                     # Strang product
+my_method = LCHS(ham_evo=Trotter(synthesis_tol=0.005),   # Strang product
+                 approx_tol=0.005)                        # kernel cutoff and quadrature
 my_plan = plan(my_problem, method=my_method, output=NormSquared(), seed=7)
 my_resources = estimate(my_plan, context=ResourceContext(basis="cx"))
 print(f"{my_plan.reconstruction.step_counts[0]} Strang steps, "

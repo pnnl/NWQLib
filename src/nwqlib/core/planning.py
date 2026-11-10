@@ -1491,10 +1491,23 @@ class Plan(Record):
         return self.model_dump(mode="json", exclude_computed_fields=True)
 
     def __str__(self):
+        """Summarize the Plan from the records it holds, without computing anything.
+
+        The first line names the Method, Problem and output types, the
+        execution mode, the shots and the number of experiments. A Method may
+        add lines that qualify the Plan, such as a premise the user asserted.
+        `model_dump()` or `to_record()` returns every field in full.
+        """
         head = (f"Plan(method={type(self.method).__name__}, problem={type(self.problem).__name__}, "
                 f"output={type(self.output).__name__}, execution={self.execution}, "
                 f"shots={self.shots}, experiments={len(self.experiments)})")
         return "\n".join((head, *getattr(self.reconstruction, "_plan_summary_lines", tuple)()))
+
+    def __repr__(self):
+        return str(self)
+
+    def _repr_pretty_(self, printer, cycle):
+        printer.text(f"{type(self).__name__}(...)" if cycle else str(self))
 
     @property
     def blocks(self):

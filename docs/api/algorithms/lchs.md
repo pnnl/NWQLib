@@ -6,7 +6,7 @@ Use `LinearDynamics(A=..., initial_state=..., time=..., source=...)` with `LCHS`
 from nwqlib.algorithms.lchs import LCHS, LCHSRefinement, LCHSVerification
 ```
 
-Every entry on this page imports from `nwqlib.algorithms.lchs`, except the result records `LCHSSamples`, `LCHSProjectedMoments`, `LCHSGroupMoments`, `LCHSPairEstimate` and `LCHSFixedShotPrecision`, which are defined in `nwqlib.algorithms.lchs.primary_records`, and the coefficient-table records `LCHSQuadraturePlan` and `LCHSPairCompatibility` in `nwqlib.algorithms.lchs.providers`.
+Every entry on this page imports from `nwqlib.algorithms.lchs`, including the nine [route-option records](#route-options), except the result records `LCHSSamples`, `LCHSProjectedMoments`, `LCHSGroupMoments`, `LCHSPairEstimate` and `LCHSFixedShotPrecision`, which are defined in `nwqlib.algorithms.lchs.primary_records`, and the coefficient-table records `LCHSQuadraturePlan` and `LCHSPairCompatibility` in `nwqlib.algorithms.lchs.providers`.
 
 ## Solve a linear ODE
 
@@ -23,6 +23,78 @@ Every entry on this page imports from `nwqlib.algorithms.lchs`, except the resul
 ::: nwqlib.algorithms.lchs.provider_config.ProviderParameter
     options:
       heading_level: 3
+
+## Choose a route and its options {#route-options}
+
+Four fields of `LCHS` choose a route. Each takes the route's name, which stands for the route's record with default options, or the record with the options you set, as in `LCHS(ham_evo=Trotter(steps=4))`. Import the records from `nwqlib.algorithms.lchs`:
+
+```python
+from nwqlib.algorithms.lchs import (PTSC, Coherent, DenseExact, MPSCircuit, QSPBlockEncoding, Richardson,
+                                    SampledPairs, Trotter, TrotterErrorBudgeted)
+```
+
+| Field | Records |
+| --- | --- |
+| `ham_evo` | [`DenseExact`][nwqlib.algorithms.lchs.route_options.DenseExact], [`Trotter`][nwqlib.algorithms.lchs.route_options.Trotter], [`TrotterErrorBudgeted`][nwqlib.algorithms.lchs.route_options.TrotterErrorBudgeted], [`QSPBlockEncoding`][nwqlib.algorithms.lchs.route_options.QSPBlockEncoding] |
+| `init_prep`, `lcu_prep` | [`MPSCircuit`][nwqlib.algorithms.lchs.route_options.MPSCircuit] |
+| `estimator` | [`Coherent`][nwqlib.algorithms.lchs.route_options.Coherent], [`SampledPairs`][nwqlib.algorithms.lchs.route_options.SampledPairs] |
+| `SampledPairs.product_formula` | [`Richardson`][nwqlib.algorithms.lchs.route_options.Richardson], [`PTSC`][nwqlib.algorithms.lchs.route_options.PTSC] |
+
+The routes `"auto"`, `"direct"`, `"analytic"`, `"plain"` and `"mpf"` have no options and stay names. The [LCHS guide](../../algorithms/lchs.md#route-options) lists the names each field accepts.
+
+::: nwqlib.algorithms.lchs.route_options.DenseExact
+    options:
+      heading_level: 3
+      members: false
+      show_bases: false
+
+::: nwqlib.algorithms.lchs.route_options.Trotter
+    options:
+      heading_level: 3
+      members: false
+      show_bases: false
+
+::: nwqlib.algorithms.lchs.route_options.TrotterErrorBudgeted
+    options:
+      heading_level: 3
+      members: false
+      show_bases: false
+
+::: nwqlib.algorithms.lchs.route_options.QSPBlockEncoding
+    options:
+      heading_level: 3
+      members: false
+      show_bases: false
+
+::: nwqlib.algorithms.lchs.route_options.MPSCircuit
+    options:
+      heading_level: 3
+      members: false
+      show_bases: false
+
+::: nwqlib.algorithms.lchs.route_options.Coherent
+    options:
+      heading_level: 3
+      members: false
+      show_bases: false
+
+::: nwqlib.algorithms.lchs.route_options.SampledPairs
+    options:
+      heading_level: 3
+      members: false
+      show_bases: false
+
+::: nwqlib.algorithms.lchs.route_options.Richardson
+    options:
+      heading_level: 3
+      members: false
+      show_bases: false
+
+::: nwqlib.algorithms.lchs.route_options.PTSC
+    options:
+      heading_level: 3
+      members: false
+      show_bases: false
 
 ## Read the result
 
@@ -55,7 +127,7 @@ With fixed `shots`, `plan.reconstruction.fixed_shot_precision` says what the cho
       heading_level: 3
       members: false
 
-With `observable_estimator="sampled_pairs"`, `result.pair_estimate` holds the raw estimates of the physical quadratic form and norm squared with their covering radii, and `sampled_pair_progress(run)` reads the rows that an unfinished Run has measured. [Sampled branch pairs](../../algorithms/lchs_derivations.md#sampled-branch-pairs) derives the scores, radii and bias bounds.
+With `estimator="sampled_pairs"`, `result.pair_estimate` holds the raw estimates of the physical quadratic form and norm squared with their covering radii, and `sampled_pair_progress(run)` reads the rows that an unfinished Run has measured. [Sampled branch pairs](../../algorithms/lchs_derivations.md#sampled-branch-pairs) derives the scores, radii and bias bounds.
 
 ::: nwqlib.algorithms.lchs.primary_records.LCHSPairEstimate
     options:
@@ -131,9 +203,9 @@ With `observable_estimator="sampled_pairs"`, `result.pair_estimate` holds the ra
 
 - A and the source are constant in time. General time-dependent A or source is not implemented.
 - The Hermitian part L of A must be positive semidefinite, or the default `make_l_psd=True` shifts it and restores the growth factor.
-- `approximation_tolerance` and the kernel-integral and k-quadrature bounds are component bounds. They do not bound the total error of the physical output, and floating-point, backend and model errors remain separate. The fixed-step `trotter_pruning` and shared-route phase values that `print(result)` shows are also components ([Pauli pruning](../../algorithms/lchs.md#pauli-pruning), [phase targets](../../algorithms/lchs.md#shared-route-phase-target)).
-- For a dense A, the default backend `"auto"` chooses `dense_exact`, which computes its branch matrices classically and, with quantum execution, accepts at most `max_dense_select_slots=4096` address slots, subject to separate work and byte checks. For an A given as a Pauli sum, Cartesian parts, a band operator or a supplied block encoding it chooses `qsp_block_encoding`, which needs quantum execution and fits its phases at planning.
-- `observable_estimator="sampled_pairs"` estimates only `NormSquared`, `QuadraticForm` and `NormalizedExpectation`, with quantum execution and finite shots or a sampling `accuracy` request. Its covering radii hold for the complete planned set of rows.
+- `approx_tol` and the kernel-integral and k-quadrature bounds are component bounds. They do not bound the total error of the physical output, and floating-point, backend and model errors remain separate. The fixed-step `trotter_pruning` and shared-route phase values that `print(result)` shows are also components ([Pauli pruning](../../algorithms/lchs.md#pauli-pruning), [phase targets](../../algorithms/lchs.md#shared-route-phase-target)).
+- For a dense A, the default backend `"auto"` chooses `dense_exact`, which computes its branch matrices classically and, with quantum execution, accepts at most 4096 address slots by default (`DenseExact.max_select_slots`), subject to separate work and byte checks. For an A given as a Pauli sum, Cartesian parts, a band operator or a supplied block encoding it chooses `qsp_block_encoding`, which needs quantum execution and fits its phases at planning.
+- `estimator="sampled_pairs"` estimates only `NormSquared`, `QuadraticForm` and `NormalizedExpectation`, with quantum execution and finite shots or a sampling `accuracy` request. Its covering radii hold for the complete planned set of rows.
 - Reference checks need a dense A and a physical solution vector.
 
 [Limitations and open work](../../ROADMAP.md#lchs) lists the open items. The [LCHS source map](../../algorithms/lchs.md#source-map) gives the paper, equation and implementing function of each step. To add a method of your own, see [Extending NWQLib](../extending.md).

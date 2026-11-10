@@ -166,7 +166,7 @@ def _strang_distance(problem, method, digits=30):
     assert observed <= selected.reconstruction.host_state_error
     state = result.data.artifact(result.artifact).array
     k, d = method.num_grid_points, len(problem.variables)
-    grids = _coordinates(problem.bounds, k, method.boundary, method.include_boundary_points)
+    grids = _coordinates(problem.bounds, k, method.boundary, method.boundary_points)
     with mpmath.workdps(digits):
         potential = [
             _exact(problem.objective.subs({v: sp.Rational(p) for v, p in zip(problem.variables, point)}))
@@ -239,7 +239,7 @@ def test_split_step_matches_an_independent_strang_product(d, k, boundary, endpoi
         bounds = ((-(k + 1) / 4, (k + 1) / 4), (-(k + 1) / 2, (k + 1) / 2))[:d]
     problem = Optimization(objective=objective, variables=variables, bounds=bounds)
     method = QHD(num_grid_points=k, num_steps=3, total_time=0.75, schedule=QuadraticSchedule(gamma=0.3),
-                 coefficient_rule=rule, boundary=boundary, include_boundary_points=endpoints,
+                 coefficient_rule=rule, boundary=boundary, boundary_points=endpoints,
                  kinetic_model=model, theory_flavor="split_step", keep_state=True)
     distance, tolerance = _strang_distance(problem, method)
     assert distance <= tolerance
@@ -259,7 +259,7 @@ def test_split_step_starts_from_the_selected_initial_state():
     """
     problem = Optimization(objective=_OBJECTIVE + _COUPLING, variables=(x, y), bounds=((-1.25, 1.25), (-2.5, 2.5)))
     method = QHD(num_grid_points=4, num_steps=3, total_time=0.75, schedule=QuadraticSchedule(gamma=0.3),
-                 boundary="dirichlet", include_boundary_points=False, kinetic_model="finite_difference",
+                 boundary="dirichlet", boundary_points=False, kinetic_model="finite_difference",
                  theory_flavor="split_step", keep_state=True,
                  initial_state=GaussianState(center=(0.3, -0.7), widths=(0.6, 1.1)))
     distance, tolerance = _strang_distance(problem, method)
@@ -493,7 +493,7 @@ def test_kinetic_transforms_are_orthonormal_eigenbases_of_the_stencils(k, bounda
     """
     periodic = boundary == "periodic"
     (points, h), = _coordinates(((-1.0, 1.0),), k, boundary, endpoints)
-    grid = OneHotGrid(("x",), ((-1.0, 1.0),), k, include_boundary_points=endpoints, boundary=boundary)
+    grid = OneHotGrid(("x",), ((-1.0, 1.0),), k, boundary_points=endpoints, boundary=boundary)
     assert grid.spacing(0) == h
     reported = split_step.kinetic_eigenvalues(grid, 0, model)
     bound = split_step.TRANSFORM_ROUNDOFF * split_step.transform_levels(grid) * u

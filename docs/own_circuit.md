@@ -76,7 +76,8 @@ from typing import ClassVar
 from qiskit import QuantumCircuit
 
 from nwqlib import plan, prepare, submit
-from nwqlib.algorithms import AlgorithmDescriptor, ApplicabilityError, Method
+from nwqlib.algorithms import ApplicabilityError
+from nwqlib.algorithms.protocol import AlgorithmDescriptor, Method
 from nwqlib.blocks import SelectedConstruction, select_preparation
 from nwqlib.core import Record
 from nwqlib.core.analysis import Result
@@ -198,6 +199,10 @@ class GHZMethod(Method):
         )._bind(blocks=(body,))
 
     def analyze(self, plan, data, *, settings):
+        # result.analyze(...) passes its keyword arguments as settings. This
+        # Method has none that can change after measurement, so it refuses them.
+        if settings:
+            raise ValueError("GHZMethod has no reanalysis settings")
         # data.observations.chunks holds one chunk per completed experiment,
         # so one here. Its histogram gives the outcome indices, their counts
         # and the readout width. Bit 0 of an index is classical bit 0, the
@@ -240,7 +245,7 @@ The Problem and the output kind are ordinary Records. `nwqlib.plan` checks that 
 
 `Program` and `SelectedConstruction` check the Program's structure when they are built, before any circuit exists, as [Describe a circuit as a Program](ir.md#check-bind-and-save-a-program) describes. Every field of the Plan's portable record, the form in which the Plan is saved (`plan.to_record()`), enters the Plan's content hash, so a different shot count is a different Plan.
 
-`analyze` receives the Run's data after every experiment has an observation. NWQLib refuses a Result whose Plan or observation content hash differs from the Run's, or that names a chunk (a part of the observations) the Run did not collect. `_summary_lines` on the Result supplies the first lines of `print(result)`.
+`analyze` receives the Run's data after every experiment has an observation, and `settings` holds the keyword arguments of `result.analyze(...)`. A Method refuses the names it cannot change after measurement, all of them here ([What every Method provides](algorithm_protocol.md#required-hooks)). NWQLib refuses a Result whose Plan or observation content hash differs from the Run's, or that names a chunk (a part of the observations) the Run did not collect. `_summary_lines` on the Result supplies the first lines of `print(result)`.
 
 The Run uses `AerBackend()` when `prepare` receives no backend. Pass `backend=` for another backend, as [Choose a backend](backends.md) describes. `limits=ExecutionLimits(...)` from `nwqlib.execution` changes the Run's limits on circuits, shots, data and simulator memory.
 
@@ -273,9 +278,8 @@ A comparison is meaningful when both Methods compute the same output for the sam
 from typing import ClassVar
 
 from nwqlib import Expectation, compare, solve
-from nwqlib.algorithms import (
-    AlgorithmDescriptor, ApplicabilityError, ExpectationMethod, Method,
-)
+from nwqlib.algorithms import ApplicabilityError, ExpectationMethod
+from nwqlib.algorithms.protocol import AlgorithmDescriptor, Method
 from nwqlib.blocks import (
     SelectedConstruction, select_preparation, select_signed_pauli,
     transform_block,
@@ -361,6 +365,8 @@ class HadamardExpectation(Method):
         )._bind(blocks=blocks)
 
     def analyze(self, plan, data, *, settings):
+        if settings:
+            raise ValueError("this Hadamard reconstruction has no post-hoc settings")
         (chunk,) = data.observations.chunks
         histogram = chunk.histogram()
         # Outcome 0 has Z = +1 and outcome 1 has Z = -1.
@@ -409,7 +415,7 @@ A Run on local Aer without a `directory` keeps its state in memory and writes no
 
 Without the hooks, `prepare` for a Run with a folder raises `TypeError` before any submission, and `result.save` and `run.save` raise `TypeError` before writing anything. A failed `prepare` of such a Run keeps its folder, so remove it before retrying.
 
-`save_archive` and `load_archive` save and restore the block with `write_blocks` and `read_blocks` from `nwqlib.blocks._archive`. This module starts with an underscore but is a supported hook for Method authors ([supported protected extension hooks](algorithm_protocol.md#supported-protected-extension-hooks)). Add the three in a subclass that keeps the name `GHZMethod`, so the examples below use it:
+`save_archive` and `load_archive` save and restore the block with `write_blocks` and `read_blocks` from `nwqlib.blocks`. Add the three in a subclass that keeps the name `GHZMethod`, so the examples below use it:
 
 ```python
 # Inherits descriptor, plan and analyze from the GHZMethod above.
@@ -419,7 +425,7 @@ class GHZMethod(GHZMethod):
     result_type: ClassVar[type[Result]] = GHZResult
 
     def save_archive(self, plan, files):
-        from nwqlib.blocks._archive import write_blocks
+        from nwqlib.blocks import write_blocks
 
         # Store the Plan's portable record, and the supplied circuit as a
         # QPY file beside it.
@@ -428,7 +434,7 @@ class GHZMethod(GHZMethod):
 
     @classmethod
     def load_archive(cls, saved, files):
-        from nwqlib.blocks._archive import read_blocks
+        from nwqlib.blocks import read_blocks
 
         fields = saved["plan"]
         # Rebuild this Method's own Records from their stored fields.

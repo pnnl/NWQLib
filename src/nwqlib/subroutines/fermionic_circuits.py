@@ -958,7 +958,7 @@ def generator_cx_count(plan, theta):
     real angles. They claim nothing about the numerical error of the
     actual generator circuit. The count is a pre-routing bound, not the
     native two-qubit depth of an executable circuit, which
-    ``ADAPT.max_native_two_qubit_depth`` checks separately.
+    ``ADAPT.max_2q_depth`` checks separately.
     """
     from nwqlib.subroutines._mcx_counts import MCX_CX_BY_CONTROLS
 

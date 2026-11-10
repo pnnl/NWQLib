@@ -12,7 +12,7 @@ import sympy as sp
 import nwqlib
 from nwqlib.algorithms import ADAPT, ExpectationMethod, FixedGCIM, Lanczos, QCELS, QFD, RFE
 from nwqlib.algorithms.gcim import BoundedRitzGrowth
-from nwqlib.algorithms.lchs import LCHS
+from nwqlib.algorithms.lchs import LCHS, PTSC, Richardson, SampledPairs, Trotter, TrotterErrorBudgeted
 from nwqlib.algorithms.qhd import QHD
 from nwqlib.algorithms.qls import QLS
 from nwqlib.execution import ObservationView
@@ -77,15 +77,15 @@ _RECIPES = nwqlib.LinearDynamics(A=ingest_pauli([("I", .3+.1j), ("X", .25), ("Z"
                                  initial_state=[2.4, 3.2j], time=.7)
 _RECIPE_READOUT = dict(output=QuadraticForm(observable=ingest_pauli([("X", .7), ("Z", -.45), ("I", .2)], num_qubits=1)),
                        shots=64)
-_PAIRS = dict(observable_estimator="sampled_pairs", pair_repeats=4, hamiltonian_evolution_backend="trotter_error_budgeted")
-_RICHARDSON = dict(_PAIRS, pair_product_formula="richardson", pair_pf_allowance=.01)
-_PTSC = dict(_PAIRS, trotter_order=1, pair_product_formula="ptsc", pair_pf_allowance=.16, pair_mu_cap=1.5,
-             pair_taylor_cutoff=8)
-_QSP_PAIRS = dict(observable_estimator="sampled_pairs", hamiltonian_evolution_backend="qsp_block_encoding")
-_BUDGETED = dict(hamiltonian_evolution_backend="trotter_error_budgeted")
-_QSP = dict(hamiltonian_evolution_backend="qsp_block_encoding")
+_PAIRS = dict(estimator=SampledPairs(repeats=4), ham_evo="trotter_error_budgeted")
+_RICHARDSON = dict(_PAIRS, estimator=SampledPairs(repeats=4, product_formula=Richardson(pf_allowance=.01)))
+_PTSC = dict(ham_evo=TrotterErrorBudgeted(order=1), estimator=SampledPairs(
+    repeats=4, product_formula=PTSC(pf_allowance=.16, mu_cap=1.5, taylor_cutoff=8)))
+_QSP_PAIRS = dict(estimator="sampled_pairs", ham_evo="qsp_block_encoding")
+_BUDGETED = dict(ham_evo="trotter_error_budgeted")
+_QSP = dict(ham_evo="qsp_block_encoding")
 _AUTO = dict(lchs_kernel="auto", k_quadrature="auto")
-_FIXED = dict(hamiltonian_evolution_backend="trotter", trotter_steps=4)
+_FIXED = dict(ham_evo=Trotter(steps=4))
 # The first example of docs/algorithms/lchs.md.
 _GUIDE_A = np.array([[.4, .15], [.05, .25]])
 _DENSE = nwqlib.LinearDynamics(A=_GUIDE_A, initial_state=[.6, .8], time=.5)
@@ -115,23 +115,26 @@ _PAULI_THEN_BAND = nwqlib.LinearDynamics(A=ingest_cartesian(ingest_pauli([("II",
 
 # Each case holds the Method at its limit, a Method with enough capacity, and the compare options. The caps come from
 # capacity sweeps on these inputs and sit below the need that each refusal states. The default caps are
-# max_dense_select_slots=4096 and max_basis_size=64.
+# DenseExact.max_select_slots=4096 and max_basis_size=64.
 _LIMITS = dict(
-    sampled_step_cap=(_RECIPES, LCHS(**_PAIRS, max_trotter_steps=1), LCHS(**_PAIRS), _RECIPE_READOUT),
-    richardson_step_cap=(_RECIPES, LCHS(**_RICHARDSON, max_trotter_steps=4), LCHS(**_RICHARDSON), _RECIPE_READOUT),
-    ptsc_step_cap=(_RECIPES, LCHS(**_PTSC, max_trotter_steps=4), LCHS(**_PTSC), _RECIPE_READOUT),
+    sampled_step_cap=(_RECIPES, LCHS(**dict(_PAIRS, ham_evo=TrotterErrorBudgeted(max_steps=1))), LCHS(**_PAIRS), _RECIPE_READOUT),
+    richardson_step_cap=(_RECIPES, LCHS(**dict(_RICHARDSON, ham_evo=TrotterErrorBudgeted(max_steps=4))),
+                         LCHS(**_RICHARDSON), _RECIPE_READOUT),
+    ptsc_step_cap=(_RECIPES, LCHS(**dict(_PTSC, ham_evo=TrotterErrorBudgeted(order=1, max_steps=4))),
+                   LCHS(**_PTSC), _RECIPE_READOUT),
     ptsc_work_cap=(_RECIPES, LCHS(**_PTSC, max_select_work=4096), LCHS(**_PTSC), _RECIPE_READOUT),
     # At time 500 and this documented tolerance the guide's A needs 8192 slots.
     default_dense_select_slots=(nwqlib.LinearDynamics(A=_GUIDE_A, initial_state=[.6, .8], time=500.),
-                                LCHS(approximation_tolerance=1e-3),
-                                LCHS(approximation_tolerance=1e-3, **_FIXED), {}),
+                                LCHS(approx_tol=1e-3),
+                                LCHS(approx_tol=1e-3, **_FIXED), {}),
     eigensolve_work=(_DENSE, LCHS(max_spectral_work=1), LCHS(), {}),
     generator_classification=(_DENSE, LCHS(**_QSP, max_select_work=1), LCHS(**_QSP), {}),
     census_work=(_DENSE, LCHS(**_BUDGETED, max_select_work=16384), LCHS(**_BUDGETED), {}),
     source_branch_work=(_SOURCE, LCHS(max_quadrature_work=16384), LCHS(), {}),
     periodic_work=(nwqlib.LinearDynamics(A=PeriodicStencil(2, mass=0., diffusion=.25), initial_state=[1., 0., 0., 0.],
                                          time=.2),
-                   LCHS(**dict(_FIXED, trotter_steps=2), max_select_work=1), LCHS(**dict(_FIXED, trotter_steps=2)), {}),
+                   LCHS(ham_evo=Trotter(steps=2), max_select_work=1),
+                   LCHS(ham_evo=Trotter(steps=2)), {}),
     classical_kernel_work=(_DENSE, LCHS(max_select_work=1), LCHS(), dict(execution="classical")),
     provider_enumeration_work=(_COMPACT, LCHS(**_AUTO, max_select_work=4096), LCHS(**_AUTO), {}),
     block_encoding_query_bytes=(_COMPACT, LCHS(**_QSP_PAIRS, max_bytes=65536), LCHS(**_QSP_PAIRS), _COMPACT_READOUT),
@@ -161,7 +164,7 @@ _LIMITS = dict(
                            ADAPT(**_ADAPT_TWO_QUBITS, basis_growth=BoundedRitzGrowth(max_chain_length=2, basis_depth_limit=4)),
                            {}),
     expectation_products=(nwqlib.Expectation(state=[1., 0.], observable=[[1., 0.], [0., -1.]]),
-                          ExpectationMethod(max_classical_products=1), ExpectationMethod(), dict(execution="classical")),
+                          ExpectationMethod(max_products=1), ExpectationMethod(), dict(execution="classical")),
     qhd_work=(nwqlib.Optimization(objective=(_X - .2)**2, variables=(_X,), bounds=((-1., 1.),)), QHD(max_work=1), QHD(), {}),
 )
 
@@ -187,7 +190,7 @@ def test_a_capacity_refusal_of_any_family_gives_a_limited_row_beside_a_method_th
 _NEEDS = dict(
     qls_general_work=(_GENERAL_SYSTEM, lambda limit: QLS(max_work=limit), dict(execution="classical")),
     qls_spectral_selection=(_GENERAL_SYSTEM,
-                            lambda limit: QLS(solver="shortcut_native_svp", encoded_solution_norm_estimate=1.5, max_work=limit),
+                            lambda limit: QLS(solver="shortcut_native_svp", norm_estimate=1.5, max_work=limit),
                             dict(execution="classical",
                                  output=StateVector(normalization="unit", global_phase="modulo_global_phase"))),
     qls_encoding_construction=(nwqlib.LinearSystem(A=_TWO_QUBITS, b=[1., 0., 0., 0.]),
@@ -251,7 +254,7 @@ def test_a_phase_synthesis_stopped_by_a_limit_gives_a_row_and_one_stopped_by_its
     from nwqlib.subroutines.qsp.phases import _QSPPhaseConvergenceError
 
     problem = nwqlib.LinearSystem(A=[[1.1, .1], [.1, .9]], b=[1., .25])
-    tight = dict(epsilon_inv=.01, phase_residual_tolerance=1e-30)
+    tight = dict(epsilon_inv=.01, phase_tol=1e-30)
     other = QLS(epsilon_inv=.01)
     with pytest.raises(_QSPPhaseConvergenceError) as ruled:
         nwqlib.compare(problem, methods=(QLS(**tight), other), seed=7)
@@ -315,11 +318,11 @@ def _wide_ratio(q):
      Lanczos(initial_state=[1, 0], krylov_dimension=3), Lanczos(initial_state=[1, 0], krylov_dimension=2), {}),
     # The dissipative part diag(-1, 1) has the eigenvalue -1, and make_l_psd=False forbids the shift.
     (nwqlib.LinearDynamics(A=np.diag([-1.0, 1.0]) + 0j, initial_state=[1.0, 0.0], time=.5),
-     LCHS(hamiltonian_evolution_backend="trotter", trotter_steps=2, make_l_psd=False),
-     LCHS(hamiltonian_evolution_backend="trotter", trotter_steps=2), dict(execution="classical")),
+     LCHS(ham_evo=Trotter(steps=2), make_l_psd=False),
+     LCHS(ham_evo=Trotter(steps=2)), dict(execution="classical")),
     # The diagonals of this Hermitian A are not constant, so it is no periodic banded operator.
     (nwqlib.LinearSystem(A=[[1.2, .7], [.7, .6]], b=[1, .25]),
-     QLS(block_encoding_implementation="banded", epsilon_inv=.1), QLS(epsilon_inv=.1), {}),
+     QLS(block_encoding="banded", epsilon_inv=.1), QLS(epsilon_inv=.1), {}),
     # alpha=.1 lies below the largest entry 1.2 of this A, and so below its spectral norm.
     (nwqlib.LinearSystem(A=[[1.2, .7], [.7, .6]], b=[1, .25]), QLS(alpha=.1), QLS(epsilon_inv=.1), {}),
     # A one-hot register has a qubit per grid point, and 2**16384 has 4933 decimal digits, above the 4300 of a saved record.

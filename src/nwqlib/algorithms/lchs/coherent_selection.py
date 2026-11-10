@@ -335,7 +335,7 @@ class LCHSCoherentAlternative:
             ``3 L max(0, q - 1)`` each; None for direct trees.
         analytic_prep: Keyword arguments of
             ``analytic_prep.plan_analytic_kernel_preparation`` except the
-            recipe and ``max_rounds`` (``gamma``, ``approximation_tolerance``,
+            recipe and ``max_rounds`` (``gamma``, ``approx_tol``,
             ``margin`` and limits) when the kernel factor must be the analytic
             Low–Somma PREP of the uniform grid; None for a direct or MPS
             kernel factor. The caller states that the kernel coefficients

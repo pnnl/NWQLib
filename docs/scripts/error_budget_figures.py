@@ -11,7 +11,7 @@ by the numerical environment. ``--preview PATH`` saves the same plot as PNG.
 
 LCHS: heat flow ``du/dt = -L u`` with ``L = (2I - S - S†)/4`` on a ring of
 ``2**q`` sites, a unit point source at site 0 and ``T = 1``, planned with
-``approximation_tolerance=0.005`` and ``trotter_synthesis_tolerance=0.005``
+``approx_tol=0.005`` and ``Trotter.synthesis_tol=0.005``
 at every q of ``HEAT_FLOW_SIZES``. Planning and resource estimation build
 no circuit. At ``ILLUSTRATION_Q`` the ideal finite-branch physical action is
 evaluated with 8-by-8 matrices and compared with ``scipy.linalg.expm``.
@@ -38,7 +38,7 @@ from scipy.linalg import expm
 
 from nwqlib import LinearDynamics, LinearSystem, estimate, plan, solve
 from nwqlib.algorithms import LCHS, QLS
-from nwqlib.algorithms.lchs import resolve_lchs_coefficient_plan
+from nwqlib.algorithms.lchs import Trotter, resolve_lchs_coefficient_plan
 from nwqlib.algorithms.qls import QLSVerification
 from nwqlib.operators import PeriodicStencil, operator_input
 from nwqlib.problems import ingest_occupation, ingest_product
@@ -52,8 +52,8 @@ SEED = 7
 HEAT_FLOW_SIZES = (3, 10, 20, 40, 100)  # system qubits q of the ring
 ILLUSTRATION_Q = 3                     # ideal finite-branch action on eight coordinates
 TARGET = 0.01                           # sum of the two tolerances of LCHS_METHOD
-LCHS_METHOD = LCHS(hamiltonian_evolution_backend="trotter", approximation_tolerance=0.005,
-                   trotter_steps=None, trotter_synthesis_tolerance=0.005)
+LCHS_METHOD = LCHS(ham_evo=Trotter(steps=None, synthesis_tol=0.005),
+                   approx_tol=0.005)
 
 QLS_SIZES = (10, 20, 40)
 QLS_TOLERANCES = (0.1, 0.01, 0.001, 0.0001)

@@ -61,8 +61,8 @@ def native_choice(
             alpha=alpha,
             kappa=kappa,
             epsilon_inv=EPSILON,
-            block_encoding_implementation=encoding or ("banded" if quadratic else "dense_dilation"),
-            encoded_solution_norm_estimate=None if inverse else 1.5,
+            block_encoding=encoding or ("banded" if quadratic else "dense_dilation"),
+            norm_estimate=None if inverse else 1.5,
         ),
         seed=7,
     )
@@ -147,8 +147,8 @@ def test_phase_residual_reaches_the_executed_inverse_through_k_s_and_the_solutio
     matrix = np.diag([1.0, 0.1])
     for rhs, norm in (([1.0, 0.0], 1.0), ([0.0, 1.0], 10.0)):
         chosen = nwqlib.plan(LinearSystem(A=matrix, b=np.array(rhs, dtype=complex)), output=Solution(), seed=7,
-                             method=QLS(alpha=1.0, kappa=10.0, phase_residual_tolerance=1e-3,
-                                        block_encoding_implementation="dense_dilation"))
+                             method=QLS(alpha=1.0, kappa=10.0, phase_tol=1e-3,
+                                        block_encoding="dense_dilation"))
         result = nwqlib.solve(chosen)
         actual = result.value
         rec = chosen.reconstruction
@@ -178,7 +178,7 @@ def test_classical_summary_gives_the_polynomial_check_without_a_phase_component(
     """Classical execution has no phases, so an explicit target changes neither its polynomial nor its record."""
     problem = LinearSystem(A=np.diag([1.0, 0.5]), b=np.array([1.0, 1.0]))
     baseline = nwqlib.plan(problem, method=QLS(), execution="classical", seed=7)
-    chosen = nwqlib.plan(problem, method=QLS(phase_residual_tolerance=1e-3), execution="classical", seed=7)
+    chosen = nwqlib.plan(problem, method=QLS(phase_tol=1e-3), execution="classical", seed=7)
     assert chosen.reconstruction.polynomial == baseline.reconstruction.polynomial
     assert chosen.reconstruction.phase_tolerance is None and chosen.reconstruction.phase_error is None
     text = str(nwqlib.solve(chosen))

@@ -57,6 +57,7 @@ from nwqlib.algorithms.lchs.solution_error_budget import (
     scaled_sum,
     signed_shift,
 )
+from nwqlib.algorithms.lchs.route_options import route_name
 from nwqlib.algorithms.lchs.providers import (
     LCHSCoefficientPlan,
     LCHSProblemContext,
@@ -134,7 +135,7 @@ def cartesian_decomposition(
     matrix: Any,
     *,
     eigcheck: bool = True,
-    psd_tolerance: float = DEFAULT_PSD_TOLERANCE,
+    psd_tol: float = DEFAULT_PSD_TOLERANCE,
     max_bytes=None,
     max_spectral_work=None,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -150,9 +151,9 @@ def cartesian_decomposition(
 
     Args:
         matrix (array_like): Finite square matrix A.
-        eigcheck (bool): Check that L is PSD within `psd_tolerance`.
-        psd_tolerance (float): Default `1e-12`. Relative window of the
-            check. An eigenvalue of L at or above `-psd_tolerance*||L||_2`
+        eigcheck (bool): Check that L is PSD within `psd_tol`.
+        psd_tol (float): Default `1e-12`. Relative window of the
+            check. An eigenvalue of L at or above `-psd_tol*||L||_2`
             passes.
         max_bytes (int | None): Default `None`, the physical memory of this computer.
             Upper limit on the arrays of the check, `64 d**2 + 16 d` bytes
@@ -172,7 +173,7 @@ def cartesian_decomposition(
 
     Raises:
         ValueError: If A is not a finite square matrix, or, with `eigcheck`,
-            if L has an eigenvalue below `-psd_tolerance*||L||_2` or the
+            if L has an eigenvalue below `-psd_tol*||L||_2` or the
             check exceeds `max_spectral_work` or `max_bytes`.
     """
     from nwqlib.operators.access import _check_bytes
@@ -206,7 +207,7 @@ def cartesian_decomposition(
         _numerical_psd_decision(
             lambda_min=lower,
             lambda_max=upper,
-            psd_tolerance=float(psd_tolerance),
+            psd_tol=float(psd_tol),
             make_l_psd=False,
         )
     return l_part, h_part
@@ -1239,8 +1240,8 @@ def _budgeted_trotter_node_record(
     selects the smallest step count whose bound E_r = W_up*|t|**(o+1)/r**o
     is at most R, E = up(E_r) <= R, and the reported total
     T = up(P + E) (error_budget.upper_combined_error) satisfies
-    ``|t|*d_up + E_r <= P + E <= T <= epsilon``. The order argument, the Method's
-    trotter_order, selects the Lie-1 bound (CSTWZ
+    ``|t|*d_up + E_r <= P + E <= T <= epsilon``. The order argument, the
+    ``order`` of the Method's product-formula backend, selects the Lie-1 bound (CSTWZ
     doi:10.1103/PhysRevX.11.011020, Prop. 9, Eq. (120)) or the Suzuki-2
     bound (Prop. 10, Eq. (121)).
 
@@ -1378,7 +1379,7 @@ def _fixed_trotter_certificate_records(
                  "nested_commutation_checks", "dense_bound_attempts", "dense_bound_completed",
                  "dense_term_matrices", "dense_matrix_products", "dense_spectral_norms"):
         counts.setdefault(name, 0)
-    order = int(method.trotter_order)
+    order = int(method.ham_evo.order)
     if type(nodes) is not LCHSProductFormulaNodes:
         raise ValueError("fixed certificates read an existing stored node table")
     grid = nodes.grid_to_node
@@ -1520,13 +1521,13 @@ def _fixed_trotter_certificate_records(
 
 
 def _lchs_trotter_error_budget_per_node(method: LCHS) -> float:
-    """Return the per-node synthesis allowance, ``LCHS_TROTTER_EPSILON_FRACTION * method.approximation_tolerance``.
+    """Return the per-node synthesis allowance, ``LCHS_TROTTER_EPSILON_FRACTION * method.approx_tol``.
 
     It bounds one node evolution in operator norm. The weighted sum over
     nodes and the physical scaling are applied later, so it is not a bound
     on the solution error.
     """
-    return LCHS_TROTTER_EPSILON_FRACTION * float(method.approximation_tolerance)
+    return LCHS_TROTTER_EPSILON_FRACTION * float(method.approx_tol)
 
 
 def _unusable_kernel_stage_names(quadrature: Mapping[str, Any]) -> tuple[str, ...]:
@@ -1635,7 +1636,7 @@ def _trotter_budget_quadrature_terms(
     trotter_synthesis_error_bound = _coefficient_weighted_bound(coefficients, bound_values) if evaluated else None
     work_counts = [record.algebraic_work_counts for record in records]
     terms = {
-        "trotter_formula_order": int(method.trotter_order),
+        "trotter_formula_order": int(method.ham_evo.order),
         "trotter_step_counts": [record.step_count for record in records],
         "trotter_bound_value_max": (
             float(max(bound for bound in bound_values if bound is not None))
@@ -1672,7 +1673,7 @@ def _trotter_budget_quadrature_terms(
         },
         "trotter_node_records": [record.to_dict() for record in records],
     }
-    if method.hamiltonian_evolution_backend == "trotter_error_budgeted":
+    if route_name(method.ham_evo) == "trotter_error_budgeted":
         terms["trotter_error_budget_per_node"] = _lchs_trotter_error_budget_per_node(method)
     return terms
 
@@ -1686,7 +1687,7 @@ class _PreparedDecomposition:
         h_evolution: Encoded H, unchanged by the shift.
         conversion: Smallest eigenvalue of L before and after the shift,
             whether a shift was applied, the shift, make_l_psd and
-            psd_tolerance, as later reported.
+            psd_tol, as later reported.
         lambda_min_before: Smallest eigenvalue of the unshifted encoded L.
         l_norm: Spectral norm of the prepared L, max(|lambda_min|, |lambda_max|)
             after the shift.
@@ -1772,7 +1773,7 @@ def _prepare_decomposition(
     decision = _numerical_psd_decision(
         lambda_min=min_l_eigenvalue,
         lambda_max=max_l_eigenvalue,
-        psd_tolerance=float(method.psd_tolerance),
+        psd_tol=float(method.psd_tol),
         make_l_psd=method.make_l_psd,
     )
     psd_shift = decision.shift
@@ -1800,7 +1801,7 @@ def _prepare_decomposition(
         "scalar_decay": 0.0,
         "psd_premise_evidence": "numerical",
         "make_l_psd": method.make_l_psd,
-        "psd_tolerance": float(method.psd_tolerance),
+        "psd_tol": float(method.psd_tol),
     }
     return _PreparedDecomposition(
         l_part=l_part,
@@ -1914,7 +1915,7 @@ def _quadrature_data_from_plan(
         dense_select_slot_limit=dense_select_slot_limit,
         problem_context=LCHSProblemContext(
             final_time=float(final_time),
-            epsilon=float(method.approximation_tolerance),
+            epsilon=float(method.approx_tol),
             l_norm=l_norm,
         ),
         max_bytes=max_bytes,
@@ -1962,7 +1963,7 @@ def lchs_quadrature_summary(
     trotter_formula = (
         {
             "trotter_formula": "lie_1_sorted_pauli_product"
-            if method.trotter_order == 1
+            if method.ham_evo.order == 1
             else "suzuki_2_sorted_pauli_product"
         }
         if he_backend == "trotter"
@@ -1970,7 +1971,7 @@ def lchs_quadrature_summary(
     )
     return {
         "beta": coefficient_plan.resolved_lchs_kernel.parameters.get("beta"),
-        "epsilon": float(method.approximation_tolerance),
+        "epsilon": float(method.approx_tol),
         "truncation_multiplier": (
             coefficient_plan.resolved_k_quadrature.parameters.get("truncation_multiplier")
         ),
@@ -1984,8 +1985,8 @@ def lchs_quadrature_summary(
         "prepared_matrix_norm": None,
         "l_norm": l_norm,
         "h_norm": None,
-        "hamiltonian_evolution_backend": he_backend,
-        "trotter_steps": int(method.trotter_steps if he_backend == "trotter" else 0),
+        "ham_evo": he_backend,
+        "trotter_steps": int(method.ham_evo.steps if he_backend == "trotter" else 0),
         **trotter_formula,
         "operator_scale": operator_scale,
         "lcu_coefficient_l1_norm": lcu_norm if lcu_norm is None or isfinite(lcu_norm) else None,
@@ -2267,7 +2268,7 @@ def _build_product_formula_select_plan(
         product_formula_occurrence_template,
     )
 
-    he_backend = method.hamiltonian_evolution_backend
+    he_backend = route_name(method.ham_evo)
     k_table = np.asarray(k_values, dtype=float).reshape(-1)
     time_table = np.asarray(elapsed_times, dtype=float).reshape(-1)
     coefficient_table = np.asarray(coefficients, dtype=complex).reshape(-1)
@@ -2351,7 +2352,7 @@ def _build_product_formula_select_plan(
     )
     occurrence_template = product_formula_occurrence_template(
         pauli_labels,
-        order=method.trotter_order,
+        order=method.ham_evo.order,
     )
     occurrence_schedule = tuple(label for label, _ in occurrence_template)
 
@@ -2380,7 +2381,7 @@ def _build_product_formula_select_plan(
         evaluations, ledger = _node_bound_coefficients(
             _union_nonidentity_labels(decomposition), q,
             {key: combined_nodes[key].traceless_terms for key in census_keys},
-            census_keys, order=int(method.trotter_order),
+            census_keys, order=int(method.ham_evo.order),
             max_work=max_select_work, max_bytes=max_bytes, census_held=census_held,
             limit_owner="LCHS", work_field="max_select_work",
             field_work_offset=charged_before,
@@ -2407,7 +2408,7 @@ def _build_product_formula_select_plan(
                 _first_use(evaluations, key, used),
                 final_time=float(elapsed_time),
                 error_budget=_lchs_trotter_error_budget_per_node(method),
-                order=method.trotter_order,
+                order=method.ham_evo.order,
             )
         else:
             record = _LCHSTrotterNodeRecord(
@@ -2416,12 +2417,12 @@ def _build_product_formula_select_plan(
                 combined_bound_value=None,
                 # Fixed-step plans keep their common repetition schedule even
                 # when one branch generator is zero. That branch's angles are zero.
-                step_count=int(method.trotter_steps),
+                step_count=int(method.ham_evo.steps),
                 selection=None,
             )
         if max_steps is not None and record.step_count > max_steps:
             raise ResourceLimitError(f"a product-formula node needs {record.step_count} steps, above the step limit "
-                                     f"{max_steps} (LCHS.max_trotter_steps)")
+                                     f"{max_steps} ({type(method.ham_evo).__name__}.max_steps)")
         slot_records.append(record)
 
     branch_step_counts = tuple(record.step_count for record in slot_records)
@@ -2443,7 +2444,7 @@ def _build_product_formula_select_plan(
     if (
         table_entries
         and he_backend == "trotter"
-        and method.lcu_select_implementation in ("auto", "structured")
+        and method.lcu_select in ("auto", "structured")
         and address_structure.get("affine", False)
     ):
         angle_peak_bytes += 24 * padded_node_count
@@ -2526,12 +2527,12 @@ def _build_product_formula_select_plan(
                 strict=True,
             )
         ),
-        formula_order=int(method.trotter_order),
+        formula_order=int(method.ham_evo.order),
         repetitions=max_step_count,
         structure_certificate=None,
         structured_generator_payload=None,
     )
-    if he_backend == "trotter" and method.lcu_select_implementation in ("auto", "structured"):
+    if he_backend == "trotter" and method.lcu_select in ("auto", "structured"):
         plan = _attach_affine_pauli_structure(
             plan,
             decomposition=decomposition,
@@ -2574,7 +2575,7 @@ def generate_lchs_product_formula_select_plan(
     its ``quadrature`` and ``dense.l_part``, ``dense.h_part``.
     """
 
-    he_backend = method.hamiltonian_evolution_backend
+    he_backend = route_name(method.ham_evo)
     # A valid dense_exact or QSP Method must not receive a product-formula plan.
     if he_backend not in ("trotter", "trotter_error_budgeted"):
         raise ValueError(

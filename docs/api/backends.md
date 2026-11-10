@@ -90,7 +90,7 @@ from nwqlib.problems.inputs import ingest_occupation
 
 problem = Expectation(state=ingest_occupation("1", num_qubits=1),
                       observable=ingest_pauli((("Z", 1.0),), num_qubits=1))
-selected = plan(problem, method=ExpectationMethod(preparation_choice="hzh"),
+selected = plan(problem, method=ExpectationMethod(prep_choice="hzh"),
                 seed=7)
 
 source = Source(name="example profile", version="1",

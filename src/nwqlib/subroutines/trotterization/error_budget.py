@@ -2044,7 +2044,7 @@ def _select_common_step(evaluation, *, coefficients, identity, tau, allowances, 
             return ValueError(
                 "; ".join(tried) + f". {why} This conservative rule for proposing step counts confirmed no feasible "
                 "count, which does not show that the target error is unattainable. A larger allowance, the "
-                "controlled_power_error_budget of a QPE method or the allowances of select_common_step, can be tried, "
+                "ctrl_power_budget of a QPE method or the allowances of select_common_step, can be tried, "
                 "but none is guaranteed to pass, because each allowance has its own counts and its own exact check"
             )
 

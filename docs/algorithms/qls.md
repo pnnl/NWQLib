@@ -8,7 +8,7 @@
 
 and rescales the result to the physical solution (Gilyén, Su, Low and Wiebe, arXiv:1806.01838v1, Theorem 17 and Corollary 18). The polynomial is the relative minimax approximation built in closed form from a Chebyshev polynomial, at the smallest odd degree that meets the tolerance unless the numerical check of its stored coefficients needs a larger degree ([Inverse polynomial accuracy](#inverse-polynomial-accuracy)). Two shortcut solvers return only the solution direction, following Dalzell, arXiv:2406.12086v2.
 
-`LinearSystem(A=A, b=b)` describes the original equation $Ax=b$. `solve(problem, method=QLS())` runs `qsvt_inverse` on the local Aer simulator and returns the physical `result.x` in the original coordinates, including scale and phase. `QLS()` uses `epsilon_inv=0.01` as the residual tolerance of its inverse polynomial, and `phase_residual_tolerance` separately limits the error of the QSP phases that implement that polynomial ([Error components](#error-budget)). Neither bounds the total physical error. For the time evolution of a linear ODE, use [LCHS](lchs.md).
+`LinearSystem(A=A, b=b)` describes the original equation $Ax=b$. `solve(problem, method=QLS())` runs `qsvt_inverse` on the local Aer simulator and returns the physical `result.x` in the original coordinates, including scale and phase. `QLS()` uses `epsilon_inv=0.01` as the residual tolerance of its inverse polynomial, and `phase_tol` separately limits the error of the QSP phases that implement that polynomial ([Error components](#error-budget)). Neither bounds the total physical error. For the time evolution of a linear ODE, use [LCHS](lchs.md).
 
 ## Solve a linear system {#solve-a-linear-system}
 
@@ -64,7 +64,7 @@ With `ResourceContext(basis="cx")`, the Hermitian inverse route can report a CX 
 
 ## Inputs, scale and padding
 
-`block_encoding_implementation` selects one explicit encoding family, `"pauli_lcu"`, `"multiplexed_pauli"`, `"banded"` or `"dense_dilation"`, which the input must support. With the default `"auto"`, QLS chooses the family from the form of $A$, as described below. See the [QLS API](../api/algorithms/qls.md) for the solver and work-limit fields.
+`block_encoding` selects one explicit encoding family, `"pauli_lcu"`, `"multiplexed_pauli"`, `"banded"` or `"dense_dilation"`, which the input must support. With the default `"auto"`, QLS chooses the family from the form of $A$, as described below. See the [QLS API](../api/algorithms/qls.md) for the solver and work-limit fields.
 
 | Input or route | Size | Limit used for this row |
 | --- | --- | --- |
@@ -140,13 +140,13 @@ These questions have different answers:
 | Question | Quantity | What answers it |
 | --- | --- | --- |
 | Does the polynomial meet its requested target? | `residual_check_value <= epsilon_inv` | Planning, with the numerical check of [Inverse polynomial accuracy](#inverse-polynomial-accuracy) |
-| Do the phases implement the polynomial? | `phase_error <= phase_residual_tolerance` | Phase synthesis, by rebuilding the polynomial's coefficients from the phases |
+| Do the phases implement the polynomial? | `phase_error <= phase_tol` | Phase synthesis, by rebuilding the polynomial's coefficients from the phases |
 | Does the measured discrepancy fit the two selected components? | $\text{raw}\le e+\kappa_{\rm poly}s\delta/\lVert y_{\rm ref}\rVert$ | The default `inverse_relative_error` comparison, described [below](#explicit-verification-and-evidence) |
 | Is the measured discrepancy below a tolerance of your choice? | $\text{raw}\le\tau$ | `QLSVerification(relative_tolerance=tau)` |
 
 None of these bounds the total physical error. QLS forms no combined output-error bound, so `result.assess(absolute_tolerance=.01)` for the first example is INCONCLUSIVE, with the sources `algorithmic_approximation`, `floating_point` and `native_execution` unknown ([Check against a tolerance](../verification.md#check-against-a-tolerance)).
 
-**Phase residual control.** Write $k=\kappa_{\rm poly}$ and let $s$ be the rescale. With `phase_residual_tolerance=None`, `qsvt_inverse` asks phase synthesis for the residual $\max(10^{-12},\,0.1\,\epsilon_{\rm inv}/(ks))$ and a shortcut solver for $10^{-12}$. A number you supply is used as given. It can be above or below the default, which also lowers or raises the memory and time of the phase synthesis. Classical execution has no phase synthesis, so the value has no effect on it. `epsilon_inv` sets the polynomial in every case, and the phase control does not change the polynomial or its degree.
+**Phase residual control.** Write $k=\kappa_{\rm poly}$ and let $s$ be the rescale. With `phase_tol=None`, `qsvt_inverse` asks phase synthesis for the residual $\max(10^{-12},\,0.1\,\epsilon_{\rm inv}/(ks))$ and a shortcut solver for $10^{-12}$. A number you supply is used as given. It can be above or below the default, which also lowers or raises the memory and time of the phase synthesis. Classical execution has no phase synthesis, so the value has no effect on it. `epsilon_inv` sets the polynomial in every case, and the phase control does not change the polynomial or its degree.
 
 The two components combine as follows. Write $A_0=A/\alpha$, $\hat b=b/\lVert b\rVert$ and $y=A_0^{-1}\hat b$, and suppose the relevant singular values lie in $[1/k,1]$. If $|kz P(z)-1|\le e_P$ for every scalar $z$ in that domain and the implemented transformation differs from $P/s$ by at most $\delta_P$ in operator norm, then the recovered vector $\tilde y$ obeys
 
@@ -156,7 +156,7 @@ The two components combine as follows. Write $A_0=A/\alpha$, $\hat b=b/\lVert b\
 
 The first term follows by expanding the error of the polynomial step in the singular basis, and the second from the triangle inequality with recovery scale $ks$. When the second argument of the default target decides, the phase term is at most $0.1\,\epsilon_{\rm inv}$, because $\lVert y\rVert\ge1$. When $10^{-12}$ decides, that statement does not hold, and `print(result)` gives the actual values. This relation holds for genuine bounds $e_P$ and $\delta_P$. The library substitutes `residual_check_value` and `phase_error`, which have no arithmetic enclosure, so every printed combination is nominal. The worst case that `print(result)` shows takes $\lVert y\rVert=1$ and can exceed `epsilon_inv` for a valid computation. It leaves out encoding, execution and sampling errors, and it is not the error of the result.
 
-A phase residual above its target raises `ValueError` with the transform lengths that were tried, and `QLS(phase_residual_tolerance=...)` chooses another target. Saved results keep the target, the residual and the transform lengths.
+A phase residual above its target raises `ValueError` with the transform lengths that were tried, and `QLS(phase_tol=...)` chooses another target. Saved results keep the target, the residual and the transform lengths.
 
 Continuing the first example:
 
@@ -218,7 +218,7 @@ The saved polynomial and phases were evaluated at 60 digits at those modes, with
 | $k$ | Degree | Up to the phase synthesis | With the phase synthesis |
 | --- | --- | --- | --- |
 | $10^4$ | 52,983 | 0.39 s, 0.29 GB | 17.7 s, 1.46 GB |
-| $10^5$ | 529,843 | 1.07 s, 1.58 GB | Refused after 92.4 s and 3.48 GB, because the arrays of the next transform length need 3.26 GB. With `phase_residual_tolerance=1e-4`, 160.2 s and 7.77 GB |
+| $10^5$ | 529,843 | 1.07 s, 1.58 GB | Refused after 92.4 s and 3.48 GB, because the arrays of the next transform length need 3.26 GB. With `phase_tol=1e-4`, 160.2 s and 7.77 GB |
 
 The memory is the peak process memory (RSS), in units of $10^9$ bytes. `max_bytes` does not bound it, and the last entry reached almost four times that limit. At $k=10^6$ with the default `max_bytes`, a plan was stopped unfinished after 400 s and more than 11 GB. These are finite observations on one input, with Python 3.12.14, NumPy 2.5.2 and SciPy 1.18.1 on an Apple computer with 36 GB of memory and one thread, and they do not bound other inputs.
 
@@ -229,8 +229,8 @@ For the shortcuts, let $B$ be $A/\alpha$ after input padding, let $\hat b$ be th
 | Configuration | Action | Available output |
 | --- | --- | --- |
 | `QLS()` | Odd relative minimax inverse polynomial with the numerical check of its residual, applied by a QSVT circuit of phases, projectors and queries | Physical `Solution`, physical or unit `StateVector`, `NormSquared`, `QuadraticForm`, `NormalizedExpectation`, `Samples` |
-| `QLS(solver="shortcut_native_svp", encoded_solution_norm_estimate=t)` | Dalzell kernel reflection on the right singular vectors of $G_t$ | Unit `StateVector` modulo global phase, `NormalizedExpectation`, `Samples` |
-| `QLS(solver="shortcut_dilation", encoded_solution_norm_estimate=t)` | Even polynomial on the Hermitian dilation of $G_t$ | Same unit-only outputs |
+| `QLS(solver="shortcut_native_svp", norm_estimate=t)` | Dalzell kernel reflection on the right singular vectors of $G_t$ | Unit `StateVector` modulo global phase, `NormalizedExpectation`, `Samples` |
+| `QLS(solver="shortcut_dilation", norm_estimate=t)` | Even polynomial on the Hermitian dilation of $G_t$ | Same unit-only outputs |
 
 For the small problem above, an explicitly supplied `t=1.2` gives a valid unit-direction request:
 
@@ -238,7 +238,7 @@ For the small problem above, an explicitly supplied `t=1.2` gives a valid unit-d
 from nwqlib import StateVector
 
 shortcut = QLS(solver="shortcut_native_svp",
-               encoded_solution_norm_estimate=1.2)
+               norm_estimate=1.2)
 direction = StateVector(normalization="unit",
                         global_phase="modulo_global_phase")
 direction_result = solve(problem, method=shortcut, output=direction, seed=7)
@@ -261,9 +261,9 @@ accuracy not assessed
 
 The exact unit direction is $(5,1)/\sqrt{26}\approx(0.980581,0.196116)$. That `t` is specific to this example and does not provide a physical solution magnitude.
 
-<a id="shortcut-direction-relation"></a>The polynomial of a shortcut has `epsilon_inv` as $\sqrt2$ times the kernel-reflection parameter $\eta$, and its phase target defaults to $10^{-12}$ unless `phase_residual_tolerance` is set. Its printed line bounds only the effect of the phases on the direction. For an ideal selected vector $v$ of norm $m$ and a phase perturbation $\delta<m$, the two normalized vectors differ by at most $2\delta/m$. Dalzell's success lower bound (arXiv:2406.12086v2, App. C, Theorem 1) gives $m^2s^2\ge\Lambda=\sin^2(2\theta)\bigl((1-\eta)/(1+\eta)\bigr)^2$ with $\theta=\arctan(\lVert y\rVert/t)$. As a function of $n=\lVert y\rVert$, $\sin^2(2\theta)=4t^2n^2/(t^2+n^2)^2$ rises and then falls, so its minimum over $[1,\kappa_{\rm poly}]$ lies at an endpoint, which gives the printed term $2s\delta/\sqrt\Lambda$. This is conditional on the spectral assumption and the kernel-reflection relation, and the supplied $t$ is not treated as a proved solution norm. It leaves out the polynomial's own direction error, the numerical formation of the stored reflection table and execution, so it is no total direction bound. The `shortcut_direction` comparison is a separate numerical check against a reference.
+<a id="shortcut-direction-relation"></a>The polynomial of a shortcut has `epsilon_inv` as $\sqrt2$ times the kernel-reflection parameter $\eta$, and its phase target defaults to $10^{-12}$ unless `phase_tol` is set. Its printed line bounds only the effect of the phases on the direction. For an ideal selected vector $v$ of norm $m$ and a phase perturbation $\delta<m$, the two normalized vectors differ by at most $2\delta/m$. Dalzell's success lower bound (arXiv:2406.12086v2, App. C, Theorem 1) gives $m^2s^2\ge\Lambda=\sin^2(2\theta)\bigl((1-\eta)/(1+\eta)\bigr)^2$ with $\theta=\arctan(\lVert y\rVert/t)$. As a function of $n=\lVert y\rVert$, $\sin^2(2\theta)=4t^2n^2/(t^2+n^2)^2$ rises and then falls, so its minimum over $[1,\kappa_{\rm poly}]$ lies at an endpoint, which gives the printed term $2s\delta/\sqrt\Lambda$. This is conditional on the spectral assumption and the kernel-reflection relation, and the supplied $t$ is not treated as a proved solution norm. It leaves out the polynomial's own direction error, the numerical formation of the stored reflection table and execution, so it is no total direction bound. The `shortcut_direction` comparison is a separate numerical check against a reference.
 
-Shortcut methods need an explicit numeric `1 <= t <= polynomial_kappa` for quantum execution. Classical execution also accepts `"grid"`, `"noisy_binary_search"` and `"linear_kappa_sequence"` as values of `encoded_solution_norm_estimate`, not of `solver`. These named norm searches evaluate their success-probability model classically and report its solves, decompositions and search rows, one row for each probe of $t$ that the search evaluates. Before the model runs, planning computes each model's search rows, trials and queries from `polynomial_kappa` and checks them against the limits, using the same exponent `ceil(log2(polynomial_kappa))` as the model, so that planning and the model count the same search rows. The planned trials and queries are the quantum trials and queries that the model predicts for the search, and no quantum job runs. The linear model evaluates its recurrence from the factorization of the original $A$, computed at planning or, when supplied `alpha` and `kappa` make spectral selection unnecessary, once during the evaluation. Grid and noisy search use one solve of the encoded system for all their probes, and the evaluation records the norm of that solution as the encoded reference norm. No shortcut uses a reference to reconstruct a missing physical magnitude or physical global phase.
+Shortcut methods need an explicit numeric `1 <= t <= polynomial_kappa` for quantum execution. Classical execution also accepts `"grid"`, `"noisy_binary_search"` and `"linear_kappa_sequence"` as values of `norm_estimate`, not of `solver`. These named norm searches evaluate their success-probability model classically and report its solves, decompositions and search rows, one row for each probe of $t$ that the search evaluates. Before the model runs, planning computes each model's search rows, trials and queries from `polynomial_kappa` and checks them against the limits, using the same exponent `ceil(log2(polynomial_kappa))` as the model, so that planning and the model count the same search rows. The planned trials and queries are the quantum trials and queries that the model predicts for the search, and no quantum job runs. The linear model evaluates its recurrence from the factorization of the original $A$, computed at planning or, when supplied `alpha` and `kappa` make spectral selection unnecessary, once during the evaluation. Grid and noisy search use one solve of the encoded system for all their probes, and the evaluation records the norm of that solution as the encoded reference norm. No shortcut uses a reference to reconstruct a missing physical magnitude or physical global phase.
 
 `execution="classical"` evaluates the planned inverse or shortcut model numerically, and its Result makes no claim of quantum execution. `Samples` requires quantum execution with a positive `shots`. Vector outputs require exact readout (`shots=None`), in which the amplitudes are computed without shot sampling, subject to numerical rounding.
 
@@ -346,7 +346,7 @@ NWQLib's tests check the inverse polynomial against an exact rational evaluation
 
 ## Limits
 
-- `epsilon_inv` sets the residual tolerance of the inverse polynomial and `phase_residual_tolerance` that of its phases. Neither bounds the total physical error, and QLS forms no combined output-error bound ([Error components](#error-budget)).
+- `epsilon_inv` sets the residual tolerance of the inverse polynomial and `phase_tol` that of its phases. Neither bounds the total physical error, and QLS forms no combined output-error bound ([Error components](#error-budget)).
 - The shortcut solvers return only the unit solution direction, and quantum execution needs an explicit numeric `1 <= t <= polynomial_kappa` ([Methods and outputs](#methods-and-outputs)). Their printed phase relation covers only the phase synthesis, relative to the selected polynomial. QLS has no assessment of the total direction error ([Shortcut direction relation](#shortcut-direction-relation)).
 - The circuit memory estimate is calibrated at a few points on the Aer simulator and is not a bound on memory, and some calls have no estimate ([Circuit memory estimate](#circuit-memory-estimate)).
 - QLS computes no singular values of a Pauli $A$ or of a non-dense $A$ with a supplied encoding, so these inputs need `QLS(kappa=K)` with $K\ge\alpha/\sigma_{\min}(A)$. QLS has no CSR or CSC route ([Inputs, scale and padding](#inputs-scale-and-padding)).

@@ -76,8 +76,8 @@ def main(argv=None):
         )
         method = QLS(
             solver=solver,
-            block_encoding_implementation="dense_dilation",
-            encoded_solution_norm_estimate=None if inverse else 1.5,
+            block_encoding="dense_dilation",
+            norm_estimate=None if inverse else 1.5,
         )
         selected = nwqlib.plan(problem, method=method, output=output, execution="classical", seed=7)
         with TemporaryDirectory() as directory:

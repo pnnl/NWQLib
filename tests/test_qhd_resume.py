@@ -353,7 +353,7 @@ def test_resume_refuses_another_backend_another_layer_and_a_second_controller(tm
         resume_augmented_lagrangian(tmp_path / "a", backend=AerBackend.from_noise_model(_noise_model()),
                                     progress=False)
     assert (tmp_path / "a" / "controller.json").read_bytes() == record and not (tmp_path / "a" / "iterations").exists()
-    with pytest.raises(ValueError, match="holds format"):
+    with pytest.raises(ValueError, match="holds format(?s:.*)run the problem again in a new directory"):
         resume_augmented_lagrangian(tmp_path / "refined", backend=None)
     from nwqlib.algorithms.qhd._durable import Directory
 

@@ -8,7 +8,7 @@ from nwqlib.algorithms import QFD
 from nwqlib.algorithms.qfd import chemistry_evolution_terms
 ```
 
-Every object on this page imports from `nwqlib.algorithms.qfd`, and `QFD` and `QFDResult` also import from `nwqlib.algorithms`.
+Every object on this page imports from `nwqlib.algorithms.qfd`, and `QFD` also imports from `nwqlib.algorithms`.
 
 `QFD` solves the Hamiltonian pencil of Parrish and McMahon, arXiv:1909.08925v1, Sec. II.C, Eqs. (5)–(8), with the states of one fixed product-formula step in place of exact time evolution. It obtains the projected matrices H and S as `FixedGCIM` does, from joint states of an ancilla and the system, so the [GCiM and ADAPT](gcim.md) page documents the objects that the two methods share: `PencilAcquisition`, `PencilSampling`, `ShotAllocation`, `ProjectedPencil` and the matrix-element records that `QFDResult` holds.
 
@@ -43,5 +43,6 @@ With `evolution="fermionic_blocks"`, `QFD` builds V from an explicit fermionic g
     options:
       heading_level: 3
       members: false
+      show_bases: false
 
 `solve` calls `plan` and the other hooks of a Method. [Extending NWQLib](../extending.md) describes them.

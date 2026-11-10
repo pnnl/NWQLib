@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import ClassVar
 
 from nwqlib._limits import ResourceLimitError  # noqa: F401 - public as nwqlib.algorithms.ResourceLimitError
-from nwqlib.core.records import Record, Source, Text
+from nwqlib.core.records import Record, Source, Text, _ConstructorDisplay
 
 
 @dataclass(frozen=True)
@@ -129,7 +129,7 @@ class AlgorithmDescriptor(Record):
                       domain="selected scientific method", reference=self.method)
 
 
-class Method(Record):
+class Method(_ConstructorDisplay, Record):
     """Base class of every method: an immutable configuration that plans, runs and analyzes one kind of problem.
 
     Subclass it to add a method. Declare the class attribute
@@ -142,6 +142,14 @@ class Method(Record):
     and changing a field gives a different Plan. Running, preparation,
     submission, saving and reports call the hooks below and never branch on the
     method's family, so a new Method needs no change elsewhere in NWQLib.
+    A Method and its option records print in constructor syntax, with the
+    options that differ from their defaults, such as
+    `LCHS(ham_evo=Trotter(steps=4))`. An input such as an initial state
+    appears as a summary in angle brackets, which must be replaced with the
+    actual input before using the display as a constructor call. The display
+    leaves out revision ancestry, so copying its configuration need not
+    preserve the record's content id. `model_dump()` returns every field in
+    full.
     [Add a Method](../algorithm_protocol.md) states every requirement,
     including the protected hooks of Plan and Result below, and
     [Run your own circuit](../own_circuit.md) shows the smallest Method.
@@ -502,6 +510,19 @@ class Method(Record):
             ValueError: Always, in the default.
         """
         raise ValueError("this method has no selected verification operation")
+
+    def __dir__(self):
+        # Tab completion on a Method lists its configuration fields, the
+        # Record operations and the methods its own class adds. The protocol
+        # methods declared above (_PROTOCOL_NAMES), overrides included, stay
+        # on the class, in help() and in the extension guide.
+        return [name for name in super().__dir__()
+                if name not in _PROTOCOL_NAMES or name in type(self).model_fields]
+
+
+# Public methods that the Method base class declares, left out of dir() of an instance.
+_PROTOCOL_NAMES = frozenset(name for name, value in vars(Method).items()
+                            if not name.startswith("_") and callable(value))
 
 
 class ApplicabilityError(ValueError):

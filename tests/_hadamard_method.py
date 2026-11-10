@@ -201,7 +201,7 @@ class HadamardPauliExpectation(Method):
 
     descriptor: ClassVar[AlgorithmDescriptor] = DESCRIPTOR
     result_type: ClassVar[type[Result]] = HadamardExpectationResult
-    preparation_choice: Literal["native", "hzh"] = "native"
+    prep_choice: Literal["native", "hzh"] = "native"
     max_bytes: PositiveInt = 64 * 1024**2
 
     def validate_point(self, plan, experiment, values):
@@ -251,7 +251,7 @@ class HadamardPauliExpectation(Method):
             raise ValueError("shots must be a positive integer or None")
         # Reuse native block selection: prepare psi, create |+> on the ancilla,
         # control sign(c)P, and undo H. Its ancilla mean contains the coefficient sign.
-        system = select_preparation("system_prep", problem.state, choice=self.preparation_choice)
+        system = select_preparation("system_prep", problem.state, choice=self.prep_choice)
         h = select_preparation("h", ingest_vector((1.0, 1.0), max_bytes=self.max_bytes))
         action = transform_block(
             "controlled_pauli",
@@ -387,7 +387,7 @@ class HadamardPauliExpectation(Method):
         return result._attach(plan, data)
 
     def save_archive(self, plan, files):
-        from nwqlib.blocks._archive import write_blocks
+        from nwqlib.blocks import write_blocks
 
         return dict(
             plan=plan.to_record(),
@@ -398,7 +398,7 @@ class HadamardPauliExpectation(Method):
 
     @classmethod
     def load_archive(cls, saved, files):
-        from nwqlib.blocks._archive import read_blocks
+        from nwqlib.blocks import read_blocks
 
         fields = saved["plan"]
         method = cls.model_validate(fields["method"]["fields"])

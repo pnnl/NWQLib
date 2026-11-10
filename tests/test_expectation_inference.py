@@ -39,7 +39,7 @@ def make_choice(
     return nwqlib.plan(
         problem,
         method=ExpectationMethod(
-            preparation_choice=preparation,
+            prep_choice=preparation,
             inference=inference or BinaryInferenceOptions(),
             mitigation=mitigation,
         ),

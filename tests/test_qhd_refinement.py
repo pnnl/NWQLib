@@ -416,7 +416,7 @@ def test_mode_or_mean_reports_the_mean_position_in_original_coordinates(monkeypa
     state = np.array([0.25, 0.75, 0.5, 0.25, 0.25], dtype=complex)
     monkeypatch.setattr(owner, "_evolve_restricted", lambda *args: state)
     problem = Optimization(objective=(x + sp.Rational(1, 4)) ** 2, variables=(x,), bounds=((-1.0, 1.0),))
-    result = refine_box(problem, qhd=QHD(num_grid_points=5, include_boundary_points=True),
+    result = refine_box(problem, qhd=QHD(num_grid_points=5, boundary_points=True),
                         options=BoxRefinement(scaling="search_model", point_rule="mode_or_mean", max_levels=1),
                         execution="classical", seed=3, progress=False)
     level = result.levels[0]
@@ -446,7 +446,7 @@ def test_flat_or_unresolved_objective_stops_before_any_solve(scaling, objective,
     # table value, where the tables cannot tell the variation from evaluation error, and dividing by E
     # would turn it into a potential of order one, so it stops as unresolved_objective.
     problem = Optimization(objective=objective, variables=(x,), bounds=(bounds,))
-    result = refine_box(problem, qhd=QHD(num_grid_points=points, num_steps=2, include_boundary_points=False),
+    result = refine_box(problem, qhd=QHD(num_grid_points=points, num_steps=2, boundary_points=False),
                         options=BoxRefinement(scaling=scaling), execution="classical", seed=3,
                         progress=False)
     assert result.termination == termination
@@ -548,7 +548,7 @@ def test_stall_split_follows_the_end_mass_lemma_and_the_clearest_valley(monkeypa
     state = np.outer(a, b).reshape(-1).astype(complex)
     monkeypatch.setattr(owner, "_evolve_restricted", lambda *args: state)
     eta = 0.96875
-    qhd = QHD(num_grid_points=5, include_boundary_points=True, keep_state=True)
+    qhd = QHD(num_grid_points=5, boundary_points=True, keep_state=True)
     options = BoxRefinement(scaling="search_model", mass_threshold=eta, max_levels=3, stall_split="best_region")
 
     def run(objective, bounds=((0.0, 1.0), (-1.0, 3.0)), settings=options):
@@ -650,7 +650,7 @@ def test_stall_split_follows_the_end_mass_lemma_and_the_clearest_valley(monkeypa
     joint = np.array([1, 5, 8, 0, 9, 0, 6, 0, 7], dtype=complex) / 16
     monkeypatch.setattr(owner, "_evolve_restricted", lambda *args: joint)
     valley = refine_box(Optimization(objective=x + y, variables=(x, y), bounds=((0.0, 1.0), (0.0, 1.0))),
-                        qhd=QHD(num_grid_points=3, include_boundary_points=True, keep_state=True),
+                        qhd=QHD(num_grid_points=3, boundary_points=True, keep_state=True),
                         options=options.model_copy(update=dict(mass_threshold=0.9)), execution="classical",
                         seed=3, progress=False).levels[0]
     assert valley.point_indices == (1, 1)
@@ -997,7 +997,7 @@ def test_an_unevaluated_objective_reopens_as_supplied_from_a_refinement_archive_
     quotient = sp.Mul(x + sp.Rational(11, 16), sp.Pow(x + sp.Rational(11, 16), -1, evaluate=False), evaluate=False)
     problem = Optimization(objective=sp.Add(x, quotient, evaluate=False), variables=(x,), bounds=((-1.0, 1.0),))
     assert problem.objective.doit() == x + 1 != problem.objective
-    result = refine_box(problem, qhd=QHD(num_grid_points=5, include_boundary_points=True),
+    result = refine_box(problem, qhd=QHD(num_grid_points=5, boundary_points=True),
                         options=BoxRefinement(max_levels=1), execution="classical", seed=1,
                         directory=tmp_path / "run", progress=False)
     path = result.save(tmp_path / "saved")

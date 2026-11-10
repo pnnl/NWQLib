@@ -389,6 +389,31 @@ def check_math_fences_open_no_html_tags(failures: list[str]) -> None:
                 )
 
 
+_PYTHON_FENCE = re.compile(r"(?ms)^[ \t]*```python[^\n]*\n(.*?)^[ \t]*```[ \t]*$")
+_NWQLIB_IMPORT = re.compile(r"^\s*(?:from\s+(nwqlib(?:\.\w+)*)\s+import\b|import\s+(nwqlib(?:\.\w+)*))", re.M)
+
+
+def check_user_code_imports_no_private_modules(failures: list[str]) -> None:
+    """Reject imports of underscore modules of nwqlib in the code users copy.
+
+    Python blocks of the guides and the notebook generators show users how to
+    write their own code, and an underscore module can change without notice.
+    The maintainer scripts in docs/scripts are not user code and are not checked.
+    """
+    paths = [*sorted((REPO_ROOT / "docs").rglob("*.md")), *sorted((REPO_ROOT / "examples" / "generators").rglob("*.py"))]
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        blocks = ([(match.start(1), match.group(1)) for match in _PYTHON_FENCE.finditer(text)]
+                  if path.suffix == ".md" else [(0, text)])
+        for offset, code in blocks:
+            for match in _NWQLIB_IMPORT.finditer(code):
+                module = match.group(1) or match.group(2)
+                if any(part.startswith("_") for part in module.split(".")):
+                    line = text.count("\n", 0, offset + match.start()) + 1
+                    failures.append(f"{path.relative_to(REPO_ROOT)}:{line}: user code imports the underscore "
+                                    f"module {module}; import its public name instead")
+
+
 class _RenderedPage(HTMLParser):
     """Read document content, excluding theme navigation and external assets."""
 
@@ -484,6 +509,7 @@ def main() -> int:
         check_backticked_implementation_references,
         check_internal_markdown_links_resolve,
         check_math_fences_open_no_html_tags,
+        check_user_code_imports_no_private_modules,
     )
     print("policy checks: " + ", ".join(check.__name__ for check in checks))
     for check in checks:

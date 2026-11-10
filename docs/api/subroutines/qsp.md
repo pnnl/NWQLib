@@ -47,7 +47,7 @@ Two solvers return phase factors. `solve_wx_qsp_phases` synthesizes a real defin
 
 ## Imaginary-time filter
 
-`imaginary_time_expansion` and `select_imaginary_time_degree` choose the modified-Bessel polynomial of `exp(-beta(1 - x))` on `[-1, 1]` from a tail bound, and `prepare_imaginary_time_filter` fits its phases. LCHS uses this filter for `qsp_route="imaginary_gqet"` when H is a multiple of the identity, so the solution needs no k quadrature.
+`imaginary_time_expansion` and `select_imaginary_time_degree` choose the modified-Bessel polynomial of `exp(-beta(1 - x))` on `[-1, 1]` from a tail bound, and `prepare_imaginary_time_filter` fits its phases. LCHS uses this filter for `QSPBlockEncoding(route="imaginary_gqet")` when H is a multiple of the identity, so the solution needs no k quadrature.
 
 ::: nwqlib.subroutines.qsp.imaginary_time
     options:

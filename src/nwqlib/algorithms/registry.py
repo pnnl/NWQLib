@@ -82,6 +82,28 @@ class Registration:
                     "registration descriptor differs from its Method configuration owner"
                 )
 
+    def __str__(self):
+        """Summarize the registration in one line: name, version, declared families and factory path.
+
+        The problem and output families come from `descriptor`. Without a
+        descriptor, the line says the families are not loaded, and nothing
+        is imported to read them. The fields hold the Source and descriptor
+        in full.
+        """
+        head = f"Registration {self.source.name}@{self.source.version}: "
+        if self.descriptor is None:
+            families = "families not loaded"
+        else:
+            families = (f"problem families {', '.join(self.descriptor.problem_families) or 'none'}; "
+                        f"output families {', '.join(self.descriptor.output_families) or 'none'}")
+        return f"{head}{families}; factory {self.factory}"
+
+    def __repr__(self):
+        return str(self)
+
+    def _repr_pretty_(self, printer, cycle):
+        printer.text(f"{type(self).__name__}(...)" if cycle else str(self))
+
 
 def third_party_registrations() -> tuple[Registration, ...]:
     """Return a registration for each installed `nwqlib.algorithms` entry point, without loading its code.
@@ -274,8 +296,8 @@ def algorithm_card(registration: Registration) -> dict:
 def options_schema(registration: Registration) -> dict:
     """Return the JSON schema of a registered Method's configuration, with its required fields and defaults.
 
-    `nwqlib options METHOD` prints it. The schema comes from the Method class
-    (`model_json_schema()`), so no required input is guessed.
+    `nwqlib options METHOD --json` prints it. The schema comes from the Method
+    class (`model_json_schema()`), so no required input is guessed.
 
     Args:
         registration (Registration): A registration whose `method_type` is known.
@@ -288,8 +310,18 @@ def options_schema(registration: Registration) -> dict:
             installed extension found by `third_party_registrations`. Select the
             extension's code explicitly in Python first.
     """
+    return _configured_type(registration).model_json_schema()
+
+
+def _configured_type(registration: Registration) -> type[Method]:
+    """Return the Method class of a registration, refusing an extension whose code is not loaded.
+
+    Raises:
+        ValueError: If the registration's Method class is not loaded, as for an
+            installed extension found by `third_party_registrations`.
+    """
     if registration.method_type is None:
         raise ValueError(
             "configuration unavailable: explicitly select trusted external code in Python"
         )
-    return registration.method_type.model_json_schema()
+    return registration.method_type

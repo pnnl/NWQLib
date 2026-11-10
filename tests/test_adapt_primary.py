@@ -83,7 +83,7 @@ def test_optimizer_global_query_limit_and_saved_incumbent():
         max_iterations=1,
         optimize_every_m=1,
         optimize_rounds_n=20,
-        optimize_max_evaluations=3,
+        max_evals=3,
     )
     result = Run(plan).wait(timeout=10, poll_interval=0)
     assert result.energy_queries <= 3 and result.optimizer_attempts == 1
@@ -101,7 +101,7 @@ def test_quantum_optimizer_reaches_analytic_minimum_through_insertion_queries():
         max_iterations=1,
         optimize_every_m=1,
         optimize_rounds_n=20,
-        optimize_max_evaluations=60,
+        max_evals=60,
     )
     result = Run(plan).wait(timeout=10, poll_interval=0)
     assert result.optimizer_attempts == 1 and result.stop_reason == "pool_exhausted"
@@ -119,7 +119,7 @@ def test_residual_stop_at_first_projection_below_threshold():
         theta=pi / 4,
         max_iterations=3,
         stop_criterion="residual_norm",
-        residual_norm_tolerance=0.5,
+        residual_tol=0.5,
     )
     result = Run(plan).wait(timeout=10, poll_interval=0)
     # Exact values; the only error is binary64 roundoff in the unit-scale solve.
@@ -139,7 +139,7 @@ def test_residual_stop_at_first_projection_below_threshold():
             theta=pi / 4,
             max_iterations=3,
             stop_criterion="residual_norm",
-            residual_norm_tolerance=tolerance,
+            residual_tol=tolerance,
         )
         stopped = Run(boundary).wait(timeout=10, poll_interval=0)
         assert stopped.stop_reason == "residual_norm_threshold" and stopped.selected == selected
@@ -148,7 +148,7 @@ def test_residual_stop_at_first_projection_below_threshold():
 def test_residual_stop_needs_an_explicit_tolerance_in_the_energy_unit():
     """The residual has the energy unit of H, so no default value can suit every unit."""
     pool = (ingest_pauli((("Y", 1j),), num_qubits=1),)
-    with pytest.raises(ValueError, match="residual_norm_tolerance"):
+    with pytest.raises(ValueError, match="residual_tol"):
         ADAPT(initial_state=(1, 1), pool=pool, stop_criterion="residual_norm")
 
 
@@ -177,7 +177,7 @@ def test_optimized_run_follows_the_operator_scale(execution):
     moves the angles by order one. The energy compared is the Ritz value of a full-rank basis, not the product energy.
     The Hartree run must iterate, or the comparison would pass with both runs at their first point.
     """
-    settings = dict(optimize_every_m=1, optimize_rounds_n=4, optimize_max_evaluations=60, max_iterations=2)
+    settings = dict(optimize_every_m=1, optimize_rounds_n=4, max_evals=60, max_iterations=2)
     a, b = 4.3597447222071e-18, 3e-18
     rows = tuple((p, a * c + (b if p == "II" else 0.0)) for p, c in _TWO_QUBIT_TERMS)
     base = _two_qubit_adapt(ingest_pauli(_TWO_QUBIT_TERMS, num_qubits=2), execution, **settings)
@@ -231,10 +231,10 @@ def test_default_thresholds_follow_the_operator_scale(representation):
     assert rec.energy_scale == pytest.approx(scale, rel=1e-14, abs=0.0)
     assert moved_rec.energy_scale == pytest.approx(a * scale, rel=1e-14, abs=0.0)
     assert moved_rec.gradient_norm_floor == pytest.approx(a * rec.gradient_norm_floor, rel=1e-14, abs=0.0)
-    assert moved_rec.energy_change_tolerance == pytest.approx(a * rec.energy_change_tolerance, rel=1e-14, abs=0.0)
-    assert moved_rec.pauli_coefficient_cutoff == pytest.approx(a * rec.pauli_coefficient_cutoff, rel=1e-14, abs=0.0)
+    assert moved_rec.energy_tol == pytest.approx(a * rec.energy_tol, rel=1e-14, abs=0.0)
+    assert moved_rec.pauli_cutoff == pytest.approx(a * rec.pauli_cutoff, rel=1e-14, abs=0.0)
     # What the user gave stays in the Method.
-    assert base.plan.method.gradient_norm_floor is None and base.plan.method.pauli_coefficient_cutoff is None
+    assert base.plan.method.gradient_norm_floor is None and base.plan.method.pauli_cutoff is None
 
 
 @pytest.mark.parametrize("representation", ["dense", "csr", "csc"])

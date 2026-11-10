@@ -12,10 +12,10 @@ def test_original_hermiticity_and_explicit_pool_correction_have_distinct_owners(
     with pytest.raises(ValueError, match="exactly Hermitian"):
         Eigenproblem(A=[[1, 1e-15], [0, -1]])
     near = ingest_pauli((("Y", 1j + 1e-14),), num_qubits=1)
-    plan = plan_for(pool=(near,), input_symmetry_tolerance=1e-12)
+    plan = plan_for(pool=(near,), symmetry_tol=1e-12)
     assert plan.reconstruction.pool[0].symmetry.correction_applied
     with pytest.raises(ValueError, match="anti-Hermitian"):
-        plan_for(pool=(near,), input_symmetry_tolerance=0)
+        plan_for(pool=(near,), symmetry_tol=0)
 
 
 @pytest.mark.parametrize(
@@ -238,7 +238,7 @@ def test_every_classical_plan_charges_the_energy_query_of_its_longest_chain():
                    initial_state=ingest_occupation((0,) * 10, num_qubits=10),
                    pool_rows=((("Y" + "I" * 9, 1j),), (("I" * 9 + "Y", 1j),)))
     plans = (plan_for(**setting),
-             plan_for(**setting, optimize_every_m=1, optimize_rounds_n=2, optimize_max_evaluations=3))
+             plan_for(**setting, optimize_every_m=1, optimize_rounds_n=2, max_evals=3))
     length = plans[0].reconstruction.max_selections
     frontiers = [adapt.classical_frontier_bytes(p.method, p._native["inputs"], length, 10) for p in plans]
     assert frontiers[0] == frontiers[1] == plans[0].construction.kernels[0].workspace[0].bytes \

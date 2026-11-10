@@ -1,6 +1,6 @@
 """Sampled LCHS pairs on a finite QSP phase bank, through the public workflow.
 
-The Methods here plan banks at bucket time tau = 0.4 with approximation_tolerance 0.2.
+The Methods here plan banks at bucket time tau = 0.4 with approx_tol 0.2.
 Their phases are not fitted again: ``data/lchs_sampled_qsp_targets.json`` holds the three prepared targets
 (the deterministic member and the two members of the stochastic bank with cutoff 0) in the LCHS archive
 format. The ``saved_phases`` fixture serves the phases of a requested target only when its polynomial and recovery
@@ -25,7 +25,7 @@ from test_ibm_backend import logical_row_operator, runtime_api, template_row_out
 import nwqlib
 from nwqlib import LinearDynamics, plan, solve
 from nwqlib._limits import ResourceLimitError
-from nwqlib.algorithms.lchs import LCHS, ProviderConfig
+from nwqlib.algorithms.lchs import LCHS, PTSC, ProviderConfig, SampledPairs, Trotter, TrotterErrorBudgeted
 from nwqlib.operators import ingest_cartesian, ingest_pauli
 from nwqlib.problems.records import Accuracy, NormalizedExpectation, NormSquared, QuadraticForm
 
@@ -123,13 +123,15 @@ CASES = {
 }
 
 
-def _sampled(**options):
-    return LCHS(observable_estimator="sampled_pairs", hamiltonian_evolution_backend="qsp_block_encoding",
-                **{"approximation_tolerance": X02, **LIMITS, **options})
+def _sampled(pairs=SampledPairs(), **options):
+    return LCHS(estimator=pairs, ham_evo="qsp_block_encoding",
+                **{"approx_tol": X02, **LIMITS, **options})
 
 
-def _signed(**options):
-    return _sampled(k_quadrature=SIGNED, pair_source_time="discrete", duhamel_nodes=1, **options)
+def _signed(pairs=None, **options):
+    """The SIGNED one-node sampled QSP Method; `pairs` holds further SampledPairs options."""
+    return _sampled(SampledPairs(source_time="discrete", **(pairs or {})), k_quadrature=SIGNED, duhamel_nodes=1,
+                    **options)
 
 
 def _within_rounding(saved, requested):
@@ -398,7 +400,7 @@ def test_sampled_qsp_rows_match_exact_cross_terms_and_count_their_queries(saved_
     from nwqlib.algorithms.protocol import ApplicabilityError
     from nwqlib.subroutines.qsp.evolution import plan_qubitized_evolution
     problem, generator, psi, (c_l, c_h) = CASES[case]
-    selected = plan(problem, method=_signed(pair_qsp_bank=bank, pair_repeats=2),
+    selected = plan(problem, method=_signed(dict(qsp_bank=bank, repeats=2)),
                     output=QuadraticForm(observable=OBSERVABLE), shots=48, seed=5)
     rec, payload = selected.reconstruction, selected._native["native_data"]
     rows, record = rec.pair_rows, rec.pair_qsp
@@ -462,7 +464,7 @@ def test_sampled_qsp_rows_match_exact_cross_terms_and_count_their_queries(saved_
         assert emitted * 2 == resources["scaled_query_calls_total"] > 0
     if case == "supplied":
         with pytest.raises(ApplicabilityError, match="supplied block encoding of L or H"):
-            plan(problem, method=LCHS(hamiltonian_evolution_backend="qsp_block_encoding"),
+            plan(problem, method=LCHS(ham_evo="qsp_block_encoding"),
                  output=QuadraticForm(observable=OBSERVABLE), shots=8)
         unknown = dict(initial_state=[1, 0], source=[0, 1j], time=1.)
         for refused in (_supplied(A_GENERAL, .2, "general_a_unknown", error_bound=None, hermitian=False),
@@ -503,7 +505,7 @@ def test_sampled_qsp_public_outputs_follow_the_dense_solution(saved_phases):
     A = (.3 + .1j) * PAULI["I"] + .4j * PAULI["Z"]
     problem = LinearDynamics(A=ingest_pauli([("I", .3 + .1j), ("Z", .4j)], num_qubits=1), initial_state=u0,
                              source=b, time=time)
-    method = _sampled(pair_source_time="discrete", duhamel_nodes=2)
+    method = _sampled(SampledPairs(source_time="discrete"), duhamel_nodes=2)
     selected = plan(problem, method=method, output=QuadraticForm(observable=OBSERVABLE), shots=24, seed=5)
     rec, payload = selected.reconstruction, selected._native["native_data"]
     rows, bias, bank = rec.pair_rows, rec.pair_bias, rec.pair_qsp
@@ -605,7 +607,7 @@ def test_saved_bank_replay_and_partial_continuation(saved_phases, tmp_path, monk
     from nwqlib import _prepared_execution as acquisition
     from nwqlib._prepared_execution import Run
     from nwqlib.algorithms.lchs import sampled_pair_progress, sampled_plan, sampled_qsp, sampled_qsp_bank, sampled_rows
-    chosen = plan(MIXED, method=_signed(pair_qsp_bank=STOCHASTIC0, pair_repeats=3),
+    chosen = plan(MIXED, method=_signed(dict(qsp_bank=STOCHASTIC0, repeats=3)),
                   output=QuadraticForm(observable=OBSERVABLE), shots=30, seed=7)
     for owner, name in ((sampled_rows, "draw_pair_rows"), (sampled_plan, "draw_pair_rows"),
                         (sampled_qsp, "bind_rows"), (sampled_qsp_bank, "prepare_qubitized_target")):
@@ -647,11 +649,13 @@ def test_saved_bank_replay_and_partial_continuation(saved_phases, tmp_path, monk
 
 
 @pytest.mark.parametrize("options, output", [
-    (dict(hamiltonian_evolution_backend="qsp_block_encoding", approximation_tolerance=X02, **LIMITS),
+    (dict(ham_evo="qsp_block_encoding", estimator=SampledPairs(repeats=3),
+          approx_tol=X02, **LIMITS),
      QuadraticForm(observable=ingest_pauli([("X", 1.), ("I", .5)], num_qubits=1))),
-    (dict(hamiltonian_evolution_backend="trotter", trotter_steps=2), NormSquared()),
-    (dict(hamiltonian_evolution_backend="trotter_error_budgeted", trotter_order=1, pair_product_formula="ptsc",
-          pair_pf_allowance=1e-2, pair_mu_cap=1.5, pair_taylor_cutoff=8),
+    (dict(ham_evo=Trotter(steps=2), estimator=SampledPairs(repeats=3)),
+     NormSquared()),
+    (dict(ham_evo=TrotterErrorBudgeted(order=1), estimator=SampledPairs(
+        repeats=3, product_formula=PTSC(pf_allowance=1e-2, mu_cap=1.5, taylor_cutoff=8))),
      QuadraticForm(observable=ingest_pauli([("X", 1.), ("I", .5)], num_qubits=1)))],
     ids=["qsp-quadratic", "plain-norm", "ptsc-quadratic"])
 def test_sampled_accuracy_selects_the_least_row_count_in_one_pass(saved_phases, monkeypatch, options, output):
@@ -661,7 +665,7 @@ def test_sampled_accuracy_selects_the_least_row_count_in_one_pass(saved_phases, 
     QSP bank, the recipe's score factor, 1 for plain rows) and H_O including the identity term; radius(B) <=
     epsilon < radius(B - 1), shots B*m with m = 3. The accuracy hook and the Plan share one deterministic
     pass, the Plan draws rows once and prepares a QSP bank once, and the Plan keeps the request. A Method whose
-    pair_failure_probability differs from 1 - confidence is refused, since its radius would state another
+    SampledPairs.fail_prob differs from 1 - confidence is refused, since its radius would state another
     confidence. On the QSP bank, an accuracy whose rows cannot fit max_bytes is refused by a byte gate before
     the bank is prepared or any row drawn.
     """
@@ -674,7 +678,7 @@ def test_sampled_accuracy_selects_the_least_row_count_in_one_pass(saved_phases, 
         original = getattr(owner, name)
         monkeypatch.setattr(owner, name, lambda *a, _o=original, _k=key, **k: (
             counter.__setitem__(_k, counter[_k] + 1), _o(*a, **k))[1])
-    method = LCHS(observable_estimator="sampled_pairs", pair_repeats=3, **options)
+    method = LCHS(**options)
     accuracy = Accuracy(absolute_tolerance=.5, component="sampling", confidence=.9)
     chosen = plan(UNITARY, method=method, output=output, accuracy=accuracy, seed=11)
     rec = chosen.reconstruction
@@ -695,8 +699,9 @@ def test_sampled_accuracy_selects_the_least_row_count_in_one_pass(saved_phases, 
     assert chosen.shots == 3 * clusters and chosen.selection_accuracy == accuracy
     assert counter["forecast"] == 1 and counter["draw"] == 1
     assert counter["prepare"] == (1 if rec.pair_qsp is not None else 0)
-    with pytest.raises(ApplicabilityError, match="pair_failure_probability"):
-        plan(UNITARY, method=method.revise(pair_failure_probability=.2), output=output, accuracy=accuracy)
+    with pytest.raises(ApplicabilityError, match="SampledPairs.fail_prob"):
+        plan(UNITARY, method=method.revise(estimator=method.estimator.revise(
+            fail_prob=.2)), output=output, accuracy=accuracy)
     if rec.pair_qsp is None:
         return
 
@@ -760,7 +765,7 @@ def test_normalized_ratio_unresolved_under_cancellation(saved_phases):
                              time=1.)
     exact = expm(-np.diag([a, -a])) @ np.array([1, 0]) + np.array([(1 - np.exp(-a)) * b0 / a, 0])
     assert np.linalg.norm(exact) < 1e-15
-    selected = plan(problem, method=_sampled(pair_source_time="discrete", duhamel_nodes=8),
+    selected = plan(problem, method=_sampled(SampledPairs(source_time="discrete"), duhamel_nodes=8),
                     output=NormalizedExpectation(observable=ingest_pauli([("X", 1.)], num_qubits=1)),
                     shots=20, seed=2)
     result = solve(selected)
@@ -789,7 +794,7 @@ def test_ibm_rows_keep_pub_identity_and_good_flag_scores(saved_phases, runtime_a
     compiled, compile_isa = [], IBMRuntimeBackend.prepare
     monkeypatch.setattr(IBMRuntimeBackend, "prepare", lambda self, circuit, **options: (
         compiled.append(circuit.num_parameters), compile_isa(self, circuit, **options))[1])
-    selected = plan(MIXED, method=_signed(pair_repeats=2), output=QuadraticForm(observable=OBSERVABLE), shots=32,
+    selected = plan(MIXED, method=_signed(dict(repeats=2)), output=QuadraticForm(observable=OBSERVABLE), shots=32,
                     seed=4)
     rec = selected.reconstruction
     rows, bank = rec.pair_rows, rec.pair_qsp
@@ -916,7 +921,7 @@ def test_bank_checks_the_first_transform_of_its_highest_member_before_any_fit(mo
     error = refused.value
     assert (error.stage, error.bucket_index, error.member_index, error.shell) == (
         "phase start", 0, highest, members[highest].shell)
-    assert f"above max_fft={start - 1}" in str(error) and "approximation_tolerance" in str(error)
+    assert f"above max_fft={start - 1}" in str(error) and "approx_tol" in str(error)
     assert isinstance(error, ResourceLimitError)
 
 
@@ -936,8 +941,8 @@ def test_planning_refuses_a_native_branch_query_above_max_bytes_at_its_built_con
     need = 6 * 19 + 4 * 64 * 2**6 * 19
 
     def method(cap):
-        return LCHS(observable_estimator="sampled_pairs", hamiltonian_evolution_backend="qsp_block_encoding",
-                    pair_repeats=2, duhamel_nodes=1, k_quadrature=SIGNED, pair_qsp_bank=ProviderConfig(**STOCHASTIC0),
+        return LCHS(estimator=SampledPairs(repeats=2, qsp_bank=ProviderConfig(**STOCHASTIC0)),
+                    ham_evo="qsp_block_encoding", duhamel_nodes=1, k_quadrature=SIGNED,
                     max_bytes=cap)
     with pytest.raises(ValueError, match=r"block-encoding query needs 114 \+ 4864 \* 2\*\*6 bytes"):
         plan(problem, method=method(need - 1), output=output, shots=16, seed=7)
@@ -1093,7 +1098,7 @@ def test_a_failing_member_refuses_every_seed_whether_or_not_it_is_drawn(saved_ph
     both seeds are refused at stage "phase preparation" with its bucket, member, shell and cause.
     """
     from nwqlib.algorithms.lchs import sampled_qsp_bank
-    method, output = _signed(pair_qsp_bank=STOCHASTIC0), QuadraticForm(observable=OBSERVABLE)
+    method, output = _signed(dict(qsp_bank=STOCHASTIC0)), QuadraticForm(observable=OBSERVABLE)
     found = {}
     for seed in range(32):
         chosen = plan(MIXED, method=method, output=output, shots=4, seed=seed)

@@ -1234,7 +1234,7 @@ class BoxRefinementResult(Record):
     def save(self, path):
         """Write this refinement and its completed level Results to a new directory.
 
-        The directory holds `refinement.json` (format `qhd.refinement/4`) with the portable
+        The directory holds `refinement.json` (format `qhd.refinement/5`) with the portable
         refinement record and the problem record, which keeps the bounds, units and content
         hash of the original problem, and `problem.pickle` with its SymPy objective and
         variables. Each completed level z keeps its Result, saved by its own archive with

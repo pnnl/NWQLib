@@ -94,7 +94,7 @@ def test_energy_unit_change_rescales_the_energy_and_keeps_the_selection():
     assert floored.selected == () and floored.stop_reason == "gradient_norm_floor"
     assert (floored.eigenvalue - b) / a == pytest.approx(hartree.history[0].energy, abs=1e-12, rel=0)
 
-    cut = _h2_in_unit(a, b, pauli_coefficient_cutoff=1e-14)
+    cut = _h2_in_unit(a, b, pauli_cutoff=1e-14)
     rec = cut.plan.reconstruction
     assert [t.label for t in rec.terms] == ["IIII"]
     assert (cut.eigenvalue - b) / a == pytest.approx(dict(H2_STO3G_JW_TERMS)["IIII"], abs=1e-12, rel=0)

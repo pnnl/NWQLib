@@ -89,9 +89,9 @@ def _onehot_positions(reconstruction, method, d):
     positions = 14 * schedule.hopping_blocks + sum(
         count * ((2 << s) - 3 if providers[s] == "diagonal_synthesis" else 1)
         for s, count in schedule.projector_blocks)
-    if method.initial_state_preparation == "structured":
+    if method.init_prep == "structured":
         positions += d + 2 * sum(chain_links(vector) for vector in reconstruction.initial_amplitudes)
-    elif method.initial_state_preparation == "qiskit_state_preparation":
+    elif method.init_prep == "qiskit_state_preparation":
         positions += d * _state_preparation_positions(method.num_grid_points)
     return positions
 
@@ -110,7 +110,7 @@ def _onehot_native_bytes(reconstruction, method, d):
     """
     schedule = reconstruction.onehot
     k = method.num_grid_points
-    preparation = 16 * d * (1 << k) if method.initial_state_preparation == "qiskit_state_preparation" else 0
+    preparation = 16 * d * (1 << k) if method.init_prep == "qiskit_state_preparation" else 0
     return (ONEHOT_POSITION_BYTES * _onehot_positions(reconstruction, method, d) + preparation
             + derivation_bytes(k, d, (p.support_size for p in schedule.providers)))
 
@@ -133,9 +133,9 @@ def _binary_positions(reconstruction, method, d):
     cp = m * bits - m * (m + 1) // 2
     swaps = bits // 2 if method.binary_synthesis.qft_bit_reversal == "swap" else 0
     positions = 0
-    if method.initial_state_preparation == "structured":
+    if method.init_prep == "structured":
         positions = d * bits
-    elif method.initial_state_preparation == "qiskit_state_preparation":
+    elif method.init_prep == "qiskit_state_preparation":
         positions = d * _state_preparation_positions(bits)
     pair = 2 * (bits + cp + swaps) - (4 * cp + 6 * swaps + 6 * cp)
     for group in reconstruction.steps:
@@ -166,7 +166,7 @@ def _binary_native_bytes(reconstruction, method, d):
 
     k = method.num_grid_points
     bits = k.bit_length() - 1
-    amplitudes = 16 * d * k if method.initial_state_preparation == "qiskit_state_preparation" else 0
+    amplitudes = 16 * d * k if method.init_prep == "qiskit_state_preparation" else 0
     widest = max((bits * len(block.variables) for group in reconstruction.steps for block in group),
                  default=bits)
     largest = 1 << widest
@@ -213,7 +213,7 @@ def _construction_memory(reconstruction, method, d):
     Run holds. Planning and archive rebinding share this function. A
     resource-only recipe builds no circuit, so it has no estimate.
     """
-    if method.initial_state_preparation == "none":
+    if method.init_prep == "none":
         return None, None
     if method.encoding == "binary":
         total, positions = (_binary_workspace_bytes(reconstruction, method, d),
@@ -261,9 +261,9 @@ def construct_qhd(block, arguments, method_context):
     from nwqlib.subroutines.hamiltonian_evolution import append_pauli_evolution_block
 
     reconstruction, options, bounds, variables = block._payload
-    if block.record.blocker or options.initial_state_preparation == "none":
-        raise ValueError("initial_state_preparation='none' is resource-only")
-    grid = OneHotGrid(variables, bounds, options.num_grid_points, options.include_boundary_points,
+    if block.record.blocker or options.init_prep == "none":
+        raise ValueError("init_prep='none' is resource-only")
+    grid = OneHotGrid(variables, bounds, options.num_grid_points, options.boundary_points,
                       options.boundary)
     if options.encoding == "binary":
         from .binary import _construction_cache_capacity
@@ -281,7 +281,7 @@ def construct_qhd(block, arguments, method_context):
     amplitudes = tuple(np.asarray(vector, dtype=float) for vector in reconstruction.initial_amplitudes)
     if options.encoding == "binary":
         bits = options.num_grid_points.bit_length() - 1
-        append_binary_initial_state(circuit, grid, bits, amplitudes, recipe=options.initial_state_preparation)
+        append_binary_initial_state(circuit, grid, bits, amplitudes, recipe=options.init_prep)
         append_binary_steps(circuit, reconstruction, options, grid, held_bytes=native_held)
     else:
         from collections import Counter
@@ -291,7 +291,7 @@ def construct_qhd(block, arguments, method_context):
         recorded = reconstruction.onehot
         if recorded.providers != projector_providers(reconstruction.support_values):
             raise ValueError("QHD one-hot projector providers differ from those of the Plan's support sizes")
-        append_initial_state(circuit, grid, amplitudes, recipe=options.initial_state_preparation)
+        append_initial_state(circuit, grid, amplitudes, recipe=options.init_prep)
         # Emitted blocks by support size, with 0 for the hopping blocks.
         emitted = Counter()
         for compact in raw_blocks(reconstruction, options, grid):

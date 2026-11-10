@@ -435,7 +435,7 @@ def test_uncertified_pair_suppresses_solution_error_certificate():
 def test_default_pair_primary_record_preserves_provider_values():
     choice = plan(
         LinearDynamics(A=np.diag([0.2, 0.3]), initial_state=[1.0, 0.0], time=0.1),
-        method=LCHS(approximation_tolerance=0.5),
+        method=LCHS(approx_tol=0.5),
         execution="classical",
         seed=7,
     )
@@ -809,3 +809,34 @@ def test_saved_plan_reopens_an_equal_coefficient_plan(tmp_path) -> None:
                   execution="quantum")
     reopened = load_result(solve(chosen).save(tmp_path / "saved")).plan
     assert resolve_lchs_coefficient_plan(reopened) == resolve_lchs_coefficient_plan(chosen)
+
+
+def test_provider_records_copy_and_pickle_as_equal_read_only_records() -> None:
+    """An LCHS with a provider parameter and a resolved provider survive pickle and deepcopy unchanged.
+
+    The LCHS Method and the resolved provider record taken from a coefficient plan
+    come back equal, with their parameters a read-only view in sorted order. The
+    coefficient plan itself is not round-tripped here.
+    """
+    import copy
+    import pickle
+    from types import MappingProxyType
+    from nwqlib.algorithms.lchs import resolve_lchs_coefficient_plan
+
+    kernel = ProviderConfig(implementation="near_optimal_eq7", parameters={"beta": .7})
+    method = LCHS(lchs_kernel=kernel, k_quadrature="composite_gauss")
+    resolved = resolve_lchs_coefficient_plan(
+        LinearDynamics(A=np.diag([.25, .5]), initial_state=[1., 0.], time=.25),
+        lchs_kernel=ProviderConfig(implementation="cauchy_density"),
+        k_quadrature=ProviderConfig(implementation="signed_binary_uniform",
+                                    parameters={"num_qubits": 2, "lsb_position": -1})).resolved_k_quadrature
+    for copied in (pickle.loads(pickle.dumps(method)), copy.deepcopy(method)):
+        assert copied == method and copied.content_id == method.content_id
+        assert dict(copied.lchs_kernel.parameters) == {"beta": .7}
+        assert type(copied.lchs_kernel.parameters) is MappingProxyType
+        with pytest.raises(TypeError):
+            copied.lchs_kernel.parameters["beta"] = .5
+    for copied in (pickle.loads(pickle.dumps(resolved)), copy.deepcopy(resolved)):
+        assert copied == resolved and copied.to_dict() == resolved.to_dict()
+        assert list(copied.parameters) == list(resolved.parameters) == ["lsb_position", "num_qubits"]
+        assert type(copied.parameters) is MappingProxyType

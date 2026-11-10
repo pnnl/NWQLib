@@ -11,7 +11,7 @@ from qiskit.quantum_info import Operator
 from conftest import lchs_dense_quadrature, lchs_quadrature_options
 from _lchs_suzuki_reference import pauli_matrix, sorted_pauli_suzuki_2_reference
 from nwqlib.algorithms.lchs.provider_config import ProviderConfig
-from nwqlib.algorithms.lchs import LCHS
+from nwqlib.algorithms.lchs import LCHS, DenseExact, Trotter, TrotterErrorBudgeted
 from nwqlib.algorithms.lchs.select_synthesis import (
     build_multiplexed_product_formula_select,
 )
@@ -32,11 +32,11 @@ def test_budgeted_plan_zeroes_inactive_repetitions() -> None:
     h_part *= 10.0
     options = LCHS(
         lchs_kernel=ProviderConfig(implementation="near_optimal_eq7", parameters={"beta": 0.8}),
-        approximation_tolerance=0.2,
+        approx_tol=0.2,
         k_quadrature=ProviderConfig(
             implementation="composite_gauss", parameters={"truncation_multiplier": 1.0}
         ),
-        hamiltonian_evolution_backend="trotter_error_budgeted",
+        ham_evo="trotter_error_budgeted",
     )
     quadrature, *parts = lchs_dense_quadrature(l_part + 1.0j * h_part, 2.0, options)
     data = generate_lchs_product_formula_select_plan(
@@ -80,14 +80,14 @@ def test_generated_angle_tables_match_independent_suzuki_products() -> None:
     """
     cases = (
         (np.array([[0.4, 0.05], [0.05, 0.5]], dtype=complex), 0.8, LCHS(
-            **{("approximation_tolerance" if key=="epsilon" else key):value
+            **{("approx_tol" if key=="epsilon" else key):value
                for key,value in lchs_quadrature_options().items()},
-            hamiltonian_evolution_backend="trotter", trotter_steps=2), 0.0),
+            ham_evo=Trotter(steps=2)), 0.0),
         (np.array([[0.5, 0.25], [0.25, 0.5]])+1j*2.0**40*np.eye(2), 0.75, LCHS(
             lchs_kernel=ProviderConfig(implementation="near_optimal_eq7"),
             k_quadrature=ProviderConfig(implementation="signed_binary_uniform",
                                         parameters={"num_qubits": 2, "lsb_position": -2}),
-            hamiltonian_evolution_backend="trotter", trotter_steps=2), 0.25),
+            ham_evo=Trotter(steps=2)), 0.25),
     )
     for matrix, final_time, options, removed_x in cases:
         quadrature, l_part, h_part = lchs_dense_quadrature(matrix, final_time, options)
@@ -117,7 +117,7 @@ def test_generated_angle_tables_match_independent_suzuki_products() -> None:
                     h_part,
                     k_value=float(k_value),
                     final_time=final_time,
-                    reps=options.trotter_steps,
+                    reps=options.ham_evo.steps,
                 )
                 for part in (l_part - removed_x * pauli_matrix("X"), l_part)
             ]
@@ -157,9 +157,8 @@ def test_budgeted_first_order_steps_follow_independent_prop9_bound() -> None:
     initial = np.array([1.0, 0.5j, -0.25, 0.5])
     problem = LinearDynamics(A=l_part + 1.0j * h_part, initial_state=initial, time=time)
     method = LCHS(
-        hamiltonian_evolution_backend="trotter_error_budgeted",
-        trotter_order=1,
-        approximation_tolerance=tolerance,
+        ham_evo=TrotterErrorBudgeted(order=1),
+        approx_tol=tolerance,
         k_quadrature=ProviderConfig(
             implementation="signed_binary_uniform",
             parameters={"num_qubits": 2, "lsb_position": 0},
@@ -246,7 +245,7 @@ def test_budgeted_first_order_steps_follow_independent_prop9_bound() -> None:
 
 
 def test_dense_select_slot_cap_refuses_at_planning_before_native_construction(monkeypatch) -> None:
-    """More padded SELECT slots than max_dense_select_slots is refused, not raised or built."""
+    """More padded SELECT slots than DenseExact.max_select_slots is refused, not raised or built."""
     from nwqlib import LinearDynamics, plan
     from nwqlib.blocks import lowering
 
@@ -254,16 +253,16 @@ def test_dense_select_slot_cap_refuses_at_planning_before_native_construction(mo
         pytest.fail("slot-cap planning lowered a native circuit")
 
     monkeypatch.setattr(lowering, "_lower_qiskit", forbidden)
-    options = {("approximation_tolerance" if key == "epsilon" else key): value
+    options = {("approx_tol" if key == "epsilon" else key): value
                for key, value in lchs_quadrature_options().items()}
     # A fixed two-bit k grid isolates slot-cap admission from quadrature search.
     options["k_quadrature"] = ProviderConfig(implementation="signed_binary_uniform",
         parameters={"num_qubits": 2, "lsb_position": 0})
     # Four declared grid nodes require exactly four SELECT slots.
     problem = LinearDynamics(A=[[0.4, 0.15], [0.05, 0.25]], initial_state=[1.0, 0.0], time=0.1)
-    with pytest.raises(ValueError, match=r"4 branches, 4 padded SELECT slots .*max_dense_select_slots=3"):
-        plan(problem, method=LCHS(**options, max_dense_select_slots=3))
-    assert plan(problem, method=LCHS(**options, max_dense_select_slots=4)).execution == "quantum"
+    with pytest.raises(ValueError, match=r"4 branches, 4 padded SELECT slots .*DenseExact.max_select_slots=3"):
+        plan(problem, method=LCHS(**options, ham_evo=DenseExact(max_select_slots=3)))
+    assert plan(problem, method=LCHS(**options, ham_evo=DenseExact(max_select_slots=4))).execution == "quantum"
 
 
 def _gauss_calls(monkeypatch):
@@ -280,7 +279,7 @@ def _gauss_calls(monkeypatch):
 
 
 _SLOT_PROBLEM = dict(A=[[0.4, 0.15], [0.05, 0.25]], initial_state=[1.0, 0.0], time=0.1)
-_DENSE = dict(hamiltonian_evolution_backend="dense_exact")
+_DENSE = dict(ham_evo="dense_exact")
 
 
 def _padded(count):
@@ -301,25 +300,23 @@ def test_composite_gauss_slot_cap_refuses_before_the_rule_is_built(monkeypatch) 
     assert slots == _padded(nodes) and nodes < slots and len(calls) == 1
     calls.clear()
     for limit in (slots-1, nodes, 1):
-        with pytest.raises(ValueError, match=rf"max_dense_select_slots={limit}\.") as refusal:
-            plan(problem, method=LCHS(**_DENSE, max_dense_select_slots=limit))
+        with pytest.raises(ValueError, match=rf"DenseExact.max_select_slots={limit}\.") as refusal:
+            plan(problem, method=LCHS(ham_evo=DenseExact(max_select_slots=limit)))
         assert calls == []
         assert f"at least {nodes} branches and {slots} padded SELECT slots" in str(refusal.value)
     # Following the refusal's remedy, a limit of P, leads past it.
-    equal = plan(problem, method=LCHS(**_DENSE, max_dense_select_slots=slots))
+    equal = plan(problem, method=LCHS(ham_evo=DenseExact(max_select_slots=slots)))
     assert len(calls) == 1 and equal.reconstruction.content_id == full.reconstruction.content_id
 
 
 @pytest.mark.parametrize(("execution", "options"), [
-    ("classical", _DENSE),
-    ("quantum", dict(hamiltonian_evolution_backend="trotter", trotter_steps=1)),
-    ("quantum", dict(hamiltonian_evolution_backend="trotter_error_budgeted")),
+    ("classical", dict(ham_evo=DenseExact(max_select_slots=1))),
 ])
 def test_slot_cap_leaves_routes_without_a_dense_select_register(monkeypatch, execution, options) -> None:
-    """Classical evaluation and product-formula branches synthesize no controlled dense exponential per slot, so the limit does not apply."""
+    """Classical evaluation synthesizes no controlled dense exponential per slot, so the limit does not apply."""
     from nwqlib import LinearDynamics, plan
     calls = _gauss_calls(monkeypatch)
-    chosen = plan(LinearDynamics(**_SLOT_PROBLEM), method=LCHS(**options, max_dense_select_slots=1), execution=execution)
+    chosen = plan(LinearDynamics(**_SLOT_PROBLEM), method=LCHS(**options), execution=execution)
     assert len(calls) == 1 and chosen.reconstruction.physical_branches > 1
 
 
@@ -332,7 +329,7 @@ def test_coefficient_table_request_has_no_slot_limit(monkeypatch) -> None:
     from nwqlib.algorithms.lchs import resolve_lchs_coefficient_plan
     calls = _gauss_calls(monkeypatch)
     problem = LinearDynamics(**{**_SLOT_PROBLEM, "time": 1000.0})
-    with pytest.raises(ValueError, match="max_dense_select_slots=4096"):
+    with pytest.raises(ValueError, match="DenseExact.max_select_slots=4096"):
         plan(problem, method=LCHS())
     assert calls == []
     assert len(resolve_lchs_coefficient_plan(problem).coefficients) > 4096 and len(calls) == 1
@@ -356,29 +353,29 @@ def test_source_layouts_keep_the_exact_final_slot_check(monkeypatch) -> None:
     assert branches == 2*nodes and slots == _padded(branches) > _padded(nodes)
     calls.clear()
     with pytest.raises(ValueError, match=rf"{branches} branches, {slots} padded SELECT slots and \d+ total qubits; "
-                                         rf"max_dense_select_slots={slots-1}\."):
-        plan(both, method=LCHS(**_DENSE, duhamel_nodes=1, max_dense_select_slots=slots-1))
+                                         rf"DenseExact.max_select_slots={slots-1}\."):
+        plan(both, method=LCHS(ham_evo=DenseExact(max_select_slots=slots-1), duhamel_nodes=1))
     assert len(calls) == 1
     calls.clear()
-    with pytest.raises(ValueError, match="max_dense_select_slots") as refusal:
-        plan(both, method=LCHS(**_DENSE, duhamel_nodes=1, max_dense_select_slots=_padded(nodes)-1))
+    with pytest.raises(ValueError, match="DenseExact.max_select_slots") as refusal:
+        plan(both, method=LCHS(ham_evo=DenseExact(max_select_slots=_padded(nodes)-1), duhamel_nodes=1))
     assert calls == []
     assert f"at least {nodes} branches" in str(refusal.value)
     source_only = LinearDynamics(**{**_SLOT_PROBLEM, "initial_state": [0.0, 0.0]}, source=[0.2, -0.1])
-    alone = plan(source_only, method=LCHS(**_DENSE, duhamel_nodes=1, max_dense_select_slots=_padded(nodes)))
+    alone = plan(source_only, method=LCHS(ham_evo=DenseExact(max_select_slots=_padded(nodes)), duhamel_nodes=1))
     assert alone.reconstruction.physical_branches == nodes
     dropped = dict(A=np.diag([.25, .5]), initial_state=[ldexp(1., 220), 0.], source=[0., ldexp(1., -1000)], time=ldexp(1., -990))
-    options = dict(**_DENSE, duhamel_nodes=1, source_drop_allowance=1e-200)
+    options = dict(**_DENSE, duhamel_nodes=1, source_drop=1e-200)
     kept = plan(LinearDynamics(**dropped), method=LCHS(**options))
     layout = kept._native["native_data"].source_layout
     size = len(kept._native["native_data"].quadrature.k_nodes)
     assert len(layout.applications) == 1 and layout.dropped_bound.mantissa > 0 and len(layout.phases) == size
     assert _padded(2*size) > _padded(size)
-    limited = plan(LinearDynamics(**dropped), method=LCHS(**options, max_dense_select_slots=_padded(size)))
+    limited = plan(LinearDynamics(**dropped), method=LCHS(**(options | dict(ham_evo=DenseExact(max_select_slots=_padded(size))))))
     assert limited.reconstruction.padded_branches == _padded(size)
     calls.clear()
-    with pytest.raises(ValueError, match="max_dense_select_slots"):
-        plan(LinearDynamics(**dropped), method=LCHS(**options, max_dense_select_slots=_padded(size)-1))
+    with pytest.raises(ValueError, match="DenseExact.max_select_slots"):
+        plan(LinearDynamics(**dropped), method=LCHS(**(options | dict(ham_evo=DenseExact(max_select_slots=_padded(size)-1)))))
     assert calls == []
 
 
@@ -395,7 +392,7 @@ def _dense_intake_plan(source, limit):
     from nwqlib import LinearDynamics, plan
     grid = ProviderConfig(implementation="signed_binary_uniform", parameters={"num_qubits": 3, "lsb_position": -1})
     problem = LinearDynamics(A=[[0.4, 0.15], [0.05, 0.25]], initial_state=[1.0, 0.0], time=0.1, source=source)
-    return problem, plan(problem, method=LCHS(hamiltonian_evolution_backend="dense_exact", k_quadrature=grid,
+    return problem, plan(problem, method=LCHS(ham_evo="dense_exact", k_quadrature=grid,
                                               duhamel_nodes=1, max_select_work=limit))
 
 
@@ -427,7 +424,7 @@ def test_select_helper_records_and_refuses_its_own_work_limit() -> None:
     5416 for the angle tables, 5682 in total. Its Method sets no limit, so
     the refusal one unit short names the helper's own value.
     """
-    method = LCHS(hamiltonian_evolution_backend="trotter", approximation_tolerance=0.2)
+    method = LCHS(ham_evo="trotter", approx_tol=0.2)
     quadrature, *parts = lchs_dense_quadrature(np.array([[0.5, 0.125j], [0.125j, 1.0]]), 0.1, method)
     args = dict(quadrature=quadrature, parts=tuple(parts), final_time=0.1, method=method)
     records = []
@@ -460,9 +457,9 @@ def test_select_construction_checks_its_circuit_bytes_before_the_first_repetitio
     problem = LinearDynamics(A=np.array([[.4 + .2j, .1], [.1, .4 - .2j]]), initial_state=[1., 0.], time=.1)
 
     def selected(steps, implementation="multiplexor"):
-        return plan(problem, method=LCHS(hamiltonian_evolution_backend="trotter", k_quadrature=grid,
-                                         lcu_select_implementation=implementation, max_bytes=1_000_000,
-                                         trotter_steps=steps), output=NormSquared(), execution="quantum", seed=13)
+        return plan(problem, method=LCHS(ham_evo=Trotter(steps=steps), k_quadrature=grid,
+                                         lcu_select=implementation, max_bytes=1_000_000),
+                    output=NormSquared(), execution="quantum", seed=13)
 
     for steps in (2, 3):
         select_plan = selected(steps)._native["native_data"].select_data.plan
@@ -510,9 +507,8 @@ def test_branch_controlled_select_checks_its_bytes_before_qiskit_expands_a_branc
     one = LinearDynamics(A=np.array([[.4 + .2j, .1], [.1, .4 - .2j]]), initial_state=[1., 0.], time=.1)
 
     def selected(problem, steps, order=2, **limits):
-        return plan(problem, method=LCHS(hamiltonian_evolution_backend="trotter", k_quadrature=grid,
-                                         lcu_select_implementation="branch_controlled", trotter_order=order,
-                                         trotter_steps=steps, **limits),
+        return plan(problem, method=LCHS(ham_evo=Trotter(steps=steps, order=order),
+                                         k_quadrature=grid, lcu_select="branch_controlled", **limits),
                     output=NormSquared(), execution="quantum", seed=13)
 
     for order in (1, 2):

@@ -14,6 +14,7 @@ paper's states ``exp(Gamma(Z_p))|Phi>`` at discretized generator coordinates
 """
 
 from nwqlib._limits import ResourceLimitError, exceeds, memory_limit
+from nwqlib._validation import reanalysis_settings
 
 from math import fsum, isfinite, sqrt
 from typing import Annotated, ClassVar, Literal
@@ -55,6 +56,7 @@ from nwqlib.core.records import (
     Real,
     Record,
     Text,
+    _ConstructorDisplay,
 )
 from nwqlib.operators.access import Count, _check_bytes
 from nwqlib.operators.inputs import _basis, pauli_table
@@ -94,7 +96,7 @@ from . import pair_reducer  # noqa: E402,F401
 
 METHOD = Source(
     name="fixed_gcim",
-    version="5",
+    version="6",
     domain="projected Hermitian eigenvalue",
     reference="Zheng et al., Phys. Rev. Research 5, 023200 (2023), arXiv:2212.09205v1, Eq. (13)",
 )
@@ -137,7 +139,8 @@ class FixedGCIMBasis(Record):
 
     Examples:
         >>> from nwqlib import Eigenproblem, solve
-        >>> from nwqlib.algorithms import FixedGCIM, FixedGCIMBasis
+        >>> from nwqlib.algorithms import FixedGCIM
+        >>> from nwqlib.algorithms.gcim import FixedGCIMBasis
         >>> from nwqlib.problems import state_input
         >>> basis = ([1, 1], [1, 1j])
         >>> preparations = tuple(state_input(v).preparation for v in basis)
@@ -159,7 +162,7 @@ class FixedGCIMBasis(Record):
         )
 
 
-class PencilAcquisition(Record):
+class PencilAcquisition(_ConstructorDisplay, Record):
     """How `FixedGCIM`, `ADAPT` and `QFD` measure the projected matrices H and S of their trial states.
 
     Build it with keyword arguments and pass it as `FixedGCIM(acquisition=...)`,
@@ -265,7 +268,7 @@ class PencilAcquisition(Record):
             imaginary Pauli coefficients on words with an odd number of Y
             letters, so that each real-angle exponential is a real matrix. A
             supplied circuit never qualifies. For `ADAPT`, A is the
-            Hamiltonian after its `pauli_coefficient_cutoff`, so the proof
+            Hamiltonian after its `pauli_cutoff`, so the proof
             says nothing about the imaginary parts of matrix elements of the
             operator before that cutoff. No proof covers the time-evolved
             states of `QFD`, which are complex in general even for a real A,
@@ -300,7 +303,7 @@ class PencilAcquisition(Record):
         return self
 
 
-class PencilSampling(Record):
+class PencilSampling(_ConstructorDisplay, Record):
     """A shot budget that `FixedGCIM`, `QFD` or `ADAPT` splits between a uniform pilot stage and a main stage chosen from it.
 
     Build it with keyword arguments, for example
@@ -471,7 +474,7 @@ class ResolvedAcquisition(Record):
             failed the proof, or None.
         scope: The inputs the proof covered, or None. Its Hamiltonian is the
             operator the Plan measures. For `ADAPT` that is the Hamiltonian
-            after `pauli_coefficient_cutoff`, whose recorded truncation
+            after `pauli_cutoff`, whose recorded truncation
             defines it, and a proof of it says nothing about the imaginary
             parts of matrix elements of the operator before that cutoff.
         pairs: The construction of every off-diagonal pair of a quantum
@@ -594,7 +597,7 @@ def resolve_acquisition(requested, *, execution, shots, acquires, real_reason, s
     and it runs only when quadratures are used and not requested as
     ``"complex"``. The proof is exact for the target that ``scope`` names,
     the operator the Plan measures. A truncation recorded before the proof,
-    such as ADAPT's ``pauli_coefficient_cutoff``, defines that target, so
+    such as ADAPT's ``pauli_cutoff``, defines that target, so
     the proof and its success ``reason`` say nothing about imaginary entries
     of the operator before truncation. ``pairs`` are the pair constructions
     of a ``FixedGCIM`` or ``QFD`` Plan. Where quadratures are used, an explicit
@@ -2885,9 +2888,9 @@ def pair_reduction_allowance(method, plan, observation, label="GCIM"):
 
     The exact pair route of FixedGCIM and QFD calls it from the Method
     ``method``'s ``reduction_allowance``, and the limits are its
-    ``max_classical_products`` and ``max_bytes``. The workspace check
+    ``max_products`` and ``max_bytes``. The workspace check
     rejects a point whose ``pair_bytes`` exceeds ``max_bytes``. Without
-    ``max_classical_products`` it returns None, and no pair work is
+    ``max_products`` it returns None, and no pair work is
     computed. With it, the summed registered work of all the Plan's pair
     reductions, computed once per Plan object and cached, is checked
     against the limit first. A Plan whose sum exceeds the limit is rejected
@@ -2905,13 +2908,13 @@ def pair_reduction_allowance(method, plan, observation, label="GCIM"):
     import json
     from .pair_reducer import pair_bytes, pair_work
 
-    limit = method.max_classical_products
+    limit = method.max_products
     pair_work_total = None if limit is None else _pair_work_total(plan)
     if limit is not None and pair_work_total > limit:
         raise ValueError(
-            f"{label} pair reductions exceed max_classical_products: registered work {pair_work_total}, "
-            f"max_classical_products={limit}. "
-            f"Raise {type(method).__name__}.max_classical_products to at least {pair_work_total}."
+            f"{label} pair reductions exceed max_products: registered work {pair_work_total}, "
+            f"max_products={limit}. "
+            f"Raise {type(method).__name__}.max_products to at least {pair_work_total}."
         )
     own = 0
     for item in observation.positions:
@@ -3079,7 +3082,7 @@ class FixedGCIM(Method):
             worst-case pass for one measurement per setting before it builds
             circuits, and analysis checks the stored counts, which repeated
             measurements can enlarge, before decoding them.
-        max_classical_products: Default `None`, no limit. Optional limit on
+        max_products: Default `None`, no limit. Optional limit on
             the counted classical work of basis preparation and projection,
             and on the summed classical work of the exact pair reductions.
         input_conversion: Default `"auto"`, which keeps Pauli input as it
@@ -3100,7 +3103,7 @@ class FixedGCIM(Method):
             operator, which prepare no joint state, keep the request
             without effect. The Plan records the resolved choices in
             `plan.reconstruction.acquisition`.
-        max_native_two_qubit_depth: Default `None`, which requests no depth
+        max_2q_depth: Default `None`, which requests no depth
             limit. `None` is neither a depth of 0 nor evidence that the
             circuits suit a device. A nonnegative integer D requires each
             submitted quantum circuit, every grouped count setting and every
@@ -3117,8 +3120,7 @@ class FixedGCIM(Method):
             the setting, the limit and the depth or why it is unavailable.
             Of the current backends only IBM Runtime computes this depth, for
             its compiled circuits, and only when its options keep the
-            provider's dynamical decoupling and twirling off and
-            qiskit-ibm-runtime 0.49.0 is installed
+            provider's dynamical decoupling and twirling off
             (`nwqlib.backends.IBMRuntimeBackend`). Otherwise the depth is
             unavailable and an integer limit refuses the first circuit, as it
             does on every other backend, Aer included. The limit also refuses
@@ -3175,7 +3177,7 @@ class FixedGCIM(Method):
         -1.4142135624
     """
 
-    schema_version: Literal[3] = 3
+    schema_version: Literal[4] = 4
     basis: Annotated[tuple[StateData, ...], Field(min_length=1)]
     overlap_cutoff: Annotated[Real, Field(gt=0)] = 1e-12
     # max_basis_size is an untuned ceiling on the basis, checked before pairs
@@ -3185,10 +3187,10 @@ class FixedGCIM(Method):
     max_basis_size: PositiveInt = 64
     max_bytes: PositiveInt | None = None
     max_analysis_work: PositiveInt | None = None
-    max_classical_products: PositiveInt | None = None
+    max_products: PositiveInt | None = None
     input_conversion: Literal["auto", "dense_pauli"] = "auto"
     acquisition: PencilAcquisition = PencilAcquisition()
-    max_native_two_qubit_depth: Count | None = None
+    max_2q_depth: Count | None = None
     sampling: PencilSampling | None = None
     result_type: ClassVar[type] = FixedGCIMResult
 
@@ -3326,24 +3328,24 @@ class FixedGCIM(Method):
             error_model=eigen_error_model(components, METHOD),
         )
         if e and not shots:
-            # Under an explicit max_classical_products, the Method's host-work
+            # Under an explicit max_products, the Method's host-work
             # limit, the summed registered work of the pair reductions is
             # recorded once in the Plan's cache. reduction_allowance admits it
             # when a pair is prepared and funds each point from this ledger.
-            if self.max_classical_products is not None:
+            if self.max_products is not None:
                 _pair_work_total(plan)
             return plan._bind(blocks=blocks, operator=operator, basis=basis,
                               pair_table=_pair_table(operator))
         return plan._bind(blocks=blocks, operator=operator, basis=basis)
 
     def before_submit(self, plan, prepared, *, run):
-        """Refuse a circuit whose native two-qubit depth exceeds `max_native_two_qubit_depth` or is unavailable, before the Run records its submission."""
+        """Refuse a circuit whose native two-qubit depth exceeds `max_2q_depth` or is unavailable, before the Run records its submission."""
         from nwqlib.backends.inspection import check_native_depth_cap
 
-        check_native_depth_cap(prepared, self.max_native_two_qubit_depth)
+        check_native_depth_cap(prepared, self.max_2q_depth)
 
     def reduction_allowance(self, plan, point, *, observation, width, run):
-        """Check a point's workspace and, under ``max_classical_products``, the summed pair work, and return the remaining allowance or None (``pair_reduction_allowance``)."""
+        """Check a point's workspace and, under ``max_products``, the summed pair work, and return the remaining allowance or None (``pair_reduction_allowance``)."""
         return pair_reduction_allowance(self, plan, observation)
 
     def prepare_all_refusal(self):
@@ -3430,9 +3432,9 @@ class FixedGCIM(Method):
         work += sum(w for _, w in preparation if w is not None)
         _check_bytes(known_bytes, self.max_bytes, "classical projected matrices")
         _check_projected_solve_work(b, self.max_analysis_work, "projected solve")
-        if exceeds(work, self.max_classical_products):
-            raise ResourceLimitError(f"classical projected matrices exceed max_classical_products: they need {work}, "
-                                     f"max_classical_products={self.max_classical_products}")
+        if exceeds(work, self.max_products):
+            raise ResourceLimitError(f"classical projected matrices exceed max_products: they need {work}, "
+                                     f"max_products={self.max_products}")
         labels = tuple(
             f"{matrix}_{i}_{j}_{part}"
             for matrix in ("h", "s")
@@ -3510,8 +3512,8 @@ class FixedGCIM(Method):
                 self.max_bytes,
                 "classical GCIM projections",
             )
-            if exceeds(kernel.invocation_work, self.max_classical_products):
-                raise ValueError("classical GCIM projections exceed max_classical_products")
+            if exceeds(kernel.invocation_work, self.max_products):
+                raise ValueError("classical GCIM projections exceed max_products")
             # Contiguous columns let np.vdot conjugate inside the reduction,
             # so no conjugate copy of V is formed.
             v = np.empty((d, len(positions)), dtype=np.complex128, order="F")
@@ -3519,8 +3521,8 @@ class FixedGCIM(Method):
                 v[:, column] = state_direction(state, max_bytes=self.max_bytes)
             w = np.empty_like(v, order="F")
             _offset_free_actions(operator, v, rec.identity_shift, w,
-                                 max_bytes=self.max_bytes, max_products=self.max_classical_products,
-                                 limit_name="FixedGCIM.max_classical_products")
+                                 max_bytes=self.max_bytes, max_products=self.max_products,
+                                 limit_name="FixedGCIM.max_products")
             index = [positions[id(s)][0] for s in basis]
             # Full H0 and S are formed before their Hermitian parts, so both
             # independently rounded triangles are averaged.
@@ -3557,6 +3559,7 @@ class FixedGCIM(Method):
 
     def analyze(self, plan, data, *, settings):
         """Reconstruct the obtained Hermitian pencil and solve its usable overlap subspace."""
+        reanalysis_settings(settings, ("overlap_cutoff",), "FixedGCIM")
         cutoff = settings.get("overlap_cutoff", self.overlap_cutoff)
         if (
             not isinstance(cutoff, (int, float))

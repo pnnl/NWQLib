@@ -10,6 +10,7 @@ from scipy.linalg import expm
 
 import nwqlib
 from nwqlib.algorithms import LCHS
+from nwqlib.algorithms.lchs import QSPBlockEncoding, Trotter
 from nwqlib.algorithms.lchs.solution_error_budget import (
     LCHSApplicationRecord,
     _build_lchs_application_record,
@@ -318,7 +319,7 @@ def test_stage_bounds_suppress_their_scope_and_tell_exact_zero_from_underflow() 
     node = _LCHSTrotterNodeRecord(pf_bound_value=2.0**-10, pruned_l1_mass=0.0, combined_bound_value=2.0**-10,
                                   step_count=1, selection=None)
     raw = _trotter_budget_quadrature_terms([node]*4, coefficients=np.full(4, 2.0**-1074, dtype=complex),
-        method=LCHS(hamiltonian_evolution_backend="trotter_error_budgeted"))["trotter_synthesis_error_bound"]
+        method=LCHS(ham_evo="trotter_error_budgeted"))["trotter_synthesis_error_bound"]
     weighted = _build_lchs_application_record({"psd_shift": 0.0}, final_time=1., start_time=0., weight=1.,
         input_norm=PhysicalScale(mantissa=.5, exponent=1075), backend="trotter_error_budgeted",
         synthesis_error_bound=raw)
@@ -360,7 +361,7 @@ def test_fixed_step_pruning_follows_the_unit_and_reports_its_propagated_componen
     terms = [("ZI", .4), ("IX", .15), ("II", .6), ("XX", .3j), ("ZZ", .2j)]
     dense = _pauli_sum(terms)
     initial = np.array([1., 0., 0., 0.])
-    method = LCHS(approximation_tolerance=1e-2, hamiltonian_evolution_backend="trotter", trotter_steps=40)
+    method = LCHS(approx_tol=1e-2, ham_evo=Trotter(steps=40))
     reference = expm(-dense) @ initial
 
     def error(scale):
@@ -412,7 +413,7 @@ def test_fixed_step_pruning_follows_the_unit_and_reports_its_propagated_componen
     # Each Duhamel application has its own start and input, and a quantum Plan reports the same sum.
     source = np.array([0., 3., 0., 4.])
     inhomogeneous = nwqlib.LinearDynamics(A=l_part+1j*h_part, initial_state=initial, source=source, time=time)
-    forced = LCHS(approximation_tolerance=1e-2, hamiltonian_evolution_backend="trotter", trotter_steps=4, duhamel_nodes=3)
+    forced = LCHS(approx_tol=1e-2, ham_evo=Trotter(steps=4), duhamel_nodes=3)
     points, weights = np.polynomial.legendre.leggauss(3)
     starts, weights = (points+1)*time/2, weights*time/2
     duration_sum = time*np.linalg.norm(initial)+sum(w*(time-s)*np.linalg.norm(source) for s, w in zip(starts, weights, strict=True))
@@ -427,13 +428,13 @@ def test_fixed_step_pruning_follows_the_unit_and_reports_its_propagated_componen
 
     # A quantum Result prints the same value in the physical-solution frame when another output is
     # requested. The step count does not enter this bound, and 4 steps run faster.
-    quantum = nwqlib.solve(problem, method=LCHS(approximation_tolerance=1e-2, hamiltonian_evolution_backend="trotter",
-                                                trotter_steps=4), output=nwqlib.NormSquared(), seed=7)
+    quantum = nwqlib.solve(problem, method=LCHS(approx_tol=1e-2, ham_evo=Trotter(steps=4)),
+                                                output=nwqlib.NormSquared(), seed=7)
     assert _printed_pruning(quantum) == pytest.approx(expected, rel=1e-7)
 
     # The budgeted route already has pruning inside trotter_synthesis and refuses an exhausted allowance.
-    budgeted = nwqlib.plan(problem, method=LCHS(approximation_tolerance=1e-2,
-        hamiltonian_evolution_backend="trotter_error_budgeted"), execution="classical")
+    budgeted = nwqlib.plan(problem, method=LCHS(approx_tol=1e-2,
+        ham_evo="trotter_error_budgeted"), execution="classical")
     assert "trotter_pruning" not in {item.fact.quantity for item in budgeted.facts}
 
 
@@ -485,6 +486,6 @@ def test_shared_route_result_prints_its_phase_target_and_residuals_and_another_r
                 (row.allowance["algorithmic"]-row.error_forecast["tail"])/row.recovery)
     assert printed(result) == pytest.approx(expected, rel=.006)
     assert printed(nwqlib.load_result(result.save(tmp_path/"result"))) == printed(result)
-    laurent = nwqlib.solve(problem, method=LCHS(hamiltonian_evolution_backend="qsp_block_encoding", qsp_route="laurent"),
+    laurent = nwqlib.solve(problem, method=LCHS(ham_evo=QSPBlockEncoding(route="laurent")),
                            output=nwqlib.NormSquared(), seed=3)
     assert "Phase synthesis" not in str(laurent)

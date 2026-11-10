@@ -43,7 +43,7 @@ ModeStatus = Literal["resolved", "unresolved", "unavailable"]
 # equation numbers cited in this package refer to arXiv:2303.01471v1.
 METHOD = Source(
     name="qhd",
-    version="2",
+    version="3",
     domain="one-hot Dirichlet or periodic, or binary periodic, box optimization; best observed candidate and most "
     "probable point",
     reference="arXiv:2303.01471v1",

@@ -19,7 +19,7 @@ from nwqlib.algorithms._eigen_support import eigen_error_model
 from nwqlib.blocks import SelectedBlock, SelectedConstruction
 from nwqlib.blocks.records import BlockSemantics, SelectedDefinition, SelectedKernel
 from nwqlib.core.planning import Plan, Experiment, ObservationSpec, ReadoutDetails
-from nwqlib.core.records import InputRef, Record, Source, PositiveInt, Real
+from nwqlib.core.records import InputRef, Record, Source, PositiveInt, Real, _ConstructorDisplay
 from nwqlib.ir import (
     Allocate,
     Argument,
@@ -91,7 +91,7 @@ from .pencil_workflow import ONE_QUERY_ESTIMATE
 
 METHOD = Source(
     name="adapt_gcim",
-    version="5",
+    version="6",
     domain="finite adaptive generator-coordinate eigenvalue",
     reference="Zheng et al., npj Quantum Information 10, 127 (2024), arXiv:2312.07691v3",
 )
@@ -790,7 +790,7 @@ def _pair_reduction_readout(identity, coefficients, q, *, diagonal):
     return ReadoutDetails(positions=(pair_reduction_point(identity, coefficients, q, diagonal=diagonal),))
 
 
-class BoundedRitzGrowth(Record):
+class BoundedRitzGrowth(_ConstructorDisplay, Record):
     """Grow the ADAPT basis one short generator chain at a time, adding the best of a few scored extensions each round.
 
     Pass it as `ADAPT(basis_growth=BoundedRitzGrowth(max_chain_length=...))`.
@@ -890,7 +890,7 @@ class BoundedRitzGrowth(Record):
     - `max_basis_size` once the basis holds that many states, or
       `max_iterations` once that many chains have been added.
     - `flat_counter`: consecutive energy changes below
-      `energy_change_tolerance`, as in the default growth, with the pool
+      `energy_tol`, as in the default growth, with the pool
       size P in place of the number of unselected generators.
     - `basis_depth_limit`: the round examined at least one extension that
       is not already in the basis, and every such extension exceeds
@@ -969,7 +969,7 @@ class BoundedRitzGrowth(Record):
             count is excluded, as is one above D. The limit changes the
             trial space. It is not the native two-qubit depth of the
             executed circuits, whose pair constructions, readout and routing
-            add depth, and which `ADAPT.max_native_two_qubit_depth` checks.
+            add depth, and which `ADAPT.max_2q_depth` checks.
         independence_cutoff: Default `None`, which uses ADAPT's
             `overlap_cutoff` and then requires it to be below 1. Otherwise a
             value in (0, 1). An extension is scored only when `eta`, the
@@ -1163,7 +1163,7 @@ class ADAPT(Method):
 
     The default flat-counter stop follows METHODS, p. 9, and stops after
     `T = min(T_auto, T_usr)` consecutive energy changes below
-    `energy_change_tolerance`, with `T_auto` equal to `t_auto_fraction`
+    `energy_tol`, with `T_auto` equal to `t_auto_fraction`
     (20%) of the unselected generators and `T_usr = t_user`. Counting starts
     at the first change from the reference energy. T is recomputed after each
     selection from the current number of unselected generators, and the run
@@ -1221,11 +1221,11 @@ class ADAPT(Method):
             unit of H, so convert it with the unit. The run stops when the norm
             of the pool gradients is at or below the floor. The value used is
             `plan.reconstruction.gradient_norm_floor`.
-        energy_change_tolerance: Default `None`, which planning replaces by
+        energy_tol: Default `None`, which planning replaces by
             `1e-6 Omega`. A positive number is used as given, as an absolute value
             in the unit of H. The flat counter counts a round when the change
             between consecutive energies is below it. The value used is
-            `plan.reconstruction.energy_change_tolerance`.
+            `plan.reconstruction.energy_tol`.
         t_auto_fraction: Default `0.2`, in (0, 1]. Fraction of the unselected
             pool size that sets `T_auto`.
         t_user: Default `10`. Cap `T_usr` on consecutive flat rounds in the
@@ -1248,7 +1248,7 @@ class ADAPT(Method):
             basis, which only classical execution can evaluate. It differs
             from the pencil's `projected_residual` `||H c - E S c||` in basis
             coordinates.
-        residual_norm_tolerance: Default `None`. Positive threshold on that
+        residual_tol: Default `None`. Positive threshold on that
             full-state residual, in the Hamiltonian's energy unit, required
             with `stop_criterion="residual_norm"`.
         optimize_every_m: Default `None`, no optimization. Optimize the
@@ -1262,7 +1262,7 @@ class ADAPT(Method):
             or a failed line search ends it first. This stationarity heuristic
             bounds neither the residual nor the ground-energy error. Recorded
             energies stay in the unit of H.
-        optimize_max_evaluations: Default `None`. Largest number of energy
+        max_evals: Default `None`. Largest number of energy
             evaluations when optimization is enabled, counted as distinct
             evaluated parameter points. A classical point is one energy-and-gradient
             evaluation, whose work record includes its forward, derivative
@@ -1288,7 +1288,7 @@ class ADAPT(Method):
             padded when needed. `"dense_pauli"` also permits the conversion of
             sparse matrices and of larger dense matrices, within
             `max_bytes`.
-        pauli_coefficient_cutoff: Default `None`, which planning replaces by
+        pauli_cutoff: Default `None`, which planning replaces by
             `1e-14 Omega`. A nonnegative number is used as given, as an absolute
             value in the unit of H. Nonidentity Pauli coefficients of the
             Hamiltonian and coefficients of each `[H, A_j]` at or below it in
@@ -1297,9 +1297,9 @@ class ADAPT(Method):
             `plan.reconstruction.hamiltonian_dropped_l1`, which `print(result)`
             shows when it is nonzero, and each pool member records its
             commutator's separately. The value used is
-            `plan.reconstruction.pauli_coefficient_cutoff`. A classical run of
+            `plan.reconstruction.pauli_cutoff`. A classical run of
             a dense or sparse matrix removes nothing.
-        input_symmetry_tolerance: Default `1e-12`, nonnegative. Largest
+        symmetry_tol: Default `1e-12`, nonnegative. Largest
             relative Frobenius-norm correction that the anti-Hermitian
             projection of each pool generator may make. The Hamiltonian has
             no tolerance and must be exactly Hermitian.
@@ -1312,7 +1312,7 @@ class ADAPT(Method):
             generator, not only the generators a run happens to select, and
             records the resolved choices in `plan.reconstruction.acquisition`.
             The processed Hamiltonian is the one measured, the operator after
-            `pauli_coefficient_cutoff`, whose removed coefficient magnitudes
+            `pauli_cutoff`, whose removed coefficient magnitudes
             sum to `plan.reconstruction.hamiltonian_dropped_l1`. The proof
             says nothing about the imaginary parts of matrix elements of the
             original operator. With a scalar processed Hamiltonian the
@@ -1372,7 +1372,7 @@ class ADAPT(Method):
             overlaps. With `max_basis_size=1` or an original operator that is
             a multiple of the identity, the Plan measures nothing and keeps
             the request unused.
-        max_native_two_qubit_depth: Default `None`, which requests no depth
+        max_2q_depth: Default `None`, which requests no depth
             limit. `None` is neither a depth of 0 nor evidence that the
             circuits suit a device. A nonnegative integer D requires each
             submitted quantum circuit, the pencil, screening and energy
@@ -1393,7 +1393,6 @@ class ADAPT(Method):
             shots in the Run. Of the current backends only IBM Runtime
             computes this depth, for its compiled circuits, and only when its
             options keep the provider's dynamical decoupling and twirling off
-            and qiskit-ibm-runtime 0.49.0 is installed
             (`nwqlib.backends.IBMRuntimeBackend`). Otherwise the depth is
             unavailable and an integer limit refuses the first circuit, as it
             does on every other backend, Aer included. The limit also refuses
@@ -1464,7 +1463,7 @@ class ADAPT(Method):
             normally. The stages follow every scientific stop of the
             growth, `invalid_sampled_evidence` included, and the main stage
             can still end without an eigenvalue, as when its solve fails. A
-            circuit that `max_native_two_qubit_depth` refuses, or a
+            circuit that `max_2q_depth` refuses, or a
             cancellation, ends the Run without the remaining stages. The
             Result then reports the last pencil that the growth solved, if
             there is one, together with the decision if it was made. The Run
@@ -1486,7 +1485,7 @@ class ADAPT(Method):
         ValueError: If `theta` is zero, if only some of the three
             optimization settings are given, if an explicit pool is empty,
             if `stop_criterion="residual_norm"` has no
-            `residual_norm_tolerance`, or if `basis_growth`
+            `residual_tol`, or if `basis_growth`
             is combined with optimization or `stop_criterion="residual_norm"`,
             or has no `independence_cutoff` while `overlap_cutoff` is at
             least 1.
@@ -1505,6 +1504,8 @@ class ADAPT(Method):
         (0,) pool_exhausted -1.0
     """
 
+    schema_version: Literal[2] = 2
+
     # The numerical defaults below are registered with their revisit conditions
     # in docs/ENGINEERING_CONSTANTS.md. max_products sets no limit by default.
     max_bytes: PositiveInt | None = None
@@ -1515,22 +1516,22 @@ class ADAPT(Method):
     n_spatial_orbitals: PositiveInt | None = None
     theta: Real = pi / 4
     gradient_norm_floor: Annotated[Real, Field(ge=0)] | None = None
-    energy_change_tolerance: Annotated[Real, Field(gt=0)] | None = None
+    energy_tol: Annotated[Real, Field(gt=0)] | None = None
     t_auto_fraction: Annotated[Real, Field(gt=0, le=1)] = 0.20
     t_user: PositiveInt = 10
     max_iterations: PositiveInt = 8
     overlap_cutoff: Annotated[Real, Field(gt=0)] = 1e-12
     symmetrize_matrices: bool = True
     stop_criterion: Literal["flat_counter", "residual_norm"] = "flat_counter"
-    residual_norm_tolerance: Annotated[Real, Field(gt=0)] | None = None
+    residual_tol: Annotated[Real, Field(gt=0)] | None = None
     optimize_every_m: PositiveInt | None = None
     optimize_rounds_n: PositiveInt | None = None
-    optimize_max_evaluations: PositiveInt | None = None
-    pauli_coefficient_cutoff: Annotated[Real, Field(ge=0)] | None = None
-    input_symmetry_tolerance: Annotated[Real, Field(ge=0)] = 1e-12
+    max_evals: PositiveInt | None = None
+    pauli_cutoff: Annotated[Real, Field(ge=0)] | None = None
+    symmetry_tol: Annotated[Real, Field(ge=0)] = 1e-12
     acquisition: PencilAcquisition = PencilAcquisition()
     basis_growth: BoundedRitzGrowth | None = None
-    max_native_two_qubit_depth: Count | None = None
+    max_2q_depth: Count | None = None
     sampling: PencilSampling | None = None
     result_type: ClassVar[type] = ADAPTResult
 
@@ -1584,12 +1585,12 @@ class ADAPT(Method):
         """
         if self.theta == 0:
             raise ValueError("new-generator theta must be nonzero")
-        if self.stop_criterion == "residual_norm" and self.residual_norm_tolerance is None:
-            raise ValueError("stop_criterion='residual_norm' needs a residual_norm_tolerance in the energy unit "
+        if self.stop_criterion == "residual_norm" and self.residual_tol is None:
+            raise ValueError("stop_criterion='residual_norm' needs a residual_tol in the energy unit "
                              "of the Hamiltonian")
         enabled = self.optimize_every_m is not None
         if enabled != (self.optimize_rounds_n is not None) or enabled != (
-            self.optimize_max_evaluations is not None
+            self.max_evals is not None
         ):
             raise ValueError(
                 "optimization requires period, rounds and an explicit total evaluation limit"
@@ -1598,7 +1599,7 @@ class ADAPT(Method):
         if growth is not None:
             if enabled:
                 raise ValueError("BoundedRitzGrowth keeps every angle at theta and cannot be combined with "
-                                 "optimize_every_m, optimize_rounds_n and optimize_max_evaluations")
+                                 "optimize_every_m, optimize_rounds_n and max_evals")
             if self.stop_criterion == "residual_norm":
                 raise ValueError("BoundedRitzGrowth computes no full-space residual; "
                                  "use stop_criterion='flat_counter'")
@@ -1714,8 +1715,8 @@ class ADAPT(Method):
         # energy, not every diagnostic flag: the sampled enclosure window of _projected_eigensolver is not
         # centered, so an identity shift can change that flag.
         scale = energy_scale(problem.A, max_bytes=self.max_bytes, max_products=self.max_products)
-        cutoff = (DEFAULT_PAULI_CUTOFF_PER_SCALE * scale if self.pauli_coefficient_cutoff is None
-                  else self.pauli_coefficient_cutoff)
+        cutoff = (DEFAULT_PAULI_CUTOFF_PER_SCALE * scale if self.pauli_cutoff is None
+                  else self.pauli_cutoff)
         inputs = prepare_adapt_inputs(
             operator,
             reference,
@@ -1756,7 +1757,7 @@ class ADAPT(Method):
         # One proof covers every basis this Plan can build: the processed
         # Hamiltonian, the reference and the whole admitted pool, scanned
         # once from their stored records. The processed Hamiltonian is the
-        # measured target. The recorded pauli_coefficient_cutoff truncation
+        # measured target. The recorded pauli_cutoff truncation
         # (hamiltonian_dropped_l1) defines it, so the proof says nothing
         # about imaginary entries of the original operator.
         # A scalar processed Hamiltonian makes the legacy growth of
@@ -1786,7 +1787,7 @@ class ADAPT(Method):
             self.acquisition, execution=execution, shots=shots, acquires=acquires,
             real_reason=lambda: real_hamiltonian_reason((t.label, t.coefficient) for t in inputs.terms)
             or real_state_reason(reference) or next(filter(None, map(real_generator_reason, inputs.pool)), None),
-            scope=f"processed Hamiltonian terms after pauli_coefficient_cutoff, the reference and all "
+            scope=f"processed Hamiltonian terms after pauli_cutoff, the reference and all "
                   f"{len(inputs.pool)} admitted pool generators",
             vacuum_reason=lambda: vacuum_failure)
         if self.sampling is not None and acquisition.matrix_measurement is not None:
@@ -1850,11 +1851,11 @@ class ADAPT(Method):
             hamiltonian_action_work=inputs.hamiltonian_work,
             hamiltonian_dropped_l1=inputs.dropped_l1,
             energy_scale=scale,
-            pauli_coefficient_cutoff=cutoff,
+            pauli_cutoff=cutoff,
             gradient_norm_floor=(DEFAULT_GRADIENT_FLOOR_PER_SCALE * scale if self.gradient_norm_floor is None
                                  else self.gradient_norm_floor),
-            energy_change_tolerance=(DEFAULT_ENERGY_CHANGE_PER_SCALE * scale if self.energy_change_tolerance is None
-                                     else self.energy_change_tolerance),
+            energy_tol=(DEFAULT_ENERGY_CHANGE_PER_SCALE * scale if self.energy_tol is None
+                                     else self.energy_tol),
             groups=inputs.groups,
             energy_groups=inputs.energy_groups,
             processing=inputs.processing,
@@ -1921,7 +1922,7 @@ class ADAPT(Method):
         return self.max_products
 
     def before_submit(self, plan, prepared, *, run):
-        """Refuse a circuit whose native two-qubit depth exceeds `max_native_two_qubit_depth` or is unavailable, before the Run records its submission.
+        """Refuse a circuit whose native two-qubit depth exceeds `max_2q_depth` or is unavailable, before the Run records its submission.
 
         ``drive_adapt`` turns a refusal of the circuit's depth into the stop
         ``native_depth_refused`` and raises a refusal for the installed package
@@ -1929,7 +1930,7 @@ class ADAPT(Method):
         """
         from nwqlib.backends.inspection import check_native_depth_cap
 
-        check_native_depth_cap(prepared, self.max_native_two_qubit_depth)
+        check_native_depth_cap(prepared, self.max_2q_depth)
 
     def prepare_all_refusal(self):
         """ADAPT rejects ``settings="all"``, because its later queries act on generators selected from earlier results."""

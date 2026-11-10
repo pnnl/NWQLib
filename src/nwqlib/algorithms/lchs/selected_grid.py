@@ -10,6 +10,7 @@ from nwqlib.blocks.selection import SelectedBlock
 from nwqlib.core.records import Float64
 from nwqlib.operators.access import _check_bytes
 from .references import dense_work
+from .route_options import route_name
 from .solution_error_budget import application_weight, psd_recovery, psd_recovery_exponent, psd_recovery_part
 
 
@@ -27,7 +28,7 @@ class GridApplication:
         input_norm: Physical norm of the input, or None when not representable.
         slots: SELECT address slots of this application in a quantum layout.
         omitted: Set of k-node indices of this application whose nonzero
-            slots planning omitted under ``source_drop_allowance``, so its
+            slots planning omitted under ``source_drop``, so its
             circuit never applies them.
     """
 
@@ -135,7 +136,7 @@ def host_applications(plan, result, data):
     specs = _specifications(plan, data)
     if len(result.applications) != len(specs):
         raise ValueError("selected-grid application count differs from its saved source schedule")
-    pf = plan.method.hamiltonian_evolution_backend in {"trotter", "trotter_error_budgeted"}
+    pf = route_name(plan.method.ham_evo) in {"trotter", "trotter_error_budgeted"}
     actions = data.host_actions["applications"] if pf else None
     applications = []
     for index, (application, spec) in enumerate(zip(result.applications, specs, strict=True)):
@@ -164,8 +165,8 @@ def selected_grid(plan, result, *, checks):
     nodes, coefficients = quad.k_nodes, quad.coefficients
     n = len(nodes)
     specs = _specifications(plan, data)
-    pf = plan.method.hamiltonian_evolution_backend in {"trotter", "trotter_error_budgeted"}
-    # Planning can omit, under source_drop_allowance, an application or some
+    pf = route_name(plan.method.ham_evo) in {"trotter", "trotter_error_budgeted"}
+    # Planning can omit, under source_drop, an application or some
     # nonzero slots of one whose PREP amplitude underflows. The grid lists
     # only what the circuit applies, so the reference and the refined bounds
     # leave out the omitted part that dropped_bound reports. The schedule
@@ -322,7 +323,7 @@ def grid_reference(plan, grid, *, checks, counts, held_inputs=()):
         stored_pf_nodes, stored_node_read_work, _stored_node_table_bytes, _BorrowedRows)
     exponent = psd_recovery_exponent(grid.shift, plan.reconstruction.elapsed_time)
     d = plan.reconstruction.encoded_dimension
-    pf = plan.method.hamiltonian_evolution_backend in {"trotter", "trotter_error_budgeted"}
+    pf = route_name(plan.method.ham_evo) in {"trotter", "trotter_error_budgeted"}
     held = 0
     if pf:
         held = (32*d*d + 32*len(grid.nodes) + 128*len(grid.applications)*(len(grid.nodes)+1)
@@ -357,7 +358,7 @@ def grid_reference(plan, grid, *, checks, counts, held_inputs=()):
         # vector and four d-vectors, beside the live L and H.
         # Applications that apply the same k nodes share one streamed sum.
         # Only an omission of some nodes of an application under
-        # source_drop_allowance makes another group, with its own eigensystems.
+        # source_drop makes another group, with its own eigensystems.
         groups = {}
         for app in grid.applications:
             if app.weight != 0 and app.input_norm != 0:
@@ -386,7 +387,7 @@ def grid_reference(plan, grid, *, checks, counts, held_inputs=()):
                 counts["eigh_calls"] += spectral["eigh_calls"]
                 counts["matvec_attempts"] += spectral["matvecs"]
                 counts["matvec_completed"] += spectral["matvecs"]
-    order = plan.method.trotter_order
+    order = plan.method.ham_evo.order if pf else None
     q = d.bit_length()-1
     stored = grid.payload.host_actions["applications"] if pf and plan.execution == "classical" else None
     for index, app in enumerate(grid.applications if pf else ()):

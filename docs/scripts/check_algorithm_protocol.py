@@ -69,7 +69,7 @@ def child(poison=None):
     from importlib.metadata import EntryPoint
     from nwqlib import methods
     from nwqlib.algorithms import _METHOD_OWNERS
-    from nwqlib.algorithms import (
+    from nwqlib.algorithms.registry import (
         AlgorithmRegistry,
         direct_method,
         options_schema,

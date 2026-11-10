@@ -53,7 +53,7 @@ from pydantic import Field
 
 from nwqlib._limits import ResourceLimitError, memory_limit
 from nwqlib._validation import UNIT_ROUNDOFF
-from nwqlib.core.records import StrictInteger, Record
+from nwqlib.core.records import StrictInteger, Record, _ConstructorDisplay
 from nwqlib.algorithms.qhd.validation import (
     _admitted_products,
     _kinetic_range_error,
@@ -73,7 +73,7 @@ _NU = 2.0**-1022
 _OMEGA = 1.7976931348623157e308
 
 
-class BinarySynthesis(Record):
+class BinarySynthesis(_ConstructorDisplay, Record):
     """Circuit choices of the binary encoding: phase diagonals, QFT bit reversal and AQFT cutoff.
 
     Build it with keyword arguments and pass it as

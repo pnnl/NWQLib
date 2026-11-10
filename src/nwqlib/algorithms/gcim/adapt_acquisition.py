@@ -12,6 +12,7 @@ from math import fsum, isfinite, pi
 import numpy as np
 from nwqlib._numerics import normalize_state_vector, stable_vector_norm
 from nwqlib._projected_eigensolver import gram_formation_allowance
+from nwqlib._validation import reanalysis_settings
 from nwqlib.blocks.kernels import BoundKernel, KernelOutput
 from nwqlib.core.planning import Realization, RuntimeOptions
 from nwqlib.core.analysis import capture_analysis_origin
@@ -2128,7 +2129,7 @@ def _new_controller_state(controls, *, bounded=False):
       the active BFGS invocation, cumulative counters, restarts after resume
       and whether the evaluation limit ended the last optimization.
     - ``energy_queries``, ``active_energy``: logical energy queries counted
-      against ``optimize_max_evaluations`` and the query in progress that
+      against ``max_evals`` and the query in progress that
       was already counted.
     - ``analysis_attempts``, ``current_analysis_attempt``,
       ``analysis_in_progress``: projected-analysis bookkeeping for
@@ -2195,7 +2196,7 @@ def _stopping_reason(state, options, reconstruction, count):
     """Return the stop reason of the ADAPT iteration after an analysis with ``count`` selections, or None.
 
     The rules are checked in this order: the optimizer's evaluation limit
-    was reached, the residual norm met ``residual_norm_tolerance``
+    was reached, the residual norm met ``residual_tol``
     (``residual_norm`` stopping only), every pool member is selected, the
     iteration limit is reached, or the flat count is at least
     ``T = min(t_user, t_auto_fraction * unselected)`` (Zheng et al. (2024),
@@ -2211,7 +2212,7 @@ def _stopping_reason(state, options, reconstruction, count):
     if (
         count
         and options.stop_criterion == "residual_norm"
-        and state["history"][-1]["residual_norm"] <= options.residual_norm_tolerance
+        and state["history"][-1]["residual_norm"] <= options.residual_tol
     ):
         return "residual_norm_threshold"
     if count == len(reconstruction.pool):
@@ -2369,7 +2370,7 @@ def drive_adapt(plan, *, run, prepare_only=False):
     - Unresolved external work stops the iteration with a pending or
       uncertain reason instead of retrying, so no preparation, submission or
       shot is duplicated.
-    - A circuit that ``ADAPT.max_native_two_qubit_depth`` refuses before its
+    - A circuit that ``ADAPT.max_2q_depth`` refuses before its
       submission (``NativeDepthCapRefusal`` from ``ADAPT.before_submit``)
       for its depth, above the limit or unqualified, ends the iteration with
       ``native_depth_refused``. The saved complete phase returns the Result
@@ -2378,7 +2379,7 @@ def drive_adapt(plan, *, run, prepare_only=False):
       the recorded ones (``provenance``) is raised with the checkpoint
       unchanged, so the same Run continues where the recorded versions are
       installed.
-    - A logical energy query is counted against ``optimize_max_evaluations``
+    - A logical energy query is counted against ``max_evals``
       before its circuits run, and an identical point reuses collected
       values without being counted again.
     - SciPy BFGS has no resumable internal state. After resume it restarts
@@ -2735,10 +2736,10 @@ def drive_adapt(plan, *, run, prepare_only=False):
         ``objective`` or ``derivative``, and ``insertion`` selects a
         Pauli-insertion derivative query. With ``gradient`` a classical query
         returns ``(energy, gradient)`` of one energy-and-gradient evaluation,
-        so ``optimize_max_evaluations`` counts distinct evaluated parameter
+        so ``max_evals`` counts distinct evaluated parameter
         points, and an energy and gradient at the same point are counted once.
         Raises ``_EvaluationBudgetExhausted`` when a new point would exceed
-        ``optimize_max_evaluations``.
+        ``max_evals``.
         """
         points = energy_points(theta, insertion)
         request = dict(
@@ -2748,7 +2749,7 @@ def drive_adapt(plan, *, run, prepare_only=False):
             return finish_energy(request, points, gradient=gradient)
         if state["active_energy"] is not None:
             raise ValueError("optimizer advanced before its original energy query completed")
-        if state["energy_queries"] >= options.optimize_max_evaluations:
+        if state["energy_queries"] >= options.max_evals:
             raise _EvaluationBudgetExhausted
         state["energy_queries"] += 1
         state["active_energy"] = request
@@ -2829,7 +2830,7 @@ def drive_adapt(plan, *, run, prepare_only=False):
             state["value"],
             iteration,
             valid=state["value"] is not None and pencil.failure_reason is None,
-            tolerance=reconstruction.energy_change_tolerance,
+            tolerance=reconstruction.energy_tol,
         )
         # The diagonal query of the full product identifies this round's
         # basis in its history record (AdaptRound.basis_realization), and the
@@ -3554,6 +3555,7 @@ def analyze_adapt(plan, data, *, settings):
     """
     from .adapt import METHOD
 
+    reanalysis_settings(settings, ("overlap_cutoff",), "ADAPT")
     chunks = tuple(_matched_query_chunks(plan, data))
     import json
 

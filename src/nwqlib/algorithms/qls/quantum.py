@@ -1280,7 +1280,7 @@ def _program(method, problem, output, shots, rec, base, preparation, terms=None)
 def _phase_tolerance(method, polynomial_kappa, rescale):
     """Return the phase residual target of ``method`` for its chosen polynomial.
 
-    An explicit ``phase_residual_tolerance`` is used as given. A shortcut
+    An explicit ``phase_tol`` is used as given. A shortcut
     solver otherwise keeps the solver preset, because its ``epsilon_inv`` sets
     the kernel-reflection ``eta`` and the relation below does not apply to it.
     ``qsvt_inverse`` otherwise takes ``max(preset, c epsilon_inv/(k s))`` with
@@ -1306,8 +1306,8 @@ def _phase_tolerance(method, polynomial_kappa, rescale):
     """
     from nwqlib.subroutines.qsp.phases import QSP_SOLVER_RESIDUAL_TOLERANCE
 
-    if method.phase_residual_tolerance is not None:
-        return method.phase_residual_tolerance
+    if method.phase_tol is not None:
+        return method.phase_tol
     if method.solver != "qsvt_inverse":
         return QSP_SOLVER_RESIDUAL_TOLERANCE
     return max(QSP_SOLVER_RESIDUAL_TOLERANCE,
@@ -1356,7 +1356,7 @@ def plan_quantum(
         note = conditioning_note(rec.polynomial_kappa, rec.sigma_min, rec.sigma_max, problem.dimension)
         raise type(error)(
             f"QLS phase synthesis of degree {rec.degree} did not meet its target: {error}. "
-            "QLS(phase_residual_tolerance=...) chooses another target, and its documentation gives the effect on the "
+            "QLS(phase_tol=...) chooses another target, and its documentation gives the effect on the "
             f"error. {note}", evidence=error.evidence) from error
     preparation = select_preparation("rhs", rhs, per_bit=True)
     rec = rec.revise(phase_solution=phase.phases, phase_error=phase.residual_sup_bound,

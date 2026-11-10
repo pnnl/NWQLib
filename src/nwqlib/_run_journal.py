@@ -42,7 +42,7 @@ from nwqlib.operators.access import Count
 # A Method-owned Result field change may instead bump that Method's archive
 # format when load_run checks it before restoring the journal and validating
 # the concrete Result.
-RUN_FORMAT = "nwqlib.run/24"
+RUN_FORMAT = "nwqlib.run/25"
 # Size of the ordered blocks of a saved payload. 1 MiB keeps each value far
 # below SQLite's per-value length limit and bounds the buffers of later chunked
 # reads, whatever max_data_bytes is. LocalJournal.commit writes these blocks and

@@ -455,14 +455,14 @@ def _census(recipe: UniformNodeRecipe, *, degree: int, rounds: int) -> dict[str,
 
 
 def plan_analytic_kernel_preparation(
-    recipe: UniformNodeRecipe, *, gamma: float, approximation_tolerance: float, margin: float, max_rounds: int,
+    recipe: UniformNodeRecipe, *, gamma: float, approx_tol: float, margin: float, max_rounds: int,
     residual_tolerance: float = QSP_SOLVER_RESIDUAL_TOLERANCE, max_fft: int | None = None,
     max_bytes: int | None = None,
 ) -> AnalyticKernelPlan:
     """Choose the degree, samples and scale of the analytic kernel PREP from G19/G20, without arrays or circuits.
 
     n is the smallest even degree with G19 at most half of
-    ``approximation_tolerance``, and N the smallest power of two above n
+    ``approx_tol``, and N the smallest power of two above n
     with G20 at most the rest, both from their logarithms; both bounds
     decrease to zero, so the searches end. See the module docstring for the
     relations.
@@ -473,7 +473,7 @@ def plan_analytic_kernel_preparation(
             ``uniform_node_recipes``. The rotation table is refused: its
             node error excludes the rounding of ``h j``.
         gamma (float): Low–Somma gamma, finite and positive.
-        approximation_tolerance (float): Budget for Delta = G19 + G20 in the
+        approx_tol (float): Budget for Delta = G19 + G20 in the
             frame of F, finite and positive.
         margin (float): eta in (0, 1).
         max_rounds (int): Admission limit on K, at least 1.
@@ -492,10 +492,10 @@ def plan_analytic_kernel_preparation(
         raise ValueError(f"the analytic kernel PREP needs a {', '.join(_SUPPORTED_RECIPES)} node recipe; the "
                          "rotation table's node error excludes the rounding of h j")
     gamma = finite_real(gamma, "gamma")
-    tolerance = finite_real(approximation_tolerance, "approximation_tolerance")
+    tolerance = finite_real(approx_tol, "approx_tol")
     eta = finite_real(margin, "margin")
     if gamma <= 0 or tolerance <= 0 or not 0 < eta < 1:
-        raise ValueError("gamma and approximation_tolerance must be positive and margin must lie in (0, 1)")
+        raise ValueError("gamma and approx_tol must be positive and margin must lie in (0, 1)")
     rounds_cap = integer(max_rounds, "max_rounds", 1)
     if max_fft is not None:
         max_fft = integer(max_fft, "max_fft", 1)

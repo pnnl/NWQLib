@@ -123,7 +123,7 @@ def test_original_nonpower_coordinates_and_hamiltonian_phase_output():
     # tr(.9 I)/3 is .9, and the rounded sum of the three quotients .3 is one unit below it, so the padded
     # form of this H keeps a nonidentity word of rounding unless the padding reads the constant diagonal.
     constant = plan(Eigenproblem(A=.9 * np.eye(3)), seed=7, method=QCELS(
-        initial_state=[1., 0., 0.], controlled_power_backend="trotter_error_budgeted")).reconstruction
+        initial_state=[1., 0., 0.], ctrl_power="trotter_error_budgeted")).reconstruction
     assert constant.identity_coefficient == .9 and not constant.pauli_labels
     assert selected._native["input"].target.dense_array()[3, 3] == pytest.approx(1.3 / 3, abs=1e-15)
     result = solve(selected)
@@ -284,7 +284,7 @@ def test_native_random_pauli_quadratures_share_each_power():
         target=target,
         execution="quantum",
         num_frequencies=3,
-        controlled_power_error_budget=1e-4,
+        ctrl_power_budget=1e-4,
     )
     assert sum(r.width for r in selected.construction.program.registers) == 2
     result = solve(selected)
@@ -410,7 +410,7 @@ def test_qcels_molecular_energy_and_identity_offset_match_exact_diagonalization(
     powers = sorted({sample.power for sample in result.samples})
     assert powers == list(range(11))
     # Method-error-bounded. Each controlled power is within eps = 1e-3 (the
-    # default controlled_power_error_budget) of exp(-i p tau H) in operator
+    # default ctrl_power_budget) of exp(-i p tau H) in operator
     # norm, so |z_p - exp(-i p theta*)| <= eps. QCELS maximizes
     # F = |mean_p z_p exp(i p theta)|. A returned phase with F >= 1 - eps, which
     # a global maximizer has because F(theta*) >= 1 - eps, gives F* >= 1 - 2 eps,
@@ -461,15 +461,15 @@ def test_sampled_powers_select_their_own_steps_and_the_trajectory_keeps_the_comm
     from nwqlib.resources import ResourceContext
 
     target = ingest_pauli((("XI", .7), ("ZX", .4), ("YZ", .3), ("ZZ", .2)), num_qubits=2)
-    method = QCELS(initial_state=[1, 0, 0, 0], controlled_power_backend="trotter_error_budgeted",
+    method = QCELS(initial_state=[1, 0, 0, 0], ctrl_power="trotter_error_budgeted",
                    tau=.03, max_time=.24, num_times=8, grid_size=32,
-                   controlled_power_error_budget=.001)
-    budget = Fraction(method.controlled_power_error_budget)
+                   ctrl_power_budget=.001)
+    budget = Fraction(method.ctrl_power_budget)
     for shots in (None, 64):
         selected = plan(Eigenproblem(A=target), method=method, shots=shots, seed=7)
         rec = selected.reconstruction
         assert [p.power for p in rec.powers] == list(range(9)) and rec.pruned_mass == 0
-        assert all(p.total_error <= method.controlled_power_error_budget for p in rec.powers)
+        assert all(p.total_error <= method.ctrl_power_budget for p in rec.powers)
         if shots is None:
             assert rec.common_step is not None
         else:
@@ -506,7 +506,7 @@ def test_a_first_step_count_lost_to_rounding_is_corrected_and_confirmed_exactly(
     terms = (("ZZI", 1.0), ("IZZ", 1.0), ("ZIZ", 1.0), ("XII", .7), ("IXI", .7), ("IIX", .7))
     tau, budget = .005, 1e-4
     method = QCELS(initial_state=[1] + [0] * 7, tau=tau, num_times=2, grid_size=64, max_time=216550.5 * tau,
-                   controlled_power_backend="trotter_error_budgeted", controlled_power_error_budget=budget)
+                   ctrl_power="trotter_error_budgeted", ctrl_power_budget=budget)
     problem = Eigenproblem(A=ingest_pauli(terms, num_qubits=3))
     rec = plan(problem, method=method, shots=1, seed=7).reconstruction
     W = Fraction(*rec.bound_coefficient)
@@ -837,7 +837,7 @@ def test_power_and_step_limits_refuse_only_when_they_are_set():
     method = QCELS(initial_state=[1] + [0] * 7, tau=.02, num_times=8, grid_size=256, max_time=4001.)
     powers = plan(problem, method=method, shots=16, seed=7).reconstruction.powers
     assert max(row.power for row in powers) >= 2 * 10**5 and max(row.steps for row in powers) > 10**6
-    assert all(row.total_error <= method.controlled_power_error_budget for row in powers)
+    assert all(row.total_error <= method.ctrl_power_budget for row in powers)
     with pytest.raises(ValueError, match="exceeds max_power=1000"):
         plan(problem, method=method.revise(max_power=1000), shots=16, seed=7)
     with pytest.raises(ValueError, match=r"above max_trotter_steps=100\. Raise max_trotter_steps"):

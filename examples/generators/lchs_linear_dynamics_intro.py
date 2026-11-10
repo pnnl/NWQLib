@@ -19,7 +19,7 @@ from time import perf_counter
 import numpy as np
 
 from nwqlib import LinearDynamics, plan, solve
-from nwqlib.algorithms import LCHS
+from nwqlib.algorithms.lchs import LCHS, Trotter
 
 POINTS = 8           # grid points around the channel, log2(POINTS) = 3 system qubits
 SPEED = 1.0          # channel lengths per unit time, so one time unit is one trip around the channel
@@ -37,7 +37,7 @@ u0 = np.exp(-((x - 0.25) / PULSE_WIDTH) ** 2)
 
 started = perf_counter()
 problem = LinearDynamics(A=A, initial_state=u0, time=FINAL_TIME)
-selected = plan(problem, method=LCHS(hamiltonian_evolution_backend="trotter", trotter_steps=TROTTER_STEPS),
+selected = plan(problem, method=LCHS(ham_evo=Trotter(steps=TROTTER_STEPS)),
                 seed=7)                   # selects the kernel, the quadrature and the circuit, runs nothing
 result = solve(selected, progress=False)  # builds and simulates the circuit
 seconds = perf_counter() - started
@@ -125,11 +125,11 @@ def show_card(result, reference, initial, predicted, seconds):
         "Split A into its dissipative Hermitian part L = (A + A<sup>†</sup>)/2 and the transport part iH, and checked "
         "that L is positive semidefinite, the condition of the LCHS identity.",
         f"Chose the kernel of An, Childs and Lin and a Gauss quadrature of {rec.physical_branches} nodes k<sub>j</sub> "
-        f"for the default tolerance {result.plan.method.approximation_tolerance:g}, and computed the coefficients "
+        f"for the default tolerance {result.plan.method.approx_tol:g}, and computed the coefficients "
         f"c<sub>j</sub> and the sum of their magnitudes α = {format_value(rec.coefficient_l1_norm)}.",
         f"Built the {qubits}-qubit circuit, in which {len(rec.success_bits)} address qubits select one of the "
         f"{rec.physical_branches} evolutions e<sup>−i(k<sub>j</sub>L+H)T</sup>, each from "
-        f"{result.plan.method.trotter_steps} product-formula steps, and simulated it on the Aer statevector simulator.",
+        f"{result.plan.method.ham_evo.steps} product-formula steps, and simulated it on the Aer statevector simulator.",
         "Kept the outcome in which the address qubits signal success and restored the scale α‖u(0)‖.",
     )
     display(HTML("<p><strong>What NWQLib did for you.</strong></p><ol>"
@@ -163,12 +163,12 @@ show_card(result, reference, u0, predicted, seconds)
 # %%
 started = perf_counter()
 try:
-    plan(problem, method=LCHS(hamiltonian_evolution_backend="trotter", trotter_steps=TROTTER_STEPS,
+    plan(problem, method=LCHS(ham_evo=Trotter(steps=TROTTER_STEPS),
                               max_quadrature_work=10_000), seed=7)
 except ValueError as refusal:
     print(f"Refused after {(perf_counter() - started) * 1e3:.1f} ms, before any circuit existed:\n{refusal}")
 
-remedied = plan(problem, method=LCHS(hamiltonian_evolution_backend="trotter", trotter_steps=TROTTER_STEPS,
+remedied = plan(problem, method=LCHS(ham_evo=Trotter(steps=TROTTER_STEPS),
                                      max_quadrature_work=11_513), seed=7)  # the remedy: the amount the refusal names
 show_table([
     ("Quadrature work cap", remedied.method.max_quadrature_work, "The amount the refusal named"),
@@ -234,7 +234,7 @@ show_table([
 # %%
 from nwqlib.algorithms.lchs import LCHSVerification
 
-exact_sum = solve(problem, method=LCHS(hamiltonian_evolution_backend="dense_exact"), execution="classical",
+exact_sum = solve(problem, method=LCHS(ham_evo="dense_exact"), execution="classical",
                   progress=False)
 relative_error = np.linalg.norm(u - reference) / np.linalg.norm(reference)
 quadrature_error = np.linalg.norm(np.asarray(exact_sum.solution) - reference) / np.linalg.norm(reference)
@@ -265,7 +265,7 @@ show_table([
 
 # %%
 trotter_runs = {TROTTER_STEPS: result}
-trotter_runs[16] = solve(problem, method=LCHS(hamiltonian_evolution_backend="trotter", trotter_steps=16), seed=7,
+trotter_runs[16] = solve(problem, method=LCHS(ham_evo=Trotter(steps=16)), seed=7,
                          progress=False)
 show_table([(count, quantity(estimate(run.plan, context=ResourceContext(basis="cx")), "cx"),
              np.linalg.norm(np.asarray(run.solution) - reference) / np.linalg.norm(reference))
@@ -277,11 +277,11 @@ show_table([(count, quantity(estimate(run.plan, context=ResourceContext(basis="c
 #
 # **The local simulator sets the limit. Beyond it, `plan` and `estimate` still give the cost.** The table lists the limits this run had and the channel's use of them.
 #
-# `solve(..., execution="classical")` with `hamiltonian_evolution_backend="dense_exact"` evaluates the finite sum classically, for systems too large to simulate. Its plan states the memory and work before anything runs. [Planning at scale](resource_estimation_at_scale.ipynb) plans circuits far beyond any simulator.
+# `solve(..., execution="classical")` with `ham_evo="dense_exact"` evaluates the finite sum classically, for systems too large to simulate. Its plan states the memory and work before anything runs. [Planning at scale](resource_estimation_at_scale.ipynb) plans circuits far beyond any simulator.
 
 # %%
 limits, width = trace.limits, len(rec.success_bits) + len(rec.system_bits)
-host_estimate = estimate(plan(problem, method=LCHS(hamiltonian_evolution_backend="dense_exact"),
+host_estimate = estimate(plan(problem, method=LCHS(ham_evo="dense_exact"),
                               execution="classical", seed=7))  # nothing runs yet
 show_table([
     ("Simulator memory cap", "Physical memory (default)" if limits.simulator_memory_mb is None else f"{limits.simulator_memory_mb:,} MiB",
@@ -312,7 +312,7 @@ import numpy as np
 from scipy.linalg import expm
 
 from nwqlib import LinearDynamics, plan, solve
-from nwqlib.algorithms import LCHS
+from nwqlib.algorithms.lchs import LCHS, Trotter
 
 omega, damping, force = 2.0, 0.4, 0.5
 my_A = np.array([[0.0, -omega], [omega, damping]])  # your matrix, for du/dt = -A u + b
@@ -321,7 +321,7 @@ my_b = np.array([0.0, force])                      # your constant source, or No
 my_time = 1.0
 
 my_problem = LinearDynamics(A=my_A, initial_state=my_u0, time=my_time, source=my_b)
-my_plan = plan(my_problem, method=LCHS(hamiltonian_evolution_backend="trotter", trotter_steps=8, duhamel_nodes=4),
+my_plan = plan(my_problem, method=LCHS(ham_evo=Trotter(steps=8), duhamel_nodes=4),
                seed=7)  # nothing runs yet
 print(f"{my_plan.reconstruction.physical_branches} evolutions, "
       f"{len(my_plan.reconstruction.success_bits) + len(my_plan.reconstruction.system_bits)} qubits")
@@ -337,8 +337,8 @@ print(f"relative error {np.linalg.norm(my_u - my_reference) / np.linalg.norm(my_
 #
 # - **Planning beyond simulation.** `plan` and `estimate` work at sizes no simulator holds ([Planning at scale](resource_estimation_at_scale.ipynb)).
 # - **The formula behind every number.** Each predicted count comes from a gate-count formula per block ([Mathematics](../docs/mathematics.md)). Section 2 sets it beside the compiled circuit, and the resource notebook compares the formulas with compiled circuits at small sizes.
-# - **Arguments switch the kernel and the evaluation.** `LCHS(lchs_kernel=..., k_quadrature=...)` selects another published kernel with a quadrature it accepts (Go deeper C). `hamiltonian_evolution_backend="dense_exact"` with `execution="classical"` evaluates the same problem classically (Section 3).
-# - **A norm or an observable from random pairs of evolutions.** `observable_estimator="sampled_pairs"` estimates a scalar of $u(T)$ from circuits that each hold two evolutions instead of the whole sum, with a numerical covering radius at a stated confidence (Go deeper E).
+# - **Arguments switch the kernel and the evaluation.** `LCHS(lchs_kernel=..., k_quadrature=...)` selects another published kernel with a quadrature it accepts (Go deeper C). `ham_evo="dense_exact"` with `execution="classical"` evaluates the same problem classically (Section 3).
+# - **A norm or an observable from random pairs of evolutions.** `estimator="sampled_pairs"` estimates a scalar of $u(T)$ from circuits that each hold two evolutions instead of the whole sum, with a numerical covering radius at a stated confidence (Go deeper E).
 # - **Saved and reloaded.** A saved result reloads with its plan, and its numbers can be recomputed from it (Appendix B).
 #
 # [Why NWQLib](../docs/why_nwqlib.md) compares this workflow with other packages.
@@ -405,7 +405,7 @@ coefficients = resolve_lchs_coefficient_plan(selected)
 nodes, values = np.asarray(coefficients.nodes), np.asarray(coefficients.coefficients)
 show_table([
     ("Kernel / quadrature", (coefficients.resolved_lchs_kernel.implementation,
-                             coefficients.resolved_k_quadrature.implementation), "Selected from approximation_tolerance"),
+                             coefficients.resolved_k_quadrature.implementation), "Selected from approx_tol"),
     ("Nodes k_j", len(nodes), f"From {nodes.min():.3g} to {nodes.max():.3g}"),
     ("Normalization α", rec.coefficient_l1_norm, "Sum of |c_j|, dimensionless"),
     ("Qubits", len(rec.success_bits) + len(rec.system_bits),
@@ -432,7 +432,7 @@ plt.show()
 steps = (1, 2, 4, 8, 16)
 for count in steps:
     if count not in trotter_runs:
-        trotter_runs[count] = solve(problem, method=LCHS(hamiltonian_evolution_backend="trotter", trotter_steps=count),
+        trotter_runs[count] = solve(problem, method=LCHS(ham_evo=Trotter(steps=count)),
                                     seed=7, progress=False)
 trotter_errors = [np.linalg.norm(np.asarray(trotter_runs[count].solution) - reference) / np.linalg.norm(reference)
                   for count in steps]
@@ -480,10 +480,10 @@ choices = {
 }
 rows, kernel_coefficients = [], {}
 for label, options in choices.items():
-    candidate = plan(problem, method=LCHS(hamiltonian_evolution_backend="trotter", trotter_steps=TROTTER_STEPS,
+    candidate = plan(problem, method=LCHS(ham_evo=Trotter(steps=TROTTER_STEPS),
                                           **options), seed=7)
     run = solve(candidate, progress=False)
-    exact = solve(problem, method=LCHS(hamiltonian_evolution_backend="dense_exact", **options),
+    exact = solve(problem, method=LCHS(ham_evo="dense_exact", **options),
                   execution="classical", progress=False)
     solution = np.asarray(run.solution)
     alpha = candidate.reconstruction.coefficient_l1_norm
@@ -562,22 +562,24 @@ ax.legend(fontsize=9)
 plt.show()
 
 # %% [markdown]
-# In the full algorithm, `lcu_state_preparation="mps_circuit"` loads the coefficients with an MPS circuit, `initial_state_preparation="mps_circuit"` does the same for $u(0)$, and `mps_num_layers` sets the coefficient loader's layers. The cell uses a 5-qubit uniform grid on $[-8,8)$ and repeats the default Gauss grid with MPS-loaded coefficients.
+# In the full algorithm, `lcu_prep="mps_circuit"` loads the coefficients with an MPS circuit, `init_prep="mps_circuit"` does the same for $u(0)$, and `MPSCircuit(num_layers=...)` in place of the name sets a loader's layers. These options act only in quantum execution. Classical execution evaluates the finite sum directly and prepares no state, so a classical result does not change with them and carries no compression error. The cell uses a 5-qubit uniform grid on $[-8,8)$ and repeats the default Gauss grid with MPS-loaded coefficients.
 
 # %%
-mps_coefficients = {"lcu_state_preparation": "mps_circuit"}
+from nwqlib.algorithms.lchs import MPSCircuit
+
+mps_coefficients = {"lcu_prep": "mps_circuit"}
 mps_uniform = ProviderConfig(implementation="signed_binary_uniform", parameters={"num_qubits": 5, "lsb_position": -1})
 cases = (
     ("Uniform grid", "Exact loading for both", {"k_quadrature": mps_uniform}),
     ("Uniform grid", "MPS for the coefficients, 2 layers", {"k_quadrature": mps_uniform, **mps_coefficients}),
     ("Uniform grid", "MPS for the coefficients, 4 layers",
-     {"k_quadrature": mps_uniform, **mps_coefficients, "mps_num_layers": 4}),
-    ("Uniform grid", "MPS for the initial pulse", {"k_quadrature": mps_uniform, "initial_state_preparation": "mps_circuit"}),
+     {"k_quadrature": mps_uniform, "lcu_prep": MPSCircuit(num_layers=4)}),
+    ("Uniform grid", "MPS for the initial pulse", {"k_quadrature": mps_uniform, "init_prep": "mps_circuit"}),
     ("Gauss grid", "MPS for the coefficients, 2 layers", mps_coefficients),
 )
 rows = [("Gauss grid", "Exact loading for both", relative_error)]
 for grid_label, label, options in cases:
-    run = solve(problem, method=LCHS(hamiltonian_evolution_backend="trotter", trotter_steps=TROTTER_STEPS, **options),
+    run = solve(problem, method=LCHS(ham_evo=Trotter(steps=TROTTER_STEPS), **options),
                 seed=7, progress=False)
     rows.append((grid_label, label, np.linalg.norm(np.asarray(run.solution) - reference) / np.linalg.norm(reference)))
 show_table(rows, headers=("Quadrature", "State preparation", "Relative error"))
@@ -595,7 +597,7 @@ show_table(rows, headers=("Quadrature", "State preparation", "Relative error"))
 #
 # A two-level atom is driven at Rabi frequency $\Omega$ and decays from its excited state $|1\rangle$ at rate $\Gamma$. Until it emits a photon, its unnormalized state obeys $du/dt=-Au$ with $A=\tfrac{\Gamma}{2}|1\rangle\langle1|+i\tfrac{\Omega}{2}X$, and $\lVert u(T)\rVert^2$ is the probability that no photon has been emitted by time $T$. The cell gives $A$ as a Pauli sum, so no matrix is formed.
 #
-# With an explicit evolution backend, `observable_estimator="sampled_pairs"` estimates `NormSquared`, `QuadraticForm` and `NormalizedExpectation` outputs from rows. Each row draws two terms of the LCHS sum, with probabilities proportional to their coefficient magnitudes, prepares both evolutions in one circuit with one extra qubit, and measures that qubit and the system. The mean of the signed scores over the rows estimates the physical quantity. The reported covering radius includes sampling error, product-formula bias and the kernel and quadrature contribution. Here each evolution is a product formula whose step count `"trotter_error_budgeted"` chooses so that its error bound fits 0.1 times `approximation_tolerance`. `shots` sets the number of rows, each measured once.
+# With an explicit evolution backend, `estimator="sampled_pairs"` estimates `NormSquared`, `QuadraticForm` and `NormalizedExpectation` outputs from rows. Each row draws two terms of the LCHS sum, with probabilities proportional to their coefficient magnitudes, prepares both evolutions in one circuit with one extra qubit, and measures that qubit and the system. The mean of the signed scores over the rows estimates the physical quantity. The reported covering radius includes sampling error, product-formula bias and the kernel and quadrature contribution. Here each evolution is a product formula whose step count `"trotter_error_budgeted"` chooses so that its error bound fits 0.1 times `approx_tol`. `shots` sets the number of rows, each measured once.
 
 # %%
 from nwqlib import Accuracy, NormSquared
@@ -607,8 +609,8 @@ ROWS = 500                               # independent rows, each one random pai
 # A = (DECAY/2)|1><1| + i (RABI/2) X, written as Pauli terms: (DECAY/4)(I - Z) + i (RABI/2) X.
 atom_A = ingest_pauli([("I", DECAY / 4), ("Z", -DECAY / 4), ("X", 0.5j * RABI)], num_qubits=1)
 atom = LinearDynamics(A=atom_A, initial_state=[1, 0], time=ATOM_TIME)  # starts in the ground state |0>
-pairs = LCHS(observable_estimator="sampled_pairs", hamiltonian_evolution_backend="trotter_error_budgeted",
-             approximation_tolerance=0.05)
+pairs = LCHS(estimator="sampled_pairs", ham_evo="trotter_error_budgeted",
+             approx_tol=0.05)
 
 started = perf_counter()
 atom_plan = plan(atom, method=pairs, output=NormSquared(), shots=ROWS, seed=7)  # draws the rows, runs nothing
@@ -635,7 +637,7 @@ show_table([
 ], headers=("Decaying atom, sampled pairs", "Value", "Meaning"))
 
 # %% [markdown]
-# The covering radius targets the no-photon probability of the physical solution. It adds the product-formula bias and the kernel and quadrature contribution to Hoeffding's bound for the mean of the row scores. Only the sampling part decreases as one over the square root of the number of independent rows. Measuring each row more than once (`pair_repeats`) does not improve this bound. These are numerical evaluations of ideal-arithmetic bounds, with no complete enclosure of coefficient, angle or score arithmetic.
+# The covering radius targets the no-photon probability of the physical solution. It adds the product-formula bias and the kernel and quadrature contribution to Hoeffding's bound for the mean of the row scores. Only the sampling part decreases as one over the square root of the number of independent rows. Measuring each row more than once (`SampledPairs.repeats`) does not improve this bound. The confidence is one minus `SampledPairs.fail_prob`, default 0.05, split equally over the quantities the output needs, here the norm squared alone. These are numerical evaluations of ideal-arithmetic bounds, with no complete enclosure of coefficient, angle or score arithmetic.
 #
 # An `accuracy` request constrains the sampling part of the radius instead of fixing the number of rows. It leaves the evolution and model bias contributions unchanged. The cell asks for a sampling radius of 0.02, plans the rows that this radius needs and counts their CX gates, without running them.
 
@@ -650,7 +652,7 @@ print("CX gates summed over these rows:",
 # %% [markdown]
 # `estimate` counts the gates of all rows without building a circuit. Running them takes one circuit per row, about 140 times as many as the 500-row run above. A Run on a backend that may charge, such as IBM, also needs `ExecutionLimits(max_total_circuits=...)` above its default of 512 circuits.
 #
-# With `hamiltonian_evolution_backend="qsp_block_encoding"`, each evolution is instead a quantum signal processing (QSP) polynomial of block encodings of $L$ and $H$, whose phases planning fits once for a finite set of evolution times (`pair_qsp_bank`). This route also evolves a periodic band operator and block-encoding circuits you supply. `pair_qsp_bank="stochastic"` keeps the low-order terms of each polynomial and draws one higher-order term separately for each evolution of a row, which can lower the average degree. A larger recovery factor $\zeta$ enlarges the range of the scores by $\zeta^2$ and the rows needed for a given sampling radius by $\zeta^4$, so a lower average degree does not by itself make a run cheaper.
+# With `ham_evo="qsp_block_encoding"`, each evolution is instead a quantum signal processing (QSP) polynomial of block encodings of $L$ and $H$, whose phases planning fits once for a finite set of evolution times (`SampledPairs.qsp_bank`). This route also evolves a periodic band operator and block-encoding circuits you supply. `SampledPairs(qsp_bank="stochastic")` keeps the low-order terms of each polynomial and draws one higher-order term separately for each evolution of a row, which can lower the average degree. A larger recovery factor $\zeta$ enlarges the range of the scores by $\zeta^2$ and the rows needed for a given sampling radius by $\zeta^4$, so a lower average degree does not by itself make a run cheaper.
 #
 # Replace `atom_A`, the initial state and `ATOM_TIME` to estimate your own norm. The product-formula route takes $A$ as a Pauli sum or as Pauli parts $L$ and $H$, and the [LCHS guide](../docs/algorithms/lchs.md#sampled-branch-pairs) lists the requirements of each route. [LCHS derivations](../docs/algorithms/lchs_derivations.md#sampled-branch-pairs) derives the scores, the radii and each bias bound.
 #

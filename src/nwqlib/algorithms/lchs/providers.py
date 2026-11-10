@@ -353,7 +353,7 @@ class LCHSPairCompatibility:
         reason: Explanation of the domain in which the pair is allowed, or of
             why its guarantee is absent or rejected.
         unbudgeted_error_stages: Named approximation stages that receive no
-            share of `approximation_tolerance` from this pair. A pair with
+            share of `approx_tol` from this pair. A pair with
             component bounds gives each bounded component a share, and it can
             name other stages, such as Trotter synthesis or state preparation.
             A pair on `signed_binary_uniform` bounds neither its kernel nor its
@@ -785,7 +785,7 @@ def _check_quadrature_work(required, max_quadrature_work, subject, ledger=None):
 
 
 def dense_select_slot_refusal(*, time, l_norm, tolerance, branches, limit, total_qubits=None):
-    """Return the refusal of a dense SELECT whose padded address slots exceed ``LCHS.max_dense_select_slots``.
+    """Return the refusal of a dense SELECT whose padded address slots exceed ``DenseExact.max_select_slots``.
 
     ``branches`` is the final branch count when ``total_qubits`` is given
     (``parameters.select_parameters``), and otherwise a lower bound on it
@@ -801,11 +801,11 @@ def dense_select_slot_refusal(*, time, l_norm, tolerance, branches, limit, total
     size = (f"at least {branches} branches and {slots} padded SELECT slots" if total_qubits is None
             else f"{branches} branches, {slots} padded SELECT slots and {total_qubits} total qubits")
     return ResourceLimitError(
-        f"LCHS dense SELECT at time={time}, ||L||={l_norm:g}, approximation_tolerance={tolerance:g} "
-        f"needs {size}; max_dense_select_slots={limit}. Raise max_dense_select_slots to at least {slots}, "
+        f"LCHS dense SELECT at time={time}, ||L||={l_norm:g}, approx_tol={tolerance:g} "
+        f"needs {size}; DenseExact.max_select_slots={limit}. Raise max_select_slots to at least {slots}, "
         "select supported multiplexed product-formula evolution with its different approximation and "
         "cost, or, on a k grid chosen from the time and tolerance, choose a shorter time or a looser "
-        "approximation_tolerance. An explicit k grid such as signed_binary_uniform sets its own size.")
+        "approx_tol. An explicit k grid such as signed_binary_uniform sets its own size.")
 
 
 def _ellipse_rule(problem, beta, range_k, strip_margin=LCHS_ELLIPSE_STRIP_MARGIN):
@@ -2241,9 +2241,9 @@ def _admit_coefficient_rounding(coefficient_l1_norm: float, epsilon: float, pair
         raise ValueError(
             f"LCHS provider pair {pair_label} has coefficient 1-norm {coefficient_l1_norm:.3g}, "
             f"so binary64 evaluation of its finite sum carries rounding of order u*alpha = {rounding:.3g} "
-            f"of the input norm, above {LCHS_ROUNDING_EPSILON_FRACTION:g}*approximation_tolerance "
+            f"of the input norm, above {LCHS_ROUNDING_EPSILON_FRACTION:g}*approx_tol "
             f"= {allowance:.3g}. Choose kernel parameters with a smaller coefficient 1-norm, such as a "
-            "smaller low_somma_f2 shift c, or a larger approximation_tolerance."
+            "smaller low_somma_f2 shift c, or a larger approx_tol."
         )
 
 
@@ -2340,7 +2340,7 @@ def _resolve_coefficient_context(
     A supplied `work_ledger` mapping receives the admitted quadrature work
     of the rule under `"quadrature_work"` (`_check_quadrature_work`).
 
-    `dense_select_slot_limit` is `LCHS.max_dense_select_slots` on a quantum
+    `dense_select_slot_limit` is `DenseExact.max_select_slots` on a quantum
     dense_exact route (`selection._route`) and None elsewhere. The composite
     Gauss rule reads it (`_build_composite_gauss`).
     """
@@ -2795,7 +2795,7 @@ def _homogeneous_coefficient_plan(quadrature, elapsed, scalar_phase=(0.0, 0.0), 
 
 
 def resolve_lchs_coefficient_plan(problem_or_plan, *, lchs_kernel=None, k_quadrature=None,
-                                  approximation_tolerance=None, max_bytes=None):
+                                  approx_tol=None, max_bytes=None):
     """Return the LCHS coefficient table of a problem without a source, or of an LCHS Plan.
 
     For a `LinearDynamics` without a source, it computes the k nodes, the
@@ -2819,7 +2819,7 @@ def resolve_lchs_coefficient_plan(problem_or_plan, *, lchs_kernel=None, k_quadra
         k_quadrature (ProviderConfig | None): Quadrature choice. `None`
             selects `"composite_gauss"`, as in `LCHS`. Must be `None` for a
             Plan.
-        approximation_tolerance (float | None): Construction tolerance,
+        approx_tol (float | None): Construction tolerance,
             strictly between 0 and 1. `None` selects `0.01`, as in `LCHS`.
             Must be `None` for a Plan.
         max_bytes (int | None): Default `None`, the physical memory of this computer.
@@ -2838,7 +2838,7 @@ def resolve_lchs_coefficient_plan(problem_or_plan, *, lchs_kernel=None, k_quadra
 
     Raises:
         ValueError: If the problem has a source or zero elapsed time, if
-            `approximation_tolerance` is outside (0, 1), or if a Plan is
+            `approx_tol` is outside (0, 1), or if a Plan is
             given with any of the three choices or holds no coefficient
             table for an input without a source.
         TypeError: If `problem_or_plan` is neither a `LinearDynamics` nor a
@@ -2847,7 +2847,7 @@ def resolve_lchs_coefficient_plan(problem_or_plan, *, lchs_kernel=None, k_quadra
     from nwqlib.core.planning import Plan
     from nwqlib.problems.records import LinearDynamics
     if isinstance(problem_or_plan, Plan):
-        if any(value is not None for value in (lchs_kernel, k_quadrature, approximation_tolerance)):
+        if any(value is not None for value in (lchs_kernel, k_quadrature, approx_tol)):
             raise ValueError("selected coefficient access cannot override the existing Plan")
         selected = problem_or_plan._native.get("coefficient_plan")
         if problem_or_plan.method.descriptor.method != "lchs" or not isinstance(selected, LCHSCoefficientPlan):
@@ -2862,10 +2862,10 @@ def resolve_lchs_coefficient_plan(problem_or_plan, *, lchs_kernel=None, k_quadra
         raise ValueError("zero-time dynamics needs no coefficient construction")
     kernel = lchs_kernel or ProviderConfig(implementation="near_optimal_eq7")
     quadrature = k_quadrature or ProviderConfig(implementation="composite_gauss")
-    # Same default as LCHS.approximation_tolerance (registered in ENGINEERING_CONSTANTS).
-    tolerance = .01 if approximation_tolerance is None else finite_real(approximation_tolerance, "approximation_tolerance")
+    # Same default as LCHS.approx_tol (registered in ENGINEERING_CONSTANTS).
+    tolerance = .01 if approx_tol is None else finite_real(approx_tol, "approx_tol")
     if not 0 < tolerance < 1:
-        raise ValueError("approximation_tolerance must lie in (0,1)")
+        raise ValueError("approx_tol must lie in (0,1)")
     from .time_independent_terms import _prepare_decomposition, _quadrature_data_from_plan
     if problem.A.manifest.reference.representation == "periodic_stencil":
         parameters = problem.A.periodic_stencil()
@@ -2892,7 +2892,7 @@ def resolve_lchs_coefficient_plan(problem_or_plan, *, lchs_kernel=None, k_quadra
     d = problem.dimension
     _check_bytes(48*d*d + 16*d, max_bytes, "LCHS Cartesian/PSD coefficient selection")
     from .method import LCHS
-    method = LCHS(lchs_kernel=kernel, k_quadrature=quadrature, approximation_tolerance=tolerance)
+    method = LCHS(lchs_kernel=kernel, k_quadrature=quadrature, approx_tol=tolerance)
     prepared = _prepare_decomposition(matrix=matrix, method=method, padded_dimension=dimension,
                                       max_spectral_work=method.max_spectral_work, parts=False)
     selected = _quadrature_data_from_plan(l_norm=prepared.l_norm, conversion=prepared.conversion,

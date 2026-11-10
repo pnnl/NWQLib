@@ -15,6 +15,7 @@ from nwqlib.operators.access import _check_bytes
 from nwqlib.operators.inputs import OperatorInput, _freeze_array
 from nwqlib.problems.inputs import PhysicalScale, StateInput, compose_recovery
 from .primary_records import METHOD
+from .route_options import dense_options, requested_qsp_route, route_name
 
 
 # Scalars that freeze_selected keeps unchanged, by exact type. Subclasses,
@@ -202,7 +203,7 @@ def selected_identity(data, problem, method):
 COHERENT_TAIL_SHARE = 0.5
 
 # Margin eta of the analytic kernel PREP target |q| <= 1 - eta (M3P witness value, PREP_IMPLEMENTATION_POLICY
-# section 6); its G19 + G20 budget is LCHS_QSP_EPSILON_FRACTION * approximation_tolerance, the component
+# section 6); its G19 + G20 budget is LCHS_QSP_EPSILON_FRACTION * approx_tol, the component
 # fraction of the coherent evolution. Both are declared controls, not optima (ENGINEERING_CONSTANTS, M8).
 ANALYTIC_PREP_MARGIN = 0.25
 
@@ -235,7 +236,7 @@ def select_parameters(method, problem, data):
     instead.
 
     A dense_exact plan whose final address-slot count exceeds
-    max_dense_select_slots is refused here, before circuit construction. A
+    DenseExact.max_select_slots is refused here, before circuit construction. A
     composite Gauss grid whose node count alone proves that outcome was
     refused earlier, before its rule was built
     (``providers._build_composite_gauss``). Each
@@ -275,7 +276,7 @@ def select_parameters(method, problem, data):
             source_scale=problem.source.preparation.physical_scale,final_time=problem.elapsed_time,
             shift=signed_shift(data.quadrature.conversion),duhamel_nodes=method.duhamel_nodes,
             scalar_phase=(generator.dissipative_extracted,generator.hamiltonian_extracted),
-            compact=selected_select=='branch_controlled',drop_allowance=method.source_drop_allowance,
+            compact=selected_select=='branch_controlled',drop_allowance=method.source_drop,
             max_bytes=method.max_bytes,max_quadrature_work=method.max_quadrature_work)
         data = replace(data,source_layout=layout)
         extra.update(physical_branches=layout.branch_count,source_nodes=layout.source_nodes,source_weights=layout.source_weights)
@@ -285,10 +286,11 @@ def select_parameters(method, problem, data):
     # intake's register and limit checks.
     coefficients = data.coefficient_plan.coefficients if layout is None else layout.amplitudes[:len(layout.phases)]
     padded_slots = 1 << (len(coefficients)-1).bit_length()
-    if backend=='dense_exact' and padded_slots>method.max_dense_select_slots:
+    if backend=='dense_exact' and padded_slots>dense_options(method).max_select_slots:
         from .providers import dense_select_slot_refusal
         raise dense_select_slot_refusal(time=problem.elapsed_time,l_norm=data.quadrature.l_norm,
-            tolerance=method.approximation_tolerance,branches=len(coefficients),limit=method.max_dense_select_slots,
+            tolerance=method.approx_tol,branches=len(coefficients),
+            limit=dense_options(method).max_select_slots,
             total_qubits=(len(coefficients)-1).bit_length()+dimension.bit_length()-1)
     if selected_select == 'branch_controlled':
         # native.construct_select passes these coefficients through the LCU
@@ -306,7 +308,8 @@ def select_parameters(method, problem, data):
             dense = data.dense_inputs()
             selected = generate_lchs_product_formula_select_plan(final_time=problem.elapsed_time,
                 method=data.method,quadrature=data.quadrature,parts=(dense.l_part,dense.h_part),
-                max_steps=method.max_trotter_steps,max_bytes=method.max_bytes,max_select_work=method.max_select_work,
+                max_steps=method.ham_evo.max_steps,max_bytes=method.max_bytes,
+                max_select_work=method.max_select_work,
                 work_ledger=ledger)
             extra['select_work_charged'] = ledger['work']
         else:
@@ -329,7 +332,7 @@ def select_parameters(method, problem, data):
                 elapsed_times=layout.elapsed_times,coefficients=slot_coefficients,coefficient_phases=layout.phases,
                 branch_to_node=layout.branch_to_node,
                 method=data.method,address_structure=data.quadrature.coefficient_plan.quadrature.address_structure,
-                max_steps=method.max_trotter_steps,
+                max_steps=method.ham_evo.max_steps,
                 max_bytes=method.max_bytes,max_select_work=remaining_work,charged_before=charged,
                 grid_k_values=data.quadrature.k_nodes,work_ledger=ledger)
             extra['select_work_charged'] = charged+ledger['work']
@@ -349,20 +352,19 @@ def select_parameters(method, problem, data):
         # byte check (source_selection.select_source_branches).
         amplitudes = _freeze_array(np.asarray(layout.amplitudes, dtype=np.complex128))
     extra['amplitudes'] = amplitudes
-    if data.source_state is None and method.initial_state_preparation == 'mps_circuit':
+    initial, lcu = method.init_prep, method.lcu_prep
+    if data.source_state is None and route_name(initial) == 'mps_circuit':
         from nwqlib.subroutines.state_preparation.mps import _decompose_normalized_state
         direction = data.dense_inputs().initial_direction
-        _admit_mps_circuit(direction.size, method.initial_state_mps_max_bond_dim, method.initial_state_mps_num_layers,
-                           method)
+        _admit_mps_circuit(direction.size, initial.max_bond_dim, initial.num_layers, method)
         initial_mps = _decompose_normalized_state(direction,
-            max_bond_dim=method.initial_state_mps_max_bond_dim,threshold=method.initial_state_mps_threshold,
+            max_bond_dim=initial.max_bond_dim,threshold=initial.threshold,
             max_bytes=method.max_bytes,max_svd_work=None)
         data = replace(data,initial_mps=initial_mps)
-    if data.source_state is None and method.lcu_state_preparation == 'mps_circuit' and len(coefficients)>1:
-        _admit_mps_circuit(1 << (len(coefficients)-1).bit_length(), method.lcu_mps_max_bond_dim, method.mps_num_layers,
-                           method)
-        decomposition = data.coefficient_plan.decompose_mps(max_bond_dim=method.lcu_mps_max_bond_dim,
-            threshold=method.lcu_mps_threshold,max_bytes=method.max_bytes,max_svd_work=None)
+    if data.source_state is None and route_name(lcu) == 'mps_circuit' and len(coefficients)>1:
+        _admit_mps_circuit(1 << (len(coefficients)-1).bit_length(), lcu.max_bond_dim, lcu.num_layers, method)
+        decomposition = data.coefficient_plan.decompose_mps(max_bond_dim=lcu.max_bond_dim,
+            threshold=lcu.threshold,max_bytes=method.max_bytes,max_svd_work=None)
         data = replace(data,coefficient_mps=decomposition,
             coefficient_plan=replace(data.coefficient_plan,mps_decomposition=decomposition))
     return replace(data,selected_select=selected_select),extra
@@ -471,7 +473,7 @@ def coherent_context(method, problem, common):
         initial_norm=problem.initial_state.preparation.physical_scale, source_norm=source_norm,
         source_nodes=nodes, source_weights=weights)
     # An MPS initial state is priced by its layer law and decomposed only after the selection (_select_coherent).
-    mps_initial = common.dense is not None and method.initial_state_preparation == 'mps_circuit'
+    mps_initial = common.dense is not None and route_name(method.init_prep) == 'mps_circuit'
     # Centered children. An exactly zero L + s*I (unitary) leaves H the only
     # child, as compiled_selection orders them; exact zeros are omitted.
     children, omitted, charged = (None, None), 0.0, 0
@@ -501,7 +503,7 @@ def coherent_context(method, problem, common):
                                                     controls)
         if kind == "initial" and mps_initial:
             # Each layer has at most q - 1 two-qubit unitaries of at most three CX (select_vector_preparation).
-            return 3*method.initial_state_mps_num_layers*max(0, q-1)
+            return 3*method.init_prep.num_layers*max(0, q-1)
         return _controlled_direct_preparation_cx(q, controls)
 
     costs = [preparation_cx(kind) for kind in kinds]
@@ -509,7 +511,7 @@ def coherent_context(method, problem, common):
     # An exact [L, H] = 0 of the representation (LCHSGenerator.parts_commute); no commutator is computed.
     commuting = generator.parts_commute is not None and children[1] is not None
     if (children[0] is not None and (children[1] is None or commuting) and not omitted
-            and method.lcu_state_preparation != "analytic"):
+            and method.lcu_prep != "analytic"):
         from nwqlib.subroutines.block_encoding.joint import access_summary
         summary = access_summary(children[0])
         c_l = generator.dissipative_extracted-shift
@@ -543,7 +545,7 @@ def coherent_selection(method, problem, data, *, raw, context, acquisition, read
     The kernel nodes and raw coefficients come from ``data``'s quadrature,
     and the kernel, k-quadrature, Duhamel and input-preparation stage bounds
     of ``raw`` give ``rest_error``. The objective is the algorithmic frame:
-    LCHS_QSP_EPSILON_FRACTION * approximation_tolerance is the combined
+    LCHS_QSP_EPSILON_FRACTION * approx_tol is the combined
     allowance of the truncation tail and phase synthesis, a component
     target and not a total physical guarantee; native gate error stays
     unknown. ``acquisition`` ranks zeta**2 * C for accepted states, C for
@@ -553,9 +555,9 @@ def coherent_selection(method, problem, data, *, raw, context, acquisition, read
     The imaginary-time filter or commuting product of the context is a
     second alternative (``ImaginaryTimeAlternative`` or
     ``CommutingProductAlternative``) whose other stages exclude the kernel
-    integral and the k quadrature. ``LCHS.qsp_route`` maps to the coherent
+    integral and the k quadrature. ``QSPBlockEncoding.route`` maps to the coherent
     request (``_coherent_request``). With
-    ``lcu_state_preparation="mps_circuit"`` both alternatives price their
+    ``lcu_prep="mps_circuit"`` both alternatives price their
     magnitude factors as layered MPS circuits, and an MPS initial state is
     priced by its layer law; no decomposition happens here.
 
@@ -574,7 +576,8 @@ def coherent_selection(method, problem, data, *, raw, context, acquisition, read
     from .native import LCHS_QSP_EPSILON_FRACTION
     from .solution_error_budget import circuit_stage_bounds
     from .time_independent_terms import _unusable_kernel_stage_names
-    mps_layers = method.mps_num_layers if method.lcu_state_preparation == 'mps_circuit' else None
+    lcu = method.lcu_prep
+    mps_layers = lcu.num_layers if route_name(lcu) == 'mps_circuit' else None
     facts, children = context.facts, context.children
     rule = data.quadrature.coefficient_plan.quadrature
     uniform = rule.address_structure.get("kind") == "symmetric_uniform_trapezoid_with_identity_padding"
@@ -595,9 +598,9 @@ def coherent_selection(method, problem, data, *, raw, context, acquisition, read
     rest = [value for name, (value, _) in stages.items() if name not in ("qsp_synthesis", "lcu_coefficient_preparation")]
     alternatives = [LCHSCoherentAlternative(label="lchs", applications=facts, kernel=kernel, l_child=children[0],
         h_child=children[1], a_child=context.a_child, rest_error=None if None in rest else fsum(rest),
-        state_preparation_cx=context.state_preparation_cx, drop_allowance=method.source_drop_allowance,
+        state_preparation_cx=context.state_preparation_cx, drop_allowance=method.source_drop,
         omitted_part_bound=context.omitted, coefficient_mps_layers=mps_layers,
-        analytic_prep=_analytic_settings(method, data) if method.lcu_state_preparation == "analytic" else None)]
+        analytic_prep=_analytic_settings(method, data) if method.lcu_prep == "analytic" else None)]
     facts_by_alternative = {"lchs": facts}
     if context.filter_facts is not None:
         from .coherent_selection import CommutingProductAlternative, ImaginaryTimeAlternative
@@ -607,23 +610,23 @@ def coherent_selection(method, problem, data, *, raw, context, acquisition, read
         common = dict(applications=context.filter_facts, l_child=children[0], alpha=context.filter_alpha,
             rest_error=None if None in kernel_free else fsum(kernel_free),
             state_preparation_cx=context.state_preparation_cx,
-            drop_allowance=method.source_drop_allowance, coefficient_mps_layers=mps_layers)
+            drop_allowance=method.source_drop, coefficient_mps_layers=mps_layers)
         if children[1] is None:
             alternatives.append(ImaginaryTimeAlternative(label="filter", **common))
         else:
             alternatives.append(CommutingProductAlternative(label="product", h_child=children[1],
                                                             commutation=data.generator.parts_commute, **common))
         facts_by_alternative[alternatives[-1].label] = context.filter_facts
-    request = _coherent_request(method.qsp_route)
+    request = _coherent_request(requested_qsp_route(method))
     selection = select_coherent_route(alternatives, objective=CoherentObjective(acquisition=acquisition,
-            allowance_frame="algorithmic", allowance=LCHS_QSP_EPSILON_FRACTION*method.approximation_tolerance,
+            allowance_frame="algorithmic", allowance=LCHS_QSP_EPSILON_FRACTION*method.approx_tol,
             tail_share=COHERENT_TAIL_SHARE, readout=readout, sampling=sampling),
         controls=CoherentControls(max_bytes=method.max_bytes, max_node_work=method.max_select_work),
         request=request)
     if selection.selected is None:
         # The factorized PREP calls the omission allowance drop_allowance; the Method option is
-        # source_drop_allowance.
-        hint = ("; set LCHS.source_drop_allowance to cover the omitted applications"
+        # source_drop.
+        hint = ("; set LCHS.source_drop to cover the omitted applications"
                 if "drop_allowance" in selection.reason else "")
         raise ApplicabilityError(f"no coherent LCHS route is admitted within the limits: {selection.reason}{hint}")
     if selection.selected.route == "zero_solution":
@@ -644,7 +647,7 @@ def _select_coherent(method, problem, choice, *, shots=None):
     ``CoherentPreparationError`` with its work and cause, and no other row or
     grid is tried. After the route is fixed, an explicit MPS initial state is
     decomposed once (``initial_mps``), and with
-    ``lcu_state_preparation="mps_circuit"`` each nontrivial factor of the
+    ``lcu_prep="mps_circuit"`` each nontrivial factor of the
     selected PREP is decomposed once (``coefficient_mps``, kernel then
     application).
 
@@ -662,14 +665,14 @@ def _select_coherent(method, problem, choice, *, shots=None):
     prepared = prepare_selected_coherent_route(selection)
     facts = choice.facts[row.alternative]
     preparation = prepared.preparation
-    mps_layers = method.mps_num_layers if method.lcu_state_preparation == 'mps_circuit' else None
+    initial, lcu = method.init_prep, method.lcu_prep
+    mps_layers = lcu.num_layers if route_name(lcu) == 'mps_circuit' else None
     initial_mps = None
-    if data.dense is not None and method.initial_state_preparation == 'mps_circuit':
+    if data.dense is not None and route_name(initial) == 'mps_circuit':
         from nwqlib.subroutines.state_preparation.mps import _decompose_normalized_state
-        _admit_mps_circuit(data.dense.initial_direction.size, method.initial_state_mps_max_bond_dim,
-                           method.initial_state_mps_num_layers, method)
+        _admit_mps_circuit(data.dense.initial_direction.size, initial.max_bond_dim, initial.num_layers, method)
         initial_mps = _decompose_normalized_state(data.dense.initial_direction,
-            max_bond_dim=method.initial_state_mps_max_bond_dim,threshold=method.initial_state_mps_threshold,
+            max_bond_dim=initial.max_bond_dim,threshold=initial.threshold,
             max_bytes=method.max_bytes,max_svd_work=None)
     coefficient_mps = None
     if mps_layers is not None and preparation is not None:
@@ -680,10 +683,10 @@ def _select_coherent(method, problem, choice, *, shots=None):
                    (preparation.application_amplitudes, preparation.application_qubits))
         for amplitudes, width in factors:
             if width:
-                _admit_mps_circuit(len(amplitudes), method.lcu_mps_max_bond_dim, mps_layers, method)
+                _admit_mps_circuit(len(amplitudes), lcu.max_bond_dim, mps_layers, method)
         coefficient_mps = tuple(None if not width else _decompose_normalized_state(
-            np.asarray(amplitudes, dtype=np.complex128), max_bond_dim=method.lcu_mps_max_bond_dim,
-            threshold=method.lcu_mps_threshold, max_bytes=method.max_bytes, max_svd_work=None)
+            np.asarray(amplitudes, dtype=np.complex128), max_bond_dim=lcu.max_bond_dim,
+            threshold=lcu.threshold, max_bytes=method.max_bytes, max_svd_work=None)
             for amplitudes, width in factors)
     data = replace(data, initial_mps=initial_mps, coefficient_mps=coefficient_mps,
         qsp_plan=freeze_selected(without_preparation_handles(prepared), max_bytes=method.max_bytes),
@@ -719,19 +722,19 @@ def _analytic_settings(method, data):
     pair = (plan.resolved_lchs_kernel.implementation, plan.resolved_k_quadrature.implementation)
     if pair[0] == "unitary_reduction":
         raise ApplicabilityError("this A has L proportional to the identity, so LCHS reduces to one unitary and has no "
-                                 "kernel state for lcu_state_preparation='analytic' to prepare; use "
-                                 "lcu_state_preparation='direct'")
+                                 "kernel state for lcu_prep='analytic' to prepare; use "
+                                 "lcu_prep='direct'")
     if pair != ("low_somma_f2", "symmetric_uniform_trapezoid") or len(set(plan.base_weights)) != 1:
-        raise ApplicabilityError("lcu_state_preparation='analytic' prepares the Low-Somma kernel state on its "
+        raise ApplicabilityError("lcu_prep='analytic' prepares the Low-Somma kernel state on its "
                                  "equal-weight trapezoid grid; use lchs_kernel='low_somma_f2' with "
                                  f"k_quadrature='symmetric_uniform_trapezoid', not {pair[0]!r} with {pair[1]!r}")
     return dict(gamma=float(plan.derived_parameters["gamma"]),
-                approximation_tolerance=LCHS_QSP_EPSILON_FRACTION*method.approximation_tolerance,
+                approx_tol=LCHS_QSP_EPSILON_FRACTION*method.approx_tol,
                 margin=ANALYTIC_PREP_MARGIN, max_bytes=method.max_bytes)
 
 
 def _coherent_request(route):
-    """Map ``LCHS.qsp_route`` to the coherent request; ``"auto"`` without parameters is no request."""
+    """Map ``QSPBlockEncoding.route`` to the coherent request; ``"auto"`` without parameters is no request."""
     from .coherent_selection import CoherentRequest
     parameters = dict(route.parameters)
     constraints = dict(route=None if route.implementation == "auto" else route.implementation,
@@ -761,9 +764,9 @@ def construction_work(data,extra,*,method,elapsed):
     coefficients = data.coefficient_plan.coefficients if data.source_layout is None else data.source_layout.phases
     a = (len(coefficients)-1).bit_length()
     backend = data.backend
-    route = method.dense_control_route
     whole = False
     if backend == 'dense_exact':
+        route = dense_options(method).control_route
         from nwqlib.subroutines._dense_synthesis import (controlled_synthesis_size, dense_synthesis_size,
                                                          gatewise_control_counts, gatewise_control_size)
         from .native import _whole_matrix, dense_branch_select_cx
@@ -927,7 +930,7 @@ def _coherent_construction_work(data, *, method):
             work += (data.initial_state if kind == "initial" else data.source_state).preparation.work
         elif kind == "initial" and data.initial_mps is not None:
             from nwqlib.subroutines.state_preparation.mps import admit_layered_construction
-            work += admit_layered_construction(data.initial_mps.bond_dimensions, method.initial_state_mps_num_layers,
+            work += admit_layered_construction(data.initial_mps.bond_dimensions, method.init_prep.num_layers,
                 max_svd_work=None, max_bytes=method.max_bytes)[0]
         else:
             work += max(1, q)*dimension
@@ -963,7 +966,7 @@ def _coherent_construction_work(data, *, method):
         # Each MPS factor's layered construction (admit_layered_construction) is built once; both factors' cores
         # are held, with the larger construction workspace.
         from nwqlib.subroutines.state_preparation.mps import admit_layered_construction
-        built = [admit_layered_construction(item.bond_dimensions, method.mps_num_layers,
+        built = [admit_layered_construction(item.bond_dimensions, method.lcu_prep.num_layers,
                  max_svd_work=None, max_bytes=method.max_bytes)
                  for item in data.coefficient_mps if item is not None]
         work += sum(size for size, _ in built)
@@ -1199,8 +1202,8 @@ def selected_error_facts(payload, *, problem, raw):
     values = circuit_stage_bounds(raw,applications=application_records,
         backend=backend,inhomogeneous=payload.source_state is not None,
         psd_premise_satisfied=payload.quadrature.psd_premise_satisfied,gamma=gamma,
-        delta_lcu=0. if getattr(payload.method,"lcu_state_preparation","direct") == "direct" else None,
-        input_preparation_output_error_bound=0. if getattr(payload.method,"initial_state_preparation","direct") == "direct" else None,
+        delta_lcu=0. if getattr(payload.method,"lcu_prep","direct") == "direct" else None,
+        input_preparation_output_error_bound=0. if getattr(payload.method,"init_prep","direct") == "direct" else None,
         compensated_recovery_error_bound=qsp_error,duhamel_quadrature_error_bound=_duhamel_bound(payload,problem),
         unusable_stages=_unusable_kernel_stage_names(raw))
     if backend == "trotter":

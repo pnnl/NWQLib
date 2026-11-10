@@ -4,7 +4,7 @@ from fractions import Fraction
 import numpy as np
 import pytest
 from nwqlib import LinearDynamics,NormSquared,QuadraticForm,plan,solve
-from nwqlib.algorithms.lchs import LCHS,ProviderConfig
+from nwqlib.algorithms.lchs import LCHS,ProviderConfig,Trotter
 from nwqlib.algorithms.lchs.periodic import select_periodic_parameters
 from nwqlib.operators.inputs import PeriodicStencil,ingest_pauli,operator_input
 from nwqlib.problems.inputs import ingest_occupation,ingest_product
@@ -24,14 +24,14 @@ def periodic_plan(*,observable='Z',product=False,num_qubits=2):
         initial=ingest_occupation((0,)*num_qubits,num_qubits=num_qubits)
     output=NormSquared() if observable is None else QuadraticForm(
         observable=ingest_pauli([('I'*(num_qubits-1)+observable,1.)],num_qubits=num_qubits))
-    method=LCHS(hamiltonian_evolution_backend='trotter',trotter_steps=2,lchs_kernel='cauchy_density',
+    method=LCHS(ham_evo=Trotter(steps=2),lchs_kernel='cauchy_density',
         k_quadrature=ProviderConfig(implementation='signed_binary_uniform',parameters={'num_qubits':2,'lsb_position':0}))
     return plan(LinearDynamics(A=generator,initial_state=initial,time=.5),method=method,output=output)
 
 
 def select(*,q=2,steps=2,options=None):
     operator=operator_input(PeriodicStencil(num_qubits=q,mass=1.,diffusion=.25,potential=.3))
-    method=options or LCHS(hamiltonian_evolution_backend='trotter',trotter_steps=steps,
+    method=options or LCHS(ham_evo=Trotter(steps=steps),
         lchs_kernel='cauchy_density',k_quadrature=ProviderConfig(implementation='signed_binary_uniform',
             parameters={'num_qubits':2,'lsb_position':0}))
     return select_periodic_parameters(operator,elapsed=.5,method=method)
@@ -67,7 +67,7 @@ def test_periodic_scalar_selection_has_no_system_expansion(monkeypatch):
     # A different actual kernel must keep its complex coefficient phases
     # and finite weighted bound; no generic Cauchy/asymptotic replacement.
     from cmath import exp as cexp
-    options = LCHS( hamiltonian_evolution_backend="trotter", trotter_steps=2,
+    options = LCHS( ham_evo=Trotter(steps=2),
         lchs_kernel=ProviderConfig(implementation="near_optimal_eq7", parameters={"beta":.5}),
         k_quadrature=ProviderConfig(implementation="signed_binary_uniform",
             parameters={"num_qubits":2,"lsb_position":0}))
@@ -116,7 +116,7 @@ def test_periodic_strang_step_cx_laws_count_the_built_step():
 
 
 def test_periodic_resource_breakdown_counts_the_repeated_strang_step():
-    """The resource breakdown reads the repeated Strang step as trotter_steps calls, as estimate does.
+    """The resource breakdown reads the repeated Strang step as Trotter.steps calls, as estimate does.
 
     The exact-reduction body calls the initial PREP, the coefficient PREP pair and the phase leaf once and the
     Strang step under a repetition of 2. The occupation PREP carries its exact gates, which hold no CX, and
@@ -138,9 +138,7 @@ def test_periodic_resource_breakdown_counts_the_repeated_strang_step():
 
 
 def test_periodic_construction_limits_refuse_the_selected_workload():
-    method = LCHS(hamiltonian_evolution_backend='trotter',
-        trotter_steps=None,
-        trotter_synthesis_tolerance=1e-4,
+    method = LCHS(ham_evo=Trotter(steps=None, synthesis_tol=1e-4),
         lchs_kernel='cauchy_density', k_quadrature=ProviderConfig(
             implementation='signed_binary_uniform', parameters={'num_qubits': 2, 'lsb_position': 0}))
     problem = LinearDynamics(A=PeriodicStencil(num_qubits=2, mass=1., diffusion=.25, potential=.3),
@@ -151,6 +149,14 @@ def test_periodic_construction_limits_refuse_the_selected_workload():
     assert chosen.reconstruction.step_counts
     with pytest.raises(ValueError, match="periodic Strang construction.*max_select_work="):
         plan(problem, method=method.revise(**limits), output=NormSquared(), seed=7)
+    # The tolerance selects r = 5 here (B/25 <= 1e-4 < B/16, see the planning test below), so a step limit of 4
+    # refuses the selected count and 5 admits it.
+    from nwqlib._limits import ResourceLimitError
+    with pytest.raises(ResourceLimitError, match="needs 5 steps .*Trotter.max_steps=4"):
+        plan(problem, method=method.revise(ham_evo=Trotter(
+            steps=None, synthesis_tol=1e-4, max_steps=4)), output=NormSquared(), seed=7)
+    plan(problem, method=method.revise(ham_evo=Trotter(
+        steps=None, synthesis_tol=1e-4, max_steps=5)), output=NormSquared(), seed=7)
 
 
 def test_periodic_plan_and_estimate_stay_available_and_preparation_checks_the_circuit_first(monkeypatch, tmp_path):
@@ -167,8 +173,8 @@ def test_periodic_plan_and_estimate_stay_available_and_preparation_checks_the_ci
     from nwqlib.resources import ResourceContext
 
     def stencil(q, time, **options):
-        method = LCHS(hamiltonian_evolution_backend='trotter', trotter_steps=None, trotter_synthesis_tolerance=.005,
-                      approximation_tolerance=.005, **options)
+        method = LCHS(ham_evo=Trotter(steps=None, synthesis_tol=.005),
+                      approx_tol=.005, **options)
         problem = LinearDynamics(A=PeriodicStencil(num_qubits=q, mass=0., diffusion=.25),
                                  initial_state=ingest_occupation('0'*q, num_qubits=q), time=time)
         return plan(problem, method=method, output=NormSquared(), seed=7)
@@ -227,7 +233,7 @@ def test_periodic_preparation_checks_the_trees_of_its_coefficient_prep_and_inver
     from nwqlib import prepare
     from nwqlib.blocks import lowering
 
-    method = LCHS(hamiltonian_evolution_backend='trotter', trotter_steps=3, lchs_kernel='cauchy_density',
+    method = LCHS(ham_evo=Trotter(steps=3), lchs_kernel='cauchy_density',
         k_quadrature=ProviderConfig(implementation='signed_binary_uniform',
                                     parameters={'num_qubits': 2, 'lsb_position': 0}))
     problem = LinearDynamics(A=PeriodicStencil(num_qubits=2, mass=1., diffusion=.25, potential=.3),
@@ -258,7 +264,7 @@ def test_periodic_synthesis_tolerance_selects_the_smallest_strang_step_count():
     # periodic_plan's grid: the one-step coefficient of select_periodic_parameters is
     # B = T^3*sum |c_j|*(4*a_j^2*p/3+a_j*p^2/3) = 111/(16000*pi) at T = .5.
     # B/r^2 <= 1e-4 first holds at r = 5: B/25 = 8.83e-5 and B/16 = 1.38e-4.
-    method=LCHS(hamiltonian_evolution_backend='trotter',trotter_steps=None,trotter_synthesis_tolerance=1e-4,
+    method=LCHS(ham_evo=Trotter(steps=None,synthesis_tol=1e-4),
         lchs_kernel='cauchy_density',k_quadrature=ProviderConfig(implementation='signed_binary_uniform',
             parameters={'num_qubits':2,'lsb_position':0}))
     problem=LinearDynamics(A=PeriodicStencil(num_qubits=2,mass=1.,diffusion=.25,potential=.3),
@@ -270,7 +276,7 @@ def test_periodic_synthesis_tolerance_selects_the_smallest_strang_step_count():
     # With q3, diffusion 1e100, T = 1e-110 and the default kernel, B is about 1.5e-28, while binary64 T**3
     # is 0, so B must be formed exactly. The recorded bound is positive and at most the tolerance, and in
     # exact arithmetic, with each |c_j| enclosed between rationals, B/r**2 <= 1e-34 < B/(r - 1)**2.
-    extreme=LCHS(hamiltonian_evolution_backend='trotter',trotter_steps=None,trotter_synthesis_tolerance=1e-34)
+    extreme=LCHS(ham_evo=Trotter(steps=None,synthesis_tol=1e-34))
     stencil=PeriodicStencil(num_qubits=3,mass=1.,diffusion=1e100)
     chosen=plan(LinearDynamics(A=stencil,initial_state=ingest_occupation((0,0,0),num_qubits=3),time=1e-110),
         method=extreme,output=NormSquared())
@@ -304,16 +310,21 @@ def test_periodic_synthesis_tolerance_selects_the_smallest_strang_step_count():
         source=Source(name='test',version='1',domain='test',reference='declared'))
     state=bind_preparation_circuit(QuantumCircuit(3),reference=reference,basis=operator.basis,
         norm=PhysicalScale(mantissa=.5,exponent=1101))
-    grid=LCHS(hamiltonian_evolution_backend='trotter',trotter_steps=1,lchs_kernel='cauchy_density',
+    grid=LCHS(ham_evo=Trotter(steps=1),lchs_kernel='cauchy_density',
         k_quadrature=ProviderConfig(implementation='signed_binary_uniform',parameters={'num_qubits':2,'lsb_position':-1}))
     chosen=plan(LinearDynamics(A=operator,initial_state=state,time=1.),method=grid,
         output=StateVector(normalization='unit'))
     strang=next(f.fact for f in chosen.facts if f.fact.quantity=='trotter_synthesis')
     assert strang.availability=='concrete' and strang.value.value==pytest.approx(.175/pi*2.**500,rel=1e-14,abs=0)
-    # A fixed count and a tolerance cannot both be given, and a dense A has no
+    # A tolerance alone means steps=None and gives the same record. A fixed
+    # count and a tolerance cannot both be given, and a dense A has no
     # planning bound for the tolerance to invert.
-    with pytest.raises(ValueError,match='exactly one of trotter_steps'):
-        method.revise(trotter_steps=12)
+    alone=Trotter(synthesis_tol=1e-4)
+    assert alone==method.ham_evo and alone.content_id==method.ham_evo.content_id
+    with pytest.raises(ValueError,match='exactly one of steps'):
+        method.ham_evo.revise(steps=12)
+    with pytest.raises(ValueError,match='exactly one of steps'):
+        Trotter(steps=12,synthesis_tol=1e-4)
     with pytest.raises(ApplicabilityError,match='PeriodicStencil'):
         plan(LinearDynamics(A=[[.4,.15],[.05,.25]],initial_state=[1,0],time=.1),method=method)
 
@@ -336,8 +347,8 @@ def test_periodic_solution_matches_the_dense_exponential_within_planned_bounds(q
     dense=mass*identity+diffusion*(2*identity-shift-shift.T)+1j*potential*z0
     problem=LinearDynamics(A=PeriodicStencil(num_qubits=q,mass=mass,diffusion=diffusion,potential=potential),
         initial_state=ingest_product(pairs),time=elapsed)
-    chosen=plan(problem,method=LCHS(hamiltonian_evolution_backend='trotter',approximation_tolerance=.02,
-        trotter_steps=None,trotter_synthesis_tolerance=.01),seed=7)
+    chosen=plan(problem,method=LCHS(ham_evo=Trotter(steps=None,synthesis_tol=.01),
+        approx_tol=.02),seed=7)
     assert sum(register.width for register in chosen.construction.program.registers)<=11
     result=solve(chosen)
     # Method-error-bounded class: for this unit initial state the planned kernel, k-quadrature, Strang and
@@ -356,7 +367,7 @@ def test_selected_archive_keeps_actual_products_without_reselection(tmp_path,mon
     from nwqlib.subroutines.qsp import evolution,phases
     from nwqlib.subroutines.state_preparation import mps
     problem=LinearDynamics(A=[[.3,.05j],[.05j,.5]],initial_state=[1,2j],time=.1)
-    chosen=plan(problem,method=LCHS(hamiltonian_evolution_backend='qsp_block_encoding',duhamel_nodes=1,
+    chosen=plan(problem,method=LCHS(ham_evo='qsp_block_encoding',duhamel_nodes=1,
         k_quadrature=ProviderConfig(implementation='signed_binary_uniform',parameters={'num_qubits':2,'lsb_position':-1})))
     assert sum(r.width for r in chosen.construction.program.registers)<=10
     files=ArchiveFiles(tmp_path,8_000_000)

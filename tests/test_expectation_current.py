@@ -226,6 +226,8 @@ def test_calibration_shared_variance_signed_result_and_reanalysis(injected):
     revised = result.analyze(inference=inference.revise(method="anytime_hoeffding"))
     assert revised.statistics.interval.kind == "time_uniform" and revised.plan is result.plan
     assert result.statistics.interval.kind == "fixed_time" and injected.calls == calls
+    with pytest.raises(ValueError, match="ExpectationMethod reanalysis accepts inference, not binary_inference"):
+        result.analyze(binary_inference=inference)
 
 
 def test_small_dense_observable_preserves_complex_pauli_mean_and_archive(tmp_path, monkeypatch):
@@ -406,11 +408,11 @@ def test_classical_original_dimension_sparse_access_and_early_admission(monkeypa
     with monkeypatch.context() as guard:
         guard.setattr(_eigen_inputs, "state_direction", forbidden)
         for method, shots in (
-            (ExpectationMethod(max_classical_products=1), None),
+            (ExpectationMethod(max_products=1), None),
             (ExpectationMethod(), 4),
             (ExpectationMethod(estimate_precision=0.1), None),
         ):
-            with pytest.raises(ValueError, match="(max_classical_products|classical expectation)"):
+            with pytest.raises(ValueError, match="(max_products|classical expectation)"):
                 nwqlib.solve(p, method=method, execution="classical", shots=shots)
 
 
@@ -528,8 +530,8 @@ def test_classical_scaled_copy_is_checked_at_planning_when_every_state_needs_it(
     p = Expectation(state=np.array([1.0, 1.0, 0.5, 0.0]), observable=ingest_pauli([("IZ", 1e-200)], num_qubits=2))
     _, copy = owner._classical_action_requirements(p.observable, p.state, max_bytes=None, scaled=True)
     with pytest.raises(ValueError, match=f"scaled copy .* every state needs.* requires {copy} classical products"):
-        nwqlib.plan(p, method=ExpectationMethod(max_classical_products=copy - 1), execution="classical")
-    plan = nwqlib.plan(p, method=ExpectationMethod(max_classical_products=copy), execution="classical")
+        nwqlib.plan(p, method=ExpectationMethod(max_products=copy - 1), execution="classical")
+    plan = nwqlib.plan(p, method=ExpectationMethod(max_products=copy), execution="classical")
     assert plan.construction.kernels[0].invocation_work == copy
     result = nwqlib.solve(plan)
     vector = np.array([1.0, 1.0, 0.5, 0.0]) / np.linalg.norm([1.0, 1.0, 0.5, 0.0])
@@ -566,7 +568,7 @@ def test_classical_copy_that_only_a_direction_needs_is_checked_before_it_is_form
                         lambda *a: copies.append(a) or scaled_copy(*a))
 
     def solve(problem, cap):
-        plan = nwqlib.plan(problem, method=ExpectationMethod(max_classical_products=cap), execution="classical")
+        plan = nwqlib.plan(problem, method=ExpectationMethod(max_products=cap), execution="classical")
         assert plan.construction.kernels[0].invocation_work == work
         return nwqlib.solve(plan)
 

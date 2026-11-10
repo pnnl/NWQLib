@@ -276,7 +276,7 @@ class QHDCompiler:
             variables=self.problem.variables,
             bounds=self.problem.bounds,
             num_grid_points=self.options.num_grid_points,
-            include_boundary_points=self.options.include_boundary_points,
+            boundary_points=self.options.boundary_points,
             boundary=self.options.boundary,
         )
 

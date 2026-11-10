@@ -60,7 +60,7 @@ def test_measured_product_jacobian_matches_independent_generator_derivative(
     options = SimpleNamespace(
         optimize_every_m=1,
         optimize_rounds_n=1,
-        optimize_max_evaluations=32,
+        max_evals=32,
     )
     optimization.optimize_product(
         options=options,

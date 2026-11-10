@@ -5,7 +5,7 @@
 ```python
 from nwqlib import Eigenproblem, SpectralEstimation, solve
 from nwqlib.algorithms import QCELS, RFE, RWPE, SPE
-from nwqlib.algorithms import QPEAnalysis, QPEVerification
+from nwqlib.algorithms.qpe import QPEAnalysis, QPEVerification
 ```
 
 | Method and paper | Estimate | `result.interval` |

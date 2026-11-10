@@ -834,7 +834,7 @@ def _selected_lchs_qsp(matrix,*,time=.1):
     initial=np.zeros(len(matrix),dtype=complex)
     initial[0]=1
     return plan(LinearDynamics(A=matrix,initial_state=initial,time=time),
-        method=LCHS(hamiltonian_evolution_backend='qsp_block_encoding',
+        method=LCHS(ham_evo='qsp_block_encoding',
             k_quadrature=ProviderConfig(implementation='signed_binary_uniform',parameters={'num_qubits':2,'lsb_position':-1})),
         output=NormSquared())
 
@@ -845,7 +845,7 @@ def test_lchs_qsp_selected_quantities_reach_actual_native_program():
     For A = diag(.1, .2) the centered child is L with alpha .2 and H is an exact zero, so the separate-parts
     generator has alpha max|k_j| * .2 on the four-node grid. The expansion is the Jacobi-Anger expansion of
     tau = alpha T_e at the row's tail allowance, which in the algorithmic frame is at most half the combined
-    allowance LCHS_QSP_EPSILON_FRACTION * approximation_tolerance (coherent_selection, M7.1). The native
+    allowance LCHS_QSP_EPSILON_FRACTION * approx_tol (coherent_selection, M7.1). The native
     program, its estimate and its prepared circuits share one width.
     """
     from nwqlib import prepare,estimate
@@ -858,7 +858,7 @@ def test_lchs_qsp_selected_quantities_reach_actual_native_program():
     assert prepared.generator.components.get('h_child') is None
     assert prepared.generator.alpha==pytest.approx(expected_alpha,rel=1e-12,abs=0)
     row=prepared.candidate
-    combined=LCHS_QSP_EPSILON_FRACTION*chosen.method.approximation_tolerance
+    combined=LCHS_QSP_EPSILON_FRACTION*chosen.method.approx_tol
     assert row.allowance['algorithmic']==combined and 0<row.allowance['tail']<=combined/2
     expansion=prepared.phases.expansion
     assert expansion==jacobi_anger_expansion(expected_alpha*.1,row.allowance['tail'],min_degree=1)
@@ -884,7 +884,7 @@ def test_lchs_guide_first_problem_plans_qsp_evolution():
 
     chosen = plan(
         LinearDynamics(A=[[.4, .15], [.05, .25]], initial_state=[1, 0], time=.1),
-        method=LCHS(hamiltonian_evolution_backend="qsp_block_encoding"),
+        method=LCHS(ham_evo="qsp_block_encoding"),
     )
     prepared = chosen._native["native_data"].qsp_plan.phases
     expansion = prepared.expansion
@@ -1043,13 +1043,13 @@ def test_shared_route_phase_tolerance_is_its_allowance_after_the_tail(route):
     """
     from scipy.optimize import brentq
     from nwqlib import LinearDynamics, NormSquared, plan
-    from nwqlib.algorithms.lchs import LCHS
+    from nwqlib.algorithms.lchs import LCHS, QSPBlockEncoding
     from nwqlib.operators import ingest_pauli
     from nwqlib.problems import ingest_occupation
 
     problem = LinearDynamics(A=ingest_pauli([("II", .001), ("ZI", 20j), ("IZ", 20j), ("XX", 10j)], num_qubits=2),
                              initial_state=ingest_occupation("00", num_qubits=2), time=30.0)
-    prepared = plan(problem, method=LCHS(hamiltonian_evolution_backend="qsp_block_encoding", qsp_route=route),
+    prepared = plan(problem, method=LCHS(ham_evo=QSPBlockEncoding(route=route)),
                     output=NormSquared(), shots=100, seed=3)._native["native_data"].qsp_plan
     row, phases = prepared.candidate, prepared.phases
     assert row.route == route

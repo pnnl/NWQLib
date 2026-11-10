@@ -209,7 +209,7 @@ def _compiled_qsp_part_plans(
     )
     if l_plan.implementation == "exact_zero":
         raise ValueError(
-            "hamiltonian_evolution_backend='qsp_block_encoding' requires a nonzero "
+            "ham_evo='qsp_block_encoding' requires a nonzero "
             "Hermitian part L after relative Pauli pruning; the input is effectively "
             "anti-Hermitian at the shared relative threshold"
         )

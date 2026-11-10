@@ -7,7 +7,7 @@ import scipy.linalg
 from qiskit.quantum_info import SparsePauliOp
 from _lchs_suzuki_reference import fixed_trotter_term_unitary_with_record
 from nwqlib import LinearDynamics, plan
-from nwqlib.algorithms.lchs import LCHS,cartesian_decomposition,duhamel_quadrature
+from nwqlib.algorithms.lchs import LCHS,Trotter,cartesian_decomposition,duhamel_quadrature
 from nwqlib.algorithms.lchs.time_independent_terms import (_budgeted_trotter_node_record,_combined_trotter_terms,_node_bound_coefficients,_union_nonidentity_labels,_trotter_pauli_decomposition)
 import nwqlib.algorithms.lchs.inhomogeneous_theory as inhomogeneous_theory_module
 
@@ -243,8 +243,7 @@ def test_pruned_mass_and_empty_branch_accounting() -> None:
         )
 
     options = LCHS(
-        hamiltonian_evolution_backend="trotter",
-        trotter_steps=2,
+        ham_evo=Trotter(steps=2),
     )
     _, record = fixed_trotter_term_unitary_with_record(
         final_time=1.0,
@@ -256,7 +255,7 @@ def test_pruned_mass_and_empty_branch_accounting() -> None:
     assert record.pf_bound_value is None
     assert record.combined_bound_value is None
     assert record.bound_value_status == "not_evaluated"
-    assert record.step_count == options.trotter_steps
+    assert record.step_count == options.ham_evo.steps
 
 
 def test_inhomogeneous_duhamel_quadrature_integrates_polynomials_exactly() -> None:
@@ -336,12 +335,12 @@ def test_growth_factor_beyond_binary64_is_carried_to_a_representable_solution(ba
     # exp(-A*T) u0 = exp(720)*1e-300*e_0, about 4.9e12, although the PSD
     # recovery exp(720) alone overflows. The shifted L is 7.2e-10*I, so the
     # finite sum is within the kernel and quadrature allowances,
-    # approximation_tolerance = .01 relative to ||u0||*exp(shift*T), of the
+    # approx_tol = .01 relative to ||u0||*exp(shift*T), of the
     # exact solution.
     from math import exp, log
     from nwqlib import load_result, plan, solve
     from nwqlib.algorithms.lchs import LCHSVerification
-    result = solve(_growth_problem([1e-300, 0.0]), method=LCHS(hamiltonian_evolution_backend=backend),
+    result = solve(_growth_problem([1e-300, 0.0]), method=LCHS(ham_evo=backend),
                    execution="classical")
     exact = exp(_GROWTH + log(1e-300))
     solution = np.asarray(result.solution)
@@ -366,7 +365,7 @@ def test_growth_factor_beyond_binary64_is_carried_to_a_representable_solution(ba
     final = 2.0**-600
     growth = 1000*log(2.)/final
     chosen = plan(LinearDynamics(A=[[-growth, 0.], [0., -growth]], initial_state=[0., 0.], source=[0., final],
-                                 time=final), method=LCHS(hamiltonian_evolution_backend=backend, duhamel_nodes=1),
+                                 time=final), method=LCHS(ham_evo=backend, duhamel_nodes=1),
                   execution="classical")
     planned = {item.fact.quantity: item.fact for item in chosen.facts}
     rec = chosen.reconstruction

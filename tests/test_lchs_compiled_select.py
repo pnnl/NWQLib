@@ -319,7 +319,7 @@ def test_selected_qsp_pruned_h_and_near_antihermitian_l_keep_original_scale(scal
     """
     from nwqlib import LinearDynamics,plan
     from nwqlib.algorithms.lchs import LCHS,ProviderConfig,coherent_selection
-    method=LCHS(hamiltonian_evolution_backend='qsp_block_encoding',
+    method=LCHS(ham_evo='qsp_block_encoding',
         k_quadrature=ProviderConfig(implementation='signed_binary_uniform',parameters={'num_qubits':2,'lsb_position':-1}))
     l_part=scale*np.diag([1e-9,2e-9])
     noise=scale*1e-26*np.array([[0.,1.],[1.,0.]])
@@ -360,7 +360,7 @@ def test_compiled_qsp_planning_checks_kept_children_not_select_tables():
 
     def make(max_bytes):
         return plan(LinearDynamics(A=a, initial_state=state, time=0.5),
-                    method=LCHS(hamiltonian_evolution_backend="qsp_block_encoding", max_bytes=max_bytes),
+                    method=LCHS(ham_evo="qsp_block_encoding", max_bytes=max_bytes),
                     output=NormSquared(), shots=100, seed=1)
 
     assert make(4_000_000).method.max_bytes == 4_000_000

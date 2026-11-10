@@ -117,7 +117,7 @@ def _lchs_resource_snapshot(operation, *, qsp=False):
     from nwqlib.resources import ResourceContext
 
     method = LCHS(
-        hamiltonian_evolution_backend="qsp_block_encoding" if qsp else "dense_exact",
+        ham_evo="qsp_block_encoding" if qsp else "dense_exact",
         k_quadrature=ProviderConfig(
             implementation="signed_binary_uniform", parameters={"num_qubits": 2, "lsb_position": -1}
         ),

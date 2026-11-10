@@ -211,7 +211,7 @@ def test_ancilla_population_normalization_and_incremental_pricing():
     from nwqlib.execution import ObservationChunk, RegisterMap
     from nwqlib.algorithms.gcim.adapt_acquisition import _point, _read_values, _PartialData
     from nwqlib.algorithms.gcim.pencil import matrix_element_count
-    from nwqlib.algorithms import PencilAcquisition
+    from nwqlib.algorithms.gcim import PencilAcquisition
 
     # The termwise comparison construction reads one ancilla bit per Pauli term.
     plan = plan_for(shots=4, acquisition=PencilAcquisition(matrix_measurement="termwise",
