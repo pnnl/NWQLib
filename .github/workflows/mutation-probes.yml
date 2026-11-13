@@ -14,8 +14,7 @@ concurrency:
 
 jobs:
   mutation-probes:
-    # The baseline loads qiskit-aer with the Qiskit of the lock, see the checks job of full-ci.yml.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     # The campaign took 16 min on an Apple M3 Max, and a hosted runner can take about three times as long.
     timeout-minutes: 90
     steps:

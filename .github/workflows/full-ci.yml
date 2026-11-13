@@ -15,11 +15,7 @@ concurrency:
 jobs:
   checks:
     name: Checks (${{ matrix.environment }})
-    # Qiskit 2.6.0, which the stable lock names, leaves too little static TLS for the libgomp of
-    # qiskit-aer on Ubuntu 26.04 (docs/dependency_issues.md). The jobs that install the lock stay
-    # on Ubuntu 24.04 until it moves to Qiskit 2.6.1 or later: this one, the notebooks job,
-    # mutation-probes.yml and nexus-qualification.yml.
-    runs-on: ${{ matrix.environment == 'stable' && 'ubuntu-24.04' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -154,8 +150,7 @@ jobs:
 
   notebooks:
     name: Notebooks (stable)
-    # The notebooks load qiskit-aer with the Qiskit of the lock, see the checks job.
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4

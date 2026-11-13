@@ -1,6 +1,6 @@
 # Dependency issues
 
-This page lists defects and version-specific behavior of NWQLib's dependencies that change results or constrain installation, and what NWQLib does about each. The Python package versions are those of the validated environment in [`docs/ENVIRONMENT_LOCK.txt`](https://github.com/pnnl/NWQLib/blob/main/docs/ENVIRONMENT_LOCK.txt) of the repository: Qiskit 2.6.0, qiskit-aer 0.18.0, PySCF 2.14.0, SciPy 1.18.1 and urllib3 2.8.0. The NWQ-Sim revision is `efd0226` or a descendant with the same roundoff source files, such as `202f5ca` ([NWQ-Sim](nwqsim.md)). Where a test or review detects a change in the dependency, the entry names it.
+This page lists defects and version-specific behavior of NWQLib's dependencies that change results or constrain installation, and what NWQLib does about each. The stable environment in [`docs/ENVIRONMENT_LOCK.txt`](https://github.com/pnnl/NWQLib/blob/main/docs/ENVIRONMENT_LOCK.txt) uses Qiskit 2.6.2, qiskit-aer 0.18.2, PySCF 2.14.0, SciPy 1.18.1 and urllib3 2.8.0. Each entry names the versions its evidence covers. The NWQ-Sim revision is `efd0226` or a descendant with the same roundoff source files, such as `202f5ca` ([NWQ-Sim](nwqsim.md)).
 
 | Dependency | Issue | Effect | NWQLib's handling |
 | --- | --- | --- | --- |
@@ -115,7 +115,7 @@ export LD_PRELOAD="$(python -c 'from importlib.util import find_spec; from pathl
 
 A Jupyter kernel inherits the variable from the Jupyter server, so start or restart Jupyter from that shell. The Full CI and Mutation Probes workflows set the same variable. On macOS arm64, in the validated environment with Python 3.12.14, the full test suite, which executes the example notebooks, passes without it.
 
-The preload is not enough on every host. On the GitHub Actions image of Ubuntu 26.04 (version 20261101.186.1) with Qiskit 2.6.0, qiskit-aer 0.18.0, PySCF 2.14.0 and Python 3.12.14, importing `qiskit_aer` raises the same `ImportError` with the OpenMP runtime of PySCF preloaded. On that image, with the same preload and with Qiskit 2.6.2, qiskit-aer 0.18.2, PySCF 2.15.0 and Python 3.15.2, the test suite without the notebooks reports no such error. On a host where the preload is not enough, install Qiskit 2.6.1 or later, which is outside the validated environment named at the top of this page.
+The preload is not enough on every host. On the GitHub Actions image of Ubuntu 26.04 (version 20261101.186.1) with Qiskit 2.6.0, qiskit-aer 0.18.0, PySCF 2.14.0 and Python 3.12.14, importing `qiskit_aer` raises the same `ImportError` with the OpenMP runtime of PySCF preloaded. On that image, with the same preload and with Qiskit 2.6.2, qiskit-aer 0.18.2, PySCF 2.15.0 and Python 3.15.2, the test suite without the notebooks reports no such error. On a host where the preload is not enough, install Qiskit 2.6.1 or later.
 
 ## NWQEC 0.1.2
 

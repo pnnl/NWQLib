@@ -43,8 +43,8 @@ h11==0.16.0
 h5py==3.16.0
 httpcore==1.0.9
 httpx==0.28.1
-ibm-cloud-sdk-core==3.26.1
-ibm-platform-services==0.77.1
+ibm-cloud-sdk-core==3.28.2
+ibm-platform-services==0.77.2
 ibm-quantum-schemas==0.13.20261016
 idna==3.19
 importlib_metadata==9.0.1
@@ -131,14 +131,14 @@ pyspnego==0.12.2
 pytest==9.1.1
 pytest-cov==7.1.0
 pytest-xdist==3.8.0
-python-dateutil==2.9.0.post0
+python-dateutil==3.0.0
 python-dotenv==1.2.3
 python-json-logger==4.2.0
 PyYAML==6.0.3
 pyyaml_env_tag==1.1
 pyzmq==27.2.0
-qiskit==2.6.0
-qiskit-aer==0.18.0
+qiskit==2.6.2
+qiskit-aer==0.18.2
 qiskit-ibm-runtime==0.52.0
 qiskit-ionq==1.1.1
 qiskit-mitigation==0.2.0
@@ -156,7 +156,7 @@ samplomatic==0.21.0
 scikit_tt @ git+https://github.com/PGelss/scikit_tt.git@8f4b0a2420cbed8d56238f8751d920137a8f5a16
 scipy==1.18.1
 Send2Trash==2.1.0
-setuptools==84.0.0
+setuptools==83.0.0
 six==1.17.0
 soupsieve==2.9.2
 stack-data==0.6.3
