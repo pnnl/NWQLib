@@ -1935,7 +1935,7 @@ def _resolve_apel_pair_profile(
 
 def kk6_radius(epsilon_c: float, *, form: str, a: float | None = None, b: float | None = None,
                alpha_a: float | None = None, max_quadrature_work: int | None) -> dict[str, Any]:
-    """Propose one Apel-Berntson radius R from the p = 2 stationary relation of KK6, or say why none is generated.
+    """Propose one Apel-Berntson radius R from the p = 2 stationary relations below, or say why none is generated.
 
     The proposal is a heuristic finite candidate for provider enumeration
     (`selection.provider_frontier`): the fixed-R kernel at the returned R is
@@ -1944,12 +1944,12 @@ def kk6_radius(epsilon_c: float, *, form: str, a: float | None = None, b: float 
     unique root, a p = 4 result or an enclosure of the root.
 
     With mu = (2/pi) atan R, L(mu) = log((1-mu)/epsilon_c), Delta = L/mu and
-    beta_R = mu exp((1-mu) Delta) (KK5, `_apel_radius`), the continuous mass
+    beta_R = mu exp((1-mu) Delta) (`_apel_radius`), the continuous mass
     satisfies d log(beta_R)/dmu = -L/mu**2, because L' = -1/(1-mu) cancels the
     1/mu terms, so d log(beta_R)/dR = -2L/[pi (1+R**2) mu**2]. Two leading-cost
     surrogates of the coherent route's query normalization use it:
 
-    - Separate parts (K1): J_sep(R) = (a R + b) beta_R**2 with a = alpha_L > 0
+    - Separate parts: J_sep(R) = (a R + b) beta_R**2 with a = alpha_L > 0
       and b = alpha_H >= 0 the query normalizations of the actual compiled
       children (`joint.access_summary(child).alpha`, not a target norm). The
       joint owner normalizes by lambda_q (lambda_k alpha_L + alpha_H); omitting
@@ -1958,14 +1958,14 @@ def kk6_radius(epsilon_c: float, *, form: str, a: float | None = None, b: float 
       the Apel nonuniform table lambda_k = max|k_j| <= R). The stationary
       condition d log J_sep/dR = 0 is the zero of
       g_sep(mu) = L - pi mu**2 (1+R**2) a / [4 (a R + b)].
-    - Single A (K2): HermitianPart[(k - i) A_0] = k L_0 + H_0, and the
+    - Single A: HermitianPart[(k - i) A_0] = k L_0 + H_0, and the
       single-A generator (`plan_single_a_generator`) has alpha_S =
       lambda_q r alpha_A with r = hypot(max|k_j|, 1), so the surrogate is
       J_A(R) = alpha_A sqrt(1+R**2) beta_R**2. Its stationary condition is
       the zero of g_A(mu) = L - (pi/4) mu**2 R; the positive alpha_A cancels
       but must be the known query normalization of the supplied encoding.
 
-    Existence (K3): for 0 < epsilon_c < 1 and U = 1 - epsilon_c, L > 0 on
+    Existence: for 0 < epsilon_c < 1 and U = 1 - epsilon_c, L > 0 on
     0 < mu < U. As mu -> 0+, L -> log(1/epsilon_c) > 0 while the subtracted
     term is O(mu**2) for b > 0, mu/2 + o(mu) for b = 0 and O(mu**3) for
     single A. As mu -> U-, L -> 0 while the subtracted term stays strictly
@@ -1975,7 +1975,7 @@ def kk6_radius(epsilon_c: float, *, form: str, a: float | None = None, b: float 
     their exact shortcuts; neither generates a proposal. An unknown or
     nonpositive normalization is not treated as zero: no proposal.
 
-    Procedure (K3, binary64 numerical evidence only): bisect on (0, U),
+    Procedure (binary64 numerical evidence only): bisect on (0, U),
     never evaluating the limiting endpoints. Each midpoint visit, including
     a domain shrink where the rounded L is not positive and a failing
     evaluation, is charged the 32 scalar units of an Apel radius step
@@ -2029,7 +2029,7 @@ def kk6_radius(epsilon_c: float, *, form: str, a: float | None = None, b: float 
         if alpha_a is None or not (isfinite(alpha_a) and alpha_a > 0):
             return refused(f"single-A query normalization alpha_A={alpha_a!r} is not a known positive value")
     else:
-        raise ValueError(f"KK6 form must be 'separate_parts' or 'single_a', not {form!r}")
+        raise ValueError(f"kk6_radius form must be 'separate_parts' or 'single_a', not {form!r}")
     if not 0.0 < epsilon_c < 1.0:
         return refused(f"continuous allowance epsilon_c={epsilon_c!r} is not in (0, 1)")
     lower, upper = 0.0, 1.0 - epsilon_c
@@ -2041,7 +2041,7 @@ def kk6_radius(epsilon_c: float, *, form: str, a: float | None = None, b: float 
     def charge(step):
         need = record["work_units"] + _APEL_SCALAR_STEP_WORK
         if exceeds(need, max_quadrature_work):
-            raise ResourceLimitError(f"the KK6 radius search needs at least {need} work units for {step}, exceeding "
+            raise ResourceLimitError(f"the kk6_radius search needs at least {need} work units for {step}, exceeding "
                                      f"LCHS.max_quadrature_work={max_quadrature_work}")
         record["work_units"] = need
 
@@ -2325,7 +2325,7 @@ def _resolve_coefficient_context(
     are used after the support and allowance checks of the artifact rule.
     Nothing here solves an optimization or reevaluates its residual.
 
-    `free_half_width` is the free uniform grid of PLAN M3 for the Low–Somma
+    `free_half_width` is the free uniform grid for the Low–Somma
     pair, which provider enumeration (`selection.provider_frontier`) uses:
     J' at least the profile's J and h = R/J'. Then h <= R/J <= h_max, so the
     Theorem 3 condition and the recorded component caps still hold, with the

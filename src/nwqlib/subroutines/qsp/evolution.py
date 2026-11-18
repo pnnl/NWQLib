@@ -2217,7 +2217,7 @@ def plan_jacobi_anger_laurent(expansion: JacobiAngerExpansion, *, margin: float)
     is ``d = 2m`` and the walk uses 2m signals, m of them inverse
     (``D_-``), not extra walks. The near-flat aliasing option of the phase
     owner applies with ``full_ja_scale = sigma`` and ``full_ja_error =
-    delta_T`` (T15, A3/A4; a positive tail below binary64 range counts as 0
+    delta_T`` (a positive tail below binary64 range counts as 0
     in sigma, which rounding up absorbs).
 
     Args:
@@ -2242,9 +2242,9 @@ def plan_jacobi_anger_laurent(expansion: JacobiAngerExpansion, *, margin: float)
         polynomial_time=expansion.tau, approximation_error_bound=expansion.tail_bound,
         tail_bound=expansion.tail_bound, tail_log_bound=expansion.tail_log_bound,
         coefficients=tuple(complex(c) for c in coefficients), minimum_power=-m, signals=2 * m,
-        negative_signals=m, scale=sigma, norm_cap=1.0 + tail, norm_cap_qualification="1 + delta_T (A4)",
+        negative_signals=m, scale=sigma, norm_cap=1.0 + tail, norm_cap_qualification="1 + delta_T (Jacobi-Anger tail bound)",
         norm_bound=1.0 - margin,
-        solver_qualification="jacobi_anger_A4: |p_m| <= 1 + delta_T on the unit circle in exact arithmetic; "
+        solver_qualification="jacobi_anger_tail: |p_m| <= 1 + delta_T on the unit circle in exact arithmetic; "
                              "binary64 Bessel coefficients without enclosure",
         full_ja=(sigma, tail))
 
@@ -2259,7 +2259,7 @@ def plan_jacobi_anger_gqet(expansion: JacobiAngerExpansion, *, margin: float) ->
     unit circle by the triangle inequality; neither the Chebyshev interval
     norm nor a sampled circle maximum does. ``sigma_E = max(1, B_E)/(1 -
     eta)``, rounded up, and the stored normalized one-norm, rounded up, is
-    the cap passed to the phase owner. m signals, none inverse (T17). The
+    the cap passed to the phase owner. m signals, none inverse. The
     full Jacobi-Anger near-flat premise does not apply to this target.
 
     Args:
@@ -2298,7 +2298,7 @@ def with_phase_allowance(plan: QubitizedTargetPlan, *, epsilon_phase: float, max
             `plan_jacobi_anger_gqet` or `plan_laurent_target`.
         epsilon_phase (float): Positive normalized-frame residual allowance:
             ``epsilon_synth <= (epsilon_alg_allow - delta_T)/sigma`` for an
-            algorithmic allowance ``epsilon_alg_allow`` (E15, T15, T17).
+            algorithmic allowance ``epsilon_alg_allow``.
         max_bytes (int | None): Default None, the physical memory. Memory
             limit of each FFT attempt of the solve.
         max_fft (int | None): Default None. Optional FFT length cap.
@@ -2512,7 +2512,7 @@ class QubitizedEvolutionPlan:
 
 
 def _qubitized_census(degree, lift, k):
-    """Rows ``(query, controls, adjoint, count)`` of the original U for d signals and k external controls (T24).
+    """Rows ``(query, controls, adjoint, count)`` of the original U for d signals and k external controls.
 
     A direct full-involution walk calls U once per signal, controlled by the
     processing qubit and the external controls; ``W^dagger = U R`` uses the
@@ -2792,7 +2792,7 @@ def imaginary_time_filter_error_terms(target: QubitizedTarget, *, contraction_er
         when a term is unknown), and ``recovery`` sigma_I.
     """
     if target.kind != "imaginary_time_gqet":
-        raise ValueError("AT13 applies to the imaginary-time filter only")
+        raise ValueError("the contraction-filter error bound applies to the imaginary-time filter only")
     if target.solution is None:
         return {"tail": 0.0, "synthesis": 0.0, "child": 0.0, "native": 0.0, "filter_error": 0.0, "recovery": 1.0}
     synthesis = None if target.synthesis_residual is None else target.scale * target.synthesis_residual

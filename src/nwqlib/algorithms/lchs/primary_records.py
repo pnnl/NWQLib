@@ -92,9 +92,9 @@ class LCHSPairBias(Record):
     Plans have no buckets and no operator bound E, and ``inner_bias`` is the
     recipe's bias bound of N in the row frame:
 
-    - ``"richardson"``: (B/g)**2*(B_ext + E_eff), the XS9 remainder of the
+    - ``"richardson"``: (B/g)**2*(B_ext + E_eff), the remainder bound of the
       m = 2 levels plus the exact coefficient discrepancy of the stored
-      multipliers, or None when the XS9 premise fails for fixed steps.
+      multipliers, or None when its premise fails for fixed steps.
     - ``"ptsc"``: (B/g)**2*(2*delta + delta**2) with the uniform branch bound
       delta of the Taylor tail and the finite-law count perturbation.
     - ``"mpf"``: None for two or more distinct labels, because no uniform

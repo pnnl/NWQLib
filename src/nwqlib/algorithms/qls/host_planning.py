@@ -334,7 +334,7 @@ def conditioning_note(polynomial_kappa, sigma_min, sigma_max, dimension):
     decomposition. ``sigma_min`` and ``sigma_max`` are ``None`` when planning
     computed no endpoints.
 
-    Relation (Q1): if the computed singular values are the exact singular values
+    Relation: if the computed singular values are the exact singular values
     of ``A + dA`` with ``||dA||_2 <= eta ||A||_2``, singular-value perturbation
     gives, for ``sigma_min > 0``, the precise inequality
     ``|sigma_hat_min - sigma_min| / sigma_min <= eta sigma_max / sigma_min``.

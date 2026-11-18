@@ -226,7 +226,7 @@ class LCHSData:
             kernel-quadrature mass, not gamma) and the unit-input component
             bounds ``approximate_lchs_error_bound`` and
             ``quadrature_error_bound`` before PSD growth; and,
-            for the KK6 entry, its ``proposal`` (``providers.kk6_radius``).
+            for the ``apel_berntson_kk6`` entry, its ``proposal`` (``providers.kk6_radius``).
             Values that do not exist for an entry are None. Empty for a
             concrete provider pair.
     """
@@ -504,7 +504,7 @@ class ProviderEntry(NamedTuple):
         k_quadrature: Quadrature ``ProviderConfig``.
         free_half_width: J' of the Low-Somma free uniform grid, else None.
         strip_margin: Gauss panel strip margin d other than the default, else None.
-        proposal: The ``providers.kk6_radius`` record of the KK6 entry, else None.
+        proposal: The ``providers.kk6_radius`` record of the ``apel_berntson_kk6`` entry, else None.
         skip: ``(status, reason)`` of an entry that has no grid
             (``"not_generated"`` or ``"duplicate"``); it is recorded, never built.
     """
@@ -523,15 +523,15 @@ def _entry(label, kernel, quadrature, **kernel_parameters):
                          ProviderConfig(implementation=quadrature))
 
 
-# The finite provider frontier of lchs_kernel="auto" with k_quadrature="auto" (PLAN M2/M3, kernel-source
-# supplement section 2.2), in tie-break order: equal comparison keys keep the earlier entry, so the default
+# The finite provider frontier of lchs_kernel="auto" with k_quadrature="auto",
+# in tie-break order: equal comparison keys keep the earlier entry, so the default
 # pair wins ties. ACL beta 0.75 (default), 0.70 and 0.80 span the range ACL arXiv:2312.03916v2 section 2.2
 # reports as numerically best for truncation; d = 0.5 is a second strip margin of the Gauss panel bound
 # (providers._ellipse_rule, valid for every d in (0, 1)). Each ACL beta and d uses the one least-node panel
 # rule of _ellipse_rule and truncation_multiplier = 1; other panel rules at the same beta and d are not
 # compared. Low-Somma c = 1 (default), 1/2 and 2 lie in the domain c > 0 of Theorem 2, and each is followed by
 # its free uniform grid when J' != J (provider_frontier). The Apel-Berntson paper root closes the fixed list;
-# provider_frontier adds the one KK6 radius for Samples and accuracy requests. These are engineering values
+# provider_frontier adds the one kk6_radius proposal for Samples and accuracy requests. These are engineering values
 # without a dominance or optimality claim: another panel rule, multiplier or parameter can have a lower
 # complete cost, and every entry is ranked by its actual finite grid and coherent row.
 # ponytail: finite heuristic list; add an entry only when the selection-only keeper table shows it winning on a
@@ -558,7 +558,7 @@ def provider_frontier(method, problem, common, *, acquisition, context, records)
     caller's ``records`` (one per yielded entry, appended before the next
     is requested):
 
-    - After each Low-Somma entry, its free uniform grid (PLAN M3) with
+    - After each Low-Somma entry, its free uniform grid with
       J' = 2**p - 1, the smallest such value at least the built profile's
       J, and h = R/J', when J' != J. Then h <= R/J <= h_max, so Theorem 3's
       step condition and the component caps still hold with the same R and
@@ -601,7 +601,7 @@ def _free_grid_entry(entry, record):
 
 
 def _kk6_entry(method, problem, common, context, paper, *, accuracy):
-    """Return the KK6 entry: one Apel-Berntson radius from the access form of this pass (KK6 policy K4).
+    """Return the ``apel_berntson_kk6`` entry: one Apel-Berntson radius from the access form of this pass.
 
     The form follows the actual access: an explicit
     ``QSPBlockEncoding.route`` parameter ``joint``, else ``"single_a"`` when the

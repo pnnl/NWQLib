@@ -522,9 +522,9 @@ def construct_coherent_lcu(block, arguments, method_context):
     qubitized emitter with the saved joint generator plan and phases, or the
     identity when the selected row is the exact identity shortcut. The
     inputs use their own constructions (``_source_preparations``) or, for
-    an MPS initial state, the cores chosen at planning. The M35 builders
-    admit each child query against max_select_work and max_bytes before they
-    build it.
+    an MPS initial state, the cores chosen at planning. The evolution and
+    joint-encoding builders admit each child query against max_select_work
+    and max_bytes before they build it.
     """
     _no_arguments(arguments)
     data = block._payload
@@ -553,7 +553,7 @@ def construct_coherent_lcu(block, arguments, method_context):
         evolution = built[0]
     else:
         # The commuting product filter * exp(-i T_e S_H): both factors act on [application, physical] with
-        # independent success workspaces, so the projected block is B_I B_H (M7.6, plan_block_encoding_product).
+        # independent success workspaces, so the projected block is B_I B_H (plan_block_encoding_product).
         evolution = build_joint_encoding(plan_block_encoding_product(built[0], built[1],
                                                                      target_norm_bounds=(1.0, 1.0)), **limits)
     # The Plan's recovery multiplies the success amplitudes by this zeta.

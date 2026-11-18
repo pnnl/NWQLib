@@ -35,7 +35,7 @@ def initial_accuracy_shots(method,problem,*,output,accuracy):
     nonzero initial QuadraticForm measures the initial-state PREP in the
     qubit-wise commuting groups of ``quantum.lchs_readout``, with no success
     qubits and the recovery ``Gamma = ||u0||``, the input's PhysicalScale
-    (``_initial_acquisition``), so its count is the AH1 law
+    (``_initial_acquisition``), so its count is the quadratic-form law of
     ``analysis.sufficient_counts`` at that recovery
     (``quantum.sampling_readout``).
     """

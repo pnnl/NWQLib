@@ -1138,7 +1138,7 @@ class _Pass:
 
 
 def _sufficient_rows(method, laws, factor, output, accuracy):
-    r"""Return B, the independent rows whose Hoeffding radius meets an absolute sampling tolerance (SC1, SC2).
+    r"""Return B, the independent rows whose Hoeffding radius meets an absolute sampling tolerance.
 
     The scaled range of one row mean is ``r_N = (W/g)**2 F`` for the norm
     squared and ``r_Q = H_O r_N`` for the quadratic form, with ``W/g`` the

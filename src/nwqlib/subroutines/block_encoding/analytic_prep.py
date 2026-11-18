@@ -1,5 +1,8 @@
 r"""Analytic Low–Somma kernel-magnitude PREP: a real Chebyshev polynomial of the node diagonal, then clean amplitude amplification.
 
+The labels G18, G19, G20, G22 and MP1–MP8 below name the relations of this
+module; other modules cite them together with its name.
+
 The constant-source LCHS kernel register needs the state
 
     \[|\psi_f\rangle=\frac{\sum_{j=-J}^{J}f(k_j)|\ell(j)\rangle}{\sqrt{Mp_f}},\qquad

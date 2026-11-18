@@ -1,7 +1,7 @@
 """Canonical inverse NLFT on causal analytic prefixes.
 
 The exterior complement is defined by R=log(1-|b|²)/2 and its
-negative-frequency Schwarz transform. F9/F10 in the phase derivation use
+negative-frequency Schwarz transform. The causal recursion uses
 the reflected ratio prefix (1, conj(reverse(chi))) instead of recompleting
 recursive subproblems. See arXiv:2505.12615v1 Algorithm 1 and Lemma 5.2,
 arXiv:2407.05634v3 Propositions 17--23, and
@@ -42,7 +42,7 @@ def convolution(a, b):
 
 
 def leaf(alpha, beta):
-    """PF-I1 peeling, including the normalized transfer pair it generates.
+    """Factor stripping, including the normalized transfer pair it generates.
 
 Common analytic rescaling does not change a ratio beta[0]/alpha[0].
 Consequently these prefixes need not satisfy a normalization identity.
@@ -73,14 +73,15 @@ Consequently these prefixes need not satisfy a normalization identity.
 
 
 def inverse_prefix(alpha, beta, leaf_size=LEAF_SIZE):
-    """F9 causal recursion returning factors and their transfer pair."""
+    """Causal recursion returning factors and their transfer pair."""
     h = len(alpha)
     if h <= leaf_size:
         return leaf(alpha, beta)
     m = (h + 1) // 2
     yl, al, bl = inverse_prefix(alpha[:m], beta[:m], leaf_size)
-    # Laurent conjugation contributes a shift -(m-1). F9a's second
-    # shift is -m, where m counts factors, not polynomial degree.
+    # Laurent conjugation contributes a shift -(m-1). The second
+    # shift of the right prefixes is -m, where m counts factors, not
+    # polynomial degree.
     ar = convolution(al[::-1].conj(), alpha)
     ar += convolution(bl[::-1].conj(), beta)
     ar = ar[m - 1:m - 1 + h - m].copy()
@@ -97,7 +98,7 @@ def inverse_prefix(alpha, beta, leaf_size=LEAF_SIZE):
 
 
 def weiss_ratio(b, n):
-    """F1: four FFTs with the Nyquist frequency on the negative side."""
+    """Return the ratio coefficients from four FFTs with the Nyquist frequency on the negative side."""
     values = np.fft.ifft(b, n)
     values *= n
     modulus = np.abs(values)
@@ -174,7 +175,7 @@ this implementation, not process memory or FFT library workspace.
 
 
 def generic_ratio_bound(degree, rho, n):
-    """PF-G2's ideal per-coefficient error, evaluated without overflow."""
+    """The generic ideal per-coefficient error (qsp_phase_derivation.md, "Ideal discretization bounds"), evaluated without overflow."""
     if degree == 0 or rho == 0:
         return 0.0
     eta = 1 - rho
@@ -201,7 +202,7 @@ def propagated_ratio_bound(degree, rho, delta):
 
 
 def _near_flat_bound(degree, rho, b_l1, sigma, delta, n):
-    """PF-J1--J6 at FFT length n for a full complex unit-modulus approximation only.
+    """The near-flat ratio bound (qsp_phase_derivation.md, "Ideal discretization bounds") at FFT length n for a full complex unit-modulus approximation only.
 
     Returns the smallest propagated bound over the orders j whose length
     next_power_of_two(max(2j, j²+1)d+1) is at most n, or inf.
@@ -235,7 +236,7 @@ def _near_flat_bound(degree, rho, b_l1, sigma, delta, n):
 
 
 def real_log_radius(coefficients, rho):
-    """R4--R8 real-Wx annulus, from actual normalized Chebyshev coefficients.
+    """Log radius of the real-Wx annulus, from actual normalized Chebyshev coefficients.
 
 For log r=2y, bb*=P(cos(theta+i v))² on z=exp(2i(theta+i v)).
 With K=cosh(1/2), C1=sum k|ck|, C2=sum k²|ck|, the strip bound is
@@ -263,7 +264,7 @@ Returns None when the annulus arithmetic is unavailable.
 
 
 def real_ratio_bound(degree, rho, log_r, n):
-    """R10--R13: log/Schwarz error and the true ratio's negative aliases."""
+    """Real-Wx ratio bound: log/Schwarz error and the true ratio's negative aliases."""
     if degree == 0:
         return 0.0
     slack = (1 - rho) * (1 + rho)
@@ -282,10 +283,10 @@ def ideal_rule(degree, rho, tolerance, n, *, log_r=None, near_flat=None):
     """Return ``(rule, bound)``: an ideal-arithmetic rule that calls FFT length ``n`` sufficient, or ``(None, None)``.
 
     Only scalar formulas are evaluated, at the length actually reached.
-    ``generic_sufficient`` (PF-G2) applies to every target with norm cap
-    rho < 1; ``real_wx_annulus`` (R15, allowance
+    ``generic_sufficient`` (`generic_ratio_bound`) applies to every target with norm cap
+    rho < 1; ``real_wx_annulus`` (`real_ratio_bound`, allowance
     min(h/(2(d+1)), tol h²/(4(d+1)²(1+h))) with h = 1 - rho²) needs the
-    real-Wx log radius ``log_r``; ``full_ja_sufficient`` (PF-J) needs
+    real-Wx log radius ``log_r``; ``full_ja_sufficient`` (`_near_flat_bound`) needs
     ``near_flat = (sum|b|, sigma, delta)`` of a full unit-modulus
     approximation. Among the rules whose propagated ideal ratio bound at
     ``n`` is at most tolerance/2, the smallest bound is returned. Each bound

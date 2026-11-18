@@ -352,8 +352,9 @@ def choose_provider(method, problem, common, *, output, shots, accuracy=None):
     masses times the kernel one-norm); across grids the comparison restores
     it, as log2 values: ``C`` for single-circuit acquisition (exact readout,
     or the fixed-acquisition comparison of fixed shots),
-    ``log2(zeta**2 C) + 2 log2 gamma`` for rejection, the ``(zeta gamma)**2 C``
-    of KK7, and the sufficient work ``N G C`` (AH3, already from the row's
+    ``log2(zeta**2 C) + 2 log2 gamma`` for rejection, the nominal
+    ``(zeta gamma)**2 C`` of ``coherent_selection``, and the sufficient work
+    ``N G C`` (already from the row's
     own recovery zeta gamma) for an accuracy request. A candidate without an
     admitted row, or with an unknown objective, ranks after every known
     one, and ties keep the frontier order, so the default pair wins ties.

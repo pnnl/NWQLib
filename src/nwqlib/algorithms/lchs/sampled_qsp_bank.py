@@ -10,8 +10,8 @@ once). The deterministic bank stores p_d. The stochastic bank keeps the
 shells through the cutoff s and replaces the rest by one drawn shell: with
 ``W = sum_{s<n<=d} |c_n|`` and ``gamma_n = W c_n/|c_n|``, member n is
 ``R_n = p_s + gamma_n B_n``, drawn with probability proportional to |c_n|.
-A zero W leaves the deterministic polynomial. The labels below are cited by
-`sampled_qsp`.
+A zero W leaves the deterministic polynomial. The labels B5–B9 and B22 below
+are cited by `sampled_qsp`.
 
 B5 (signal degree). A target with lowest power ``-l`` and highest power h
 uses ``max(0, l) + max(0, h)`` walk signals, which is 2n for a member of

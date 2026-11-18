@@ -309,7 +309,7 @@ def _sampling_fact(frame,value,failure,*,assumption=_PAIR_SAMPLING,
 
 
 _COUNTS_SAMPLING = ("Hoeffding bound for each counts setting's independent shots, summed over settings with the "
-                    "failure probability split equally (M7.13-M7.14); a statistical radius of the finite circuit's "
+                    "failure probability split equally; a statistical radius of the finite circuit's "
                     "moment, not its bias against the physical solution")
 
 
@@ -322,11 +322,10 @@ def _counts_radius(rec,output,groups,value,failure,*,returned=None):
     the others of that group, so the per-shot score of group g is
     ``Y_g = Gamma**2 1_good sum_(l in g) o_l s_l`` with ``|Y_g| <= Gamma**2
     A_g``, ``A_g = sum_(l in g) |o_l|``, the identity coefficient counted once
-    in the first unconditional group (M7.13 of the M7 mathematics handoff;
-    ``_sampled``). With ``N_g`` independent returned shots and failure share
+    in the first unconditional group (``_sampled``). With ``N_g`` independent returned shots and failure share
     ``delta_g`` Hoeffding's Theorem 2 (doi:10.1080/01621459.1963.10500830)
     bounds the group mean within ``Gamma**2 A_g sqrt(2 log(2/delta_g)/N_g)``,
-    and a union bound over the settings gives M7.14,
+    and a union bound over the settings gives
     ``R = sum_g Gamma**2 A_g sqrt(2 log(2/delta_g)/N_g)``,
     ``delta_g = delta/G``. NormSquared uses the indicator in ``[0, Gamma**2]``,
     ``Gamma**2 sqrt(log(2/delta)/(2 N))``. An unpadded normalized output uses
@@ -381,7 +380,7 @@ def score_ranges(terms,groups):
     (`_coalesced`), the unconditional score of group g is
     ``Y_g = Gamma**2 1_good sum_(l in g) o_l s_l``, plus the identity
     coefficient once in the first group, so ``|Y_g| <= Gamma**2 A_g``
-    (M7.13 of the M7 mathematics handoff, the range `_counts_radius` uses).
+    (the range `_counts_radius` uses).
     Each ``A_g`` is the exact rational sum of those binary64 weights,
     converted to binary64 and raised by one step when the conversion rounded
     down, so it bounds the actual range.
@@ -402,8 +401,7 @@ def score_ranges(terms,groups):
 def sufficient_counts(recovery,*,kind,ranges,tolerance,confidence):
     r"""Return the shots per counts setting that make the coherent sampling radius at most ``tolerance``, or None when a saved Plan cannot hold that count.
 
-    The inversions of the radius laws of `_counts_radius` (ACCURACY_HOOK_POLICY
-    AH1/AH2, from M7.13-M7.14 and Hoeffding's Theorem 2,
+    The inversions of the radius laws of `_counts_radius` (Hoeffding's Theorem 2,
     doi:10.1080/01621459.1963.10500830). With ``Gamma`` the physical
     recovery, ``delta = 1 - confidence`` and the same N on each of the G
     settings, the failure probability split equally (``delta_g = delta/G``,
@@ -413,10 +411,10 @@ def sufficient_counts(recovery,*,kind,ranges,tolerance,confidence):
           =\Gamma^2A\sqrt{2\log(2G/\delta)/N},\qquad A=\sum_gA_g,\]
 
     so ``R_Q(N) <= epsilon`` exactly when
-    ``N >= 2 Gamma**4 A**2 log(2G/delta)/epsilon**2`` (AH1). The norm
+    ``N >= 2 Gamma**4 A**2 log(2G/delta)/epsilon**2``. The norm
     squared is the one indicator in ``[0, Gamma**2]`` with
     ``R_N(N) = Gamma**2 sqrt(log(2/delta)/(2N))``, so
-    ``N >= Gamma**4 log(2/delta)/(2 epsilon**2)`` (AH2). The count is the
+    ``N >= Gamma**4 log(2/delta)/(2 epsilon**2)``. The count is the
     ceiling, at least 1. These bound the statistical error of the finite
     circuit's moment, given independent stationary shots within each
     setting; they do not bound its bias against the physical solution.

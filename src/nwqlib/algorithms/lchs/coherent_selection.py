@@ -1,45 +1,42 @@
 r"""Static choice of the coherent LCHS evolution route, and preparation of the chosen route only.
 
-Equation labels refer to the LCHS mathematical specification and its
-supplements (MATHEMATICAL_SPEC E6-E15, R1-R3; transformation T1-T28;
-encoding G12-G17, G24-G27; alternative transformations AT8-AT15).
-
 Selection. One coherent SELECT applies ``exp(-i T_e S)`` to the joint
-generator ``S`` of `plan_joint_generator` (G12) or `plan_single_a_generator`
-(G13), with ``T_e`` the largest active elapsed time and time factors
+generator ``S`` of `plan_joint_generator` or `plan_single_a_generator`,
+with ``T_e`` the largest active elapsed time and time factors
 ``q_a = t_a / T_e`` read from the factorized PREP layout
-(`plan_factorized_source_preparation`, G14-G17). Every row of the result is a
+(`plan_factorized_source_preparation`). Every row of the result is a
 node/joint generator together with one transformation: shared real QSVT raw
-or with three-use OAA (T7-T13) for each common cap in `SHARED_TARGET_CAPS`,
-ordinary Laurent (T14/T15) and one-sided GQET (T16/T17) for each margin in
-`GENERAL_MARGINS`, the imaginary-time filter (AT8-AT13) of an H = 0
-alternative, or, when the representation gives an exact [L, H] = 0, the
-product of that filter with an H evolution (AT14/AT15,
-`CommutingProductAlternative`). Shared QSVT reads the generator directly when its encoded
+or with three-use OAA for each common cap in `SHARED_TARGET_CAPS`,
+ordinary Laurent and one-sided GQET for each margin in
+`GENERAL_MARGINS`, the imaginary-time filter of an H = 0
+alternative (`ImaginaryTimeAlternative`), or, when the representation gives
+an exact [L, H] = 0, the product of that filter with an H evolution
+(`CommutingProductAlternative`). Shared QSVT reads the generator directly when its encoded
 block is recorded Hermitian; the qubitized walk reads it directly when the
 whole unitary is a recorded Hermitian involution; otherwise both use the
-generic lift (T3/T4). Berry, outer amplitude amplification, Martyn one-shot
-and coherent MPF are listed as refused with the M0 reasons. An exactly zero
-generator or ``T_e = 0`` gives the identity evolution and no polynomial row
-(T1 boundary); no nonzero application gives the exact zero solution.
+generic lift. Berry, outer amplitude amplification, Martyn one-shot
+and coherent MPF are listed as refused with the reasons of
+`NOT_ADMITTED_ROUTES`. An exactly zero
+generator or ``T_e = 0`` gives the identity evolution and no polynomial
+row; no nonzero application gives the exact zero solution.
 
-Allowance (E15). In the physical-vector frame with outer recovery ``gamma``
-(G14) and the qualified other stages ``Delta_rest``,
+Allowance. In the physical-vector frame with outer recovery ``gamma``
+and the qualified other stages ``Delta_rest``,
 
     \[\epsilon_{\rm alg,allow}=(\epsilon_{\rm phys}-\Delta_{\rm rest})/\gamma
       -T_e\delta_S-\zeta\epsilon_{\rm native}.\]
 
-``T_e delta_S`` is the generator term of E6 (``beta delta_X`` for the
-filter, AT13). In the algorithmic frame the caller supplies
+``T_e delta_S`` is the generator term of the evolution error (``beta
+delta_X`` for the filter). In the algorithmic frame the caller supplies
 ``epsilon_alg,allow`` directly and the generator and native terms are
 reported beside it. A tail allowance ``tail_share * epsilon_alg,allow``
 selects the truncation degree; the OAA rows use the conservative inverse of
-``Phi_{1/2}``, since ``Phi_a <= Phi_{1/2}`` for ``a <= 1/2`` (T13). Then
+``Phi_{1/2}``, since ``Phi_a <= Phi_{1/2}`` for ``a <= 1/2`` (`_phi`). Then
 
 * Laurent/GQET: ``epsilon_synth = (epsilon_alg,allow - delta_T) / sigma``,
-  rounded down, is the phase allowance (E15, T15, T17);
+  rounded down, is the phase allowance;
 * shared raw/OAA: the phase owner fixes the residual tolerance ``tol`` per
-  parity, so ``delta <= delta_T + 2 s tol`` (T10) and the row is admitted
+  parity, so ``delta <= delta_T + 2 s tol`` and the row is admitted
   only when ``delta`` (raw) or ``Phi_a(delta)`` (OAA) is within the
   allowance;
 * imaginary time: ``epsilon_synth = (epsilon_I,allow - delta_m) / s``, with
@@ -50,14 +47,14 @@ selects the truncation degree; the OAA rows use the conservative inverse of
 A forecast is conditional on the synthesis meeting its tolerance; binary64
 Bessel, phase and PREP arithmetic stay UNKNOWN, never zero.
 
-Cost (T24, R1, G27). One attempt costs ``C = C_evol + P_out`` CX. ``C_evol``
+Cost. One attempt costs ``C = C_evol + P_out`` CX. ``C_evol``
 adds the original-U calls of the transformation census, priced by the
 generator's own ``forward_cx`` (no control) and ``controlled_cx`` (one
 control), and the CX the emitters add around those calls. Both come from
 the emitter owners in ``qsp.evolution``, which the plan records of the
 built circuit use too: ``_shared_census`` and ``_shared_gate_cx`` for
 shared QSVT, ``_qubitized_census`` and ``_qubitized_gate_cx`` for the
-qubitized walk (M7.2 of the M7 mathematics handoff).
+qubitized walk.
 
 ``P_out`` is the factorized PREP and its inverse
 (`direct_preparation_cx_bound` for each magnitude tree, or the layered MPS
@@ -67,16 +64,16 @@ diagonal (`multiplexor_resource_law` for each diagonal that
 kind-state preparation R. Child laws carry their own upper-bound
 qualification; an unknown child or R cost leaves the row's cost unknown.
 
-Ranking (R2, T25, T26). All rows of one alternative share one finite
+Ranking. All rows of one alternative share one finite
 target, so rejection acquisition ranks ``zeta**2 C`` and single-circuit
 acquisition ranks ``C``. Single-circuit acquisition covers exact readout and
 fixed-shot moments; under fixed shots ranking ``C`` is a fixed-acquisition
-comparison, not matched precision (M7 mathematics handoff, Q6). Admitted
+comparison, not matched precision. Admitted
 rows with exactly the same objective go to the lowest total degree of the
 phase polynomials to synthesize, a classical cost the objective does not
 contain, and remaining ties keep the row order. Under fixed shots equal ``C`` is not equal precision:
 the Hoeffding range radius of an unconditional moment scales as
-``Gamma**2 = (zeta gamma)**2`` (M7.13-M7.14) at fixed shots and statistical
+``Gamma**2 = (zeta gamma)**2`` (``analysis._counts_radius``) at fixed shots and statistical
 model, and the accepted probability ``q/Gamma**2`` of a success-conditional
 output, with ``q`` the squared norm of the approximate vector, as ``1/Gamma**2``
 only when ``q`` is the same; the reason names the
@@ -89,15 +86,15 @@ no admitted row has a known cost, the deterministic choice takes the
 smallest recovery ``zeta`` (rejection and accuracy) or the fewest original-U calls
 (single circuit), then the lowest total phase degree, the classical
 tie-break of known-cost rows applied to that stand-in objective; this order
-is a principal and counselor decision, not a certified minimum. Different alternatives have different finite targets
+is a fixed tie-break convention, not a certified minimum. Different alternatives have different finite targets
 and different gamma. Their chosen rows are compared by the nominal
-``C (zeta gamma)**2`` for rejection (M7.8, PLAN M0.1) and by ``C`` for a
+``C (zeta gamma)**2`` for rejection and by ``C`` for a
 single circuit, the fixed-acquisition comparison; both are nominal, since
 a strict order needs every total error against one reference solution and
-a positive norm lower bound (T25, M7.9). The caller's alternative order
+a positive norm lower bound. The caller's alternative order
 breaks ties and decides only when no chosen row has a known nominal value.
 
-Accuracy (ACCURACY_HOOK_POLICY AH1-AH3). A requested absolute sampling
+Accuracy. A requested absolute sampling
 radius of a physical scalar output (`SamplingTarget`) gives each row the
 sufficient shots N per setting of its own recovery ``Gamma = zeta gamma``
 (``analysis.sufficient_counts``), and the row objective is the quantum work
@@ -161,22 +158,22 @@ from nwqlib.subroutines.qsp.imaginary_time import (
 )
 
 # Common caps of the shared real targets: 1 - eta for the general margins,
-# plus 1/2 (M0.2; PHASE_POLICY_REVISION section 10 compares exactly these four).
+# plus 1/2.
 SHARED_TARGET_CAPS = (0.999, 0.99, 0.9375, 0.5)
-# The general margin set of M0.2, also the margins `imaginary_time_expansion` accepts.
+# The general margin set, also the margins `imaginary_time_expansion` accepts.
 GENERAL_MARGINS = (1e-3, 1e-2, 1 / 16)
 
 NOT_ADMITTED_ROUTES = {
-    "berry": "Berry prescribed-pair synthesis is not admitted (M0 ADMISSIONS section 2): no qualified bounded "
-             "factorization of the T21 pair preserves T22 and the d+2 signal count. This is not a "
-             "nonexistence result.",
-    "outer_amplitude_amplification": "Outer amplitude amplification is not admitted (M0 ADMISSIONS section 5): "
+    "berry": "Berry prescribed-pair synthesis is not admitted: no qualified bounded "
+             "factorization of the prescribed pair preserves its extraction identity and the d+2 signal count. "
+             "This is not a nonexistence result.",
+    "outer_amplitude_amplification": "Outer amplitude amplification is not admitted: "
                                      "no finite schedule with a positive success premise and original-amplitude "
                                      "recovery exists; amplified mass is not physical mass.",
-    "martyn_one_shot": "Martyn one-shot is not admitted (M0 ADMISSIONS section 7): the complex-even endpoint "
-                       "completion and realizable degree (AT6) are not closed.",
-    "coherent_mpf": "Coherent amplified MPF is not admitted (M0 ADMISSIONS section 7): (4V-U)/3 is not a norm-one "
-                    "compression (AT24) and the robust-amplification error chain is not closed.",
+    "martyn_one_shot": "Martyn one-shot is not admitted: the complex-even endpoint "
+                       "completion and realizable degree are not closed.",
+    "coherent_mpf": "Coherent amplified MPF is not admitted: (4V-U)/3 is not a norm-one "
+                    "compression and the robust-amplification error chain is not closed.",
 }
 
 _REAL_TIME_ROUTES = ("shared_oaa", "shared_raw", "laurent", "gqet")
@@ -220,14 +217,15 @@ class CoherentObjective:
 
     Attributes:
         acquisition: ``"rejection"`` ranks ``zeta**2 C`` (state or Born
-            samples by postselection, R2/T26). ``"single_circuit"`` ranks
+            samples by postselection). ``"single_circuit"`` ranks
             ``C``, the cost of one coherent circuit: for exact readout, and
             for moments measured with fixed shots, where it is a
             fixed-acquisition comparison and not matched precision (the
             radius scales as ``Gamma**2``). ``"accuracy"`` ranks the
-            sufficient quantum work ``N G C`` of ``sampling`` (AH1-AH3).
-        allowance_frame: ``"physical_vector"`` applies E15 to ``allowance``
-            as ``epsilon_phys``; ``"algorithmic"`` takes ``allowance`` as
+            sufficient quantum work ``N G C`` of ``sampling``.
+        allowance_frame: ``"physical_vector"`` takes ``allowance`` as
+            ``epsilon_phys`` of the allowance relation of the module
+            docstring; ``"algorithmic"`` takes ``allowance`` as
             ``epsilon_alg,allow`` in the recovered evolution frame, a
             component tolerance whose physical total is not budgeted here.
         allowance: Positive allowance in the frame above.
@@ -317,8 +315,8 @@ class LCHSCoherentAlternative:
         l_child: Encoding of the centered ``L_0``, or None for an exact zero.
         h_child: Encoding of the centered ``H_0``, or None for an exact zero.
         a_child: Encoding of ``A_0 = L_0 + i H_0`` for the single-A form, or None.
-        rest_error: Qualified sum of the other physical-vector stages of
-            E11 (kernel, k-quadrature, source quadrature/window, PREP), or
+        rest_error: Qualified sum of the other physical-vector stages
+            (kernel, k-quadrature, source quadrature/window, PREP), or
             None when unknown. An omitted-application bound of the
             factorized PREP is added here by the selection.
         state_preparation_cx: CX count of the kind-state preparation R as
@@ -340,7 +338,7 @@ class LCHSCoherentAlternative:
             Low–Somma PREP of the uniform grid; None for a direct or MPS
             kernel factor. The caller states that the kernel coefficients
             have the Low–Somma magnitudes ``|c_j|/beta_k = f(k_j)**2/(M p_f)``
-            of that gamma (G18).
+            of that gamma (the state of the ``analytic_prep`` module docstring).
     """
 
     label: str
@@ -359,7 +357,7 @@ class LCHSCoherentAlternative:
 
 @dataclass(frozen=True, kw_only=True)
 class ImaginaryTimeAlternative:
-    """The H = 0 imaginary-time alternative (AT8-AT13), a finite target without a kernel.
+    """The H = 0 imaginary-time alternative, a finite target without a kernel.
 
     The Hamiltonian must be an exact scalar ``c_H`` (``applications.hamiltonian_scalar``).
     The masses must be ``w_a nu_a kappa_a`` with ``kappa_a = exp[-t_a (c - alpha)]``,
@@ -388,10 +386,10 @@ class ImaginaryTimeAlternative:
 
 @dataclass(frozen=True, kw_only=True)
 class CommutingProductAlternative:
-    r"""The conditional commuting product (AT14/AT15): an L filter times an H evolution, a finite target without a kernel.
+    r"""The conditional commuting product: an L filter times an H evolution, a finite target without a kernel.
 
     For Hermitian parts with an exact ``[L, H] = 0`` in one basis, ``L = c_L I + L_0`` and
-    ``H = c_H I + H_0``, every application obeys (M7.5 of the M7 mathematics handoff)
+    ``H = c_H I + H_0``, every application obeys
 
         \[e^{-t_a(L+iH)}=\kappa_a e^{-it_ac_H}F_{I,a}e^{-it_aH_0},\quad
           F_{I,a}=e^{-\beta(1-X_a)},\quad X_a=(1-q_a)I-q_aL_0/\alpha,\]
@@ -401,12 +399,12 @@ class CommutingProductAlternative:
     evolves ``D_Q (x) H_0`` for ``T_e`` on the same application register. Approximate factors
     ``A_I = sigma_I B_I`` and ``A_H = zeta_H B_H`` within ``e_I, e_H`` of the contractions
     ``F_I, F_H`` compose, without any commutation of the approximants and with independent success
-    workspaces, to (M7.6)
+    workspaces, to the product bound
 
         \[\|A_IA_H-F_IF_H\|\le e_I+e_H+e_Ie_H,\qquad \zeta=\sigma_I\zeta_H.\]
 
     An allowance B of the product is split equally, ``b = sqrt(1 + B) - 1 = B/(sqrt(1 + B) + 1)``,
-    so that ``2 b + b**2 = B`` (M7.7). Unitary OAA is never applied to the filter.
+    so that ``2 b + b**2 = B``. Unitary OAA is never applied to the filter.
 
     Attributes:
         label: Name used in rows and requests.
@@ -510,7 +508,7 @@ class CoherentSelection:
 
 @dataclass(frozen=True, kw_only=True)
 class PreparedCoherentRoute:
-    """The selected route after its one synthesis, ready for the M35 circuit builders.
+    """The selected route after its one synthesis, ready for the circuit builders (``native.construct_coherent_lcu``).
 
     Attributes:
         selection: The frozen selection.
@@ -576,7 +574,7 @@ def _preparation_failure(message, *, candidate, cause):
 
 
 def _phi(a: float, delta: float) -> float:
-    """T13: ``Phi_a(delta) = delta + 12a^2/(3-4a^2) delta^2 + 4a^2/(3-4a^2) delta^3``."""
+    """Return ``Phi_a(delta) = delta + 12a^2/(3-4a^2) delta^2 + 4a^2/(3-4a^2) delta^3``."""
     c = 4.0 * a * a / (3.0 - 4.0 * a * a)
     return delta + c * delta * delta * (3.0 + delta)
 
@@ -625,13 +623,12 @@ def _query_cx(rows, census) -> int | None:
 
 
 def _preparation_cx(prep, state_preparation_cx, mps_layers=None, analytic=None) -> int | None:
-    """CX of P_c, P_c^dagger, the slot phase diagonal and R for one attempt (G27), as `source_prep` builds them.
+    """CX of P_c, P_c^dagger, the slot phase diagonal and R for one attempt, as `source_prep` builds them.
 
     With ``mps_layers`` L each nontrivial magnitude factor on q qubits is an
     L-layer MPS circuit priced by the existing estimate ``3 L max(0, q - 1)``
     (at most q - 1 two-qubit unitaries of at most three CX per layer,
-    `quantum.select_vector_preparation`; MPS_PREP_POLICY of the M7
-    mathematics handoff); otherwise each is a direct magnitude tree. With an
+    `quantum.select_vector_preparation`); otherwise each is a direct magnitude tree. With an
     ``analytic`` plan (``analytic_prep.AnalyticKernelPlan``) the kernel factor
     is the analytic PREP, priced by its MP8 law at the acquisition degree n
     and the round cap K, an upper bound of the selected d <= n and K; its
@@ -669,14 +666,14 @@ def _preparation_cx(prep, state_preparation_cx, mps_layers=None, analytic=None) 
 
 
 def _base_allowance(objective, rest, prep, child):
-    """Return ``(A0, reasons)``: E15 without the route's ``zeta epsilon_native``, or the algorithmic allowance."""
+    """Return ``(A0, reasons)``: the physical-frame allowance of the module docstring without the route's ``zeta epsilon_native``, or the algorithmic allowance."""
     if objective.allowance_frame == "algorithmic":
         return objective.allowance, ()
     missing = [name for name, value in (("rest_error", rest), ("native_error", objective.native_error),
                                         ("generator error", child)) if value is None]
     if missing:
-        return None, (f"E15 needs {', '.join(missing)}; unknown terms make the physical allowance "
-                      "unqualified",)
+        return None, (f"the physical-frame allowance needs {', '.join(missing)}; unknown terms make the "
+                      "physical allowance unqualified",)
     if prep.dropped_bound is not None:
         rest = rest + _scale_value(*prep.dropped_bound)
     remaining = objective.allowance - rest
@@ -686,7 +683,7 @@ def _base_allowance(objective, rest, prep, child):
     base = gamma_scaled - child
     if not base > 0:
         return None, (f"(epsilon_phys - Delta_rest)/gamma = {gamma_scaled!r} does not exceed the generator "
-                      f"term {child!r} (E15)",)
+                      f"term {child!r}",)
     return base, ()
 
 
@@ -698,7 +695,7 @@ def _route_allowance(objective, base, zeta):
 
 
 def _forecast(objective, prep, algorithmic, child, zeta):
-    """E6 terms in the recovered frame and E8 ``gamma * epsilon_evol``; any unknown term leaves the sums unknown."""
+    """Evolution error terms in the recovered frame and the physical ``gamma * epsilon_evol``; any unknown term leaves the sums unknown."""
     native = None if objective.native_error is None else zeta * objective.native_error
     parts = (algorithmic, child, native)
     evolution = None if any(part is None for part in parts) else math.fsum(parts)
@@ -723,7 +720,7 @@ def _ranked(objective, zeta, attempt, prep):
     """Return the ranking objective of one row and, for accuracy, its sufficient shots N and settings G.
 
     Rejection ranks ``zeta**2 C``, single circuit ``C`` and accuracy the
-    sufficient quantum work ``N G C`` (AH3), N from the row's own recovery
+    sufficient quantum work ``N G C``, N from the row's own recovery
     ``Gamma = zeta gamma``; an unknown cost, recovery or count leaves the
     objective unknown.
     """
@@ -781,7 +778,8 @@ def _real_time_rows(alternative, generator_label, generator, prep, evolution_tim
     label = alternative.label
     if generator.target_operator_is_hermitian is False:
         return _refused_rows(label, generator_label, _real_time_route_levels(),
-                             "the generator records a non-Hermitian target; T1 needs a Hermitian S")
+                             "the generator records a non-Hermitian target; the real-time transformations "
+                             "need a Hermitian S")
     premise = ("Hermitian target recorded by construction" if generator.target_operator_is_hermitian
                else "Hermitian target is a caller assumption; the error forecast is conditional on it")
     child = None if generator.error_bound is None else evolution_time * generator.error_bound
@@ -848,9 +846,10 @@ def _attach_analytic(row, analytic):
     """
     if analytic is None or row.status != "admitted":
         return row
-    reason = (f"analytic Low-Somma kernel PREP (M3P) on the {analytic.recipe.kind} labels: acquisition degree "
+    reason = (f"analytic Low-Somma kernel PREP on the {analytic.recipe.kind} labels: acquisition degree "
               f"{analytic.degree}, at most {analytic.max_rounds} amplification rounds and {analytic.work_qubits} "
-              "work qubits kept through PREP and its inverse; its CX is the MP8 bound at that degree and round cap, "
+              "work qubits kept through PREP and its inverse; its CX is the MP8 bound of analytic_prep at that degree "
+              "and round cap, "
               "an upper forecast, and its coefficients, probabilities and phases are computed for the selected row "
               "only")
     return replace(row, reasons=row.reasons + (reason,),
@@ -941,7 +940,7 @@ def _shared_row(common, alternative, generator, prep, expansion, targets, tail, 
 
 def _qubitized_row(common, alternative, generator, prep, expansion, tail, evolution_time, objective, controls,
                    base, child, lift, a_u, premise, analytic=None):
-    # T15 (Laurent) or T17 (GQET): the target, its scale and circle cap come from the phase owner's planning
+    # Laurent or GQET: the target, its scale and circle cap come from the phase owner's planning
     # entry, which preparation then solves unchanged.
     planner = plan_jacobi_anger_laurent if common["route"] == "laurent" else plan_jacobi_anger_gqet
     target = planner(expansion, margin=common["level"])
@@ -976,7 +975,7 @@ def _qubitized_row(common, alternative, generator, prep, expansion, tail, evolut
 
 
 def _imaginary_rows(alternative, generator, prep, evolution_time, objective, controls):
-    """Forecast the AT9-AT13 filter for each margin; coefficients are acquired once per margin."""
+    """Forecast the imaginary-time filter for each margin; coefficients are acquired once per margin."""
     label = alternative.label
     levels = [("imaginary_gqet", margin) for margin in GENERAL_MARGINS]
     beta = evolution_time * alternative.alpha
@@ -1023,7 +1022,8 @@ def _imaginary_rows(alternative, generator, prep, evolution_time, objective, con
         cost = _cost(objective, zeta, query_rows, generator, _qubitized_gate_cx(degree, walk, lift), prep,
                      alternative, 1 + walk + generator.system_qubits)
         algorithmic = tail + zeta * epsilon_phase
-        reasons = ["AT13 contraction-filter law; unitary OAA is not used for this filter"]
+        reasons = ["contraction-filter error law (qsp.evolution.imaginary_time_filter_error_terms); unitary OAA "
+                   "is not used for this filter"]
         rows.append(CoherentCandidate(
             status="admitted", reasons=tuple(reasons),
             signal_access="generic_lift" if lift else "direct_involution", recovery=zeta,
@@ -1111,12 +1111,12 @@ def _lchs_rows(alternative, objective, controls):
             return [CoherentCandidate(alternative=label, generator="none", route="identity", level=None,
                                       status="refused", reasons=(f"factorized PREP: {error}",))]
         return [_exact_row(label, "identity", "every centered child is an exact zero: the evolution is the "
-                           "identity, applied before any polynomial (T1 boundary)", prep, alternative, objective)]
+                           "identity, applied before any polynomial", prep, alternative, objective)]
     recipes = ()
     if uniform and (alternative.l_child is not None or alternative.a_child is not None):
         recipes = uniform_node_recipes(kernel.half_width, kernel.spacing, max_bytes=controls.max_bytes,
                                        max_work=controls.max_node_work)
-    # (generator label, kind, node encoding of G12, uniform recipe that fixes the PREP labels)
+    # (generator label, kind, node encoding of the joint generator, uniform recipe that fixes the PREP labels)
     plans = []
     if alternative.l_child is not None:
         if uniform:
@@ -1141,7 +1141,7 @@ def _lchs_rows(alternative, objective, controls):
         analytic = None
         if analytic_settings is not None:
             # The analytic PREP prepares the kernel on the labels of the evolution's own uniform recipe, so the
-            # node map of PREP, phase and generator is one (MATH_TRIAGE Q3); other generators have no such recipe.
+            # node map of PREP, phase and generator is one; other generators have no such recipe.
             if kind != "separate" or recipe is None:
                 rows += _refused_rows(label, generator_label, _real_time_route_levels(),
                                       "the analytic kernel PREP needs the uniform Low-Somma grid and its node recipe "
@@ -1167,7 +1167,7 @@ def _lchs_rows(alternative, objective, controls):
         evolution_time, time_factors = _layout_time(prep)
         if evolution_time == 0:
             return [_exact_row(label, "identity", "T_e = 0: the evolution is the identity, applied before any "
-                               "polynomial (T1 boundary)", prep, alternative, objective)]
+                               "polynomial", prep, alternative, objective)]
         try:
             if kind == "single_a":
                 generator = _single_a_plan(alternative.a_child, kernel, recipe, time_factors)
@@ -1198,7 +1198,7 @@ def _lchs_rows(alternative, objective, controls):
 
 
 def _single_a_plan(a_child, kernel, recipe, time_factors):
-    """G13 on the PREP labels: ``c_j = k_j - i`` with padding 0, so ``r = sqrt(R^2 + 1)`` bounds the completion."""
+    """The single-A generator on the PREP labels: ``c_j = k_j - i`` with padding 0, so ``r = sqrt(R^2 + 1)`` bounds the completion."""
     nodes = np.asarray(kernel.nodes, dtype=float)
     if recipe is not None:
         labels = np.asarray(uniform_node_labels(recipe))
@@ -1233,16 +1233,17 @@ def _imaginary_alternative_rows(alternative, objective, controls):
         return _refused_rows(label, "convex_contraction", levels, f"factorized PREP: {error}")
     evolution_time, time_factors = _layout_time(prep)
     if evolution_time == 0:
-        return [_exact_row(label, "identity", "T_e = 0: the filter is the identity (AT9 at beta = 0)", prep,
+        return [_exact_row(label, "identity", "T_e = 0: the filter is the identity (beta = 0)", prep,
                            alternative, objective)]
     try:
         generator = plan_convex_contraction(l_child=alternative.l_child, alpha=alpha, time_factors=time_factors)
     except ResourceLimitError:
         raise
     except (TypeError, ValueError) as error:
-        return _refused_rows(label, "convex_contraction", levels, f"AT12 contraction plan: {error}")
+        return _refused_rows(label, "convex_contraction", levels, f"contraction plan: {error}")
     if generator.target_operator_is_hermitian is False:
-        return _refused_rows(label, "convex_contraction", levels, "AT13 needs a Hermitian L_0")
+        return _refused_rows(label, "convex_contraction", levels,
+                             "the contraction-filter error law needs a Hermitian L_0")
     return _imaginary_rows(alternative, generator, prep, evolution_time, objective, controls)
 
 
@@ -1253,16 +1254,17 @@ def _factor_terms(row):
 
 
 def _composed(first, second):
-    """M7.6: ``e_1 + e_2 + e_1 e_2``, unknown when either term is."""
+    """The product bound ``e_1 + e_2 + e_1 e_2`` of `CommutingProductAlternative`, unknown when either term is."""
     return None if first is None or second is None else first + second + first * second
 
 
 def _composed_child(alg_i, child_i, alg_h, child_h):
-    """The child share of the product's M7.6 bound, so that its algorithmic and child terms sum to the whole bound.
+    """The child share of the product bound, so that its algorithmic and child terms sum to the whole bound.
 
-    Each factor's error is ``e = a + c`` (algorithmic plus child), and M7.6
-    bounds the product by ``e_I + e_H + e_I e_H``. The algorithmic term is
-    M7.6 of the algorithmic parts alone, ``a_I + a_H + a_I a_H``, and the
+    Each factor's error is ``e = a + c`` (algorithmic plus child), and the
+    product bound of `CommutingProductAlternative` is
+    ``e_I + e_H + e_I e_H``. The algorithmic term is that bound of the
+    algorithmic parts alone, ``a_I + a_H + a_I a_H``, and the
     child term is the rest, ``c_I (1 + a_H + c_H) + c_H (1 + a_I)``, which
     keeps the cross products of a child error with the other factor.
     Unknown when any term is.
@@ -1273,7 +1275,7 @@ def _composed_child(alg_i, child_i, alg_h, child_h):
 
 
 def _product_row(label, prep, objective, filter_row, h_row, system_qubits, budget):
-    """Compose one admitted filter row and one admitted H row into a product row (M7.6), PREP counted once."""
+    """Compose one admitted filter row and one admitted H row into a product row, PREP counted once."""
     zeta = filter_row.recovery * h_row.recovery
     evolution = _sum_known((filter_row.cost.get("evolution_cx"), h_row.cost.get("evolution_cx")))
     preparation = filter_row.cost.get("preparation_cx")
@@ -1290,7 +1292,7 @@ def _product_row(label, prep, objective, filter_row, h_row, system_qubits, budge
         route="commuting_product", level=None, status="admitted",
         reasons=(f"exact [L, H] = 0 from {budget['commutation']}; each factor's algorithmic allowance is "
                  f"b = {budget['factor']!r} of B = {budget['product']!r} (2b + b**2 = B), and the factor errors compose "
-                 "as e_I + e_H + e_I e_H (M7.6)", *filter_row.reasons, *h_row.reasons),
+                 "as e_I + e_H + e_I e_H", *filter_row.reasons, *h_row.reasons),
         signal_access=f"{filter_row.signal_access}*{h_row.signal_access}", recovery=zeta,
         polynomial_time=None, degrees={"filter": dict(filter_row.degrees), "hamiltonian": dict(h_row.degrees)},
         allowance={"algorithmic": budget["product"], "factor": budget["factor"]},
@@ -1321,7 +1323,7 @@ def _product_alternative_rows(alternative, objective, controls):
         return [CoherentCandidate(alternative=label, generator="none", route="commuting_product", level=None,
                                   status="refused", reasons=(
             "the product split is implemented in the algorithmic frame; in the physical frame each factor's child "
-            "and native terms must also fit its share (M7.7)",))]
+            "and native terms must also fit its share",))]
     try:
         prep = _preparation(applications, np.ones(1), 0, np.zeros(1), nodes=(0.0,),
                             scalar_phase=(0.0, facts.hamiltonian_scalar), alternative=alternative,
@@ -1493,7 +1495,7 @@ def _choose(rows, objective):
             details = "no row matches the request"
         return None, f"no admitted requested row ({details})"
     metric = {"rejection": "zeta**2 * attempt CX", "single_circuit": "attempt CX",
-              "accuracy": "sufficient quantum work N G C (AH3)"}[objective.acquisition]
+              "accuracy": "sufficient quantum work N G C"}[objective.acquisition]
     known = [(index, row) for index, row in pool if row.cost.get("objective") is not None]
     unknown = [row.label for _, row in pool if row.cost.get("objective") is None]
     if known:
@@ -1502,7 +1504,7 @@ def _choose(rows, objective):
         # Exact ties on the quantum objective go to the lowest total phase degree. Remaining ties keep row order.
         index, row = min(tied, key=lambda item: (_phase_degree(item[1]), item[0]))
         reason = (f"minimum {metric} = {best!r} among {len(known)} admitted rows of one finite "
-                  "target with known cost (R2/T26)")
+                  "target with known cost")
         if accuracy:
             reason += (f"; N = {row.cost['shots']} shots on each of {row.cost['settings']} settings, the "
                        "sufficient count of the row's recovery; the CX are upper bounds, so this is a "
@@ -1549,13 +1551,13 @@ def _choose(rows, objective):
 def _nominal_log2(row, objective):
     """``log2`` of the nominal cross-alternative objective of a chosen row, or None when unknown.
 
-    Rejection compares ``J = C Gamma**2 = C (zeta gamma)**2`` (M7.8, PLAN
-    M0.1): different alternatives have different finite targets and so
+    Rejection compares ``J = C Gamma**2 = C (zeta gamma)**2``: different
+    alternatives have different finite targets and so
     different gamma. Single-circuit acquisition keeps every shot and compares
-    the cost C of one circuit, the fixed-acquisition comparison of the M7
-    mathematics handoff (Q6). Both are nominal: a strict order needs every
+    the cost C of one circuit, the fixed-acquisition comparison of the
+    module docstring. Both are nominal: a strict order needs every
     alternative's total physical error against one reference solution and a
-    positive lower bound on its norm (T25, M7.9), which are not available.
+    positive lower bound on its norm, which are not available.
     """
     value = row.cost.get("objective")
     if value is None:
@@ -1581,13 +1583,13 @@ def _choose_alternative(winners, objective):
     index, row, why, best = min(known, key=lambda item: (item[3], item[0]))
     listed = ", ".join(f"{other.alternative} log2 {value!r}" for _, other, _, value in known)
     if objective.acquisition == "accuracy":
-        reason = (f"{row.alternative}: {why}; across alternatives the {model} (AH3) is smallest ({listed}); each N "
+        reason = (f"{row.alternative}: {why}; across alternatives the {model} is smallest ({listed}); each N "
                   "already contains its own (zeta gamma)**4, so this compares sufficient-work forecasts at the "
                   "requested radius, not total errors against one reference solution")
     else:
-        reason = (f"{row.alternative}: {why}; across alternatives the nominal {model} (M7.8) is smallest ({listed}); "
+        reason = (f"{row.alternative}: {why}; across alternatives the nominal {model} is smallest ({listed}); "
                   "this is not a strict order, which needs the total errors against one reference solution and a "
-                  "positive norm lower bound (T25)")
+                  "positive norm lower bound")
     if objective.acquisition == "single_circuit" and objective.readout in ("unconditional_counts", "conditional_counts"):
         reason += ("; under fixed shots the range-based confidence radius of a moment scales as (zeta gamma)**2, "
                    "which this cost comparison does not include")
@@ -1713,13 +1715,13 @@ def prepare_selected_coherent_route(selection: CoherentSelection) -> PreparedCoh
     factor, each once with its frozen factor allowance; the prepared
     ``generator``, ``phases`` and ``evolution_plan`` are then the pairs
     ``(filter, H)``, the recovery is their product and the error terms are
-    composed by M7.6.
+    composed by the product bound of `CommutingProductAlternative`.
 
     Args:
         selection (CoherentSelection): From `select_coherent_route`.
 
     Returns:
-        prepared (PreparedCoherentRoute): Phases, the M35 plan and actual
+        prepared (PreparedCoherentRoute): Phases, the evolution plan and actual
         error terms.
 
     Raises:

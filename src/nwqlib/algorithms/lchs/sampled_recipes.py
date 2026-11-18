@@ -11,6 +11,9 @@ and then the recipe choices once from the Method's random stream, and saves
 them here. Loading, analysis, resource estimates and continuation read the
 saved choices and never draw again.
 
+The labels P1–P4 and P6–P8 below name the relations of this module; other
+modules cite them together with its name.
+
 Notation. A pair row has branches x, y with elapsed times t_b, kernel nodes
 k_b and importance weights w_b = a/q of the original outer proposal q
 (`sampled_rows`). B >= E|w| is the mean weight bound and W >= sup|w| the
@@ -47,7 +50,7 @@ two commuting Pauli rotations whose norm sum is max(|t_x c_xj|, |t_y c_yj|).
 Summing over j gives sum_j ||G_j|| <= L_* = T_e*(lambda_H + K_* lambda_L)
 for every finite or continuous pair of the support, including unequal
 source times. Reading the Strang word as 2L - 1 stages with one G_j each and
-coefficient magnitude at most 1 gives the conservative XS9 constants
+coefficient magnitude at most 1 gives the conservative constants
 lambda = 4 L_*, T = 1 and A = (2L - 1)*lambda. The levels are r = (s, 2s);
 with x_l = r_l**-2 the Lagrange weights at x = 0 are
 w_l = r_l**(2(m-1))/prod_{h != l}(r_l**2 - r_h**2), here (-1/3, 4/3) for
@@ -77,7 +80,7 @@ case of L >= 2 centered labels with A > 0, otherwise leaves it unknown. With
 L <= 1 or L_* = 0, B_ext = 0 needs no s > 2A, and the published operator
 bound B_ext + E_eff is E_eff.
 
-PTSC (XS12-XS14, XS28; Zeng, Sun, Jiang and Zhao, arXiv:2212.04566v2,
+PTSC (Zeng, Sun, Jiang and Zhao, arXiv:2212.04566v2,
 Sec. IV.2, Proposition 4). One branch evolves for t under
 H_c + k L_c = sum over the fixed unmerged H list then L list, with L
 coefficients k*l_l; the Lie step S_1 applies the list in that order and
@@ -102,7 +105,7 @@ s >= 4 the correction is C = Q; for s = 2, 3 it is C = exp(i atan(h) P')
 with P' = Q for Hermitian Q and -iQ otherwise, so P' = +-I gives a phase
 that is relative between the two branches. Each segment applies S_1 and
 then C, and mu_step*E[C] = I + F_2 + F_3 + sum_{s=4}^{s_c} F_s, the Taylor
-truncation of V = exp(-ixH)S_1^dagger (XS28e). The two branches draw
+truncation of V = exp(-ixH)S_1^dagger. The two branches draw
 independent sequences, fixed for every shot of the row, and the row
 magnitude is multiplied by mu_x*mu_y under the original outer proposal.
 
@@ -123,7 +126,7 @@ and
     |E Z_N - N_v| <= B**2*(2 delta_* + delta_***2),  Q: C_O times this (P6).
 
 Selection: the least r with r > 2 L_time and
-r**3 log mu_cap >= (e + 2/9)(2 L_time)**4 (XS13), at most a set
+r**3 log mu_cap >= (e + 2/9)(2 L_time)**4, at most a set
 TrotterErrorBudgeted.max_steps, found by bisection after testing that cap or after
 doubling to a sufficient r, then the first s_c = 3, 4, ... at
 most PTSC.taylor_cutoff with
@@ -216,7 +219,7 @@ class LCHSPairMembers(Record):
         coefficient_discrepancy: E_eff = sum_j |pi_j gamma_hat_j - b_j|,
             rounded upward; zero for MPF, whose factors are exact.
         remainder: Richardson B_ext at the selected s, rounded upward, zero
-            for exact evolution, or None when the XS9 premise s > 2A fails
+            for exact evolution, or None when its premise s > 2A fails
             or (MPF with K >= 2) no finite remainder is admitted.
         allowance: The ``Richardson.pf_allowance`` the selection met, or None for
             fixed steps.
@@ -376,7 +379,7 @@ def _upward(value):
 
 
 def _richardson_remainder(a, s):
-    """B_ext = 4*Lambda*max(1, A)**2*(A/s)**4 (XS9 with m = 2, p = 2), exact."""
+    """B_ext = 4*Lambda*max(1, A)**2*(A/s)**4 (the Richardson remainder bound with m = 2, p = 2), exact."""
     if a == 0:
         return Fraction(0)
     return 4 * Fraction(5, 3) * max(Fraction(1), a) ** 2 * (a / s) ** 4
@@ -439,7 +442,7 @@ def select_richardson(method, support):
         rule, s = "fixed", formula.steps
         remainder = _richardson_remainder(a, s) if a == 0 or s > 2 * a else None
         if remainder is None:
-            reasons = (f"the Richardson remainder needs s > 2A for the XS9 bound; s = {s} and "
+            reasons = (f"the Richardson remainder bound needs s > 2A; s = {s} and "
                        f"A = {float(a)!r}",)
     else:
         rule = "weighted"
@@ -466,7 +469,7 @@ def select_richardson(method, support):
             # B_ext decreases as s**-4 above 2A and the target is positive.
             s = _least_step(floor(2 * a) + 1, lambda steps: _richardson_remainder(a, steps) <= target, cap)
         remainder = _richardson_remainder(a, s)
-    qualification = ("Richardson m=2 levels (s, 2s) of one Strang word; XS9 remainder with A = (2L - 1)*4*L_* "
+    qualification = ("Richardson m=2 levels (s, 2s) of one Strang word; remainder bound with A = (2L - 1)*4*L_* "
                      "for exact elementary exponentials; E_eff is exact for the stored multipliers; rounded "
                      "angles, native gates and the score, reduction and radius arithmetic have no enclosure; "
                      "observable-term and phase arithmetic perturbations stay unknown and would scale by "
@@ -586,8 +589,8 @@ def select_ptsc(method, support, *, h_count, l_count, clusters):
             + 256 * lists)
     fields = dict(recipe="ptsc", steps=r, cutoff=cutoff, mu_cap=mu_cap, allowance=float(recipe.pf_allowance),
                   taylor_bound=taylor, law_bound=law, branch_bound=branch,
-                  qualification=("first-order PTSC with common r and s_c; the bound covers the XS12 Taylor tail and "
-                                 "the P4 count quantization only; the arithmetic forming the integer targets, the "
+                  qualification=("first-order PTSC with common r and s_c; the bound covers the Taylor tail and "
+                                 "the count quantization of the finite laws only; the arithmetic forming the integer targets, the "
                                  "low-order angles and the stored normalizations has no enclosure, and the score "
                                  "range uses the mathematical cap mu_cap; observable-term and phase arithmetic "
                                  "perturbations stay unknown and would scale by mu_x*mu_y"))

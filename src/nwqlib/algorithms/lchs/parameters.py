@@ -202,9 +202,9 @@ def selected_identity(data, problem, method):
 # not an optimum: the degree depends on the tail only logarithmically.
 COHERENT_TAIL_SHARE = 0.5
 
-# Margin eta of the analytic kernel PREP target |q| <= 1 - eta (M3P witness value, PREP_IMPLEMENTATION_POLICY
-# section 6); its G19 + G20 budget is LCHS_QSP_EPSILON_FRACTION * approx_tol, the component
-# fraction of the coherent evolution. Both are declared controls, not optima (ENGINEERING_CONSTANTS, M8).
+# Margin eta of the analytic kernel PREP target |q| <= 1 - eta; its tail-plus-alias budget (G19 + G20 of
+# ``analytic_prep``) is LCHS_QSP_EPSILON_FRACTION * approx_tol, the component
+# fraction of the coherent evolution. Both are declared controls, not optima.
 ANALYTIC_PREP_MARGIN = 0.25
 
 
@@ -436,7 +436,8 @@ def coherent_context(method, problem, common):
     without a kernel. With L = c_L I + L_0 and the contraction normalization
     alpha = alpha_L + delta_L of the centered child,
     exp(-t_a (L + iH)) = kappa_a exp(-i t_a c_H) exp[-beta (1 - X_a)] with
-    beta = T_e alpha and kappa_a = exp[t_a (alpha - c_L)] (AT8-AT13, M7.5),
+    beta = T_e alpha and kappa_a = exp[t_a (alpha - c_L)]
+    (``coherent_selection.CommutingProductAlternative``),
     so its masses are w_a nu_a kappa_a and no PSD shift is needed. These
     facts are grid-independent too; the alternative's other stages are not.
     An analytic kernel PREP request excludes that alternative, which has no
@@ -477,7 +478,7 @@ def coherent_context(method, problem, common):
     # Centered children. An exactly zero L + s*I (unitary) leaves H the only
     # child, as compiled_selection orders them; exact zeros are omitted.
     children, omitted, charged = (None, None), 0.0, 0
-    # A general A given only as one supplied encoding is the single-A child (G13): its encoding of A_0 = A
+    # A general A given only as one supplied encoding is the single-A child: its encoding of A_0 = A
     # (no identity is extracted, so c_L = c_H = 0) and the kernel coefficients k_j - i give k_j L + H. The
     # operator input is kept, which the archive saves with its circuit; the joint owner reads its encoding.
     a_child = generator.single_a
@@ -676,7 +677,7 @@ def _select_coherent(method, problem, choice, *, shots=None):
             max_bytes=method.max_bytes,max_svd_work=None)
     coefficient_mps = None
     if mps_layers is not None and preparation is not None:
-        # Explicit MPS coefficient PREP (MPS_PREP_POLICY): one TT-SVD of each selected nontrivial magnitude
+        # Explicit MPS coefficient PREP: one TT-SVD of each selected nontrivial magnitude
         # factor, in its selected label order, after the route is fixed; a factor without qubits is the identity.
         from nwqlib.subroutines.state_preparation.mps import _decompose_normalized_state
         factors = ((preparation.kernel_amplitudes, preparation.kernel_qubits),
@@ -712,7 +713,7 @@ def _analytic_settings(method, data):
     weights h (``providers._low_somma_provider_coefficient``), and
     ``|f_hat_2(k)| = sqrt(2/pi) exp(c - 1/(4 gamma**2)) f(k)**2``, so
     ``|c_j|/beta_k = f(k_j)**2/sum_l f(k_l)**2`` with the profile's gamma
-    (G18). The phase ``arg c_j = -k_j c`` stays in the slot phase diagonal.
+    (G18 of ``analytic_prep``). The phase ``arg c_j = -k_j c`` stays in the slot phase diagonal.
     Any other pair, unequal weights or the unitary reduction is refused
     before any row is planned.
     """
@@ -1215,7 +1216,8 @@ def selected_error_facts(payload, *, problem, raw):
         values = {**values, "kernel_approximation": (0., None), "k_quadrature": (0., None)}
     if payload.selected_select == "coherent_lcu" and payload.qsp_plan.kernel_preparation is not None:
         # PREP and its inverse each contribute one state error delta_k of the analytic kernel PREP, so 2 gamma
-        # delta_k is a known part of the stage (MATH_TRIAGE Q3, E9). delta_k omits the PREP's unknown emitter,
+        # delta_k is a known part of the stage (docs/algorithms/lchs_derivations.md, "What the Plan reports").
+        # delta_k omits the PREP's unknown emitter,
         # uniform-support and full-gate terms (analytic_prep.prepare_analytic_kernel), so the stage stays unknown.
         from .solution_error_budget import _stage_product
         kernel = payload.qsp_plan.kernel_preparation

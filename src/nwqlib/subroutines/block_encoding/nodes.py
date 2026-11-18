@@ -276,7 +276,7 @@ def angle_table_cx(address_qubits: int, num_controls: int) -> int:
         \[C_{\rm table}(k)=U(r+k)+M(k).\]
 
     The same circuit serves a `DiagonalTable` query and the
-    ``"rotation_table"`` node recipe (M7.3 of the M7 mathematics handoff).
+    ``"rotation_table"`` node recipe.
     Reversal has the same count, and open controls add only X gates.
 
     Raises:
@@ -298,7 +298,7 @@ def uniform_node_query_cx(recipe: UniformNodeRecipe, num_controls: int) -> int |
       comparisons, ``2 C_Uni(J) + 2(16p + 1)`` with ``p = r - 1``, and the
       ``J = 1`` builder has no shell. The core K is a phase flip on the sign
       plus the k controls and an X on the signal controlled by the test bit
-      plus those controls, so (M7.4)
+      plus those controls, so
 
           \[C_{\rm cmp}(k)=C_{\rm shell}+M(k+1)+M(k).\]
 

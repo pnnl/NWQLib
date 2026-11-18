@@ -4,7 +4,7 @@
 ham_evo="qsp_block_encoding")`` keeps the pair rows of
 `sampled_rows` and replaces the product formula of each branch by a
 qubitized Laurent polynomial from a finite phase bank (`sampled_qsp_bank`).
-The labels B1–B18 below name the finite-bank relations of the sampled pairs,
+The labels B1–B18 and B23 below name the finite-bank relations of the sampled pairs,
 derived here; `sampled_qsp_bank` derives the bank's own construction, and the
 other owners cite these labels.
 
@@ -814,8 +814,7 @@ def expected_pair_signals(laws, forecast):
     ``E_b[d]`` each (``expected_independent_pair_signals``), and a both-zero
     row runs none. For a discrete outer law the two branches are iid with
     ``F(t) = P(s <= t)`` over the finite category and node laws, so
-    ``P(bucket <= b) = F(t_b)**2`` and the both-zero mass is ``F(0)**2`` (the
-    finite-law factorization of B19/§7 of the policy), which avoids
+    ``P(bucket <= b) = F(t_b)**2`` and the both-zero mass is ``F(0)**2``, which avoids
     enumerating pairs.
     """
     bank = forecast.bank

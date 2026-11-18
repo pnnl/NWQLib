@@ -68,7 +68,7 @@ def child(poison=False):
     loaded = [name for name in sys.modules if forbidden(name)]
     if attempts or loaded:
         raise AssertionError(f"SDK isolation violation: attempts={attempts}, loaded={loaded}")
-    print("SDK-free public IO import and actual M1 direct writing passed.")
+    print("SDK-free public IO import and actual direct writing passed.")
 
 
 def main(argv=None):

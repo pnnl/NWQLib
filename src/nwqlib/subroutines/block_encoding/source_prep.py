@@ -435,7 +435,8 @@ def build_source_lcu_circuit(preparation: FactorizedSourcePreparation, evolution
     the phase diagonal never act on it, and the success projector includes
     it. With ``p_hat = P_c |0>`` on [W, kernel, application] the projected
     block is ``<p_hat| (I_W (x) Phi F R) |p_hat>``, the factorized relation
-    above on the enlarged coefficient space (S4, MATH_TRIAGE Q3). The inverse
+    above on the enlarged coefficient space
+    (docs/algorithms/lchs_derivations.md, "Constant-source preparation"). The inverse
     is ``qiskit_compat.inverse_realized_gate`` of the realized ``P_c`` gate.
 
     Returns:
