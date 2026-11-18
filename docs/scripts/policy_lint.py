@@ -8,6 +8,7 @@ import argparse
 from html.parser import HTMLParser
 import re
 import sys
+import tokenize
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -216,14 +217,213 @@ def check_record_docstring_fields(failures: list[str]) -> None:
 
 _INACCESSIBLE_REFERENCES = re.compile(
     r"\bJob\s+\d+\b|\bprincipal['’]s\s+committed\b|\bparking[-]lot\s+D6\b|"
-    r"\bAdapt[-]GCiM\s+job\s+review\b|\bassigned\s+redesign\b"
+    r"\bAdapt[-]GCiM\s+job\s+review\b|\bassigned\s+redesign\b|"
+    r"\bcounselors?\b|\bmathematics\s+handoff\b"
 )
+
+# A label is one to three capitals and a number, optionally hyphenated, dotted or with a letter suffix.
+_LABEL = r"(?:[A-Z]{2,3}-[A-Z]\d+|[A-Z]{1,3}\d+[a-z]?(?:\.\d+)?)"
+_LABEL_AT = re.compile(rf"(?<![\w.\-#/$\\])({_LABEL})(?![\w(=]|\s*=[^=])")
+# The second number of a range may omit its letters.
+_LABEL_RANGE = re.compile(rf"({_LABEL})\s*(?:–|-{{1,2}}|\bto\b)\s*(?:[A-Z]{{1,3}}-?[A-Z]?)?(\d+)")
+# A range or a slash pair of labels is written without spaces, which separates it from a difference.
+_LABEL_CHAIN = re.compile(rf"(?<![\w.\-#/$\\]){_LABEL}(?:\)?(?:–|-{{1,2}}|/)\(?{_LABEL})+(?![\w(=])")
+# A label family with two or more letters, or a dotted number, is rarely a formula symbol.
+_DISTINCT_LABEL = re.compile(r"[A-Z]{2,3}-?[A-Z]?\d|[A-Z]\d+\.\d")
+_DECLARATION = re.compile(r"\blabels?\s+((?:[\s,]|and\b|–|-|\bto\b|" + _LABEL + r")+)")
+_EQUATION_TAG = re.compile(r"\\tag\{([^{}]+)\}|\\text\{\(([^(){}]+)\)\}|\s{2,}\((" + _LABEL + r")\)\s*$", re.M)
+# An equation, table, section or page word, then any earlier labels of the same list.
+_PAPER_WORD = re.compile(
+    r"(?:\bEqs?\.?|\bEquations?|\bTables?|\bFigs?\.?|\bFigures?|\bTheorems?|\bLemmas?|\bPropositions?|"
+    r"\bCorollar(?:y|ies)|\bAppendi(?:x|ces)|\bSections?|\bSecs?\.?|\bAlgorithms?|\bpp?\.)\s*\(?\s*"
+    r"(?:" + _LABEL + r"\)?\s*(?:,|–|-{1,2}|/|\band\b|\bto\b)\s*\(?\s*)*$")
+_PAPER_IDENTIFIER = re.compile(r"arXiv:\s*\S|\bdoi:\s*\S|doi\.org/", re.I)
+_PARENTHETICAL = re.compile(r"(?<![\w)\]])\(([^()]*)\)")
+_CODE_SPAN = re.compile(r"``.*?``|`[^`\n]*`", re.S)
+# A document is cited by a name in capitals, as a Markdown file is named, that is followed by a numbered
+# section or item or by a label, or that stands alone at the start of a parenthetical.
+_DOCUMENT = re.compile(
+    r"(?<![\w./-])([A-Z]{4,}|[A-Z]{3,}(?:_[A-Z0-9]{2,})+)\s+"
+    rf"(?:(?:sections?|items?)\s+\d|§\s*\d|\d+(?:\.\d+)+,\s*items?\s+\d|({_LABEL})(?![\w(=]))"
+    r"|(?<![\w)\]])\(\s*([A-Z]{3,}(?:_[A-Z0-9]{2,})+)\s*[),:;]")
+
+# Names that match the label pattern and cite nothing. Add a formula symbol or an identifier of
+# another library here when the check reports it.
+_NOT_CITATIONS = frozenset({
+    "PCG64", "RK45", "DOP853",   # NumPy bit generator and SciPy integrators
+    "MP2",                       # Moller-Plesset energy
+    "NRM2",                      # BLAS routine
+    "PRX11",                     # journal volume in a reference that also gives its DOI
+})
+
+
+def _prose_segments(path: Path) -> tuple[set[str], list[tuple[int, str]]]:
+    """Return the identifiers of a Python file and its comments and string literals with their first lines."""
+    names: set[str] = set()
+    segments: list[tuple[int, str]] = []
+    run: list[tokenize.TokenInfo] = []
+
+    def close_run():
+        if run:
+            segments.append((run[0].start[0], "\n".join(token.string.lstrip("#") for token in run)))
+            run.clear()
+
+    with tokenize.open(path) as handle:
+        for token in tokenize.generate_tokens(handle.readline):
+            if token.type == tokenize.COMMENT:
+                if run and token.start[0] != run[-1].start[0] + 1:
+                    close_run()
+                if "noqa" not in token.string:
+                    run.append(token)
+                continue
+            if token.type == tokenize.NAME:
+                names.add(token.string)
+            elif token.type == tokenize.STRING or token.type == getattr(tokenize, "FSTRING_MIDDLE", None):
+                close_run()
+                segments.append((token.start[0], token.string))
+    close_run()
+    return names, segments
+
+
+def _declared_labels(text: str) -> set[str]:
+    """Return the labels that a text declares in a sentence about its labels or in an equation tag."""
+    declared: set[str] = set()
+
+    def add(fragment: str) -> None:
+        for first, last in _LABEL_RANGE.findall(fragment):
+            prefix = re.match(r"\D+", first).group()
+            start = int(re.search(r"\d+", first).group())
+            declared.update(f"{prefix}{number}" for number in range(start, int(last) + 1))
+        declared.update(re.findall(_LABEL, fragment))
+
+    for match in _DECLARATION.finditer(text):
+        add(match.group(1))
+    for match in _EQUATION_TAG.finditer(text):
+        add(next(group for group in match.groups() if group))
+    return declared
+
+
+def _cited_labels(text: str) -> list[tuple[int, str, bool]]:
+    """Return ``(offset, label, paper)`` for each label that a text cites.
+
+    A distinct label is a citation wherever it stands. A single-letter label
+    is one only where the text uses it as a reference: in a parenthetical
+    that starts or ends with a label, in a range or a slash pair of labels,
+    after a document name, or before a colon at the start of the text.
+    ``paper`` says that an equation, table, section or page word introduces
+    the label or the list it belongs to.
+    """
+    masked = _CODE_SPAN.sub(lambda match: " " * len(match.group()), text)
+    found: dict[int, tuple[str, bool]] = {}
+
+    def paper(offset: int) -> bool:
+        return bool(_PAPER_WORD.search(text[max(0, offset - 80):offset]))
+
+    def add(offset: int, label: str, introduced: bool) -> None:
+        if label not in _NOT_CITATIONS:
+            found[offset] = (label, introduced or found.get(offset, ("", False))[1])
+
+    for match in _LABEL_AT.finditer(text):
+        if _DISTINCT_LABEL.match(match.group(1)):
+            add(match.start(1), match.group(1), paper(match.start(1)))
+    for match in _LABEL_CHAIN.finditer(masked):
+        introduced = paper(match.start())
+        for label in re.finditer(_LABEL, match.group()):
+            add(match.start() + label.start(), label.group(), introduced)
+    for match in _PARENTHETICAL.finditer(masked):
+        inner = match.group(1)
+        items = [item.strip() for item in inner.split(",")]
+        # A tuple of symbols such as (H0, S), or one nested in another tuple, is notation.
+        if masked[max(0, match.start() - 1):match.start()] == "(" or masked[match.end():match.end() + 1] == ")":
+            continue
+        if len(items) > 1 and all(re.fullmatch(r"\S{1,12}", item) for item in items) and not all(
+                re.fullmatch(_LABEL, item) for item in items):
+            continue
+        leads = re.match(rf"\s*{_LABEL}(?=\s*(?:$|[,;:/]|–|-{{1,2}}[A-Z]|\s+[a-z]))", inner)
+        closes = re.search(rf"[,;/]\s*{_LABEL}\s*$", inner)
+        if leads or closes:
+            introduced = paper(match.start())
+            for label in _LABEL_AT.finditer(inner):
+                add(match.start(1) + label.start(1), label.group(1), introduced)
+    leading = re.match(rf"\s*(?:[A-Za-z]{{0,2}}(?:\"\"\"|'''|\"|'))?\s*({_LABEL})\s*:", masked)
+    if leading:
+        add(leading.start(1), leading.group(1), False)
+    for match in _DOCUMENT.finditer(masked):
+        if match.group(2):
+            add(match.start(2), match.group(2), False)
+    return [(offset, label, introduced) for offset, (label, introduced) in sorted(found.items())]
+
+
+def _check_citations_resolve(failures: list[str], paths: list[Path]) -> None:
+    """Require every cited label and document name in Python comments and strings to resolve for a reader."""
+    files = {}
+    identifiers: set[str] = set()
+    declaring: dict[str, set[str]] = {}
+    for path in paths:
+        names, segments = _prose_segments(path)
+        declared = _declared_labels("\n".join(segment for _, segment in segments))
+        files[path] = (segments, declared)
+        identifiers |= names
+        for label in declared:
+            declaring.setdefault(label, set()).add(path.stem)
+    # A document name resolves to a Markdown page of the repository or to an identifier of its code.
+    known = identifiers | _NOT_CITATIONS | {
+        item.stem for item in (*REPO_ROOT.glob("*.md"), *(REPO_ROOT / "docs").rglob("*.md"))}
+    for path, (segments, declared) in files.items():
+        relative = path.relative_to(REPO_ROOT)
+        source = path.read_text(encoding="utf-8")
+        has_paper = bool(_PAPER_IDENTIFIER.search(source))
+        for first_line, segment in segments:
+
+            def line(offset: int) -> int:
+                return first_line + segment.count("\n", 0, offset)
+
+            for offset, label, introduced in _cited_labels(segment):
+                base = label if label[-1].isdigit() else label[:-1]
+                if {label, base} & declared or (introduced and has_paper):
+                    continue
+                # A symbol that the file defines by an equation is not a citation.
+                if re.search(rf"(?<![\w.]){re.escape(label)}\s*:?=[^=]", source):
+                    continue
+                # A label declared in another module resolves when this file names that module.
+                if any(re.search(rf"\b{re.escape(stem)}\b", source)
+                       for stem in declaring.get(label, set()) | declaring.get(base, set())):
+                    continue
+                failures.append(
+                    f"{relative}:{line(offset)}: label {label!r} cites a numbered statement that a reader of the "
+                    "repository cannot open. State the relation here, or declare the label where the repository "
+                    "states it ('The labels X1–X9 below name ...') and name that module here, or cite the paper "
+                    "with its arXiv version or DOI and its own equation number. If it is a formula symbol or an "
+                    "identifier, add it to _NOT_CITATIONS in docs/scripts/policy_lint.py.")
+            for match in _DOCUMENT.finditer(_CODE_SPAN.sub(lambda span: " " * len(span.group()), segment)):
+                name = match.group(1) or match.group(3)
+                if name in known or match.group(2) in _NOT_CITATIONS:
+                    continue
+                failures.append(
+                    f"{relative}:{line(match.start())}: {name!r} names a document that is not in the "
+                    "repository. State what it says here, or cite a page under docs/ or a paper with its "
+                    "arXiv version or DOI. If it is a name from another library, add it to _NOT_CITATIONS "
+                    "in docs/scripts/policy_lint.py.")
 
 
 def check_inaccessible_references(failures: list[str]) -> None:
-    """Reject specific inaccessible references without banning Plan or backend job terms."""
-    paths = {*_python_sources("src", "tests", "docs/scripts", "examples"),
-             *REPO_ROOT.glob("*.md"), *(REPO_ROOT / "docs").rglob("*.md"),
+    """Reject references that a reader of the repository cannot open.
+
+    Every scanned file is checked for a few fixed phrases that name work
+    assignments. Python comments and string literals are also checked for
+    labels of numbered statements and for document names. A label passes
+    when the repository declares it (a sentence that names its labels, or an
+    equation tag) in the same file or in a module that the file names, when
+    an equation, table, section or page word introduces it and the file
+    cites a paper by arXiv identifier or DOI, when the file defines it by an
+    equation, or when ``_NOT_CITATIONS`` lists it. A document name passes
+    when it is a Markdown page of the repository or an identifier of its
+    code. A single-letter label in running prose is not examined, because a
+    formula symbol has the same form. Plan and backend job terms are not
+    affected.
+    """
+    sources = _python_sources("src", "tests", "docs/scripts", "examples")
+    paths = {*sources, *REPO_ROOT.glob("*.md"), *(REPO_ROOT / "docs").rglob("*.md"),
              REPO_ROOT / "pyproject.toml"}
     for path in sorted(paths):
         if not path.is_file():
@@ -231,6 +431,7 @@ def check_inaccessible_references(failures: list[str]) -> None:
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             if _INACCESSIBLE_REFERENCES.search(line):
                 failures.append(f"{path.relative_to(REPO_ROOT)}:{lineno}: replace inaccessible reference with its technical reason or public source")
+    _check_citations_resolve(failures, sorted(sources))
 
 
 def _identifier_corpus() -> str:
