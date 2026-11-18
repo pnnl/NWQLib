@@ -200,6 +200,9 @@ def selected_identity(data, problem, method):
 # GQET: epsilon_synth = (A - tail)/zeta; shared QSVT: the tail leaves A/2 for
 # the fixed per-parity phase residual). One half is a valid simple choice,
 # not an optimum: the degree depends on the tail only logarithmically.
+# Revisit when the degree selection or the phase synthesis of the coherent
+# routes changes, or when a measured workload favors another split. Registered
+# in docs/ENGINEERING_CONSTANTS.md ("LCHS defaults and error allocation").
 COHERENT_TAIL_SHARE = 0.5
 
 # Margin eta of the analytic kernel PREP target |q| <= 1 - eta; its tail-plus-alias budget (G19 + G20 of
