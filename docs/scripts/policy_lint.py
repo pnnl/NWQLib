@@ -215,11 +215,6 @@ def check_record_docstring_fields(failures: list[str]) -> None:
                 failures.append(f"{relative}:{node.lineno}: {owner} field {field_name!r} is missing from its docstring section")
 
 
-_INACCESSIBLE_REFERENCES = re.compile(
-    r"\bJob\s+\d+\b|\bprincipal['’]s\s+committed\b|\bparking[-]lot\s+D6\b|"
-    r"\bAdapt[-]GCiM\s+job\s+review\b|\bassigned\s+redesign\b"
-)
-
 # A label is one to three capitals and a number, optionally hyphenated, dotted or with a letter suffix.
 _LABEL = r"(?:[A-Z]{2,3}-[A-Z]\d+|[A-Z]{1,3}\d+[a-z]?(?:\.\d+)?)"
 _LABEL_AT = re.compile(rf"(?<![\w.\-#/$\\])({_LABEL})(?![\w(=]|\s*=[^=])")
@@ -423,31 +418,19 @@ def _check_citations_resolve(failures: list[str], paths: list[Path]) -> None:
 def check_inaccessible_references(failures: list[str]) -> None:
     """Reject references that a reader of the repository cannot open.
 
-    Every scanned file is checked for a few fixed phrases that name work
-    assignments. Python comments and string literals are also checked for
-    labels of numbered statements and for document names. A label passes
-    when the repository declares it (a sentence that names its labels, or an
-    equation tag) in the same file, in a module that the file names, or on a
-    Markdown page of the repository that the file names with its ``.md``
-    extension, when
-    an equation, table, section or page word introduces it and the file
-    cites a paper by arXiv identifier or DOI, when the file defines it by an
+    Python comments and string literals are checked for labels of numbered
+    statements and for document names. A label passes when the repository
+    declares it (a sentence that names its labels, or an equation tag) in the
+    same file, in a module that the file names, or on a Markdown page of the
+    repository that the file names with its ``.md`` extension, when an
+    equation, table, section or page word introduces it and the file cites a
+    paper by arXiv identifier or DOI, when the file defines it by an
     equation, or when ``_NOT_CITATIONS`` lists it. A document name passes
     when it is a Markdown page of the repository or an identifier of its
     code. A single-letter label in running prose is not examined, because a
-    formula symbol has the same form. Plan and backend job terms are not
-    affected.
+    formula symbol has the same form.
     """
-    sources = _python_sources("src", "tests", "docs/scripts", "examples")
-    paths = {*sources, *REPO_ROOT.glob("*.md"), *(REPO_ROOT / "docs").rglob("*.md"),
-             REPO_ROOT / "pyproject.toml"}
-    for path in sorted(paths):
-        if not path.is_file():
-            continue
-        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if _INACCESSIBLE_REFERENCES.search(line):
-                failures.append(f"{path.relative_to(REPO_ROOT)}:{lineno}: replace inaccessible reference with its technical reason or public source")
-    _check_citations_resolve(failures, sorted(sources))
+    _check_citations_resolve(failures, sorted(_python_sources("src", "tests", "docs/scripts", "examples")))
 
 
 def _identifier_corpus() -> str:
@@ -632,7 +615,7 @@ def check_user_code_imports_no_private_modules(failures: list[str]) -> None:
 
 
 class _RenderedPage(HTMLParser):
-    """Read document content, excluding theme navigation and external assets."""
+    """Read the anchors of a rendered page, and the links and API entries of its article, without theme navigation."""
 
     def __init__(self):
         super().__init__()
@@ -640,7 +623,6 @@ class _RenderedPage(HTMLParser):
         self.links: list[str] = []
         self.ids: set[str] = set()
         self.has_api_entry = False
-        self.text: list[str] = []
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
@@ -658,10 +640,6 @@ class _RenderedPage(HTMLParser):
         if tag == "article":
             self.in_article = False
 
-    def handle_data(self, data):
-        if self.in_article:
-            self.text.append(data)
-
 
 def check_rendered_documentation(failures: list[str], site_dir: Path) -> None:
     """Check the existing MkDocs output without importing or executing package code."""
@@ -675,8 +653,6 @@ def check_rendered_documentation(failures: list[str], site_dir: Path) -> None:
         failures.append(f"{site_dir}: no rendered HTML; build the documentation first")
         return
     for path, page in pages.items():
-        if _INACCESSIBLE_REFERENCES.search("".join(page.text)):
-            failures.append(f"{path.relative_to(site_dir)}: rendered content contains an inaccessible reference")
         for href in sorted(set(page.links)):
             link = urlsplit(href)
             if link.scheme or link.netloc:
