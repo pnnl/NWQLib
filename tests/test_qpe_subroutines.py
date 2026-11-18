@@ -1,7 +1,7 @@
 """Unchanged coherent QPE register/power/phase contract.
 
 The selected statistical methods are covered by test_qpe_workflow.py and
- test_qpe_selected.py; this native test is not part of the J22/J23 run.
+ test_qpe_selected.py.
 """
 
 import numpy as np

@@ -1019,7 +1019,7 @@ def test_sampled_pair_rows_and_bias_bounds_match_dense_branches(source, options,
     count, B = S*beta bounds E|w|, and P = inner_bias*g**2 is the
     N bias in the physical frame, which must be at most .16 and at least a
     lower value formed here from the problem's coefficients. For
-    Richardson (XS9, `sampled_recipes.select_richardson`) that value is
+    Richardson (`sampled_recipes.select_richardson`) that value is
     B**2 times 4*(5/3)*max(1, A)**2*(A/s)**4 at levels (s, 2s) with
     s > 2A, where A = 4(2L - 1)T_e(lambda_H + K_* lambda_L), L = 3 labels,
     T_e = .7, lambda_H = .2 + .15, lambda_L = .25 and K_* the largest
@@ -1487,7 +1487,7 @@ def _taylor_parts(h_list, l_list, x, k, cutoff):
 
 @pytest.mark.parametrize("k", (-1.3, 0.0))
 def test_sampled_ptsc_segment_law_is_the_taylor_truncation(k):
-    """mu_step*E[C] over the actual integer laws equals I + F_2 + ... + F_sc within mu_step*d_seg (PTSC, XS28e and P4).
+    """mu_step*E[C] over the actual integer laws equals I + F_2 + ... + F_sc within mu_step*d_seg (PTSC and P4 of `sampled_recipes`).
 
     Exhaustive enumeration over the orders 2..s_c, all 2**s fair-bit
     patterns and every list-index sequence, through the production order,

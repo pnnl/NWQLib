@@ -659,7 +659,7 @@ def test_saved_bank_replay_and_partial_continuation(saved_phases, tmp_path, monk
      QuadraticForm(observable=ingest_pauli([("X", 1.), ("I", .5)], num_qubits=1)))],
     ids=["qsp-quadratic", "plain-norm", "ptsc-quadratic"])
 def test_sampled_accuracy_selects_the_least_row_count_in_one_pass(saved_phases, monkeypatch, options, output):
-    """B is the least row count whose Hoeffding radius of the support-wide range meets epsilon (SC1-SC2).
+    """B is the least row count whose Hoeffding radius of the support-wide range meets epsilon (`sampled_plan._sufficient_rows`).
 
     H = g**2 (W/g)**2 F H_O from the saved row table and the whole-law factor F (max(1, max zeta_b**2) for a
     QSP bank, the recipe's score factor, 1 for plain rows) and H_O including the identity term; radius(B) <=
@@ -706,7 +706,7 @@ def test_sampled_accuracy_selects_the_least_row_count_in_one_pass(saved_phases, 
         return
 
     # NormSquared at epsilon = 1e-4: the reached law has frame g = 2, W/g = 0.5 and the deterministic member's
-    # recovery zeta = 1.0697, so H = g**2 (W/g)**2 zeta**2 = 1.144 and SC2 needs B = 2 (H/epsilon)**2 log(2/0.1),
+    # recovery zeta = 1.0697, so H = g**2 (W/g)**2 zeta**2 = 1.144 and the radius needs B = 2 (H/epsilon)**2 log(2/0.1),
     # about 7.8e8 rows. Their coarse row data, 1024 bytes each, is about 8e11 bytes, far above the 32 MiB cap.
     # The Plan's one row axis does not grow with B, so a byte gate (`_sufficient_rows` or the held-data check)
     # refuses it, naming max_bytes.

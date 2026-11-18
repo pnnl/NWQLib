@@ -443,7 +443,7 @@ def test_bound_absorption_moves_a_one_variable_constraint_into_the_box():
     # The Dirichlet interior grid keeps the absorbed boundary out of the register.
     interior = _solve(problem, qhd=_qhd(num_grid_points=4), absorb_bounds=True)
     assert interior.candidate == (-1.0 + 4 * (1.5 / 5),)
-    # The result lists the kept multiplier by its problem position (PLAN 3.3, item 2).
+    # The result lists the kept multiplier by its problem position.
     both = ConstrainedOptimization(objective=(x - 1) ** 2 + (y - 1) ** 2, variables=(x, y), bounds=BOX,
                                    inequalities=(x - sp.Rational(1, 2), x**2 + y**2 - sp.Rational(1, 2)))
     report = _solve(both, qhd=_qhd(num_grid_points=4), absorb_bounds=True, inequality_multipliers=(0.5, 0.0)).report()

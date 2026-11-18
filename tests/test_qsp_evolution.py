@@ -845,7 +845,7 @@ def test_lchs_qsp_selected_quantities_reach_actual_native_program():
     For A = diag(.1, .2) the centered child is L with alpha .2 and H is an exact zero, so the separate-parts
     generator has alpha max|k_j| * .2 on the four-node grid. The expansion is the Jacobi-Anger expansion of
     tau = alpha T_e at the row's tail allowance, which in the algorithmic frame is at most half the combined
-    allowance LCHS_QSP_EPSILON_FRACTION * approx_tol (coherent_selection, M7.1). The native
+    allowance LCHS_QSP_EPSILON_FRACTION * approx_tol (coherent_selection). The native
     program, its estimate and its prepared circuits share one width.
     """
     from nwqlib import prepare,estimate
@@ -876,7 +876,7 @@ def test_lchs_guide_first_problem_plans_qsp_evolution():
     distance to Re P is bounded by its Bessel tail over the scale plus the actual-angle coefficient residual.
     For the qubitized walk the block is sum_j r_j T_|j|(x) for the realized Laurent coefficients r_j, since
     J^dagger W^(+-k) J = T_k(x); its distance to exp(-i tau x)/sigma is at most delta_T/sigma plus the
-    coefficient residual ||r - f||_1, because |T_k| <= 1 on [-1, 1] (T15, T17).
+    coefficient residual ||r - f||_1, because |T_k| <= 1 on [-1, 1].
     """
     from nwqlib import LinearDynamics, plan
     from nwqlib.algorithms import LCHS

@@ -649,7 +649,7 @@ def test_native_bounds_product_and_control_phase_are_not_zero_or_exact(monkeypat
     assert (scalar(ordinary, "operations"), scalar(ordinary, "global_phases")) == (3, 1)
     assert (scalar(coherent, "operations"), scalar(coherent, "global_phases"), scalar(coherent, "controlled")) == (4, 0, 4)
     assert scalar(estimate(one(select_zero_reflection("empty", 0))), "operations") == 0
-    # Actual J05 PREP[i,0] has global pi/2; coherent control is S, which maps
+    # The actual PREP[i,0] has global pi/2; coherent control is S, which maps
     # X to Y and fixes Z. PREP[1+i,0] analogously gives the named T phase.
     from nwqlib.problems import ingest_vector
     phase = transform_block("controlled_s", select_preparation("s", ingest_vector(

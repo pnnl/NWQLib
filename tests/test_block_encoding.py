@@ -1059,7 +1059,7 @@ def test_joint_generators_and_contraction_encode_their_targets():
     assert joint.query_census["controlled_cx"] is not None
     assert joint.alpha == pytest.approx(recipe.alpha * l_plan.alpha + h_plan.alpha, rel=1e-15)
     _check_composite(joint, np.kron(l0, np.kron(q, d_k)) + np.kron(h0, np.kron(q, np.eye(len(d_k)))))
-    # The comparator core carries the combine control and the external one, k = 2 (M7.4 at the node owner).
+    # The comparator core carries the combine control and the external one, k = 2 (nodes.uniform_node_query_cx).
     comparator = uniform_node_recipes(1, .7)[1]
     joint = plan_joint_generator(nodes=comparator, l_child=l_plan, h_child=h_plan, time_factors=(1., .25))
     d_c = np.diag(uniform_node_values(comparator))
@@ -1176,7 +1176,7 @@ def test_saved_analytic_kernel_prep_prepares_the_low_somma_kernel_state_with_con
 
     ``data/lchs_analytic_kernel_prep.json`` is the LCHS archive record of one prepared query for J = 1,
     h = 1/2, gamma = 1, margin eta = 1/4 and tolerance 1e-3 on the comparator nodes. Planning is phase-free and
-    must equal the saved plan, whose degree n and sample count M follow G19/G20 at lambda = hJ = 1/2: with
+    must equal the saved plan, whose degree n and sample count M follow G19/G20 of analytic_prep at lambda = hJ = 1/2: with
     rho = 1 + sqrt(2) and M_rho = (2/sqrt 3) exp(1/32), n is the least even degree with
     tail(n) = 2 M_rho rho**-n/(rho - 1) <= tol/2, and M the least power of two above n with
     alias(n, M) = 2 M_rho (1 + 2n) rho**-(2M - n)/(1 - rho**-2M) <= tol - tail(n). Reading the record and

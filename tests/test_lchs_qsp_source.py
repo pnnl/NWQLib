@@ -412,7 +412,7 @@ def test_imaginary_time_filter_route_matches_the_source_sum_and_keeps_a_failed_f
     A = .3 I + .4 X + .2 Z is Hermitian, so H = 0 and L = A, whose Pauli lower bound -.3 gives the PSD shift
     .3 of the kernel route. The filter needs no shift: with L = c_L I + L_0, c_L = .3, and the contraction
     normalization alpha of L_0, exp(-t A) = kappa exp[-beta (1 - X)] with kappa = exp[t (alpha - c_L)]
-    (AT9-AT12, M7.5 with H_0 = 0). The independent sum is exp(-T A) u0 + sum_q w_q exp(-(T - r_q) A) b over
+    (`coherent_selection.CommutingProductAlternative` with H_0 = 0). The independent sum is exp(-T A) u0 + sum_q w_q exp(-(T - r_q) A) b over
     NumPy's two-point Gauss-Legendre nodes r_q, from explicit matrices, with no global-phase alignment. Its
     difference from the solved vector is the filter's own tail and fit error, which the qsp_synthesis fact
     gamma*(algorithmic + child) bounds; the kernel stages are exactly zero on this route. Using the shifted
@@ -524,7 +524,8 @@ def test_commuting_product_of_periodic_bands_recovers_the_exponential():
     L = .7 I - .3 (S + S^dagger) and H = .2 i (S - S^dagger) are polynomials in the same cyclic shift S on four
     points, so the representation records [L, H] = 0 without any commutator. Then exp(-T A) =
     kappa exp[-beta (1 - X)] exp(-i T H_0), and the product route composes the imaginary-time filter of L_0 with
-    a real-time evolution of H_0, independent success workspaces and the recovery sigma_I zeta_H (M7.5-M7.6). It
+    a real-time evolution of H_0, independent success workspaces and the recovery sigma_I zeta_H
+    (`coherent_selection.CommutingProductAlternative`). It
     has no kernel, so its finite target is exp(-T A) u0 itself, here from explicit 4x4 matrices with no
     global-phase alignment; the deviation must lie within the qsp_synthesis fact, which composes the factor
     errors as e_I + e_H + e_I e_H after scaling by gamma, plus 1e-12 for simulation rounding. Dropping the scalar
@@ -634,7 +635,7 @@ def test_single_a_access_evolves_a_supplied_nonhermitian_encoding(tmp_path):
     A = M + i D with Hermitian M and D has L = M and H = D. The supplied circuit is the Halmos unitary dilation of
     the contraction A, an exact encoding with alpha = 1, whose asserted bound ||A|| <= 1 gives the PSD shift
     s = 1 of L. The single-A generator encodes k_j L + H from the one encoding through the coefficients
-    k_j - i (G13), so the independent finite sum is sum_j c_j exp(s T) exp(-i T (k_j (L + s I) + H)) u0 on the
+    k_j - i (`plan_single_a_generator`), so the independent finite sum is sum_j c_j exp(s T) exp(-i T (k_j (L + s I) + H)) u0 on the
     Cauchy coefficients c_j = .5/(pi (1 + k_j**2)) of the signed-binary grid, from explicit matrices with no
     global-phase alignment. The deviation must lie within the qsp_synthesis fact plus 1e-12, here 7.9e-5.
     Treating the encoded block as L alone, or dropping the -i of the coefficients, changes the sum by 8.8e-3, and
@@ -696,8 +697,8 @@ def test_sampling_accuracy_plans_the_counts_whose_radius_meets_the_request(tmp_p
 
     The literal default backend takes the coherent route for this compact A. For the QuadraticForm of
     O = Z + .5 X + .3 I the two counts settings {Z, I} and {X} score within Gamma**2 * 1.3 and Gamma**2 * .5, the
-    identity counted once (M7.13), so with N shots per setting and confidence c the reported radius is
-    R(N) = Gamma**2 * 1.8 * sqrt(2 log(2 * 2/(1 - c))/N) (M7.14, the radius of analysis._counts_radius). Each
+    identity counted once, so with N shots per setting and confidence c the reported radius is
+    R(N) = Gamma**2 * 1.8 * sqrt(2 log(2 * 2/(1 - c))/N) (the radius of analysis._counts_radius). Each
     route's N must be the least integer with R(N) <= epsilon at that route's own recovery Gamma, here computed in
     floating point from the Plan's recovery, independently of the planner's exact rational and Decimal count.
     Leaving the identity out of the range gives a smaller N whose radius exceeds epsilon. The run of the first

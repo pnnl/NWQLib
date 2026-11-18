@@ -51,7 +51,7 @@ def _exact_entry(left, matrix_terms, right):
 
 
 def _oracle(plan, reference):
-    """The basis states from the stored rotations, multiplied independently, with their T4 error bounds.
+    """The basis states from the stored rotations, multiplied independently, with their error bounds.
 
     Each factor is ``exp(-i theta P/2) = cos(theta/2) I - i sin(theta/2) P``
     with the stored angle. A negative power applies the factors in reverse
@@ -198,7 +198,7 @@ def _ritz_allowance(h, s, eh, es, columns, energies, sigma, magnitude, norm, sca
     assert g < 1, "the returned coefficients are not S-normalized to within 1"
     solve = (phi + max(abs(F(e)) for e in energies) * g) / (1 - g)
     numerical = (e_h + magnitude * e_s + norm * F(gram_formation_allowance(b, b))) / (sigma - e_s)
-    assert solve <= numerical, "the small solve exceeds its arithmetic-resolution acceptance (T7)"
+    assert solve <= numerical, "the small solve exceeds its arithmetic-resolution acceptance"
     return (e_h + magnitude * e_s) / (sigma - e_s) + solve
 
 
@@ -235,7 +235,7 @@ def _apply_pauli(state, letters):
 
 
 def _simulate(circuit):
-    """The state of a lowered circuit from |0...0> by independent primitive gates, with its T4 norm-error bound.
+    """The state of a lowered circuit from |0...0> by independent primitive gates, with its norm-error bound.
 
     A rotation ``exp(-i theta P/2)`` is ``cos(theta/2) I - i sin(theta/2) P``,
     a controlled RZ applies RZ on the control's one branch, and H, S, S^dagger,
@@ -306,7 +306,7 @@ def test_three_powers_follow_the_base_power_rule_with_a_phased_reference_and_the
     (0, 2) controls V^dagger. Every exact pair entry H0_ij and S_ij, with
     the oracle's contraction in exact rationals, lies within its qualified
     entry bound plus the oracle bound C(d_i + d_j + d_i d_j), and C omitted
-    for S, of the T4 recurrence. The power -1 is the adjoint of the same V:
+    for S, of the error recurrence of `_oracle`. The power -1 is the adjoint of the same V:
     the order-1 step at time -tau with the original term order gives an
     overlap S_02 farther from the measured one than a thousand times that
     allowance. Each stored angle is the correctly rounded 2 tau c.
@@ -1136,7 +1136,7 @@ def test_chemistry_generator_projects_the_stored_one_body_pair_and_qfd_keeps_the
     ``-0.5e-12`` each, far below 1e-12. Cutoff 0 keeps them, and 0.0125
     removes them with the two pairs, six in all. That entry stays out of
     the generator that QFD uses below, because its four blocks would raise
-    the simulated circuit above the 64 gates of the T4 bound. No call
+    the simulated circuit above the 64 gates of the bound of `_simulate`. No call
     changes the integrals or the target. QFD with A, whose identity
     coefficient -0.3 differs from c_B, adds -0.3 once to the centered Ritz
     value and to the reference entry H0_00, which lies within its bound of

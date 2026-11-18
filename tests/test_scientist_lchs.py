@@ -203,7 +203,7 @@ def test_source_pf_padding_and_original_readout_follow_recorded_steps():
     p = mass/alpha**2
     assert abs(counts.value-mass)<6*alpha**2*np.sqrt(p*(1-p)/4096)
     # The reported shot radius is Hoeffding's for the success indicator in
-    # [0, alpha**2] (M7.14), at the default failure probability .05; a
+    # [0, alpha**2], at the default failure probability .05; a
     # QuadraticForm's one Z-type group has scores in [-alpha**2 A, alpha**2 A]
     # with A the sum of the padded observable's Pauli coefficient magnitudes.
     def sampling(result):

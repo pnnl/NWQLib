@@ -203,7 +203,7 @@ def test_native_shortcut_pair_preserves_right_singular_unit_action():
         if method == "shortcut_native_svp":
             _, singular, right = np.linalg.svd(
                 g
-            )  # One D4 independent reference, no full circuit operator.
+            )  # One independent reference, no full circuit operator.
             reference = right.conj().T @ (
                 np.polynomial.chebyshev.chebval(singular, coefficients) * (right @ np.eye(4)[:, 2])
             )
