@@ -217,8 +217,7 @@ def check_record_docstring_fields(failures: list[str]) -> None:
 
 _INACCESSIBLE_REFERENCES = re.compile(
     r"\bJob\s+\d+\b|\bprincipal['’]s\s+committed\b|\bparking[-]lot\s+D6\b|"
-    r"\bAdapt[-]GCiM\s+job\s+review\b|\bassigned\s+redesign\b|"
-    r"\bcounselors?\b|\bmathematics\s+handoff\b"
+    r"\bAdapt[-]GCiM\s+job\s+review\b|\bassigned\s+redesign\b"
 )
 
 # A label is one to three capitals and a number, optionally hyphenated, dotted or with a letter suffix.
@@ -243,10 +242,12 @@ _CODE_SPAN = re.compile(r"``.*?``|`[^`\n]*`", re.S)
 # An inline code span of a Markdown page. A fenced block opens with three backticks and is kept.
 _INLINE_CODE = re.compile(r"(?<!`)`[^`\n]+`(?!`)")
 # A document is cited by a name in capitals, as a Markdown file is named, that is followed by a numbered
-# section or item or by a label, or that stands alone at the start of a parenthetical.
+# section or item or by a label, directly or after "of" or "of the", or that stands alone at the start of a
+# parenthetical.
 _DOCUMENT = re.compile(
     r"(?<![\w./-])([A-Z]{4,}|[A-Z]{3,}(?:_[A-Z0-9]{2,})+)\s+"
-    rf"(?:(?:sections?|items?)\s+\d|§\s*\d|\d+(?:\.\d+)+,\s*items?\s+\d|({_LABEL})(?![\w(=]))"
+    rf"(?:(?:sections?|items?)\s+\d|§\s*\d|\d+(?:\.\d+)+,\s*items?\s+\d"
+    rf"|(?:of\s+(?:the\s+)?)?({_LABEL})(?![\w(=]))"
     r"|(?<![\w)\]])\(\s*([A-Z]{3,}(?:_[A-Z0-9]{2,})+)\s*[),:;]")
 
 # Names that match the label pattern and cite nothing. Add a formula symbol or an identifier of
