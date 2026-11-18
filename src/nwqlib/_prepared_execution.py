@@ -3164,7 +3164,7 @@ def _held_bytes(run):
     from nwqlib.blocks.lowering import _definition_closure
     from nwqlib.blocks.selection import SelectedBlock
     state = run._state
-    # ponytail: restored records of backends other than Aer are not counted; add them only once a
+    # shortcut: restored records of backends other than Aer are not counted; add them only once a
     # memory law for those backends is calibrated or an over-admission is measured.
     # A bound kernel runs on the host and enters no gate cache.
     closure = _definition_closure((block, ()) for block in run.plan.blocks if isinstance(block, SelectedBlock))

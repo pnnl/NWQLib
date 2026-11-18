@@ -109,7 +109,7 @@ def energy_scale(operator, *, max_bytes, max_products):
         _check_bytes((indices.dtype.itemsize + 18) * len(data) + 48 * d, max_bytes, "ADAPT energy scale")
         lines = np.repeat(np.arange(d, dtype=indices.dtype), np.diff(indptr))
         on_diagonal = indices == lines
-        # ponytail: this copy doubles the stored values for the length of the scan, as _shifted_sparse does.
+        # shortcut: this copy doubles the stored values for the length of the scan, as _shifted_sparse does.
         # Scan tiles of lines if a sparse matrix near the memory limit needs this path.
         off_diagonal = stable_vector_norm(data[~on_diagonal])
         stored = data[on_diagonal].real

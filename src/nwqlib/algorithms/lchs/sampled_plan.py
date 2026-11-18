@@ -215,7 +215,7 @@ def _census(labels, rows, num_qubits, method, held):
         ledger["work"]
 
 
-# ponytail: equal-width |k| buckets; a quantile or geometric split would suit
+# shortcut: equal-width |k| buckets; a quantile or geometric split would suit
 # heavy-tailed node laws better if bucket step savings matter.
 def _bucket_edges(top, count):
     """Return ``count`` equal-width upper ends in |k| on [0, top], the last exactly ``top``, or one end for top = 0."""

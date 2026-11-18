@@ -1177,7 +1177,7 @@ _APEL_ROUNDING_TRIES = 64
 # j = 1.._APEL_STRIP_FRACTIONS-1. Each try is one scalar inversion of the
 # step and truncation bounds. The resolution of this set is a working
 # choice, not a tuned optimum.
-# ponytail: fixed strip fractions; a bounded scalar minimization of the node count over eta would find its optimum.
+# shortcut: fixed strip fractions; a bounded scalar minimization of the node count over eta would find its optimum.
 _APEL_STRIP_FRACTIONS = 16
 # Scalar work units charged per radius bisection step and per strip width tried.
 _APEL_SCALAR_STEP_WORK = 32

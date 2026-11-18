@@ -268,7 +268,7 @@ Use Google-style docstrings. Docstrings for scientific methods include:
 - Output meaning and shape.
 - Approximation assumptions and known limitations.
 
-Inline comments explain non-obvious scientific or circuit logic and do not repeat the code. Keep research sources and citations, and remove descriptions of superseded implementations.
+Inline comments explain non-obvious scientific or circuit logic and do not repeat the code. Keep research sources and citations, and remove descriptions of superseded implementations. A comment that starts with `shortcut:` marks a deliberate simplification and names its limit and what would replace it.
 
 Every hardcoded engineering value has a comment at its definition that explains the choice and the condition for revisiting it, plus an entry in [Engineering constants](ENGINEERING_CONSTANTS.md). This includes instance-size limits, numerical tolerances, safety factors, accuracy factors, schedule defaults and budgets. Document paper-derived values with their equations and engineering choices with their reasons. A historical value needs a scientific or engineering basis that still applies, and its age alone does not justify keeping it.
 

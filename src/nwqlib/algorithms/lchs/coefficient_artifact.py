@@ -252,7 +252,7 @@ def _residual_record(nodes, weights, support, modes, allowance):
     constant_term = 0.5 * float(abs(values[0]))
     cosine_terms = fsum(np.abs(values[1:modes + 1]))
     slope_zero, slope_end = float(abs(values[modes + 1])), float(abs(values[modes + 2]))
-    # ponytail: the integration-by-parts tail is loose for large b or |kappa_j| and sets an allowance floor
+    # shortcut: the integration-by-parts tail is loose for large b or |kappa_j| and sets an allowance floor
     # near 2b(1-exp(-b))/(pi^2 M); a tighter tail with the same finite contract would admit smaller allowances.
     tail = tail_factor * (slope_zero + slope_end + curvature)
     bound = constant_term + cosine_terms + tail

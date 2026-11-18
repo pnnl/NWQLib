@@ -290,7 +290,7 @@ class SearchSelection(Record):
         )
         comparable = tuple(i for i, row in enumerate(numeric) if None not in row)
         # a strictly dominates b iff every a_j <= b_j and at least one is <.
-        # ponytail: quadratic frontier; a skyline algorithm would serve larger
+        # shortcut: quadratic frontier; a skyline algorithm would serve larger
         # populations if their comparisons become material.
         frontier = tuple(
             i

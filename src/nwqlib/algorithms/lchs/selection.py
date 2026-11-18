@@ -534,8 +534,7 @@ def _entry(label, kernel, quadrature, **kernel_parameters):
 # provider_frontier adds the one kk6_radius proposal for Samples and accuracy requests. These are engineering values
 # without a dominance or optimality claim: another panel rule, multiplier or parameter can have a lower
 # complete cost, and every entry is ranked by its actual finite grid and coherent row.
-# ponytail: finite heuristic list; add an entry only when the selection-only keeper table shows it winning on a
-# representative input.
+# The list is a finite heuristic. Add an entry only when this ranking puts it first on a representative input.
 PROVIDER_FRONTIER = (
     _entry("acl", "near_optimal_eq7", "composite_gauss"),
     _entry("acl_beta_0.7", "near_optimal_eq7", "composite_gauss", beta=.7),

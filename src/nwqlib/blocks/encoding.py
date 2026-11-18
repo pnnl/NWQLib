@@ -84,7 +84,7 @@ def _encoding_record(name, *, operator, alpha, error, ancillas, system_qubits,
     # has no content identity here and keeps a fresh label, as a supplied
     # preparation does, so an encoding with equal metadata cannot attach another
     # circuit to a selected Program.
-    # ponytail: a supplied-encoding Plan gets a new id per selection; a canonical
+    # shortcut: a supplied-encoding Plan gets a new id per selection; a canonical
     # digest of the snapshot circuit would make that id reproducible.
     choice = str(uuid4()) if implementation == "encoding.native" else family
     fields = dict(signature=_signature(name, implementation, (("ancillas",ancillas),("system",system_qubits))),
