@@ -49,13 +49,25 @@ G_j = ((t_x c_xj + t_y c_yj)/2) I (x) P_j + ((t_x c_xj - t_y c_yj)/2) Z_a (x) P_
 two commuting Pauli rotations whose norm sum is max(|t_x c_xj|, |t_y c_yj|).
 Summing over j gives sum_j ||G_j|| <= L_* = T_e*(lambda_H + K_* lambda_L)
 for every finite or continuous pair of the support, including unequal
-source times. Reading the Strang word as 2L - 1 stages with one G_j each and
-coefficient magnitude at most 1 gives the conservative constants
+source times. The remainder used here is a conservative finite rule solved
+from Lemma 7 and Eq. (84) of that paper. For a staged formula of order p
+with Upsilon stages and largest stage coefficient magnitude a_max, m levels
+with smallest step count r_min, evolution time T, and the coarse bound
+lambda = 4 sum_g ||H_g|| over the terms H_g of the pair generator, set
+A = a_max*Upsilon*lambda*|T| and K = ceil(2m/p). For r_min > 2A and every
+pair observable M with ||M|| <= 1 the extrapolation remainder obeys
+
+    B_ext <= 4*Lambda*max(1, A)**K*(A/r_min)**(2m),
+
+with Lambda the sum of the magnitudes of the extrapolation weights; A = 0 is
+treated directly, without a zero power. Reading the Strang word as 2L - 1
+stages with one G_j each and coefficient magnitude at most 1 gives, with
+p = 2 and m = 2, the conservative constants
 lambda = 4 L_*, T = 1 and A = (2L - 1)*lambda. The levels are r = (s, 2s);
 with x_l = r_l**-2 the Lagrange weights at x = 0 are
 w_l = r_l**(2(m-1))/prod_{h != l}(r_l**2 - r_h**2), here (-1/3, 4/3) for
 any s, with Lambda = sum |w_l| = 5/3, sum w = 1 and sum w_l r_l**-2 = 0. For
-r_min = s > 2A,
+r_min = s > 2A the rule has K = 2, and
 
     B_ext <= 4*Lambda*max(1, A)**2*(A/s)**4
 
@@ -125,7 +137,14 @@ and
 
     |E Z_N - N_v| <= B**2*(2 delta_* + delta_***2),  Q: C_O times this (P6).
 
-Selection: the least r with r > 2 L_time and
+Normalization bound (the same Proposition 4). For a branch whose Pauli
+coefficients have one-norm lambda, with elapsed time t, r segments and
+x = t/r such that 2 lambda x < 1, the normalization mu of the whole branch
+obeys
+
+    log mu <= c_0 (2 lambda t)**4 / r**3,   c_0 = e + 2/9.
+
+Selection: for the finite cap mu_cap > 1, the least r with r > 2 L_time and
 r**3 log mu_cap >= (e + 2/9)(2 L_time)**4, at most a set
 TrotterErrorBudgeted.max_steps, found by bisection after testing that cap or after
 doubling to a sufficient r, then the first s_c = 3, 4, ... at

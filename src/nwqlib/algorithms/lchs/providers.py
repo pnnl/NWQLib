@@ -1965,6 +1965,21 @@ def kk6_radius(epsilon_c: float, *, form: str, a: float | None = None, b: float 
       the zero of g_A(mu) = L - (pi/4) mu**2 R; the positive alpha_A cancels
       but must be the known query normalization of the supplied encoding.
 
+    The exponent p: both surrogates are the p = 2 case of a leading cost
+    with factor beta_R**p, where p = 2 is rejection acquisition and p = 1
+    applies only where an actual amplitude-amplification contract holds. For
+    the separate-parts cost (a R + b) beta_R**p with a = alpha_L >= 0 and
+    b = alpha_H >= 0, an interior stationary point satisfies
+
+        log((1-mu)/epsilon_c) = pi mu**2 (1+R**2) a / [2 p (a R + b)],
+
+    which at p = 2 is g_sep = 0; the single-A form replaces (a R + b) by
+    alpha_A sqrt(1+R**2) before differentiating. The relation only generates
+    a targeted scalar proposal. It does not show that the complete objective,
+    with node count, degree rounding, PREP and workspace, is convex or
+    globally minimal there. A p = 4 result would be a stationary point of
+    the Gamma**4 range law of an accuracy request, which is not claimed.
+
     Existence: for 0 < epsilon_c < 1 and U = 1 - epsilon_c, L > 0 on
     0 < mu < U. As mu -> 0+, L -> log(1/epsilon_c) > 0 while the subtracted
     term is O(mu**2) for b > 0, mu/2 + o(mu) for b = 0 and O(mu**3) for

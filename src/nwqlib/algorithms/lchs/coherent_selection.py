@@ -14,14 +14,48 @@ an exact [L, H] = 0, the product of that filter with an H evolution
 (`CommutingProductAlternative`). Shared QSVT reads the generator directly when its encoded
 block is recorded Hermitian; the qubitized walk reads it directly when the
 whole unitary is a recorded Hermitian involution; otherwise both use the
-generic lift. Berry, outer amplitude amplification, Martyn one-shot
+generic lift. Each transformation, its recovery and its error relation are
+stated in ``qsp.evolution``: `plan_shared_qsvt_evolution` and
+`qsp_evolution_error_terms` for shared QSVT raw and with OAA,
+`plan_jacobi_anger_laurent` and `plan_jacobi_anger_gqet` for the two general
+targets, `plan_qubitized_evolution` for the walk and the generic lift, and
+`imaginary_time_filter_error_terms` for the filter. Berry, outer amplitude
+amplification, Martyn one-shot
 and coherent MPF are listed as refused with the reasons of
 `NOT_ADMITTED_ROUTES`. An exactly zero
 generator or ``T_e = 0`` gives the identity evolution and no polynomial
 row; no nonzero application gives the exact zero solution.
 
-Allowance. In the physical-vector frame with outer recovery ``gamma``
-and the qualified other stages ``Delta_rest``,
+Evolution error. For every row, ``B`` is the operator the circuit applies
+after successful projection and the recovery ``zeta`` is a positive number
+that depends on no state and is common to all address branches, with
+
+    \[\|\zeta B-e^{-iT_eS}\|\le\epsilon_{\rm alg}+T_e\delta_S
+      +\zeta\epsilon_{\rm native}=:\epsilon_{\rm evol}.\]
+
+``epsilon_alg`` is the approximation error in the recovered, unscaled
+evolution frame. ``delta_S`` bounds ``||S - alpha_S U_00||`` for the encoded
+block ``U_00`` of the generator's block encoding ``U`` with normalization
+``alpha_S``; for Hermitian ``S`` and Hermitian encoded generator the Duhamel
+identity gives the evolution difference a norm of at most ``T_e delta_S``.
+``epsilon_native`` is the operator error of the final complete circuit
+against its ideal compiled circuit. With ``gamma`` the outer recovery common
+to the source and initial applications (the coefficient mass of the
+factorized PREP) and ``u_fin`` the ideal finite-sum solution vector of the
+alternative,
+
+    \[\Gamma=\zeta\gamma,\qquad v_{\rm succ}^{\rm ideal}=u_{\rm fin}/\Gamma,
+      \qquad\Delta_{\rm evol}\le\gamma\epsilon_{\rm evol}.\]
+
+The middle equality is for the ideal finite-sum evolution, and
+``Delta_evol`` is the part of the physical-vector error that the evolution
+stage contributes. The last bound has no further factor ``zeta`` because the
+first one is already in the recovered evolution scale.
+
+Allowance. In the physical-vector frame, with ``epsilon_phys`` the caller's
+allowance for the physical-vector error and ``Delta_rest`` the qualified sum
+of the other stages (``rest_error``; `solution_error_budget` lists the
+stages),
 
     \[\epsilon_{\rm alg,allow}=(\epsilon_{\rm phys}-\Delta_{\rm rest})/\gamma
       -T_e\delta_S-\zeta\epsilon_{\rm native}.\]
@@ -34,11 +68,15 @@ selects the truncation degree; the OAA rows use the conservative inverse of
 ``Phi_{1/2}``, since ``Phi_a <= Phi_{1/2}`` for ``a <= 1/2`` (`_phi`). Then
 
 * Laurent/GQET: ``epsilon_synth = (epsilon_alg,allow - delta_T) / sigma``,
-  rounded down, is the phase allowance;
+  rounded down, is the phase allowance, with ``delta_T`` the Jacobi-Anger
+  truncation tail and ``sigma`` the normalization of the target
+  (``qsp.evolution.plan_jacobi_anger_laurent``, ``plan_jacobi_anger_gqet``);
 * shared raw/OAA: the phase owner fixes the residual tolerance ``tol`` per
   parity, so ``delta <= delta_T + 2 s tol`` and the row is admitted
   only when ``delta`` (raw) or ``Phi_a(delta)`` (OAA) is within the
-  allowance;
+  allowance; ``delta``, the scale ``s``, ``a = 1/(2s)`` and ``Phi_a`` are
+  those of ``qsp.evolution.qsp_evolution_error_terms``, whose ``delta`` is
+  the two parity tails plus ``s`` times the two parity residuals;
 * imaginary time: ``epsilon_synth = (epsilon_I,allow - delta_m) / s``, with
   ``s = nextafter(1/(1-eta))`` the scale that `imaginary_time_expansion`
   returns when the stored coefficient sum, rounded upward, is at most one; a
@@ -91,8 +129,35 @@ and different gamma. Their chosen rows are compared by the nominal
 ``C (zeta gamma)**2`` for rejection and by ``C`` for a
 single circuit, the fixed-acquisition comparison; both are nominal, since
 a strict order needs every total error against one reference solution and
-a positive norm lower bound. The caller's alternative order
+a positive norm lower bound, which the selection does not have. The caller's
+alternative order
 breaks ties and decides only when no chosen row has a known nominal value.
+
+Strict order. With ``Gamma = zeta gamma`` the ideal success probability of a
+row is ``p = ||u_fin||**2 / Gamma**2``. When the recovered vector of the
+finite implementation is within ``Delta`` of ``u_fin``,
+
+    \[\frac{\max(0,\|u_{\rm fin}\|-\Delta)^2}{\Gamma^2}\le p\le
+      \frac{(\|u_{\rm fin}\|+\Delta)^2}{\Gamma^2}.\]
+
+A strict comparison of rows 1 and 2 takes the total physical error
+``Delta_i`` of each row, with its kernel, source, window, PREP and evolution
+terms, against the same reference solution ``u``, and a lower bound ``r_lo``
+with ``r = ||u|| >= r_lo > Delta_1``. The costs ``C_i`` are exact or have
+upper and lower enclosures. Then
+
+    \[\frac{C_1\Gamma_1^2}{C_2\Gamma_2^2}
+      \Bigl(\frac{r_{\rm lo}+\Delta_2}{r_{\rm lo}-\Delta_1}\Bigr)^2<1\]
+
+is sufficient for row 1 to need strictly less rejection work than row 2:
+the largest work of row 1 is ``C_1 Gamma_1**2/(r - Delta_1)**2``, the work of
+row 2 is at least ``C_2 Gamma_2**2/(r + Delta_2)**2``, and
+``(r + Delta_2)/(r - Delta_1)`` decreases with ``r``. With cost enclosures
+the quotient is the upper bound of ``C_1`` over the lower bound of ``C_2``;
+two CX upper bounds do not order the actual gate counts. An error against
+the finite target of row 1 is not an error against the common ``u``. An
+unknown total error, or no ``r_lo`` above ``Delta_1``, leaves the strict
+comparison unavailable.
 
 Accuracy. A requested absolute sampling
 radius of a physical scalar output (`SamplingTarget`) gives each row the
@@ -316,7 +381,8 @@ class LCHSCoherentAlternative:
         h_child: Encoding of the centered ``H_0``, or None for an exact zero.
         a_child: Encoding of ``A_0 = L_0 + i H_0`` for the single-A form, or None.
         rest_error: Qualified sum of the other physical-vector stages
-            (kernel, k-quadrature, source quadrature/window, PREP), or
+            (kernel, k-quadrature, source quadrature/window, PREP; each
+            stage's rule is in `solution_error_budget`), or
             None when unknown. An omitted-application bound of the
             factorized PREP is added here by the selection.
         state_preparation_cx: CX count of the kind-state preparation R as
@@ -358,6 +424,11 @@ class LCHSCoherentAlternative:
 @dataclass(frozen=True, kw_only=True)
 class ImaginaryTimeAlternative:
     """The H = 0 imaginary-time alternative, a finite target without a kernel.
+
+    The row applies the modified-Bessel filter ``exp[-beta (1 - X_a)]`` of
+    ``qsp.imaginary_time``, with ``beta = T_e alpha``, to the contraction
+    ``X_a`` of ``block_encoding.joint.plan_convex_contraction``. Its error
+    bound is that of ``qsp.evolution.imaginary_time_filter_error_terms``.
 
     The Hamiltonian must be an exact scalar ``c_H`` (``applications.hamiltonian_scalar``).
     The masses must be ``w_a nu_a kappa_a`` with ``kappa_a = exp[-t_a (c - alpha)]``,
@@ -574,7 +645,12 @@ def _preparation_failure(message, *, candidate, cause):
 
 
 def _phi(a: float, delta: float) -> float:
-    """Return ``Phi_a(delta) = delta + 12a^2/(3-4a^2) delta^2 + 4a^2/(3-4a^2) delta^3``."""
+    """Return ``Phi_a(delta) = delta + 12a^2/(3-4a^2) delta^2 + 4a^2/(3-4a^2) delta^3``.
+
+    This is the recovered-frame bound of three-use OAA,
+    ``||T(B)/r - F|| <= Phi_a(delta)`` with ``a = 1/(2s)``, of
+    ``qsp.evolution.qsp_evolution_error_terms``.
+    """
     c = 4.0 * a * a / (3.0 - 4.0 * a * a)
     return delta + c * delta * delta * (3.0 + delta)
 
@@ -695,7 +771,10 @@ def _route_allowance(objective, base, zeta):
 
 
 def _forecast(objective, prep, algorithmic, child, zeta):
-    """Evolution error terms in the recovered frame and the physical ``gamma * epsilon_evol``; any unknown term leaves the sums unknown."""
+    """Evolution error terms in the recovered frame and the physical ``gamma * epsilon_evol``; any unknown term leaves the sums unknown.
+
+    The terms are those of the evolution-error bound of the module docstring.
+    """
     native = None if objective.native_error is None else zeta * objective.native_error
     parts = (algorithmic, child, native)
     evolution = None if any(part is None for part in parts) else math.fsum(parts)
@@ -1555,9 +1634,10 @@ def _nominal_log2(row, objective):
     alternatives have different finite targets and so
     different gamma. Single-circuit acquisition keeps every shot and compares
     the cost C of one circuit, the fixed-acquisition comparison of the
-    module docstring. Both are nominal: a strict order needs every
-    alternative's total physical error against one reference solution and a
-    positive lower bound on its norm, which are not available.
+    module docstring. Both are nominal: the strict comparison of the module
+    docstring needs every alternative's total physical error against one
+    reference solution and a positive lower bound on its norm, which are not
+    available.
     """
     value = row.cost.get("objective")
     if value is None:
