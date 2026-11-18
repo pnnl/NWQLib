@@ -204,7 +204,9 @@ COHERENT_TAIL_SHARE = 0.5
 
 # Margin eta of the analytic kernel PREP target |q| <= 1 - eta; its tail-plus-alias budget (G19 + G20 of
 # ``analytic_prep``) is LCHS_QSP_EPSILON_FRACTION * approx_tol, the component
-# fraction of the coherent evolution. Both are declared controls, not optima.
+# fraction of the coherent evolution. Both are declared controls, not optima. Revisit the margin when the
+# phase synthesis or the amplification of the analytic PREP changes. Registered in
+# docs/ENGINEERING_CONSTANTS.md ("LCHS defaults and error allocation").
 ANALYTIC_PREP_MARGIN = 0.25
 
 
