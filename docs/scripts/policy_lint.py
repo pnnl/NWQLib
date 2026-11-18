@@ -240,6 +240,8 @@ _PAPER_WORD = re.compile(
 _PAPER_IDENTIFIER = re.compile(r"arXiv:\s*\S|\bdoi:\s*\S|doi\.org/", re.I)
 _PARENTHETICAL = re.compile(r"(?<![\w)\]])\(([^()]*)\)")
 _CODE_SPAN = re.compile(r"``.*?``|`[^`\n]*`", re.S)
+# An inline code span of a Markdown page. A fenced block opens with three backticks and is kept.
+_INLINE_CODE = re.compile(r"(?<!`)`[^`\n]+`(?!`)")
 # A document is cited by a name in capitals, as a Markdown file is named, that is followed by a numbered
 # section or item or by a label, or that stands alone at the start of a parenthetical.
 _DOCUMENT = re.compile(
@@ -359,6 +361,7 @@ def _check_citations_resolve(failures: list[str], paths: list[Path]) -> None:
     files = {}
     identifiers: set[str] = set()
     declaring: dict[str, set[str]] = {}
+    page_declaring: dict[str, set[str]] = {}
     for path in paths:
         names, segments = _prose_segments(path)
         declared = _declared_labels("\n".join(segment for _, segment in segments))
@@ -366,9 +369,14 @@ def _check_citations_resolve(failures: list[str], paths: list[Path]) -> None:
         identifiers |= names
         for label in declared:
             declaring.setdefault(label, set()).add(path.stem)
+    pages = (*REPO_ROOT.glob("*.md"), *(REPO_ROOT / "docs").rglob("*.md"))
     # A document name resolves to a Markdown page of the repository or to an identifier of its code.
-    known = identifiers | _NOT_CITATIONS | {
-        item.stem for item in (*REPO_ROOT.glob("*.md"), *(REPO_ROOT / "docs").rglob("*.md"))}
+    known = identifiers | _NOT_CITATIONS | {page.stem for page in pages}
+    # A page declares labels as a module does. Its inline code spans are skipped, so that a page can show
+    # the syntax of a declaration without making one.
+    for page in pages:
+        for label in _declared_labels(_INLINE_CODE.sub(" ", page.read_text(encoding="utf-8"))):
+            page_declaring.setdefault(label, set()).add(page.name)
     for path, (segments, declared) in files.items():
         relative = path.relative_to(REPO_ROOT)
         source = path.read_text(encoding="utf-8")
@@ -389,10 +397,15 @@ def _check_citations_resolve(failures: list[str], paths: list[Path]) -> None:
                 if any(re.search(rf"\b{re.escape(stem)}\b", source)
                        for stem in declaring.get(label, set()) | declaring.get(base, set())):
                     continue
+                # A label declared on a documentation page resolves when this file names that page.
+                if any(re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", source)
+                       for name in page_declaring.get(label, set()) | page_declaring.get(base, set())):
+                    continue
                 failures.append(
                     f"{relative}:{line(offset)}: label {label!r} cites a numbered statement that a reader of the "
                     "repository cannot open. State the relation here, or declare the label where the repository "
-                    "states it ('The labels X1–X9 below name ...') and name that module here, or cite the paper "
+                    "states it ('The labels X1–X9 below name ...', or an equation tag) and name that module or "
+                    "documentation page here, as in 'sampled_recipes' or 'lchs_derivations.md', or cite the paper "
                     "with its arXiv version or DOI and its own equation number. If it is a formula symbol or an "
                     "identifier, add it to _NOT_CITATIONS in docs/scripts/policy_lint.py.")
             for match in _DOCUMENT.finditer(_CODE_SPAN.sub(lambda span: " " * len(span.group()), segment)):
@@ -413,7 +426,9 @@ def check_inaccessible_references(failures: list[str]) -> None:
     assignments. Python comments and string literals are also checked for
     labels of numbered statements and for document names. A label passes
     when the repository declares it (a sentence that names its labels, or an
-    equation tag) in the same file or in a module that the file names, when
+    equation tag) in the same file, in a module that the file names, or on a
+    Markdown page of the repository that the file names with its ``.md``
+    extension, when
     an equation, table, section or page word introduces it and the file
     cites a paper by arXiv identifier or DOI, when the file defines it by an
     equation, or when ``_NOT_CITATIONS`` lists it. A document name passes
