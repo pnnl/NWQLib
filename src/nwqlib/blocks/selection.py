@@ -76,11 +76,12 @@ def _source(name):
     """Versioned Source of a builtin block implementation or law.
 
     Every field, including the fixed domain text, is part of the content
-    hash of each selection and of the registered cost functions that
-    ``resources.fold`` recognizes, so changing it would change every saved
-    selection.
+    hash of each selection, and ``resources.fold`` applies a registered cost
+    function only to a record whose sources equal these. Changing a field
+    therefore gives new selections other content ids and leaves a record
+    saved with the earlier values without its registered bound.
     """
-    return Source(name=name, version="1", domain="M1 logical blocks", reference="nwqlib.blocks versioned selected kernels")
+    return Source(name=name, version="1", domain="logical blocks", reference="nwqlib.blocks versioned selected kernels")
 
 
 def signed_pauli_cx_bound(index_qubits: int, system_qubits: int, *, controlled=False) -> int:
